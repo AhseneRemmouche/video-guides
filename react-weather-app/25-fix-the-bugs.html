@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>25 · Fix the Bugs Found While Testing</title>
+<meta name="description" content="No more lat 0 / lon 0 or &quot;custom&quot; requests, HTTPS everywhere, safe geocoding, the broken production marker, the map click leak and the lint errors.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 25/29</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 25 of 29 · Extra, not in the video</div>
+  <h1>Fix the Bugs Found While Testing</h1>
+  <p class="lead">No more lat 0 / lon 0 or &quot;custom&quot; requests, HTTPS everywhere, safe geocoding, the broken production marker, the map click leak and the lint errors.</p>
+  <span class="video-link extra">Extension · built and browser-tested</span>
+</section>
+<div class="callout"><p><strong>Extension: not in the video.</strong> Steps 25–28 start from the finished repo (commit <code>272cc5f</code>, the only commit) and fix what a real browser test turned up. Every change on these pages was <strong>type-checked</strong> (<code>tsc -b</code>), <strong>linted</strong> (<code>npm run lint</code>), <strong>built</strong> (<code>npm run build</code>) and then <strong>run in headless Chrome</strong> against the production build, with OpenWeather answers replaced by fake but schema-valid test data and MapTiler blocked.</p>
+<p><strong>What that proves:</strong> the code compiles, the requests go out in the order shown, the error messages and screens below are real, and the bugs are gone. <strong>What it does not prove:</strong> how the real OpenWeather API answers for every city, your account's limits, or how the MapTiler base map looks (its tiles were blocked offline). Screenshots show test data, not real weather.</p></div>
+
+<h2>Goal</h2>
+<p>By the end of step 24 the dashboard looks finished, and in the video it works. But when the finished code was loaded in a browser with a request recorder and a few "unhappy" test answers (a city that isn't found, a wrong key, a place without translated names), it showed several real problems. Some waste requests, one crashes the whole page, one breaks once the app is deployed, and one only appears in the production build. In this step you fix them one at a time. For each one you see the <strong>before</strong> (the repo), the <strong>after</strong> (the fixed file), a line-by-line explanation, and what the browser test recorded.</p>
+
+<div class="table-wrap"><table>
+<tr><th>#</th><th>File</th><th>Problem in the repo</th><th>Fix</th></tr>
+<tr><td>1</td><td><code>src/App.tsx</code></td><td>Every page load first asks for the weather at latitude 0, longitude 0</td><td><code>coords</code> is <code>null</code> until the city is known; cards show skeletons meanwhile</td></tr>
+<tr><td>2</td><td><code>src/App.tsx</code></td><td>A city that isn't found crashes the whole page (blank screen)</td><td>Read <code>geocodeData?.[0]</code> safely and show "Could not find …"</td></tr>
+<tr><td>2b</td><td><code>src/App.tsx</code></td><td>A map click asks the geocoding API for a city called "custom"</td><td><code>enabled: location !== "custom"</code></td></tr>
+<tr><td>3</td><td><code>src/schemas/geocodeSchema.ts</code></td><td><code>local_names</code> is required, but many real places don't have it</td><td><code>.optional()</code></td></tr>
+<tr><td>4</td><td><code>src/api.ts</code></td><td>No <code>res.ok</code> check: a 401 turns into a confusing Zod error</td><td>One <code>fetchJson</code> helper that checks the status first</td></tr>
+<tr><td>5</td><td><code>src/api.ts</code></td><td>Geocoding and air pollution use <code>http://</code> (blocked on an https site)</td><td>One <code>https://</code> base URL</td></tr>
+<tr><td>6</td><td><code>src/api.ts</code></td><td>City name not encoded in the URL</td><td><code>encodeURIComponent</code></td></tr>
+<tr><td>7</td><td><code>src/components/Map.tsx</code></td><td>Map marker is a broken image in the production build</td><td>Import the marker images; pass <code>L.icon(...)</code></td></tr>
+<tr><td>8</td><td><code>src/components/Map.tsx</code></td><td>A new click listener is added on every re-render</td><td><code>useMapEvents</code> + <code>useEffect</code></td></tr>
+<tr><td>9</td><td><code>src/components/Map.tsx</code></td><td>MapTiler key written in the code (and in the public repo)</td><td><code>VITE_MAPTILER_KEY</code> from <code>.env</code></td></tr>
+<tr><td>10</td><td><code>LocationDropdown.tsx</code></td><td>Placeholder says "Theme"</td><td>"Location"</td></tr>
+<tr><td>11</td><td>6 skeletons + <code>LightDarkToggle.tsx</code></td><td>14 of the 15 lint errors: empty <code>Props</code> types</td><td>Remove the empty props</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Map of the fixes grouped by file: App.tsx, api.ts, geocodeSchema.ts, Map.tsx, and small files">
+  <rect class="box-bad" x="16" y="16" width="236" height="92" rx="8"/>
+  <text x="134" y="40" text-anchor="middle" class="mono">src/App.tsx</text>
+  <text x="134" y="62" text-anchor="middle" class="label">1 · no lat 0 / lon 0 requests</text>
+  <text x="134" y="80" text-anchor="middle" class="label">2 · "Could not find" message</text>
+  <text x="134" y="98" text-anchor="middle" class="label">2b · no geocode for "custom"</text>
+  <rect class="box-warn" x="262" y="16" width="236" height="92" rx="8"/>
+  <text x="380" y="40" text-anchor="middle" class="mono">src/api.ts</text>
+  <text x="380" y="62" text-anchor="middle" class="label">4 · fetchJson checks res.ok</text>
+  <text x="380" y="80" text-anchor="middle" class="label">5 · https everywhere</text>
+  <text x="380" y="98" text-anchor="middle" class="label">6 · encodeURIComponent</text>
+  <rect class="box-warn" x="508" y="16" width="236" height="92" rx="8"/>
+  <text x="626" y="40" text-anchor="middle" class="mono">src/components/Map.tsx</text>
+  <text x="626" y="62" text-anchor="middle" class="label">7 · marker icon imported</text>
+  <text x="626" y="80" text-anchor="middle" class="label">8 · useMapEvents, no leak</text>
+  <text x="626" y="98" text-anchor="middle" class="label">9 · key from .env</text>
+  <path class="line dashed" d="M16,126 H744"/>
+  <rect class="box-info" x="16" y="144" width="236" height="66" rx="8"/>
+  <text x="134" y="168" text-anchor="middle" class="mono">geocodeSchema.ts</text>
+  <text x="134" y="190" text-anchor="middle" class="label">3 · local_names optional</text>
+  <rect class="box-info" x="262" y="144" width="236" height="66" rx="8"/>
+  <text x="380" y="168" text-anchor="middle" class="mono">LocationDropdown.tsx</text>
+  <text x="380" y="190" text-anchor="middle" class="label">10 · placeholder text</text>
+  <rect class="box-info" x="508" y="144" width="236" height="66" rx="8"/>
+  <text x="626" y="168" text-anchor="middle" class="mono">6 skeletons + toggle</text>
+  <text x="626" y="190" text-anchor="middle" class="label">11 · 14 lint errors</text>
+  <text x="380" y="236" text-anchor="middle" class="small">red = crashes or wrong data · orange = breaks in some situations · blue = small or tooling</text>
+</svg>
+<figcaption>Each box is one file you edit in this step. <strong>Start with <code>App.tsx</code> and <code>api.ts</code></strong>: they cause the visible bugs. The rest can be done in any order.</figcaption>
+</figure>
+
+<h2>Before you start</h2>
+<ol class="steps">
+<li><strong>Open the project and a terminal</strong>
+<p>Open your weather project folder (the one with <code>package.json</code>) in your editor and open a <a class="term" href="glossary.html#terminal">terminal</a> there. All commands on this page run from that folder.</p></li>
+<li><strong>Save a checkpoint</strong>
+<p>Run <code>git add .</code> and <code>git commit -m "before fixes"</code>. If an edit goes wrong you can compare with the working version.</p></li>
+<li><strong>Look at the lint result first</strong>
+<p>Run <code>npm run lint</code>. On the repo version this prints <code>✖ 15 problems (15 errors, 0 warnings)</code>. You will bring that down to 1 in this step and to 0 in step 27. (<code>npm run build</code> still succeeds today: <a class="term" href="glossary.html#lint">lint</a> rules are separate from the type check.)</p></li>
+</ol>
+
+<h2>Fix 1: no more requests for latitude 0, longitude 0 (App.tsx)</h2>
+<p>When the page opens, <code>location</code> is <code>"Tokyo"</code>. The <a class="term" href="glossary.html#geocoding">geocoding</a> query has to ask OpenWeather where Tokyo is before anything else can happen. Here is how the repo turns the answer into coordinates:</p>
+
+<pre data-lang="tsx" data-tag="before (repo, src/App.tsx lines 28–41)"><code>  const { data: geocodeData } = useQuery({
+    queryKey: ["geocode", location],
+    queryFn: () =&gt; getGeocode(location),
+  })
+
+  const onMapClick = (lat: number, lon: number) =&gt; {
+    setCoords({ lat, lon })
+    setLocation("custom")
+  }
+
+  const coords =
+    location === "custom"
+      ? coordinates
+      : { lat: geocodeData?.[0].lat ?? 0, lon: geocodeData?.[0].lon ?? 0 }</code></pre>
+
+<p>While the geocode request is still on its way, <code>geocodeData</code> is <code>undefined</code>. Then <code>geocodeData?.[0].lat</code> is <code>undefined</code> too, and <code>?? 0</code> replaces it with <code>0</code>. So for a moment <code>coords</code> is <code>{ lat: 0, lon: 0 }</code>, a real place in the Atlantic Ocean. Every card receives those coordinates and immediately starts its own query. The browser test recorded this order on every load:</p>
+
+<pre data-lang="text" data-tag="verified request order (repo, production build)"><code>1  https://api.openweathermap.org/data/3.0/onecall?lat=0&amp;lon=0&amp;...
+2  http://api.openweathermap.org/data/2.5/air_pollution?lat=0&amp;lon=0
+3  http://api.openweathermap.org/geo/1.0/direct?q=Tokyo&amp;limit=1
+4  https://api.openweathermap.org/data/3.0/onecall?lat=35.68&amp;lon=139.69&amp;...
+5  http://api.openweathermap.org/data/2.5/air_pollution?lat=35.68&amp;lon=139.69</code></pre>
+
+<p>Two of the five requests are wasted (they count against your API usage), and the map briefly centres on the ocean. In step 15 the presenter notices exactly this symptom (at 2:28:00, "it flickers to looks like the middle of the ocean first") and changes how the map moves, but the cause, the <code>?? 0</code>, stays in the final code.</p>
+
+<details class="primer"><summary>New to <code>?.</code> and <code>??</code>? What they do and why <code>?? 0</code> hides a problem here</summary>
+<p><a class="term" href="glossary.html#optional-chaining">Optional chaining</a> <code>a?.b</code> means: "if <code>a</code> is <code>null</code> or <code>undefined</code>, stop and give <code>undefined</code>; otherwise read <code>a.b</code>". <a class="term" href="glossary.html#nullish-coalescing">Nullish coalescing</a> <code>x ?? y</code> means: "use <code>x</code>, unless it is <code>null</code> or <code>undefined</code>; then use <code>y</code>".</p>
+<p>Together they are handy for defaults, but a default is only correct when it is a sensible value. Here <code>0</code> is not "no location yet", it is a <em>real</em> <a class="term" href="glossary.html#latitude-longitude">latitude and longitude</a>. The code can't tell "loading" apart from "the user picked 0,0". The fix uses <code>null</code>, which honestly means "we don't know yet", and makes TypeScript force every user of <code>coords</code> to handle that case.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>const data: { lat: number }[] | undefined = undefined
+data?.[0].lat        // undefined (no crash, data is undefined)
+data?.[0].lat ?? 0   // 0  (looks like a real coordinate!)</code></pre>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Timeline of requests: before, two wasted requests for 0,0 go out before the geocode; after, geocode first, then one weather and one air pollution request">
+  <text x="16" y="28" class="title">Before (repo)</text>
+  <rect class="box-bad" x="16" y="40" width="130" height="44" rx="8"/>
+  <text x="81" y="60" text-anchor="middle" class="label">onecall</text>
+  <text x="81" y="76" text-anchor="middle" class="small">lat 0, lon 0</text>
+  <rect class="box-bad" x="162" y="40" width="130" height="44" rx="8"/>
+  <text x="227" y="60" text-anchor="middle" class="label">air_pollution</text>
+  <text x="227" y="76" text-anchor="middle" class="small">lat 0, lon 0</text>
+  <rect class="box" x="308" y="40" width="130" height="44" rx="8"/>
+  <text x="373" y="60" text-anchor="middle" class="label">geocode</text>
+  <text x="373" y="76" text-anchor="middle" class="small">q=Tokyo</text>
+  <rect class="box-ok" x="454" y="40" width="130" height="44" rx="8"/>
+  <text x="519" y="60" text-anchor="middle" class="label">onecall</text>
+  <text x="519" y="76" text-anchor="middle" class="small">35.68, 139.69</text>
+  <rect class="box-ok" x="600" y="40" width="144" height="44" rx="8"/>
+  <text x="672" y="60" text-anchor="middle" class="label">air_pollution</text>
+  <text x="672" y="76" text-anchor="middle" class="small">35.68, 139.69</text>
+  <text x="154" y="104" text-anchor="middle" class="bad">2 wasted requests</text>
+  <path class="line dashed" d="M16,124 H744"/>
+  <text x="16" y="152" class="title">After (fix)</text>
+  <rect class="box" x="16" y="164" width="130" height="44" rx="8"/>
+  <text x="81" y="184" text-anchor="middle" class="label">geocode</text>
+  <text x="81" y="200" text-anchor="middle" class="small">q=Tokyo</text>
+  <path class="arrow-ok" d="M146,186 H160"/>
+  <rect class="box-ok" x="162" y="164" width="130" height="44" rx="8"/>
+  <text x="227" y="184" text-anchor="middle" class="label">onecall</text>
+  <text x="227" y="200" text-anchor="middle" class="small">35.68, 139.69</text>
+  <rect class="box-ok" x="308" y="164" width="144" height="44" rx="8"/>
+  <text x="380" y="184" text-anchor="middle" class="label">air_pollution</text>
+  <text x="380" y="200" text-anchor="middle" class="small">35.68, 139.69</text>
+  <text x="600" y="184" text-anchor="middle" class="ok">3 requests, all https</text>
+  <text x="600" y="202" text-anchor="middle" class="small">time flows left to right</text>
+  <path class="arrow" d="M16,236 H740"/>
+  <text x="380" y="252" text-anchor="middle" class="small">time</text>
+</svg>
+<figcaption>Recorded in the browser test (coordinates from the test data). <strong>After the fix nothing waits on a made-up location</strong>: the weather requests start only once the geocode answer is in.</figcaption>
+</figure>
+
+<h2>Fix 2: a city that isn't found no longer crashes the page (App.tsx)</h2>
+<p>The same line has a second problem. If OpenWeather finds nothing it answers with an empty list <code>[]</code>. Then <code>geocodeData</code> is <code>[]</code>, <code>geocodeData?.[0]</code> is <code>undefined</code>, and <code>.lat</code> is read from <code>undefined</code>. The <code>?.</code> only protects the step it is written on (<code>geocodeData</code>), not the <code>[0]</code> after it. With a test answer of <code>[]</code> the whole app disappeared and the console showed:</p>
+
+<pre data-lang="text" data-tag="verified error (repo, empty geocode answer)"><code>TypeError: Cannot read properties of undefined (reading 'lat')</code></pre>
+
+<p>A blank page is the worst possible outcome: the user can't even pick another city. A render error like this removes the whole React tree unless an <a class="term" href="glossary.html#error-boundary">error boundary</a> catches it (that comes in step 26). Here the better fix is not to throw at all. Below is the complete fixed <code>App.tsx</code>; it fixes 1 and 2 together.</p>
+
+<pre data-file="src/App.tsx" data-lang="tsx" data-tag="after (step 25)"><code>import DailyForecast from "./components/cards/DailyForecast"
+import HourlyForecast from "./components/cards/HourlyForecast"
+import CurrentWeather from "./components/cards/CurrentWeather"
+import AdditionalInfo from "./components/cards/AdditionalInfo"
+import Map from "./components/Map"
+import { Suspense, useState } from "react"
+import type { Coords } from "./types"
+import LocationDropdown from "./components/dropdowns/LocationDropdown"
+import { useQuery } from "@tanstack/react-query"
+import { getGeocode } from "./api"
+import MapTypeDropdown from "./components/dropdowns/MapTypeDropdown"
+import MapLegend from "./components/MapLegend"
+import CurrentSkeleton from "./components/skeletons/CurrentSkeleton"
+import DailySkeleton from "./components/skeletons/DailySkeleton"
+import HourlySkeleton from "./components/skeletons/HourlySkeleton"
+import AdditionalInfoSkeleton from "./components/skeletons/AdditionalInfoSkeleton"
+import SidePanel from "./components/SidePanel"
+import Hamburger from "/src/assets/hamburger.svg?react"
+import MobileHeader from "./components/MobileHeader"
+import LightDarkToggle from "./components/LightDarkToggle"
+
+function App() {
+  const [coordinates, setCoords] = useState&lt;Coords&gt;({ lat: 50, lon: 45 })
+  const [location, setLocation] = useState("Tokyo")
+  const [mapType, setMapType] = useState("clouds_new")
+  const [isSidePanelOpen, setIsSidePanelOpen] = useState(false)
+
+  const { data: geocodeData, error: geocodeError } = useQuery({
+    queryKey: ["geocode", location],
+    queryFn: () =&gt; getGeocode(location),
+    enabled: location !== "custom", // a map click sets "custom": there is no city to look up
+  })
+
+  const onMapClick = (lat: number, lon: number) =&gt; {
+    setCoords({ lat, lon })
+    setLocation("custom")
+  }
+
+  const place = geocodeData?.[0]
+  // null until we know where to look: no requests for lat 0 / lon 0 while the city is loading
+  const coords: Coords | null =
+    location === "custom" ? coordinates : place ? { lat: place.lat, lon: place.lon } : null
+
+  return (
+    &lt;&gt;
+      &lt;MobileHeader setIsSidePanelOpen={setIsSidePanelOpen} /&gt;
+      &lt;div className="flex flex-col gap-8 pt-4 p-8 xs:pt-8 lg:w-[calc(100dvw-var(--sidebar-width))] 2xl:h-screen 2xl:min-h-[1120px]"&gt;
+        &lt;div className="flex flex-col gap-4 xs:flex-row xs:gap-8"&gt;
+          &lt;div className="flex flex-col md:flex-row gap-2 md:gap-4"&gt;
+            &lt;h1 className="text-2xl font-semibold"&gt;Location: &lt;/h1&gt;
+            &lt;LocationDropdown location={location} setLocation={setLocation} /&gt;
+          &lt;/div&gt;
+          &lt;div className="flex flex-col md:flex-row gap-2 md:gap-4"&gt;
+            &lt;h1 className="text-2xl font-semibold whitespace-nowrap"&gt;
+              Map Type:{" "}
+            &lt;/h1&gt;
+            &lt;MapTypeDropdown mapType={mapType} setMapType={setMapType} /&gt;
+          &lt;/div&gt;
+          &lt;div className="ml-auto flex gap-4 items-center"&gt;
+            &lt;div className="hidden xs:block"&gt;
+              &lt;LightDarkToggle /&gt;
+            &lt;/div&gt;
+            &lt;button
+              onClick={() =&gt; setIsSidePanelOpen(true)}
+              className="hidden xs:block"
+            &gt;
+              &lt;Hamburger className="size-6 lg:hidden" /&gt;
+            &lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+        {location !== "custom" &amp;&amp; geocodeError &amp;&amp; (
+          &lt;p role="alert" className="text-red-500"&gt;
+            {geocodeError.message}
+          &lt;/p&gt;
+        )}
+        {location !== "custom" &amp;&amp; geocodeData &amp;&amp; !place &amp;&amp; (
+          &lt;p role="alert" className="text-red-500"&gt;
+            Could not find "{location}". Pick another city or click the map.
+          &lt;/p&gt;
+        )}
+        &lt;div className="grid grid-cols-1 2xl:flex-1 2xl:min-h-0 md:grid-cols-2 2xl:grid-cols-4 2xl:grid-rows-4 gap-4"&gt;
+          &lt;div className="relative h-120 2xl:h-auto col-span-1 md:col-span-2 2xl:col-span-4 2xl:row-span-2 order-1"&gt;
+            {coords &amp;&amp; &lt;Map coords={coords} onMapClick={onMapClick} mapType={mapType} /&gt;}
+            &lt;MapLegend mapType={mapType} /&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 2xl:row-span-2 order-2"&gt;
+            &lt;Suspense fallback={&lt;CurrentSkeleton /&gt;}&gt;
+              {coords ? &lt;CurrentWeather coords={coords} /&gt; : &lt;CurrentSkeleton /&gt;}
+            &lt;/Suspense&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 order-3 2xl:order-4 2xl:row-span-2"&gt;
+            &lt;Suspense fallback={&lt;DailySkeleton /&gt;}&gt;
+              {coords ? &lt;DailyForecast coords={coords} /&gt; : &lt;DailySkeleton /&gt;}
+            &lt;/Suspense&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 md:col-span-2 2xl:row-span-1 order-4 2xl:order-3"&gt;
+            &lt;Suspense fallback={&lt;HourlySkeleton /&gt;}&gt;
+              {coords ? &lt;HourlyForecast coords={coords} /&gt; : &lt;HourlySkeleton /&gt;}
+            &lt;/Suspense&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 md:col-span-2 2xl:row-span-1 order-5"&gt;
+            &lt;Suspense fallback={&lt;AdditionalInfoSkeleton /&gt;}&gt;
+              {coords ? &lt;AdditionalInfo coords={coords} /&gt; : &lt;AdditionalInfoSkeleton /&gt;}
+            &lt;/Suspense&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      {coords &amp;&amp; (
+        &lt;SidePanel
+          coords={coords}
+          isSidePanelOpen={isSidePanelOpen}
+          setIsSidePanelOpen={setIsSidePanelOpen}
+        /&gt;
+      )}
+    &lt;/&gt;
+  )
+}
+
+export default App
+
+// styling - Tailwind
+// data fetching - TanStack Query (React Query)</code></pre>
+
+<h3>Line by line (the changed lines)</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>28</td><td><code>const { data: geocodeData, error: geocodeError } = useQuery({</code></td><td>Same <a class="term" href="glossary.html#tanstack-query">TanStack Query</a> call as before, but now it also takes out <code>error</code> and renames it <code>geocodeError</code> (that is <a class="term" href="glossary.html#destructuring">destructuring</a> with renaming). It holds the error if the geocode request failed after its <a class="term" href="glossary.html#retry">retries</a>; otherwise <code>null</code>. Without it the user would never learn why nothing loads.</td></tr>
+<tr><td>29–30</td><td><code>queryKey: ["geocode", location],</code><br><code>queryFn: () =&gt; getGeocode(location),</code></td><td>Unchanged. The <a class="term" href="glossary.html#query-key">query key</a> includes the city, so each city is cached separately; the <a class="term" href="glossary.html#query-function">query function</a> calls the fixed <code>getGeocode</code> from <code>api.ts</code>.</td></tr>
+<tr><td>31</td><td><code>enabled: location !== "custom", // a map click sets "custom": ...</code></td><td>Fix 2b (below): the geocode query only runs when <code>location</code> is a real city name. <code>enabled: false</code> tells TanStack Query "don't fetch for now"; the query wakes up again as soon as the value becomes <code>true</code>.</td></tr>
+<tr><td>39</td><td><code>const place = geocodeData?.[0]</code></td><td>Takes the first result, or <code>undefined</code> when the data hasn't arrived yet <em>or</em> the list is empty. This is the only place that indexes the list, and it never reads a property from <code>undefined</code>, so the crash of fix 2 can't happen.</td></tr>
+<tr><td>40</td><td><code>// null until we know where to look: ...</code></td><td>A comment for the next reader explaining why <code>null</code> is used.</td></tr>
+<tr><td>41–42</td><td><code>const coords: Coords | null =</code><br><code>  location === "custom" ? coordinates : place ? { lat: place.lat, lon: place.lon } : null</code></td><td>Two nested ternaries (<code>condition ? a : b</code>). If the user clicked the map, use the clicked <code>coordinates</code>. Otherwise, if we have a <code>place</code>, use its lat/lon. Otherwise <code>null</code>. The <a class="term" href="glossary.html#type">type</a> annotation <code>Coords | null</code> tells <a class="term" href="glossary.html#typescript">TypeScript</a> that <code>null</code> is allowed, and from now on TypeScript refuses to pass <code>coords</code> to a component that needs a real <code>Coords</code> until you have checked it.</td></tr>
+<tr><td>71–75</td><td><code>{location !== "custom" &amp;&amp; geocodeError &amp;&amp; (</code><br><code>  &lt;p role="alert" className="text-red-500"&gt;</code><br><code>    {geocodeError.message}</code></td><td>Shows the geocode error's message in red under the header. <code>a &amp;&amp; b &amp;&amp; (&lt;p&gt;…)</code> is <a class="term" href="glossary.html#jsx">JSX</a> conditional rendering: if both conditions are true React renders the paragraph, otherwise nothing. <code>role="alert"</code> makes screen readers announce it (<a class="term" href="glossary.html#accessibility">accessibility</a>). The message itself comes from <code>fetchJson</code> in fix 4, so it is readable. <code>location !== "custom"</code> hides the old city error once the user clicks the map.</td></tr>
+<tr><td>76–80</td><td><code>{location !== "custom" &amp;&amp; geocodeData &amp;&amp; !place &amp;&amp; (</code><br><code>  ... Could not find "{location}". Pick another city or click the map.</code></td><td>The "empty list" case: the request worked (<code>geocodeData</code> exists) but there is no first result. Instead of crashing, tell the user what happened and what to do next. <code>{location}</code> inserts the city name.</td></tr>
+<tr><td>83</td><td><code>{coords &amp;&amp; &lt;Map coords={coords} ... /&gt;}</code></td><td>Only render the map when there are coordinates. Inside the <code>&amp;&amp;</code>, TypeScript knows <code>coords</code> is not <code>null</code> (this is called narrowing), so the <code>Map</code> props still type-check. The legend on line 84 stays visible.</td></tr>
+<tr><td>87–89</td><td><code>&lt;Suspense fallback={&lt;CurrentSkeleton /&gt;}&gt;</code><br><code>  {coords ? &lt;CurrentWeather coords={coords} /&gt; : &lt;CurrentSkeleton /&gt;}</code></td><td>While <code>coords</code> is <code>null</code>, show the same <a class="term" href="glossary.html#skeleton">skeleton</a> the <a class="term" href="glossary.html#suspense">Suspense</a> fallback shows. The user sees one smooth "loading" state, and <code>CurrentWeather</code> (with its <code>useSuspenseQuery</code>) is not even created, so no request goes out for a made-up place.</td></tr>
+<tr><td>92–104</td><td>(same pattern for <code>DailyForecast</code>, <code>HourlyForecast</code>, <code>AdditionalInfo</code>)</td><td>Each card gets the same <code>coords ? card : skeleton</code> choice with its own skeleton.</td></tr>
+<tr><td>108–114</td><td><code>{coords &amp;&amp; (</code><br><code>  &lt;SidePanel coords={coords} ... /&gt;</code></td><td>The side panel fetches air pollution, so it also waits for real coordinates. This removes the <code>air_pollution?lat=0&amp;lon=0</code> request.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Decision tree for coords: custom location uses clicked coordinates; otherwise a found place gives its coordinates; otherwise null and skeletons or a message">
+  <rect class="box" x="290" y="14" width="180" height="40" rx="8"/>
+  <text x="380" y="39" text-anchor="middle" class="mono">location === "custom"?</text>
+  <path class="arrow" d="M330,54 L170,90"/>
+  <path class="arrow" d="M430,54 L560,90"/>
+  <text x="232" y="70" text-anchor="middle" class="small">yes</text>
+  <text x="520" y="70" text-anchor="middle" class="small">no</text>
+  <rect class="box-ok" x="40" y="92" width="240" height="44" rx="8"/>
+  <text x="160" y="113" text-anchor="middle" class="label">coords = clicked coordinates</text>
+  <text x="160" y="128" text-anchor="middle" class="small">(from the map click)</text>
+  <rect class="box" x="470" y="92" width="180" height="40" rx="8"/>
+  <text x="560" y="117" text-anchor="middle" class="mono">place exists?</text>
+  <path class="arrow" d="M520,132 L430,166"/>
+  <path class="arrow" d="M600,132 L660,166"/>
+  <text x="462" y="150" text-anchor="middle" class="small">yes</text>
+  <text x="646" y="150" text-anchor="middle" class="small">no</text>
+  <rect class="box-ok" x="300" y="168" width="240" height="44" rx="8"/>
+  <text x="420" y="189" text-anchor="middle" class="label">coords = place.lat, place.lon</text>
+  <text x="420" y="204" text-anchor="middle" class="small">cards fetch the weather</text>
+  <rect class="box-warn" x="556" y="168" width="188" height="44" rx="8"/>
+  <text x="650" y="189" text-anchor="middle" class="label">coords = null</text>
+  <text x="650" y="204" text-anchor="middle" class="small">skeletons (+ message)</text>
+</svg>
+<figcaption>Lines 39–42 as a picture. <strong><code>null</code> means "not known yet"</strong>, and every component that needs coordinates waits for it instead of guessing <code>0</code>.</figcaption>
+</figure>
+
+<figure class="shot"><img src="img/fixed-city-not-found.webp" alt="Dashboard header with the red message: Could not find Tokyo. Pick another city or click the map. Below it, the map area is empty and the cards show skeletons." width="1200" height="525" loading="lazy"><figcaption>The fixed app when the test made the geocoding API answer <code>[]</code>: a clear message instead of a blank page. (Test data, not real weather; base map tiles blocked in the test.)</figcaption></figure>
+
+<h2>Fix 2b: a map click no longer looks up a city called "custom" (App.tsx)</h2>
+<p>When you click the map, <code>onMapClick</code> stores the clicked point and sets <code>location</code> to the special value <code>"custom"</code> (step 13). But the geocode query's key is <code>["geocode", location]</code>, so a new key means a new request, and the repo sends one: it asks OpenWeather for a city named "custom". The answer is useless at best (the app ignores it, because <code>coords</code> uses the clicked point for <code>"custom"</code>), and it costs an API call on every first click. The browser test clicked the map and recorded these requests right after the click:</p>
+
+<pre data-lang="text" data-tag="verified requests after one map click (repo)"><code>https://api.openweathermap.org/data/3.0/onecall?lat=...&amp;lon=...
+http://api.openweathermap.org/data/2.5/air_pollution?lat=...&amp;lon=...
+http://api.openweathermap.org/geo/1.0/direct?q=custom&amp;limit=1</code></pre>
+
+<pre data-lang="text" data-tag="verified requests after one map click (step 25)"><code>https://api.openweathermap.org/data/3.0/onecall?lat=...&amp;lon=...
+https://api.openweathermap.org/data/2.5/air_pollution?lat=...&amp;lon=...</code></pre>
+
+<p>The fix is line 31 of the file above: <code>enabled: location !== "custom"</code>. While <code>enabled</code> is <code>false</code>, TanStack Query keeps the query idle: no request, <code>data</code> stays <code>undefined</code>, <code>error</code> stays <code>null</code>. When the user picks a city again from the dropdown, <code>enabled</code> becomes <code>true</code> and the query runs (or reuses its cache).</p>
+
+<details class="primer"><summary>New to the <code>enabled</code> option? Dependent queries in TanStack Query</summary>
+<p>By default a <code>useQuery</code> fetches as soon as the component renders and whenever its query key changes. Sometimes a query must wait: for a value the user hasn't chosen yet, for another query's result, or, like here, it makes no sense for some values. <code>enabled</code> takes a boolean. <code>false</code> means "not now"; switching to <code>true</code> starts the fetch. This pattern is called a <em>dependent query</em>. Note that <code>useSuspenseQuery</code> (used by the cards) has no <code>enabled</code> option; that's why the cards use <code>coords ? card : skeleton</code> instead, so the card with the query isn't rendered at all until it can fetch.</p>
+</details>
+
+<h2>Fix 3: <code>local_names</code> is optional (geocodeSchema.ts)</h2>
+<p>The <a class="term" href="glossary.html#zod">Zod</a> <a class="term" href="glossary.html#schema">schema</a> written in step 14 describes one geocoding result. It marks <code>local_names</code> (the city's name in other languages) as required:</p>
+
+<pre data-lang="ts" data-tag="before (repo, line 6)"><code>    local_names: z.record(z.string(), z.string()),</code></pre>
+
+<p>Big cities like Tokyo have <code>local_names</code>, but OpenWeather leaves the field out for many smaller places. When it is missing, <code>GeocodeSchema.parse</code> throws a <code>ZodError</code>, TanStack Query retries three times, gives up, and <code>geocodeData</code> stays <code>undefined</code>. With the repo's <code>?? 0</code> that meant something sneaky: the browser test (a geocode answer without <code>local_names</code>) showed the dropdown saying the city while the cards showed the weather for 0,0, with no error on screen. The app doesn't even use <code>local_names</code>, so the fix is one word:</p>
+
+<pre data-file="src/schemas/geocodeSchema.ts" data-lang="ts" data-tag="after (step 25)"><code>import z from "zod"
+
+export const GeocodeSchema = z.array(
+  z.object({
+    name: z.string(),
+    local_names: z.record(z.string(), z.string()).optional(),
+    lat: z.number(),
+    lon: z.number(),
+    country: z.string(),
+    state: z.string().optional(),
+  })
+)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import z from "zod"</code></td><td>Imports Zod, the <a class="term" href="glossary.html#validation">validation</a> library (unchanged).</td></tr>
+<tr><td>3–4</td><td><code>export const GeocodeSchema = z.array(</code><br><code>  z.object({</code></td><td>The answer is a list (<code>z.array</code>) of objects (<code>z.object</code>).</td></tr>
+<tr><td>6</td><td><code>local_names: z.record(z.string(), z.string()).optional(),</code></td><td><code>z.record(key, value)</code> describes an object with any keys, like <code>{ en: "Tokyo", ja: "東京" }</code>. <code>.optional()</code> means "this field may be missing". When it is missing, parsing still succeeds and the field is <code>undefined</code>. The inferred type becomes <code>Record&lt;string, string&gt; | undefined</code>.</td></tr>
+<tr><td>5, 7–10</td><td><code>name</code>, <code>lat</code>, <code>lon</code>, <code>country</code>, <code>state</code></td><td>Unchanged. <code>lat</code> and <code>lon</code> stay required: the app can't work without them, so an answer without them <em>should</em> fail.</td></tr>
+</table></div>
+
+<div class="callout"><p><strong>Rule of thumb for API schemas.</strong> Require only the fields your code reads. Every extra required field is one more way for a perfectly good answer to be rejected. If you are not sure whether a field is always present, check the API documentation's example responses and mark it <code>.optional()</code>.</p></div>
+
+<h2>Fixes 4, 5 and 6: one safe fetch helper (api.ts)</h2>
+<p>All three API functions in the repo follow the same pattern: <a class="term" href="glossary.html#fetch">fetch</a>, read the <a class="term" href="glossary.html#json">JSON</a>, parse it with Zod.</p>
+
+<pre data-file="src/api.ts" data-lang="ts" data-tag="before (repo)"><code>import { AirPollutionSchema } from "./schemas/airPollutionSchema"
+import { GeocodeSchema } from "./schemas/geocodeSchema"
+import { weatherSchema } from "./schemas/weatherSchema"
+
+const API_KEY = import.meta.env.VITE_API_KEY
+
+export async function getWeather({ lat, lon }: { lat: number; lon: number }) {
+  const res = await fetch(
+    `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&amp;lon=${lon}&amp;units=imperial&amp;exclude=minutely,alerts&amp;appid=${API_KEY}`
+  )
+  const data = await res.json()
+  return weatherSchema.parse(data)
+}
+
+export async function getGeocode(location: string) {
+  const res = await fetch(
+    `http://api.openweathermap.org/geo/1.0/direct?q=${location}&amp;limit=1&amp;appid=${API_KEY}`
+  )
+  const data = await res.json()
+  return GeocodeSchema.parse(data)
+}
+
+export async function getAirPollution({
+  lat,
+  lon,
+}: {
+  lat: number
+  lon: number
+}) {
+  const res = await fetch(
+    `http://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&amp;lon=${lon}&amp;appid=${API_KEY}`
+  )
+  const data = await res.json()
+  return AirPollutionSchema.parse(data)
+}</code></pre>
+
+<p>Three things go wrong here:</p>
+<ul>
+<li><strong>No status check (fix 4).</strong> <code>fetch</code> only rejects when the network fails. A <code>401 Unauthorized</code> (wrong key) or <code>429</code> (too many requests) still <em>resolves</em>, with an error object as the body, e.g. <code>{"cod":401,"message":"Invalid API key. ..."}</code>. That object then goes into Zod, which complains that <code>lat</code> is missing. The test recorded a <code>ZodError</code> ending in <code>"path": ["lat"] ... expected number, received undefined</code>: true, but useless for finding the real cause. Then the default three retries per query kicked in (28 requests recorded in 20 seconds) and finally the page went blank.</li>
+<li><strong><code>http://</code> on lines 17 and 31 (fix 5).</strong> Once the app is deployed on an <code>https://</code> address, browsers block plain <code>http://</code> requests from it. This is called <a class="term" href="glossary.html#mixed-content">mixed content</a>. On <code>localhost</code> it works, so you don't notice until deployment. One Call (line 9) already uses https. (Explained from browser rules; not tested on a deployed site.)</li>
+<li><strong>City not encoded (fix 6).</strong> <code>q=${location}</code> pastes the city straight into the URL. "New York" contains a space; browsers happen to fix that one for you, but a name with <code>&amp;</code>, <code>#</code> or <code>?</code> would cut the <a class="term" href="glossary.html#query-string">query string</a> in the wrong place.</li>
+</ul>
+
+<details class="primer"><summary>New to HTTP status codes and <code>res.ok</code>? Why a 401 doesn't throw</summary>
+<p>Every <a class="term" href="glossary.html#api">API</a> answer has a number called the <a class="term" href="glossary.html#http-status">HTTP status</a>. <code>200</code> means OK. <code>4xx</code> means "your request was wrong" (<code>401</code> bad or missing key, <code>404</code> not found, <code>429</code> too many requests). <code>5xx</code> means "the server had a problem".</p>
+<p><code>fetch</code> treats <em>any</em> answer as success, because the server did answer. It only rejects its <a class="term" href="glossary.html#promise">promise</a> when there is no answer at all (offline, DNS failure, blocked request). The <code>Response</code> object gives you <code>res.status</code> (the number) and <code>res.ok</code>, which is <code>true</code> for 200–299. So checking <code>res.ok</code> is <em>your</em> job.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>const res = await fetch(url)   // no throw, even for 401
+res.status                     // 401
+res.ok                         // false
+await res.json()               // { cod: 401, message: "Invalid API key. ..." }</code></pre>
+</details>
+
+<details class="primer"><summary>New to mixed content? Why <code>http://</code> breaks only after you deploy</summary>
+<p>A page loaded over <a class="term" href="glossary.html#https">HTTPS</a> promises the user that everything is encrypted. If that page then asks for data over plain <code>http://</code>, the data could be read or changed on the way, which would break the promise. So browsers block such requests ("mixed content") and show an error in the console. On your computer the page is <code>http://localhost:5173</code>, which is not https, so nothing is blocked and the bug stays hidden. Real hosts serve your site over https, and the first visitor sees empty cards. The fix is simply to use <code>https://</code> for every API URL; OpenWeather supports it.</p>
+</details>
+
+<p>The fix moves the shared steps into one helper, <code>fetchJson</code>, and makes all three functions use it:</p>
+
+<pre data-file="src/api.ts" data-lang="ts" data-tag="after (step 25)"><code>import type { z } from "zod"
+import { AirPollutionSchema } from "./schemas/airPollutionSchema"
+import { GeocodeSchema } from "./schemas/geocodeSchema"
+import { weatherSchema } from "./schemas/weatherSchema"
+
+const API_KEY = import.meta.env.VITE_API_KEY
+const BASE_URL = "https://api.openweathermap.org"
+
+// Fetch a URL, fail with a readable message on HTTP errors, then validate the JSON with a Zod schema.
+async function fetchJson&lt;T extends z.ZodType&gt;(url: string, schema: T): Promise&lt;z.infer&lt;T&gt;&gt; {
+  const res = await fetch(url)
+  if (!res.ok) {
+    const body = await res.json().catch(() =&gt; null)
+    throw new Error(`OpenWeather request failed (${res.status}): ${body?.message ?? res.statusText}`)
+  }
+  return schema.parse(await res.json())
+}
+
+export function getWeather({ lat, lon }: { lat: number; lon: number }) {
+  return fetchJson(
+    `${BASE_URL}/data/3.0/onecall?lat=${lat}&amp;lon=${lon}&amp;units=imperial&amp;exclude=minutely,alerts&amp;appid=${API_KEY}`,
+    weatherSchema
+  )
+}
+
+export function getGeocode(location: string) {
+  return fetchJson(
+    `${BASE_URL}/geo/1.0/direct?q=${encodeURIComponent(location)}&amp;limit=1&amp;appid=${API_KEY}`,
+    GeocodeSchema
+  )
+}
+
+export function getAirPollution({ lat, lon }: { lat: number; lon: number }) {
+  return fetchJson(
+    `${BASE_URL}/data/2.5/air_pollution?lat=${lat}&amp;lon=${lon}&amp;appid=${API_KEY}`,
+    AirPollutionSchema
+  )
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import type { z } from "zod"</code></td><td>Imports Zod's <code>z</code> only for its <a class="term" href="glossary.html#type">types</a> (<code>z.ZodType</code>, <code>z.infer</code>). <code>import type</code> is removed completely when the code is compiled, so it adds nothing to the <a class="term" href="glossary.html#bundle">bundle</a>.</td></tr>
+<tr><td>2–4</td><td><code>import { AirPollutionSchema } ...</code> (3 lines)</td><td>The three schemas, unchanged.</td></tr>
+<tr><td>6</td><td><code>const API_KEY = import.meta.env.VITE_API_KEY</code></td><td>The OpenWeather <a class="term" href="glossary.html#api-key">API key</a> from <code>.env</code>, as in step 5. (Step 28 explains why this value is still visible to anyone using the site.)</td></tr>
+<tr><td>7</td><td><code>const BASE_URL = "https://api.openweathermap.org"</code></td><td>The start of every API URL, written once with <code>https</code>. This is fix 5: no function can accidentally use <code>http</code> any more.</td></tr>
+<tr><td>9</td><td><code>// Fetch a URL, fail with a readable message ...</code></td><td>Comment describing the helper's job.</td></tr>
+<tr><td>10</td><td><code>async function fetchJson&lt;T extends z.ZodType&gt;(url: string, schema: T): Promise&lt;z.infer&lt;T&gt;&gt; {</code></td><td>A <a class="term" href="glossary.html#generic">generic</a> function. <code>T</code> is "whatever schema you pass in"; <code>extends z.ZodType</code> says it must be a Zod schema. The return type <code>Promise&lt;z.infer&lt;T&gt;&gt;</code> means "a promise of the type that schema describes". So <code>getWeather</code> still returns weather-shaped data and <code>getGeocode</code> geocode-shaped data, fully typed, without writing those types by hand. Not exported: it's an internal helper.</td></tr>
+<tr><td>11</td><td><code>const res = await fetch(url)</code></td><td>Sends the request and waits for the answer (<a class="term" href="glossary.html#async-await">async/await</a>).</td></tr>
+<tr><td>12</td><td><code>if (!res.ok) {</code></td><td>Fix 4: stop here if the status is not 200–299.</td></tr>
+<tr><td>13</td><td><code>const body = await res.json().catch(() =&gt; null)</code></td><td>Tries to read OpenWeather's error body (it contains a useful <code>message</code>). If the body is not JSON (for example an HTML error page from a proxy), <code>.catch(() =&gt; null)</code> turns that failure into <code>null</code> instead of throwing a second, confusing error.</td></tr>
+<tr><td>14</td><td><code>throw new Error(`OpenWeather request failed (${res.status}): ${body?.message ?? res.statusText}`)</code></td><td>Throws a normal <code>Error</code> with a message a human can act on, built with a <a class="term" href="glossary.html#template-literal">template literal</a>: the status number plus OpenWeather's message, or the standard status text (like "Unauthorized") if there is no message. TanStack Query stores this error; <code>App.tsx</code> line 73 shows it.</td></tr>
+<tr><td>16</td><td><code>return schema.parse(await res.json())</code></td><td>Only for successful answers: read the JSON and validate it with the schema that was passed in. A real shape mismatch still throws a <code>ZodError</code>, which is correct.</td></tr>
+<tr><td>19</td><td><code>export function getWeather({ lat, lon }: { lat: number; lon: number }) {</code></td><td>No longer <code>async</code>: it just returns the promise from <code>fetchJson</code>. Callers (<code>useSuspenseQuery</code> in the cards) use it exactly as before.</td></tr>
+<tr><td>20–23</td><td><code>return fetchJson(</code><br><code>  `${BASE_URL}/data/3.0/onecall?lat=${lat}&amp;lon=${lon}&amp;units=imperial&amp;exclude=minutely,alerts&amp;appid=${API_KEY}`,</code><br><code>  weatherSchema</code></td><td>Same One Call URL as the repo, now built from <code>BASE_URL</code>, plus the schema to check it with. <code>units=imperial</code> keeps °F and mph like the video; <code>exclude=minutely,alerts</code> leaves out parts the app doesn't show.</td></tr>
+<tr><td>26–30</td><td><code>`${BASE_URL}/geo/1.0/direct?q=${encodeURIComponent(location)}&amp;limit=1&amp;appid=${API_KEY}`,</code><br><code>GeocodeSchema</code></td><td>Geocoding, now over https (fix 5). <code>encodeURIComponent</code> (fix 6) turns characters with a special meaning in URLs into safe codes: a space becomes <code>%20</code>, <code>&amp;</code> becomes <code>%26</code>. <code>limit=1</code> asks for the best match only.</td></tr>
+<tr><td>33–37</td><td><code>`${BASE_URL}/data/2.5/air_pollution?lat=${lat}&amp;lon=${lon}&amp;appid=${API_KEY}`,</code><br><code>AirPollutionSchema</code></td><td>Air pollution, now over https too. The long destructured parameter from the repo is written on one line; the type is the same.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Flow of fetchJson: fetch, then res.ok check; if not ok, read the error body and throw a readable Error; if ok, parse with the Zod schema and return typed data">
+  <rect class="box" x="16" y="80" width="120" height="44" rx="8"/>
+  <text x="76" y="107" text-anchor="middle" class="mono">fetch(url)</text>
+  <path class="arrow" d="M136,102 H164"/>
+  <rect class="box" x="166" y="80" width="110" height="44" rx="8"/>
+  <text x="221" y="107" text-anchor="middle" class="mono">res.ok?</text>
+  <path class="arrow-bad" d="M276,94 L330,46"/>
+  <path class="arrow-ok" d="M276,110 L330,158"/>
+  <text x="221" y="70" text-anchor="middle" class="small">no: 401, 429...</text>
+  <text x="221" y="142" text-anchor="middle" class="small">yes: 200</text>
+  <rect class="box-bad" x="332" y="18" width="190" height="56" rx="8"/>
+  <text x="427" y="42" text-anchor="middle" class="label">read body.message</text>
+  <text x="427" y="60" text-anchor="middle" class="small">(null if not JSON)</text>
+  <path class="arrow-bad" d="M522,46 H550"/>
+  <rect class="box-bad" x="552" y="18" width="192" height="56" rx="8"/>
+  <text x="648" y="40" text-anchor="middle" class="label">throw Error(</text>
+  <text x="648" y="58" text-anchor="middle" class="small">"OpenWeather request failed (401)..."</text>
+  <rect class="box-ok" x="332" y="130" width="190" height="56" rx="8"/>
+  <text x="427" y="154" text-anchor="middle" class="mono">schema.parse(json)</text>
+  <text x="427" y="172" text-anchor="middle" class="small">ZodError if shape is wrong</text>
+  <path class="arrow-ok" d="M522,158 H550"/>
+  <rect class="box-ok" x="552" y="130" width="192" height="56" rx="8"/>
+  <text x="648" y="154" text-anchor="middle" class="label">typed data</text>
+  <text x="648" y="172" text-anchor="middle" class="small">z.infer of the schema</text>
+</svg>
+<figcaption>One helper, two exits. <strong>HTTP errors and shape errors now produce different messages</strong>, so you can tell "wrong key" apart from "the API changed".</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Mixed content: a page served over https can call an https API, but the browser blocks its http requests">
+  <rect class="zone" x="16" y="16" width="250" height="158" rx="8"/>
+  <text x="141" y="38" text-anchor="middle" class="title">Browser</text>
+  <rect class="box" x="36" y="56" width="210" height="44" rx="8"/>
+  <text x="141" y="76" text-anchor="middle" class="label">your deployed site</text>
+  <text x="141" y="92" text-anchor="middle" class="small">https://your-site.example</text>
+  <text x="141" y="140" text-anchor="middle" class="small">localhost is http, so the</text>
+  <text x="141" y="156" text-anchor="middle" class="small">problem is hidden in dev</text>
+  <path class="arrow-ok" d="M246,70 H480"/>
+  <text x="362" y="62" text-anchor="middle" class="ok">https:// request: allowed</text>
+  <path class="arrow-bad" d="M246,92 H330"/>
+  <text x="390" y="122" text-anchor="middle" class="bad">http:// request</text>
+  <text x="390" y="138" text-anchor="middle" class="bad">blocked (mixed content)</text>
+  <rect class="box-info" x="482" y="48" width="262" height="60" rx="8"/>
+  <text x="613" y="72" text-anchor="middle" class="label">api.openweathermap.org</text>
+  <text x="613" y="90" text-anchor="middle" class="small">serves both http and https</text>
+</svg>
+<figcaption>The blocked request never leaves the browser. <strong>Always use <code>https://</code> API URLs</strong>, even if <code>http://</code> works on your machine.</figcaption>
+</figure>
+
+<figure class="shot"><img src="img/fixed-invalid-key.webp" alt="Dashboard header with the red message: OpenWeather request failed (401): Invalid API key. Please see https://openweathermap.org/faq#error401 for more info." width="1200" height="525" loading="lazy"><figcaption>The fixed app when the test answered every request with a 401: the real reason, in plain words, instead of a <code>ZodError</code> about <code>lat</code>. (Test data; base map tiles blocked in the test.)</figcaption></figure>
+
+<div class="callout"><p><strong>This fixes finding 4 only partly.</strong> A geocode error now shows a readable message, because <code>App.tsx</code> uses <code>useQuery</code> and displays <code>error</code>. But the cards use <code>useSuspenseQuery</code>, which <em>throws</em> its error into the component tree. If only the One Call request fails, the page still goes blank after the retries. The browser test confirmed that for this step's code (4 One Call requests, then <code>Error: OpenWeather request failed (401): ...</code> and an empty page). Step 26 adds error boundaries for exactly that case.</p></div>
+
+<h2>Fix 7: the marker is broken in the production build (Map.tsx)</h2>
+<p>This bug is invisible while you develop. With <code>npm run dev</code> the map shows Leaflet's blue pin. After <code>npm run build</code> and <code>npm run preview</code> the pin is a broken image with the alt text "Marker":</p>
+
+<figure class="shot"><img src="img/marker-prod-dev-fixed.webp" alt="Three crops of the map: left, a broken image icon with the text Marker; middle, the blue pin; right, the blue pin" width="880" height="240" loading="lazy"><figcaption>Left: repo, production build (broken). Middle: repo, dev server (works). Right: fixed code, production build. From the browser test.</figcaption></figure>
+
+<p>Why only in production? Leaflet's default marker doesn't know where its images are. It looks at the <code>leaflet.css</code> file to guess the folder (an internal function called <code>_detectIconPath</code>) and then adds <code>marker-icon.png</code> to it. In production, <a class="term" href="glossary.html#vite">Vite</a> inlines small images straight into the CSS as <code>data:</code> URLs (text versions of the image), so there is no folder to find, and the guessed URL is invalid. In development Vite serves the CSS differently and the guess happens to work.</p>
+<p>The fix stops Leaflet from guessing. You import the three images yourself, so Vite knows they are needed and gives you working URLs in every mode, and you hand them to Leaflet with <code>L.icon</code>. Here is the repo file first (note: <strong>line 58 contained a real MapTiler key in the repo; it is replaced with <code>"YOUR_MAPTILER_KEY"</code> here</strong>):</p>
+
+<pre data-file="src/components/Map.tsx" data-lang="tsx" data-tag="before (repo, key replaced)"><code>import { MapContainer, Marker, TileLayer, useMap } from "react-leaflet"
+import "leaflet/dist/leaflet.css"
+import type { Coords } from "../types"
+import { useEffect } from "react"
+import { MaptilerLayer } from "@maptiler/leaflet-maptilersdk"
+
+const API_KEY = import.meta.env.VITE_API_KEY
+
+type Props = {
+  coords: Coords
+  onMapClick: (lat: number, lon: number) =&gt; void
+  mapType: string
+}
+
+export default function Map({ coords, onMapClick, mapType }: Props) {
+  const { lat, lon } = coords
+  return (
+    &lt;MapContainer
+      center={[lat, lon]}
+      zoom={5}
+      style={{ width: "100%", height: "100%" }}
+    &gt;
+      &lt;MapClick onMapClick={onMapClick} coords={coords} /&gt;
+      &lt;MapTileLayer /&gt;
+      &lt;TileLayer
+        opacity={0.7}
+        url={`https://tile.openweathermap.org/map/${mapType}/{z}/{x}/{y}.png?appid=${API_KEY}`}
+      /&gt;
+      &lt;Marker position={[lat, lon]} /&gt;
+    &lt;/MapContainer&gt;
+  )
+}
+
+function MapClick({
+  onMapClick,
+  coords,
+}: {
+  onMapClick: (lat: number, lon: number) =&gt; void
+  coords: Coords
+}) {
+  const map = useMap()
+  map.panTo([coords.lat, coords.lon])
+
+  map.on("click", (e) =&gt; {
+    const { lat, lng } = e.latlng
+    onMapClick(lat, lng)
+  })
+
+  return null
+}
+
+function MapTileLayer() {
+  const map = useMap()
+
+  useEffect(() =&gt; {
+    const tileLayer = new MaptilerLayer({
+      style: "basic-dark",
+      apiKey: "YOUR_MAPTILER_KEY",
+    })
+    tileLayer.addTo(map)
+
+    return () =&gt; {
+      map.removeLayer(tileLayer)
+    }
+  }, [map])
+
+  return null
+}</code></pre>
+
+<p>And the fixed file. It also contains fixes 8 and 9:</p>
+
+<pre data-file="src/components/Map.tsx" data-lang="tsx" data-tag="after (step 25)"><code>import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from "react-leaflet"
+import L from "leaflet"
+import "leaflet/dist/leaflet.css"
+import markerIconUrl from "leaflet/dist/images/marker-icon.png"
+import markerIcon2xUrl from "leaflet/dist/images/marker-icon-2x.png"
+import markerShadowUrl from "leaflet/dist/images/marker-shadow.png"
+import type { Coords } from "../types"
+import { useEffect } from "react"
+import { MaptilerLayer } from "@maptiler/leaflet-maptilersdk"
+
+const API_KEY = import.meta.env.VITE_API_KEY
+const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY
+
+// Import the marker images so Vite bundles them. Leaflet's automatic image path
+// breaks in production builds, where Vite inlines the small images as data URLs.
+const markerIcon = L.icon({
+  iconUrl: markerIconUrl,
+  iconRetinaUrl: markerIcon2xUrl,
+  shadowUrl: markerShadowUrl,
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  shadowSize: [41, 41],
+})
+
+type Props = {
+  coords: Coords
+  onMapClick: (lat: number, lon: number) =&gt; void
+  mapType: string
+}
+
+export default function Map({ coords, onMapClick, mapType }: Props) {
+  const { lat, lon } = coords
+  return (
+    &lt;MapContainer
+      center={[lat, lon]}
+      zoom={5}
+      style={{ width: "100%", height: "100%" }}
+    &gt;
+      &lt;MapClick onMapClick={onMapClick} coords={coords} /&gt;
+      &lt;MapTileLayer /&gt;
+      &lt;TileLayer
+        opacity={0.7}
+        url={`https://tile.openweathermap.org/map/${mapType}/{z}/{x}/{y}.png?appid=${API_KEY}`}
+      /&gt;
+      &lt;Marker position={[lat, lon]} icon={markerIcon} /&gt;
+    &lt;/MapContainer&gt;
+  )
+}
+
+function MapClick({
+  onMapClick,
+  coords,
+}: {
+  onMapClick: (lat: number, lon: number) =&gt; void
+  coords: Coords
+}) {
+  // useMapEvents registers the click listener once and removes it on unmount
+  const map = useMapEvents({
+    click(e) {
+      onMapClick(e.latlng.lat, e.latlng.lng)
+    },
+  })
+
+  // pan only when the coordinates change, not on every render
+  useEffect(() =&gt; {
+    map.panTo([coords.lat, coords.lon])
+  }, [map, coords.lat, coords.lon])
+
+  return null
+}
+
+function MapTileLayer() {
+  const map = useMap()
+
+  useEffect(() =&gt; {
+    if (!MAPTILER_KEY) return // no key: keep the weather layer only
+    const tileLayer = new MaptilerLayer({
+      style: "basic-dark",
+      apiKey: MAPTILER_KEY,
+    })
+    tileLayer.addTo(map)
+
+    return () =&gt; {
+      map.removeLayer(tileLayer)
+    }
+  }, [map])
+
+  return null
+}</code></pre>
+
+<h3>Line by line (the changed lines)</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from "react-leaflet"</code></td><td>Adds <code>useMapEvents</code>, a <a class="term" href="glossary.html#react-leaflet">react-leaflet</a> <a class="term" href="glossary.html#hook">hook</a> that registers map events correctly (fix 8).</td></tr>
+<tr><td>2</td><td><code>import L from "leaflet"</code></td><td>Imports <a class="term" href="glossary.html#leaflet">Leaflet</a> itself (react-leaflet is only a wrapper around it). We need its <code>L.icon</code> function.</td></tr>
+<tr><td>4–6</td><td><code>import markerIconUrl from "leaflet/dist/images/marker-icon.png"</code><br><code>import markerIcon2xUrl from ".../marker-icon-2x.png"</code><br><code>import markerShadowUrl from ".../marker-shadow.png"</code></td><td>Importing an image file in a Vite project gives you a string: a URL that works in dev and in the build (either a file in <code>dist/assets</code> or a <code>data:</code> URL). These are the pin, the sharper pin for high-resolution screens, and the shadow.</td></tr>
+<tr><td>12</td><td><code>const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY</code></td><td>Fix 9: the MapTiler key now comes from <code>.env</code> like the OpenWeather key.</td></tr>
+<tr><td>14–15</td><td><code>// Import the marker images so Vite bundles them. ...</code></td><td>Explains the non-obvious reason for this code, so nobody "simplifies" it back.</td></tr>
+<tr><td>16–23</td><td><code>const markerIcon = L.icon({</code><br><code>  iconUrl: markerIconUrl,</code><br><code>  iconRetinaUrl: markerIcon2xUrl,</code><br><code>  shadowUrl: markerShadowUrl,</code><br><code>  iconSize: [25, 41],</code><br><code>  iconAnchor: [12, 41],</code><br><code>  shadowSize: [41, 41],</code></td><td>Builds an icon object once, outside the component (it never changes, so there is no reason to rebuild it on every render). <code>iconSize</code> is the pin's width and height in pixels; <code>iconAnchor</code> is the pixel that sits exactly on the coordinates (bottom centre, the pin's tip); <code>shadowSize</code> sizes the shadow. These are the same values Leaflet's default icon uses.</td></tr>
+<tr><td>45</td><td><code>&lt;Marker position={[lat, lon]} icon={markerIcon} /&gt;</code></td><td>Passes the icon explicitly. Leaflet now uses these URLs and never runs its path guessing.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Why the marker breaks: in dev, Leaflet finds the images folder from the CSS; in the build, the images are inlined as data URLs and the guessed path is invalid; the fix imports the images and passes L.icon">
+  <text x="130" y="26" text-anchor="middle" class="title">npm run dev</text>
+  <text x="380" y="26" text-anchor="middle" class="title">npm run build (repo)</text>
+  <text x="630" y="26" text-anchor="middle" class="title">build (fixed)</text>
+  <rect class="box2" x="16" y="40" width="228" height="44" rx="8"/>
+  <text x="130" y="60" text-anchor="middle" class="label">leaflet.css served with</text>
+  <text x="130" y="76" text-anchor="middle" class="label">a normal image path</text>
+  <rect class="box2" x="266" y="40" width="228" height="44" rx="8"/>
+  <text x="380" y="60" text-anchor="middle" class="label">small PNGs inlined into</text>
+  <text x="380" y="76" text-anchor="middle" class="label">the CSS as data: URLs</text>
+  <rect class="box2" x="516" y="40" width="228" height="44" rx="8"/>
+  <text x="630" y="60" text-anchor="middle" class="label">Map.tsx imports the PNGs</text>
+  <text x="630" y="76" text-anchor="middle" class="label">and builds L.icon(...)</text>
+  <path class="arrow" d="M130,84 V108"/>
+  <path class="arrow" d="M380,84 V108"/>
+  <path class="arrow" d="M630,84 V108"/>
+  <rect class="box" x="16" y="110" width="228" height="44" rx="8"/>
+  <text x="130" y="130" text-anchor="middle" class="label">Leaflet guesses the folder</text>
+  <text x="130" y="146" text-anchor="middle" class="small">_detectIconPath works</text>
+  <rect class="box-bad" x="266" y="110" width="228" height="44" rx="8"/>
+  <text x="380" y="130" text-anchor="middle" class="label">Leaflet guesses the folder</text>
+  <text x="380" y="146" text-anchor="middle" class="small">guessed URL is invalid</text>
+  <rect class="box" x="516" y="110" width="228" height="44" rx="8"/>
+  <text x="630" y="130" text-anchor="middle" class="label">no guessing needed</text>
+  <text x="630" y="146" text-anchor="middle" class="small">icon prop has real URLs</text>
+  <path class="arrow-ok" d="M130,154 V178"/>
+  <path class="arrow-bad" d="M380,154 V178"/>
+  <path class="arrow-ok" d="M630,154 V178"/>
+  <rect class="box-ok" x="16" y="180" width="228" height="36" rx="8"/>
+  <text x="130" y="203" text-anchor="middle" class="ok">blue pin</text>
+  <rect class="box-bad" x="266" y="180" width="228" height="36" rx="8"/>
+  <text x="380" y="203" text-anchor="middle" class="bad">broken image "Marker"</text>
+  <rect class="box-ok" x="516" y="180" width="228" height="36" rx="8"/>
+  <text x="630" y="203" text-anchor="middle" class="ok">blue pin</text>
+</svg>
+<figcaption>Same code, different result in dev and production. <strong>Always test the production build (<code>npm run build</code> then <code>npm run preview</code>) before you deploy.</strong></figcaption>
+</figure>
+
+<h2>Fix 8: one click listener, not one per render (Map.tsx)</h2>
+<p>In the repo, <code>MapClick</code> (repo lines 34–50) calls <code>map.panTo(...)</code> and <code>map.on("click", ...)</code> directly in the component body. A component body runs on <em>every</em> <a class="term" href="glossary.html#rendering">render</a>. <code>map.on</code> doesn't replace the previous listener, it adds another one, and nothing ever removes them. After a few renders (changing the city, the map type, the theme), one click calls <code>onMapClick</code> several times. It looks harmless because every call sets the same coordinates, but the list keeps growing for as long as the page is open. (This one is reasoned from the code and Leaflet's API; the listeners were not counted in the browser.)</p>
+<p>The fixed <code>MapClick</code> is on lines 50–70 above:</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>57</td><td><code>// useMapEvents registers the click listener once and removes it on unmount</code></td><td>Says why the hook is used.</td></tr>
+<tr><td>58–62</td><td><code>const map = useMapEvents({</code><br><code>  click(e) {</code><br><code>    onMapClick(e.latlng.lat, e.latlng.lng)</code><br><code>  },</code><br><code>})</code></td><td><code>useMapEvents</code> takes an object of event handlers (here only <code>click</code>), attaches them to the map, and detaches them when the component goes away. It also returns the map, so we don't need <code>useMap()</code> here. <code>e.latlng</code> is the clicked point; Leaflet calls longitude <code>lng</code>, our app calls it <code>lon</code>.</td></tr>
+<tr><td>64–67</td><td><code>useEffect(() =&gt; {</code><br><code>  map.panTo([coords.lat, coords.lon])</code><br><code>}, [map, coords.lat, coords.lon])</code></td><td><a class="term" href="glossary.html#useeffect">useEffect</a> runs its function after rendering, and only again when something in the dependency list changes. So the map pans when the coordinates change, not on every render. The dependencies are the two numbers (not the <code>coords</code> object), so a new object with the same numbers doesn't trigger a pan.</td></tr>
+<tr><td>69</td><td><code>return null</code></td><td>This component draws nothing; it only connects behaviour to the map.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Before: each render adds another click listener, so after three renders one click calls onMapClick three times. After: one listener.">
+  <text x="190" y="24" text-anchor="middle" class="title">Before: map.on in the body</text>
+  <text x="570" y="24" text-anchor="middle" class="title">After: useMapEvents</text>
+  <rect class="box2" x="30" y="40" width="90" height="34" rx="8"/>
+  <text x="75" y="62" text-anchor="middle" class="label">render 1</text>
+  <rect class="box2" x="145" y="40" width="90" height="34" rx="8"/>
+  <text x="190" y="62" text-anchor="middle" class="label">render 2</text>
+  <rect class="box2" x="260" y="40" width="90" height="34" rx="8"/>
+  <text x="305" y="62" text-anchor="middle" class="label">render 3</text>
+  <circle class="dot-bad" cx="75" cy="96" r="7"/>
+  <circle class="dot-bad" cx="180" cy="96" r="7"/>
+  <circle class="dot-bad" cx="200" cy="96" r="7"/>
+  <circle class="dot-bad" cx="285" cy="96" r="7"/>
+  <circle class="dot-bad" cx="305" cy="96" r="7"/>
+  <circle class="dot-bad" cx="325" cy="96" r="7"/>
+  <text x="190" y="130" text-anchor="middle" class="label">listeners on the map: 1, 2, 3 ...</text>
+  <text x="190" y="152" text-anchor="middle" class="bad">1 click = 3 calls to onMapClick</text>
+  <rect class="box2" x="410" y="40" width="90" height="34" rx="8"/>
+  <text x="455" y="62" text-anchor="middle" class="label">render 1</text>
+  <rect class="box2" x="525" y="40" width="90" height="34" rx="8"/>
+  <text x="570" y="62" text-anchor="middle" class="label">render 2</text>
+  <rect class="box2" x="640" y="40" width="90" height="34" rx="8"/>
+  <text x="685" y="62" text-anchor="middle" class="label">render 3</text>
+  <circle class="dot-ok" cx="455" cy="96" r="7"/>
+  <circle class="dot-ok" cx="570" cy="96" r="7"/>
+  <circle class="dot-ok" cx="685" cy="96" r="7"/>
+  <text x="570" y="130" text-anchor="middle" class="label">always exactly 1 listener</text>
+  <text x="570" y="152" text-anchor="middle" class="ok">1 click = 1 call</text>
+  <path class="line dashed" d="M380,36 V176"/>
+  <text x="380" y="192" text-anchor="middle" class="small">each dot = one click listener attached to the map (illustrative count)</text>
+</svg>
+<figcaption>Code in a component body runs on every render. <strong>Side effects such as adding listeners belong in an effect or a hook that cleans up after itself.</strong></figcaption>
+</figure>
+
+<h2>Fix 9: the MapTiler key comes from <code>.env</code> (Map.tsx)</h2>
+<p>In step 17 the MapTiler key was pasted directly into <code>Map.tsx</code>, and that file is in the public repo. Lines 12 and 76–80 of the fixed file read it from an <a class="term" href="glossary.html#env-variable">environment variable</a> instead:</p>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>12</td><td><code>const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY</code></td><td>Vite replaces <code>import.meta.env.VITE_MAPTILER_KEY</code> with the value from <code>.env</code> (see <a class="term" href="glossary.html#vite-env">Vite env variables</a>). Only names starting with <code>VITE_</code> are passed to browser code.</td></tr>
+<tr><td>76</td><td><code>if (!MAPTILER_KEY) return // no key: keep the weather layer only</code></td><td>If you haven't set the key, skip the MapTiler layer instead of sending requests that will fail. The OpenWeather overlay and marker still work. Returning nothing from an effect means "no cleanup needed".</td></tr>
+<tr><td>77–80</td><td><code>const tileLayer = new MaptilerLayer({</code><br><code>  style: "basic-dark",</code><br><code>  apiKey: MAPTILER_KEY,</code></td><td>Same <a class="term" href="glossary.html#maptiler">MapTiler</a> layer as the video, with the key from the variable. (Step 27 makes the style follow the theme.)</td></tr>
+</table></div>
+
+<ol class="steps">
+<li><strong>Add the key to <code>.env</code></strong>
+<p>Open the <code>.env</code> file next to <code>package.json</code> (the one that already holds <code>VITE_API_KEY</code>) and add a line <code>VITE_MAPTILER_KEY=</code> followed by <em>your own</em> key from your MapTiler account. No quotes, no spaces around <code>=</code>.</p></li>
+<li><strong>Restart the dev server</strong>
+<p>Vite reads <code>.env</code> only when it starts. Stop it with <kbd>Ctrl</kbd>+<kbd>C</kbd> and run <code>npm run dev</code> again.</p></li>
+<li><strong>Don't reuse a key you found in someone's code</strong>
+<p>A key that was ever committed to a public repo stays in the Git history even after you delete the line. If you pasted your own key into the code earlier, create a new key in the MapTiler dashboard and delete the old one. Step 28 shows how to restrict a key to your own website.</p></li>
+</ol>
+
+<h2>Fix 10: placeholder "Theme" (LocationDropdown.tsx)</h2>
+<p>A copy-paste slip from the shadcn example: the location dropdown's placeholder says "Theme". You never see it, because a city is always selected, but a screen reader or a future "no city selected" state would. One word changes on line 19:</p>
+<pre data-lang="tsx" data-tag="before (repo, line 19)"><code>        &lt;SelectValue placeholder="Theme" /&gt;</code></pre>
+<pre data-lang="tsx" data-tag="after (step 25, line 19)"><code>        &lt;SelectValue placeholder="Location" /&gt;</code></pre>
+
+<h2>Fix 11: 14 lint errors from empty <code>Props</code> (skeletons and toggle)</h2>
+<p>The six skeleton components and <code>LightDarkToggle</code> were created from an editor snippet that always adds a <code>Props</code> type. They take no props, so it stayed empty:</p>
+
+<pre data-lang="tsx" data-tag="before (repo, src/components/skeletons/CurrentSkeleton.tsx lines 1–6)"><code>import Card from "../cards/Card"
+import { Skeleton } from "../ui/skeleton"
+
+type Props = {}
+
+export default function CurrentSkeleton({}: Props) {</code></pre>
+
+<p><a class="term" href="glossary.html#eslint">ESLint</a> reports two errors per file, 14 in total:</p>
+<pre data-lang="text" data-tag="verified output (npm run lint, repo; one file shown, messages shortened)"><code>src\components\skeletons\CurrentSkeleton.tsx
+  4:14  error  The `{}` ("empty object") type allows any non-nullish value,
+               including literals like `0` and `""`.  @typescript-eslint/no-empty-object-type
+  6:41  error  Unexpected empty object pattern            no-empty-pattern</code></pre>
+
+<ul>
+<li><strong><code>no-empty-object-type</code></strong>: in TypeScript, <code>{}</code> does not mean "an empty object", it means "anything except <code>null</code> and <code>undefined</code>". It's a type that checks almost nothing, which is usually a mistake.</li>
+<li><strong><code>no-empty-pattern</code></strong>: <code>({}: Props)</code> destructures nothing from the props. It does no harm but serves no purpose.</li>
+</ul>
+<p>A component without props simply has no parameter. Here is the fixed file; the other five skeletons and <code>LightDarkToggle.tsx</code> get the same two-line change:</p>
+
+<pre data-file="src/components/skeletons/CurrentSkeleton.tsx" data-lang="tsx" data-tag="after (step 25)"><code>import Card from "../cards/Card"
+import { Skeleton } from "../ui/skeleton"
+
+export default function CurrentSkeleton() {
+  return (
+    &lt;Card
+      title="Current Weather"
+      className="md:pb-11"
+      childrenClassName="flex flex-col items-center gap-6 2xl:justify-between"
+    &gt;
+      &lt;div className="flex flex-col gap-2 items-center"&gt;
+        &lt;Skeleton className="w-30 h-15" /&gt;
+        &lt;Skeleton className="size-14 rounded-full" /&gt;
+        &lt;Skeleton className="w-36 h-7" /&gt;
+      &lt;/div&gt;
+      &lt;div className="flex flex-col gap-2"&gt;
+        &lt;p className="text-xl text-center"&gt;Local Time:&lt;/p&gt;
+        &lt;Skeleton className="w-36 h-10" /&gt;
+      &lt;/div&gt;
+      &lt;div className="flex justify-between w-full"&gt;
+        &lt;div className="flex flex-col items-center gap-2"&gt;
+          &lt;p className="text-gray-500"&gt;Feels Like&lt;/p&gt;
+          &lt;Skeleton className="w-16 h-6" /&gt;
+        &lt;/div&gt;
+        &lt;div className="flex flex-col items-center gap-2"&gt;
+          &lt;p className="text-gray-500"&gt;Humidity&lt;/p&gt;
+          &lt;Skeleton className="w-16 h-6" /&gt;
+        &lt;/div&gt;
+        &lt;div className="flex flex-col items-center gap-2"&gt;
+          &lt;p className="text-gray-500"&gt;Wind&lt;/p&gt;
+          &lt;Skeleton className="w-16 h-6" /&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/Card&gt;
+  )
+}</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>import Card ...</code><br><code>import { Skeleton } ...</code></td><td>Unchanged: the shared card frame and shadcn's grey placeholder block.</td></tr>
+<tr><td>(removed)</td><td><code>type Props = {}</code></td><td>Deleted. A type with nothing in it adds no safety.</td></tr>
+<tr><td>4</td><td><code>export default function CurrentSkeleton() {</code></td><td>No parameter at all. If someone tries <code>&lt;CurrentSkeleton foo="x" /&gt;</code>, TypeScript now reports that the component takes no props, which is more useful than before.</td></tr>
+<tr><td>5–35</td><td><code>return ( &lt;Card ...&gt; ... &lt;/Card&gt; )</code></td><td>Unchanged markup from step 19.</td></tr>
+</table></div>
+
+<p>The 15th lint error (<code>react-refresh/only-export-components</code> in <code>ThemeProvider.tsx</code>) is fixed in step 27, where that file changes anyway.</p>
+
+<h2>Check your work</h2>
+<ol class="steps">
+<li><strong>Type-check, lint and build</strong>
+<p>Run <code>npm run lint</code>, then <code>npm run build</code>. The build runs <code>tsc -b</code> first, so a TypeScript error (for example passing <code>coords</code> where it might be <code>null</code>) would stop it.</p></li>
+<li><strong>Look at the requests</strong>
+<p>Run <code>npm run dev</code>, open the page, open DevTools (<kbd>F12</kbd>), go to the <strong>Network</strong> tab, type <code>openweathermap</code> in the filter box and reload.</p></li>
+<li><strong>Test the production marker</strong>
+<p>Run <code>npm run build</code> and then <code>npm run preview</code>, open the address it prints, and check the pin.</p></li>
+</ol>
+
+<div class="callout ok"><p><strong>What you should see</strong></p>
+<ul>
+<li><code>npm run lint</code>: <code>✖ 1 problem (1 error, 0 warnings)</code>, the one in <code>ThemeProvider.tsx</code> (verified).</li>
+<li><code>npm run build</code> succeeds.</li>
+<li>On load, three API requests in this order: <code>geo/1.0/direct?q=Tokyo</code>, <code>data/3.0/onecall?lat=35.68…</code>, <code>data/2.5/air_pollution?lat=35.68…</code>, all starting with <code>https://</code>. No <code>lat=0</code> (verified; your coordinates come from the real API).</li>
+<li>Click the map: only <code>onecall</code> and <code>air_pollution</code> for the clicked point, no <code>direct?q=custom</code> (verified).</li>
+<li>The blue pin in both <code>npm run dev</code> and <code>npm run preview</code>.</li>
+<li>With a wrong key in <code>.env</code> (try it, then restart the dev server): the red "OpenWeather request failed (401): Invalid API key…" line.</li>
+</ul></div>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>TypeScript error "Type 'Coords | null' is not assignable to type 'Coords'"</strong>: a component got <code>coords</code> without the <code>coords ? … :</code> or <code>coords &amp;&amp;</code> check. Wrap it like lines 83–114.</li>
+<li><strong>Writing <code>geocodeData?.[0]?.lat ?? 0</code></strong> to stop the crash: it stops the crash but brings back the 0,0 requests. Use <code>null</code>, not a fake coordinate.</li>
+<li><strong>Marker still broken after the build</strong>: check that <code>icon={markerIcon}</code> is on the <code>&lt;Marker&gt;</code> and that you rebuilt (<code>npm run preview</code> serves the old <code>dist/</code> until you run <code>npm run build</code> again).</li>
+<li><strong>"Cannot find module 'leaflet/dist/images/marker-icon.png'"</strong>: a typo in the path. The folder is <code>images</code>, the file names use dashes.</li>
+<li><strong>No base map after fix 9</strong>: <code>.env</code> doesn't have <code>VITE_MAPTILER_KEY</code>, the name is misspelled, or the dev server wasn't restarted.</li>
+<li><strong>Putting <code>res.json()</code> before the <code>res.ok</code> check and reading it twice</strong>: a response body can be read only once. <code>fetchJson</code> reads it in exactly one of the two branches.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li><code>coords</code> is <code>null</code> until the city is known: no requests for 0,0, and an empty geocode answer shows a message instead of a blank page. <code>enabled</code> stops the geocode request for "custom" after a map click.</li>
+<li><code>local_names</code> is optional: require only the fields you use.</li>
+<li><code>fetchJson</code> checks <code>res.ok</code> before Zod, uses <code>https</code> everywhere and encodes the city name.</li>
+<li>Importing Leaflet's marker images and passing <code>L.icon</code> fixes the pin in production builds. Test with <code>npm run build</code> + <code>npm run preview</code>.</li>
+<li><code>useMapEvents</code> + <code>useEffect</code> replace listeners added on every render.</li>
+<li>The MapTiler key lives in <code>.env</code>; lint errors go from 15 to 1.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="24-light-dark-mode.html"><small>← Previous · Step 24</small>Light and Dark Mode</a>
+<a class="next" href="26-error-boundaries.html"><small>Next · Step 26 →</small>Handle API Errors Gracefully</a>
+</nav>
+</main>
+</body>
+</html>

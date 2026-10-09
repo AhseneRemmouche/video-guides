@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 6 · Memory, State &amp; Checkpointers</title>
+<meta name="description" content="Short-term vs long-term memory, threads, persistent checkpointers and trimming long conversations.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 6/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangChain &amp; Agents Handbook · Chapter 6 of 10</div>
+  <h1>Memory, State &amp; Checkpointers</h1>
+  <p class="lead">Short-term vs long-term memory, threads, persistent checkpointers and trimming long conversations.</p>
+</section>
+<p>In <a href="10-short-term-memory.html">step 10</a> the agent forgot your favourite colour, then remembered it after two small changes: an <code>InMemorySaver</code> and a <code>thread_id</code>. This chapter explains what really happened there. You will learn why a model has no memory of its own, what LangChain means by <strong>state</strong>, how <a class="term" href="glossary.html#checkpointer">checkpointers</a> and <a class="term" href="glossary.html#thread-id">threads</a> work, the difference between short-term and long-term <a class="term" href="glossary.html#memory">memory</a>, how to keep memory after the program exits, and how to stop a long conversation from becoming slow and expensive.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> The chef from steps 12–15 answers one photo and stops. As soon as you want follow-up questions ("can I make it without eggs?"), as in <a href="18-chat-with-your-chef.html">step 18</a>, you need memory. And as soon as several people use the chef, you need one conversation per person, memory that survives a restart, and a plan for conversations that grow too long.</div>
+
+<h2>Why an agent forgets</h2>
+<p>A <a class="term" href="glossary.html#chat-model">chat model</a> is <strong>stateless</strong>: every request is answered only from the text inside that request. When you call <code>agent.invoke(...)</code> twice, the second call knows nothing about the first unless your code sends the earlier messages again. The model on OpenAI's servers does not keep a notebook about you.</p>
+<p>The video shows two ways to give the model the past:</p>
+<ul>
+<li><strong>By hand</strong> (<a href="06-conversation-history.html">step 6</a>): you build a list with a <a class="term" href="glossary.html#human-message">HumanMessage</a>, an <a class="term" href="glossary.html#ai-message">AIMessage</a> and another HumanMessage, and send the whole list. It works, but your code must store and resend everything.</li>
+<li><strong>With a checkpointer</strong> (<a href="10-short-term-memory.html">step 10</a>): LangChain saves the conversation after every step and loads it again on the next call with the same thread id. You only send the new message.</li>
+</ul>
+<p>The verified behaviour from the offline harness: without a checkpointer the second call reaches the model with <strong>1</strong> message, so it cannot know the colour. With a checkpointer it reaches the model with <strong>3</strong> messages (Human, AI, Human), so it can.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Without a checkpointer the second call sends one message; with a checkpointer it sends the saved history plus the new message">
+  <rect class="zone" x="10" y="10" width="360" height="230" rx="10"/>
+  <rect class="zone" x="390" y="10" width="360" height="230" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Without a checkpointer</text>
+  <text x="570" y="34" text-anchor="middle" class="title">With InMemorySaver + thread_id</text>
+  <text x="190" y="60" text-anchor="middle" class="small">2nd call: what the model receives</text>
+  <rect class="box2" x="40" y="72" width="300" height="34" rx="8"/><text x="190" y="94" text-anchor="middle" class="label">Human: what is my favorite color</text>
+  <rect class="box-bad" x="40" y="150" width="300" height="50" rx="8"/><text x="190" y="171" text-anchor="middle">1 message</text><text x="190" y="189" text-anchor="middle" class="small">"I don't know your favourite colour"</text>
+  <path class="arrow-bad" d="M190,106 V148"/>
+  <text x="570" y="60" text-anchor="middle" class="small">2nd call: what the model receives</text>
+  <rect class="box" x="420" y="72" width="300" height="28" rx="8"/><text x="570" y="91" text-anchor="middle" class="label">Human: My favorite color is green</text>
+  <rect class="box" x="420" y="104" width="300" height="28" rx="8"/><text x="570" y="123" text-anchor="middle" class="label">AI: Nice, green it is!</text>
+  <rect class="box2" x="420" y="136" width="300" height="28" rx="8"/><text x="570" y="155" text-anchor="middle" class="label">Human: what is my favorite color</text>
+  <rect class="box-ok" x="420" y="186" width="300" height="40" rx="8"/><text x="570" y="211" text-anchor="middle">3 messages: "Green"</text>
+  <path class="arrow-ok" d="M570,164 V184"/>
+</svg>
+<figcaption>The same second question, two outcomes. The model is identical; only the <strong>input</strong> differs. Memory in LangChain means "resend the right earlier messages". (The AI reply wording is illustrative.)</figcaption>
+</figure>
+
+<details class="primer"><summary>New to "stateless"? What it means and why APIs work this way</summary>
+<p>A <strong>stateless</strong> service treats every request as brand new. It is the normal design for web APIs: any of thousands of servers can answer your request because none of them needs to remember you. The price is that the <em>client</em> (your Python program) must send everything the server needs each time. For a chat model, "everything" is the list of <a class="term" href="glossary.html#message">messages</a> so far, which all count towards the model's <a class="term" href="glossary.html#context-window">context window</a>.</p>
+</details>
+
+<h2>State: what the agent actually carries</h2>
+<p>An agent built with <code>create_agent</code> is a <a class="term" href="glossary.html#langgraph">LangGraph</a> graph (see <a href="lc-04-agents-under-the-hood.html">chapter 4</a>). As it runs, it passes a Python <a class="term" href="glossary.html#dict">dictionary</a> called the <strong>state</strong> from node to node. In LangChain 1.3.12 the default state (<code>AgentState</code>) has these keys:</p>
+<div class="table-wrap"><table>
+<tr><th>Key</th><th>What it holds</th><th>Where you saw it</th></tr>
+<tr><td><code>messages</code></td><td>The list of every message in the conversation: human, AI, tool. New messages are <strong>appended</strong>, not replaced.</td><td><code>response["messages"][-1].content</code> in every lesson</td></tr>
+<tr><td><code>structured_response</code></td><td>The typed object when you use <code>response_format</code> (<a href="lc-07-multimodal-and-structured.html">chapter 7</a>).</td><td><code>response["structured_response"]</code> in <a href="17-structured-recipe.html">step 17</a></td></tr>
+</table></div>
+<p>The "appended, not replaced" part is the important detail. When the checkpointer loads a thread and you invoke with <code>{"messages": [HumanMessage(...)]}</code>, your new message is <strong>added</strong> to the saved list. That is why the lesson code only sends the new question.</p>
+
+<h2>Checkpointers and checkpoints</h2>
+<p>A <strong>checkpointer</strong> is an object that saves a snapshot of the state, called a <strong>checkpoint</strong>, after every step of the graph, and loads the latest snapshot when the same thread is used again. Here is the lesson code from step 10 (transcribed from the video):</p>
+<pre data-lang="py" data-file="in_memory_agent.py"><code>agent = create_agent(model="gpt-5-nano",
+                     checkpointer=InMemorySaver())
+
+config = {"configurable":{"thread_id":"1"}}
+
+response = agent.invoke(
+    {"messages": [HumanMessage(content="My favorite color is green")]},
+    config
+)</code></pre>
+<p>Three things work together: the <code>checkpointer</code> passed to <code>create_agent</code>, a <code>config</code> dictionary whose <code>"configurable"</code> key holds a <code>thread_id</code>, and passing that <code>config</code> as the second argument of every <code>invoke</code> (or <code>stream</code>) call.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Timeline of one invoke call: load thread, add new message, model step, tool step, model step, each followed by a saved checkpoint">
+  <text x="380" y="22" text-anchor="middle" class="title">One agent.invoke(..., config) with a checkpointer</text>
+  <rect class="box-info" x="10" y="45" width="120" height="50" rx="8"/><text x="70" y="66" text-anchor="middle" class="label">load thread</text><text x="70" y="84" text-anchor="middle" class="small">thread_id="1"</text>
+  <rect class="box" x="160" y="45" width="120" height="50" rx="8"/><text x="220" y="66" text-anchor="middle" class="label">add new</text><text x="220" y="84" text-anchor="middle" class="small">HumanMessage</text>
+  <rect class="box" x="310" y="45" width="120" height="50" rx="8"/><text x="370" y="66" text-anchor="middle" class="label">model</text><text x="370" y="84" text-anchor="middle" class="small">AIMessage</text>
+  <rect class="box2" x="460" y="45" width="120" height="50" rx="8"/><text x="520" y="66" text-anchor="middle" class="label">tools</text><text x="520" y="84" text-anchor="middle" class="small">if requested</text>
+  <rect class="box" x="610" y="45" width="140" height="50" rx="8"/><text x="680" y="66" text-anchor="middle" class="label">model</text><text x="680" y="84" text-anchor="middle" class="small">final AIMessage</text>
+  <path class="arrow" d="M130,70 H158"/><path class="arrow" d="M280,70 H308"/><path class="arrow" d="M430,70 H458"/><path class="arrow" d="M580,70 H608"/>
+  <path class="line dashed" d="M220,95 V140"/><path class="line dashed" d="M370,95 V140"/><path class="line dashed" d="M520,95 V140"/><path class="line dashed" d="M680,95 V140"/>
+  <circle class="dot-ok" cx="220" cy="148" r="7"/><circle class="dot-ok" cx="370" cy="148" r="7"/><circle class="dot-ok" cx="520" cy="148" r="7"/><circle class="dot-ok" cx="680" cy="148" r="7"/>
+  <path class="line" d="M60,148 H730"/>
+  <text x="40" y="152" text-anchor="middle" class="small">saved</text>
+  <rect class="box-ok" x="160" y="175" width="590" height="40" rx="8"/><text x="455" y="200" text-anchor="middle" class="label">checkpoints of thread "1" (InMemorySaver keeps them in RAM)</text>
+</svg>
+<figcaption>Each green dot is a checkpoint: a snapshot of the state after a step. The next call with the same <code>thread_id</code> starts from <strong>the latest snapshot</strong>, so the agent continues where it stopped.</figcaption>
+</figure>
+
+<p>You can look at the saved state yourself with <code>agent.get_state(config)</code>. This was checked against LangGraph 1.2.9 with a fake model:</p>
+<pre data-lang="py" data-tag="illustrative"><code>snapshot = agent.get_state(config)
+for message in snapshot.values["messages"]:
+    print(message.type, "|", message.content)</code></pre>
+<p>After the two calls of step 10 this prints four lines: <code>human</code>, <code>ai</code>, <code>human</code>, <code>ai</code>. It is the quickest way to answer "what does the agent remember right now?".</p>
+
+<div class="callout warn"><strong>The error you get when you forget the config.</strong> With a checkpointer but no config, the call fails with:
+<pre data-lang="text"><code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id</code></pre>
+The fix is to pass <code>config</code> to <em>every</em> call: <code>agent.invoke({...}, config)</code>. A second common slip is a typo in the keys, such as <code>"configurables"</code> or <code>"threadid"</code>. The value of <code>thread_id</code> can be any string; <code>"1"</code> and <code>"kitchen-1"</code> both work.</div>
+
+<h2>Threads: one conversation per thread id</h2>
+<p>A <strong>thread</strong> is one separate conversation inside the same checkpointer. The <code>thread_id</code> is its name. Two calls with the same id share history; two calls with different ids are strangers. In <a href="18-chat-with-your-chef.html">step 18</a> the chat chef uses one fixed thread:</p>
+<pre data-lang="py" data-file="chat_chef.py"><code>config = {"configurable": {"thread_id": "kitchen-1"}}</code></pre>
+<p>That is fine for a program one person runs in a <a class="term" href="glossary.html#terminal">terminal</a>. In an app with many users, give each user (or each chat window) its own id, for example built from a user id you already have. Never let two people share a thread: one person would see the other's messages, photos and preferences.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="One checkpointer holds several threads; each user's calls go to their own thread">
+  <rect class="box2" x="10" y="30" width="150" height="40" rx="8"/><text x="85" y="55" text-anchor="middle">Alice's app</text>
+  <rect class="box2" x="10" y="100" width="150" height="40" rx="8"/><text x="85" y="125" text-anchor="middle">Bob's app</text>
+  <rect class="box2" x="10" y="170" width="150" height="40" rx="8"/><text x="85" y="195" text-anchor="middle">Alice, 2nd chat</text>
+  <rect class="box" x="230" y="70" width="140" height="100" rx="8"/><text x="300" y="112" text-anchor="middle">agent</text><text x="300" y="132" text-anchor="middle" class="small">one object</text>
+  <path class="arrow" d="M160,50 L228,95"/><path class="arrow" d="M160,120 H228"/><path class="arrow" d="M160,190 L228,145"/>
+  <rect class="zone" x="430" y="10" width="320" height="220" rx="10"/>
+  <text x="590" y="32" text-anchor="middle" class="title">Checkpointer</text>
+  <rect class="box-info" x="450" y="45" width="280" height="44" rx="8"/><text x="590" y="64" text-anchor="middle" class="mono">user-alice-chat-1</text><text x="590" y="81" text-anchor="middle" class="small">photo of rice, 6 messages</text>
+  <rect class="box-info" x="450" y="105" width="280" height="44" rx="8"/><text x="590" y="124" text-anchor="middle" class="mono">user-bob-chat-1</text><text x="590" y="141" text-anchor="middle" class="small">photo of pasta, 4 messages</text>
+  <rect class="box-info" x="450" y="165" width="280" height="44" rx="8"/><text x="590" y="184" text-anchor="middle" class="mono">user-alice-chat-2</text><text x="590" y="201" text-anchor="middle" class="small">new, empty</text>
+  <path class="arrow" d="M370,100 L448,67"/><path class="arrow" d="M370,120 H448"/><path class="arrow" d="M370,140 L448,185"/>
+</svg>
+<figcaption>One agent, one checkpointer, many threads. The <code>thread_id</code> in the config decides <strong>which history is loaded</strong>. The ids and message counts are illustrative.</figcaption>
+</figure>
+
+<pre data-lang="py" data-tag="illustrative"><code>def config_for(user_id: str, chat_number: int) -&gt; dict:
+    """Build a config so every user and chat gets its own thread."""
+    return {"configurable": {"thread_id": f"user-{user_id}-chat-{chat_number}"}}
+
+agent.invoke({"messages": [HumanMessage("Any ideas for dinner?")]}, config_for("alice", 1))</code></pre>
+<p>This uses an <a class="term" href="glossary.html#f-string">f-string</a> to build the id. The <code>user_id</code> must come from something you trust, such as your login system, never from text the user typed into the chat.</p>
+
+<h2>Short-term memory vs long-term memory</h2>
+<p>LangChain's documentation separates two kinds of memory. They solve different problems and use different objects:</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>Short-term memory</th><th>Long-term memory</th></tr>
+<tr><td><strong>Scope</strong></td><td>One thread (one conversation)</td><td>Across threads: every conversation of a user, or the whole app</td></tr>
+<tr><td><strong>What is stored</strong></td><td>The agent's state, mainly the messages list</td><td>Facts you choose to keep: "Alice is vegetarian", "Bob has no oven"</td></tr>
+<tr><td><strong>Object</strong></td><td>A checkpointer: <code>create_agent(..., checkpointer=...)</code></td><td>A store: <code>create_agent(..., store=...)</code></td></tr>
+<tr><td><strong>Saved when</strong></td><td>Automatically, after every step</td><td>Only when your code (often a tool) writes to it</td></tr>
+<tr><td><strong>Example in this guide</strong></td><td>Steps 10 and 18</td><td>Not in the video; covered below as a next step</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Short-term memory is inside each thread; long-term memory is a store shared by all threads of a user">
+  <rect class="zone" x="10" y="10" width="480" height="210" rx="10"/>
+  <text x="250" y="32" text-anchor="middle" class="title">Short-term: checkpointer (per thread)</text>
+  <rect class="box" x="30" y="50" width="210" height="150" rx="8"/><text x="135" y="72" text-anchor="middle" class="mono">user-alice-chat-1</text>
+  <rect class="box2" x="45" y="85" width="180" height="24" rx="6"/><text x="135" y="102" text-anchor="middle" class="small">Human: photo of rice</text>
+  <rect class="box2" x="45" y="115" width="180" height="24" rx="6"/><text x="135" y="132" text-anchor="middle" class="small">AI: fried rice recipe</text>
+  <rect class="box2" x="45" y="145" width="180" height="24" rx="6"/><text x="135" y="162" text-anchor="middle" class="small">Human: no eggs please</text>
+  <rect class="box" x="260" y="50" width="210" height="150" rx="8"/><text x="365" y="72" text-anchor="middle" class="mono">user-alice-chat-2</text>
+  <rect class="box2" x="275" y="85" width="180" height="24" rx="6"/><text x="365" y="102" text-anchor="middle" class="small">Human: photo of pasta</text>
+  <text x="365" y="150" text-anchor="middle" class="small">knows nothing about chat 1</text>
+  <rect class="box-ok" x="530" y="60" width="220" height="120" rx="8"/><text x="640" y="84" text-anchor="middle" class="title">Long-term: store</text><text x="640" y="106" text-anchor="middle" class="mono">("users", "alice")</text><text x="640" y="128" text-anchor="middle" class="small">diet: vegetarian</text><text x="640" y="146" text-anchor="middle" class="small">allergies: peanuts</text>
+  <path class="arrow-ok" d="M528,110 L472,120"/>
+  <path class="arrow-ok" d="M528,165 L242,188"/>
+</svg>
+<figcaption>Each chat has its own message history, but both chats can read the same <strong>store</strong>. Put facts that should outlive one conversation in the store, not in the thread. Contents are illustrative.</figcaption>
+</figure>
+
+<h3>A tiny long-term memory example</h3>
+<p>LangGraph ships <code>InMemoryStore</code> (in <code>langgraph.store.memory</code>). Values are dictionaries saved under a <strong>namespace</strong> (a tuple, like a folder path) and a <strong>key</strong>. A tool can read the store through a special <code>runtime</code> argument of type <code>ToolRuntime</code>; LangChain fills it in and hides it from the model, so the model only sees <code>user_id</code>. The snippet below was run against LangChain 1.3.12 with a fake model:</p>
+<pre data-lang="py" data-tag="illustrative"><code>from langchain.agents import create_agent
+from langchain.tools import tool, ToolRuntime
+from langgraph.store.memory import InMemoryStore
+
+store = InMemoryStore()
+store.put(("users", "alice"), "preferences", {"diet": "vegetarian"})
+
+@tool
+def get_diet(user_id: str, runtime: ToolRuntime) -&gt; str:
+    """Look up the user's saved diet preferences."""
+    item = runtime.store.get(("users", user_id), "preferences")
+    return str(item.value) if item else "No preferences saved."
+
+agent = create_agent(model="gpt-5-nano", tools=[get_diet], store=store)</code></pre>
+<p>Like <code>InMemorySaver</code>, <code>InMemoryStore</code> lives in RAM and is lost when the program exits. LangGraph also offers database-backed stores; see the long-term memory page in "Learn more". In a real app, do not let the model choose <em>whose</em> data it reads: take the user id from your own code (for example from the config or a context object) rather than from a tool argument the model fills in. The example keeps it simple on purpose.</p>
+
+<h2>Keeping memory after the program exits</h2>
+<p><code>InMemorySaver</code> stores checkpoints in a Python dictionary in RAM. That is perfect for learning and tests, but when <code>python main.py</code> finishes, the memory is gone (verified finding: <em>InMemorySaver loses everything when the program exits</em>). For memory that survives restarts, use a checkpointer that writes to a file or a database. At the time of writing, the LangGraph team publishes these as <strong>separate packages</strong> on PyPI:</p>
+<div class="table-wrap"><table>
+<tr><th>Package (install with uv)</th><th>Class</th><th>Where data lives</th><th>Good for</th></tr>
+<tr><td>built in (<code>langgraph</code>)</td><td><code>InMemorySaver</code></td><td>RAM of your Python process</td><td>Learning, tests, one-off scripts</td></tr>
+<tr><td><code>langgraph-checkpoint-sqlite</code></td><td><code>SqliteSaver</code></td><td>A single file on disk</td><td>Local apps, prototypes, one machine</td></tr>
+<tr><td><code>langgraph-checkpoint-postgres</code></td><td><code>PostgresSaver</code></td><td>A PostgreSQL database server</td><td>Web apps with many users and several servers</td></tr>
+</table></div>
+<p>These packages are <strong>not</strong> installed in the chef project, so the snippet below was not run in this guide's harness. It follows the pattern in the LangGraph persistence docs; check the current docs before using it:</p>
+<pre data-lang="sh" data-tag="illustrative"><code>uv add langgraph-checkpoint-sqlite</code></pre>
+<pre data-lang="py" data-tag="illustrative"><code>from langgraph.checkpoint.sqlite import SqliteSaver
+
+with SqliteSaver.from_conn_string("chef_memory.sqlite") as checkpointer:
+    agent = create_agent(model="gpt-5-nano",
+                         tools=[web_search],
+                         system_prompt=SYSTEM_CHEF_PROMPT,
+                         checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": "kitchen-1"}}
+    agent.invoke({"messages": [HumanMessage("What did we cook last time?")]}, config)</code></pre>
+<p><code>from_conn_string</code> opens a connection and is used with <code>with</code>, so the file is closed properly when the block ends. Run the script twice: the second run can see the first run's messages, because they are in <code>chef_memory.sqlite</code>. Add that file to your <a class="term" href="glossary.html#gitignore">.gitignore</a>: it contains everything users said, including photos turned into <a class="term" href="glossary.html#base64">base64</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Three checkpointers compared: InMemorySaver in RAM lost on exit, SqliteSaver in a file on one machine, PostgresSaver in a database shared by several servers">
+  <rect class="box-warn" x="10" y="20" width="230" height="160" rx="8"/><text x="125" y="46" text-anchor="middle" class="mono">InMemorySaver</text><text x="125" y="74" text-anchor="middle" class="label">Python process RAM</text><text x="125" y="102" text-anchor="middle" class="small">fast, nothing to install</text><text x="125" y="122" text-anchor="middle" class="small">one process only</text><text x="125" y="156" text-anchor="middle" class="warn">lost when the program exits</text>
+  <rect class="box" x="265" y="20" width="230" height="160" rx="8"/><text x="380" y="46" text-anchor="middle" class="mono">SqliteSaver</text><text x="380" y="74" text-anchor="middle" class="label">one .sqlite file</text><text x="380" y="102" text-anchor="middle" class="small">survives restarts</text><text x="380" y="122" text-anchor="middle" class="small">one machine</text><text x="380" y="156" text-anchor="middle" class="ok">good for local apps</text>
+  <rect class="box-ok" x="520" y="20" width="230" height="160" rx="8"/><text x="635" y="46" text-anchor="middle" class="mono">PostgresSaver</text><text x="635" y="74" text-anchor="middle" class="label">database server</text><text x="635" y="102" text-anchor="middle" class="small">survives restarts</text><text x="635" y="122" text-anchor="middle" class="small">shared by many servers</text><text x="635" y="156" text-anchor="middle" class="ok">good for web apps</text>
+</svg>
+<figcaption>Same interface, different storage. Your agent code does not change; only the object you pass as <code>checkpointer=</code> does. <strong>Pick the storage by where your app runs.</strong></figcaption>
+</figure>
+
+<h2>Growing history means growing cost</h2>
+<p>Memory has a price. With a checkpointer, every new question sends <strong>the whole thread</strong> to the model: all earlier questions, answers, tool results and images. Providers charge per <a class="term" href="glossary.html#token">token</a> of input and output, and each model has a maximum context window. So in a long chat:</p>
+<ul>
+<li>each turn costs more than the one before, because the input keeps growing;</li>
+<li>answers get slower, because the model must read more text first;</li>
+<li>eventually the history no longer fits in the context window and the request fails;</li>
+<li>the model can lose track of what matters, because the important bit is buried in old text.</li>
+</ul>
+<p>Tool results make this worse. A single Tavily search result in the chef project is a dictionary with several web pages' titles, URLs and text snippets; it is saved in the thread as a <a class="term" href="glossary.html#tool-message">ToolMessage</a> and resent on every later turn. The photo is saved too, as a long base64 string.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Bar chart: input tokens grow with every turn of a conversation and approach the context window limit">
+  <path class="line" d="M60,210 H740"/><path class="line" d="M60,30 V210"/>
+  <path class="line dashed" d="M60,50 H740"/><text x="735" y="44" text-anchor="end" class="bad">context window limit</text>
+  <rect class="box-info" x="90" y="190" width="60" height="20" rx="3"/>
+  <rect class="box-info" x="180" y="170" width="60" height="40" rx="3"/>
+  <rect class="box-info" x="270" y="145" width="60" height="65" rx="3"/>
+  <rect class="box-info" x="360" y="125" width="60" height="85" rx="3"/>
+  <rect class="box-warn" x="450" y="100" width="60" height="110" rx="3"/>
+  <rect class="box-warn" x="540" y="80" width="60" height="130" rx="3"/>
+  <rect class="box-bad" x="630" y="58" width="60" height="152" rx="3"/>
+  <text x="120" y="228" text-anchor="middle" class="small">turn 1</text><text x="210" y="228" text-anchor="middle" class="small">2</text><text x="300" y="228" text-anchor="middle" class="small">3</text><text x="390" y="228" text-anchor="middle" class="small">4</text><text x="480" y="228" text-anchor="middle" class="small">5</text><text x="570" y="228" text-anchor="middle" class="small">6</text><text x="660" y="228" text-anchor="middle" class="small">7</text>
+  <text x="30" y="120" text-anchor="middle" class="small">input</text><text x="30" y="136" text-anchor="middle" class="small">tokens</text>
+  <text x="300" y="90" text-anchor="middle" class="small">big jump: a tool result was added</text>
+  <path class="arrow" d="M300,96 V141"/>
+</svg>
+<figcaption>Illustrative shape, not measured numbers: every turn resends the whole thread, so input size (and cost) <strong>keeps growing</strong> until you trim or summarise.</figcaption>
+</figure>
+
+<h2>Trimming and summarising long conversations</h2>
+<p>There are three common ways to keep a thread under control. They trade detail for size:</p>
+<div class="table-wrap"><table>
+<tr><th>Technique</th><th>How it works</th><th>Pros</th><th>Cons</th></tr>
+<tr><td><strong>Trim</strong></td><td>Send only the most recent messages that fit a token budget (plus the system message).</td><td>Simple, cheap, predictable</td><td>Old details are simply not seen</td></tr>
+<tr><td><strong>Summarise</strong></td><td>Ask a model to write a short summary of old messages, then keep the summary plus recent messages.</td><td>Keeps the gist of the whole conversation</td><td>An extra model call; summaries can drop or distort details</td></tr>
+<tr><td><strong>Delete</strong></td><td>Remove specific messages from the saved state (for example big tool results you no longer need).</td><td>Precise</td><td>You must decide what is safe to remove</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Comparison of trimming, which drops old messages, and summarising, which replaces them with one short summary message">
+  <text x="190" y="22" text-anchor="middle" class="title">Trim</text>
+  <text x="570" y="22" text-anchor="middle" class="title">Summarise</text>
+  <rect class="box2" x="30" y="36" width="320" height="26" rx="6"/><text x="190" y="54" text-anchor="middle" class="small">System: You are the best chef in the world...</text>
+  <rect class="box-bad" x="30" y="68" width="320" height="26" rx="6"/><text x="190" y="86" text-anchor="middle" class="small">old messages 1-12: dropped</text>
+  <rect class="box" x="30" y="100" width="320" height="26" rx="6"/><text x="190" y="118" text-anchor="middle" class="small">Human: no eggs please</text>
+  <rect class="box" x="30" y="132" width="320" height="26" rx="6"/><text x="190" y="150" text-anchor="middle" class="small">AI: here is an egg-free version</text>
+  <rect class="box" x="30" y="164" width="320" height="26" rx="6"/><text x="190" y="182" text-anchor="middle" class="small">Human: how long does it take?</text>
+  <text x="190" y="214" text-anchor="middle" class="warn">model never sees the old details</text>
+  <rect class="box2" x="410" y="36" width="320" height="26" rx="6"/><text x="570" y="54" text-anchor="middle" class="small">System: You are the best chef in the world...</text>
+  <rect class="box-ok" x="410" y="68" width="320" height="26" rx="6"/><text x="570" y="86" text-anchor="middle" class="small">Summary: rice, garlic, soy; user is vegetarian</text>
+  <rect class="box" x="410" y="100" width="320" height="26" rx="6"/><text x="570" y="118" text-anchor="middle" class="small">Human: no eggs please</text>
+  <rect class="box" x="410" y="132" width="320" height="26" rx="6"/><text x="570" y="150" text-anchor="middle" class="small">AI: here is an egg-free version</text>
+  <rect class="box" x="410" y="164" width="320" height="26" rx="6"/><text x="570" y="182" text-anchor="middle" class="small">Human: how long does it take?</text>
+  <text x="570" y="214" text-anchor="middle" class="ok">gist kept, one extra model call</text>
+</svg>
+<figcaption>Both keep the system prompt and the latest turns. Trimming <strong>throws old messages away</strong>; summarising <strong>squeezes them into one message</strong>. Contents are illustrative.</figcaption>
+</figure>
+
+<h3>Trimming with <code>trim_messages</code></h3>
+<p><code>trim_messages</code> is exported from <code>langchain.messages</code> in LangChain 1.3.12. You give it a list of messages and a budget; it returns a shorter list. This snippet was run in the harness:</p>
+<pre data-lang="py" data-tag="illustrative"><code>from langchain.messages import trim_messages
+from langchain_core.messages.utils import count_tokens_approximately
+
+recent = trim_messages(
+    messages,
+    strategy="last",
+    token_counter=count_tokens_approximately,
+    max_tokens=2000,
+    include_system=True,
+    start_on="human",
+)</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>from langchain.messages import trim_messages</code></td><td>Imports the trimming helper from the same module that gives you <code>HumanMessage</code>.</td></tr>
+<tr><td>2</td><td><code>from langchain_core.messages.utils import count_tokens_approximately</code></td><td>A quick token estimate that needs no network call. Exact counts depend on the model's tokenizer; an estimate is enough for a budget.</td></tr>
+<tr><td>4–5</td><td><code>recent = trim_messages(messages,</code></td><td>Takes your full list and returns a new, shorter list. The original list is not changed.</td></tr>
+<tr><td>6</td><td><code>strategy="last",</code></td><td>Keep the <em>newest</em> messages, which are usually the most relevant.</td></tr>
+<tr><td>7</td><td><code>token_counter=count_tokens_approximately,</code></td><td>How to measure each message.</td></tr>
+<tr><td>8</td><td><code>max_tokens=2000,</code></td><td>The budget. Pick it well below the model's context window to leave room for the answer.</td></tr>
+<tr><td>9</td><td><code>include_system=True,</code></td><td>Always keep the <a class="term" href="glossary.html#system-message">system message</a>; without it the chef forgets it is a chef.</td></tr>
+<tr><td>10</td><td><code>start_on="human",</code></td><td>Make the kept part start with a human message, so it never begins with a lonely AI answer or a ToolMessage whose tool call was cut off (providers reject that).</td></tr>
+</table></div>
+<p><code>trim_messages</code> works on any list you send to a model yourself, as in step 6. With <code>create_agent</code>, the agent builds the model input for you, so the clean place to trim or summarise is a <a class="term" href="glossary.html#middleware">middleware</a>, which runs just before each model call.</p>
+
+<h3>Summarising with <code>SummarizationMiddleware</code></h3>
+<p>LangChain 1.3.12 ships a ready-made middleware for this. Its constructor takes a model to write the summaries, a <code>trigger</code> (when to summarise) and <code>keep</code> (how much recent history to leave untouched). The construction below was checked against the installed package; the token number is an arbitrary example:</p>
+<pre data-lang="py" data-tag="illustrative"><code>from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
+from langgraph.checkpoint.memory import InMemorySaver
+
+agent = create_agent(
+    model="gpt-5-nano",
+    tools=[web_search],
+    system_prompt=SYSTEM_CHEF_PROMPT,
+    checkpointer=InMemorySaver(),
+    middleware=[
+        SummarizationMiddleware(
+            model="gpt-5-nano",
+            trigger=("tokens", 4000),
+            keep=("messages", 20),
+        )
+    ],
+)</code></pre>
+<p>Read it as: "when the thread passes about 4,000 tokens, summarise everything except the last 20 messages". Middleware is introduced properly in <a href="lc-10-roadmap.html">chapter 10</a>; the video lists "managing long conversations" as an advanced topic for a later part of the series.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Decision tree for choosing a memory setup">
+  <rect class="box-solid" x="10" y="60" width="160" height="50" rx="8"/><text x="90" y="82" text-anchor="middle" class="on-solid">Need follow-up</text><text x="90" y="99" text-anchor="middle" class="on-solid">questions?</text>
+  <rect class="box2" x="230" y="10" width="200" height="40" rx="8"/><text x="330" y="35" text-anchor="middle" class="label">no: no checkpointer</text>
+  <rect class="box" x="230" y="65" width="200" height="40" rx="8"/><text x="330" y="90" text-anchor="middle" class="label">yes, one run: InMemorySaver</text>
+  <rect class="box" x="230" y="120" width="200" height="40" rx="8"/><text x="330" y="145" text-anchor="middle" class="label">yes, after restarts: SQLite/Postgres</text>
+  <rect class="box-info" x="490" y="65" width="260" height="40" rx="8"/><text x="620" y="90" text-anchor="middle" class="label">chats get long? trim or summarise</text>
+  <rect class="box-ok" x="490" y="120" width="260" height="40" rx="8"/><text x="620" y="145" text-anchor="middle" class="label">facts across chats? add a store</text>
+  <path class="arrow" d="M170,75 L228,32"/><path class="arrow" d="M170,85 H228"/><path class="arrow" d="M170,98 L228,138"/>
+  <path class="arrow" d="M430,85 H488"/><path class="arrow" d="M430,140 H488"/>
+</svg>
+<figcaption>Start on the left. Most beginner projects stop at <code>InMemorySaver</code>; <strong>add each extra piece only when you actually need it</strong>.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"The model remembers me."</em> It does not. Your program resends the history every time; LangChain just automates it.</li>
+<li><em>"A checkpointer makes the chef remember yesterday."</em> Only if it writes to disk or a database. <code>InMemorySaver</code> forgets on exit.</li>
+<li><em>"More memory is always better."</em> Every remembered message is resent and paid for. Long, noisy history can make answers worse, not better.</li>
+<li><em>"thread_id is a security feature."</em> It is just a label. If a user can choose any thread id, they may read someone else's chat. Build it from a trusted user id.</li>
+<li><em>"Memory and RAG are the same thing."</em> Memory is about this user's past conversation and facts; retrieval (RAG) is about searching documents. Agents often use both.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Chat models are stateless; memory means resending the right earlier messages.</li>
+<li>The agent's state is a dictionary; <code>messages</code> is appended to after every step.</li>
+<li>A checkpointer saves a checkpoint after every step; the <code>thread_id</code> in <code>{"configurable": {"thread_id": ...}}</code> picks the conversation. Forgetting the config raises a <code>ValueError</code>.</li>
+<li>One thread per user and chat; build the id from trusted data.</li>
+<li>Short-term memory = checkpointer (per thread); long-term memory = store (across threads).</li>
+<li><code>InMemorySaver</code> is RAM-only; <code>langgraph-checkpoint-sqlite</code> and <code>langgraph-checkpoint-postgres</code> persist.</li>
+<li>Long threads cost more and eventually overflow the context window: trim (<code>trim_messages</code>), summarise (<code>SummarizationMiddleware</code>) or delete.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langchain/short-term-memory">LangChain docs: Short-term memory</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/long-term-memory">LangChain docs: Long-term memory</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/persistence">LangGraph docs: Persistence (checkpointers, threads, stores)</a></li>
+<li><a href="https://pypi.org/project/langgraph-checkpoint-sqlite/">PyPI: langgraph-checkpoint-sqlite</a> and <a href="https://pypi.org/project/langgraph-checkpoint-postgres/">langgraph-checkpoint-postgres</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/middleware">LangChain docs: Middleware (including summarization)</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lc-05-tools-in-depth.html"><small>← Chapter 5</small>Designing Good Tools</a>
+<a class="next" href="lc-07-multimodal-and-structured.html"><small>Chapter 7 →</small>Multimodal Input &amp; Structured Output</a>
+</nav>
+</main>
+</body>
+</html>

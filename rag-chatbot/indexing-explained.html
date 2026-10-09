@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Indexing Explained</title>
+<meta name="description" content="What indexing means in RAG, why we do it, and how the HNSW index works.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Concept</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concept · read with steps 9–14</div>
+  <h1>Indexing Explained</h1>
+  <p class="lead">What indexing means in RAG, why we do it, and how the HNSW index works.</p>
+</section>
+<h2>Two meanings of "indexing"</h2>
+<p>In a <a class="term" href="glossary.html#rag">RAG</a> app, "indexing" refers to two related but different things. This project does both:</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>1 · Indexing your documents</th><th>2 · The database index (HNSW)</th></tr>
+<tr><td><strong>What</strong></td><td>Turning each PDF into stored, searchable rows: text → chunks → embeddings → database.</td><td>A data structure in Postgres that finds the closest vectors without comparing against every row.</td></tr>
+<tr><td><strong>When</strong></td><td>Once per document, at upload time.</td><td>Created once by a migration, then updated automatically on every insert.</td></tr>
+<tr><td><strong>Why</strong></td><td>So a question can be answered by <em>looking up</em> a few passages instead of reading every document.</td><td>So that lookup stays fast as the knowledge base grows from dozens of rows to millions.</td></tr>
+<tr><td><strong>Where</strong></td><td><a href="10-embedding-utility.html">Step 10</a>, <a href="11-chunking-utility.html">11</a>, <a href="12-server-action.html">12</a>, <a href="13-pdf-upload-ui.html">13</a> (and <a href="21-images-as-knowledge.html">21</a>)</td><td><a href="09-vector-database.html">Step 9</a> (created), <a href="14-semantic-search.html">step 14</a> (used)</td></tr>
+</table></div>
+<p>Think of a textbook. Part 1 is <em>writing the index at the back of the book</em>: someone reads the book once and records which topics are on which pages. Part 2 is <em>sorting that index alphabetically</em>, so you can jump to the right entry instead of reading the whole index line by line.</p>
+
+<details class="primer"><summary>New to database indexes? The phone-book analogy</summary>
+<p>Imagine a phone book with a million names printed in <em>random</em> order. To find "Martin, Sarah" you would have to read every line until you hit it. That's what a <a class="term" href="glossary.html#database">database</a> does on a table with no index: a <strong>sequential scan</strong>, row after row.</p>
+<p>A real phone book is sorted alphabetically. You open it near the middle, see "L", jump forward to "M", and find Sarah in a few seconds without looking at 99.9% of the pages. A database <a class="term" href="glossary.html#index">index</a> is that sorted structure: a separate, organised copy of one column (plus a pointer back to each row) that lets the database jump close to the answer.</p>
+<ul>
+<li>An index <strong>speeds up reads</strong> that can use its ordering.</li>
+<li>It <strong>slows down writes</strong> a little, because every new row must also be filed in the right place in the index.</li>
+<li>It <strong>takes extra space</strong>, like the pages of an index at the back of a book.</li>
+</ul>
+<p>Alphabetical order works for names. Vectors of 1,536 numbers can't be sorted alphabetically, so they need a special kind of index, HNSW, explained in Part 2.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 255" role="img" aria-label="Phone book analogy: in an unsorted book you check every line until you find Martin, Sarah; in a sorted book with letter tabs you jump to the M section and find her almost immediately">
+  <rect class="zone" x="10" y="10" width="360" height="235" rx="10"/>
+  <text x="190" y="32" text-anchor="middle" class="title">No index: read every line</text>
+  <rect class="box2" x="40" y="46" width="170" height="182" rx="6"/>
+  <text x="56" y="68" class="label">Okafor, Ben</text><circle class="dot-warn" cx="226" cy="64" r="5"/>
+  <text x="56" y="90" class="label">Zhang, Wei</text><circle class="dot-warn" cx="226" cy="86" r="5"/>
+  <text x="56" y="112" class="label">Dubois, Léa</text><circle class="dot-warn" cx="226" cy="108" r="5"/>
+  <text x="56" y="134" class="label">Patel, Ravi</text><circle class="dot-warn" cx="226" cy="130" r="5"/>
+  <text x="56" y="156" class="label">Kim, Jisoo</text><circle class="dot-warn" cx="226" cy="152" r="5"/>
+  <text x="56" y="178" class="label">Alvarez, Rosa</text><circle class="dot-warn" cx="226" cy="174" r="5"/>
+  <rect class="box-ok" x="46" y="184" width="158" height="22" rx="4"/><text x="56" y="200" class="label">Martin, Sarah</text><circle class="dot-ok" cx="226" cy="196" r="6"/>
+  <text x="56" y="222" class="label">Novak, Ivan</text>
+  <text x="246" y="110" class="small">checks line</text>
+  <text x="246" y="126" class="small">after line</text>
+  <text x="246" y="150" class="mono">Seq Scan</text>
+  <rect class="zone" x="390" y="10" width="360" height="235" rx="10"/>
+  <text x="570" y="32" text-anchor="middle" class="title">Index: jump close, then look</text>
+  <rect class="box2" x="410" y="56" width="60" height="28" rx="5"/><text x="440" y="75" text-anchor="middle" class="label">A–F</text>
+  <rect class="box2" x="410" y="92" width="60" height="28" rx="5"/><text x="440" y="111" text-anchor="middle" class="label">G–L</text>
+  <rect class="box" x="410" y="128" width="60" height="28" rx="5"/><text x="440" y="147" text-anchor="middle" class="label">M–R</text>
+  <rect class="box2" x="410" y="164" width="60" height="28" rx="5"/><text x="440" y="183" text-anchor="middle" class="label">S–Z</text>
+  <path class="arrow-accent" d="M470,142 H528"/>
+  <rect class="box2" x="530" y="96" width="190" height="96" rx="6"/>
+  <text x="546" y="120" class="label">Malik, Omar</text>
+  <rect class="box-ok" x="536" y="128" width="178" height="22" rx="4"/><text x="546" y="144" class="label">Martin, Sarah</text>
+  <text x="546" y="172" class="label">Meyer, Jan</text>
+  <text x="625" y="218" text-anchor="middle" class="mono">Index Scan</text>
+</svg>
+<figcaption>Left: with no order, the only way is to check every line (orange dots) until the right one turns up. Right: a sorted structure lets you <strong>skip straight to the right region</strong> and look at only a few entries. Names are made up.</figcaption>
+</figure>
+
+<h2>Part 1: Indexing your documents</h2>
+
+<h3>Why not just give the model all the documents?</h3>
+<p>The simplest alternative to RAG is to paste every document into every prompt. It breaks down quickly:</p>
+<ul>
+<li><strong>It doesn't fit.</strong> A model's <a class="term" href="glossary.html#context-window">context window</a> is limited. One handbook may fit, but a company's thousands of PDFs never will.</li>
+<li><strong>It's expensive and slow.</strong> You pay for every input <a class="term" href="glossary.html#token">token</a> on <em>every</em> question, and the model has to read all of it before it answers.</li>
+<li><strong>Answers get worse.</strong> Models are less reliable at finding one sentence buried in a huge context than in a short, relevant one.</li>
+</ul>
+<p>RAG sends the model only the <strong>3 most relevant <a class="term" href="glossary.html#chunk">chunks</a></strong>. To find those chunks quickly, the documents must be prepared in advance, and that preparation is indexing.</p>
+
+<h3>Why prepare in advance instead of at question time?</h3>
+<p>Search by meaning (<a class="term" href="glossary.html#semantic-search">semantic search</a>) compares <a class="term" href="glossary.html#embedding">embeddings</a>. If embeddings were computed when a question arrives, every question would have to embed every chunk of every document. That's thousands of API calls per question. Indexing moves that work to upload time:</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>Done when</th><th>Embedding calls</th></tr>
+<tr><td>Upload a PDF (<em>indexing</em>)</td><td>Once per document</td><td>1 batched call for all its chunks (<code>embedMany</code>)</td></tr>
+<tr><td>Ask a question (<em>retrieval</em>)</td><td>Every question</td><td>1 call, for the question only (<code>embed</code>)</td></tr>
+</table></div>
+<p>This is the core trade-off of RAG: <strong>do the heavy work once when you write the data, so every read is cheap.</strong></p>
+
+<h3>The indexing pipeline in this project</h3>
+<figure class="diagram">
+<svg viewBox="0 0 760 120" role="img" aria-label="Indexing pipeline">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="10" y="30" width="120" height="56" rx="8"/><text x="70" y="53" text-anchor="middle">1 · Extract</text><text x="70" y="71" text-anchor="middle" class="small">pdf-parse → text</text>
+  <rect class="box" x="165" y="30" width="135" height="56" rx="8"/><text x="232" y="53" text-anchor="middle">2 · Chunk</text><text x="232" y="71" text-anchor="middle" class="small">900 chars, 150 overlap</text>
+  <rect class="box" x="335" y="30" width="135" height="56" rx="8"/><text x="402" y="53" text-anchor="middle">3 · Embed</text><text x="402" y="71" text-anchor="middle" class="small">1536 numbers / chunk</text>
+  <rect class="box" x="505" y="30" width="110" height="56" rx="8"/><text x="560" y="53" text-anchor="middle">4 · Store</text><text x="560" y="71" text-anchor="middle" class="small">INSERT rows</text>
+  <rect class="box2" x="650" y="30" width="100" height="56" rx="8"/><text x="700" y="53" text-anchor="middle">5 · HNSW</text><text x="700" y="71" text-anchor="middle" class="small">auto-updated</text>
+  <path class="arrow" d="M130,58 H163"/><path class="arrow" d="M300,58 H333"/><path class="arrow" d="M470,58 H503"/><path class="arrow" d="M615,58 H648"/>
+  <text x="380" y="112" text-anchor="middle" class="small">all inside processPdfFile (step 12), triggered by the /upload page (step 13)</text>
+</svg>
+</figure>
+<ol class="steps">
+<li><strong>Extract.</strong> <code>pdf-parse</code> pulls the raw text out of the PDF. Images and scans need a vision model instead (<a href="21-images-as-knowledge.html">step 21</a>).</li>
+<li><strong>Chunk.</strong> <code>chunkContent</code> splits the text into overlapping pieces (<a href="11-chunking-utility.html">step 11</a>). <em>Why:</em> one embedding for a whole document is a blur of every topic in it. Small chunks let the search return exactly the paragraph about vacation days.</li>
+<li><strong>Embed.</strong> <code>generateEmbeddings</code> turns every chunk into a 1,536-number vector in one API call (<a href="10-embedding-utility.html">step 10</a>). <em>Why:</em> vectors are what make search by <em>meaning</em> possible. "PTO" and "vacation days" end up close together.</li>
+<li><strong>Store.</strong> Each chunk is inserted as a row with its text and its vector (<a href="12-server-action.html">step 12</a>). The text is kept so it can be handed to the model later. The vector is what gets searched.</li>
+<li><strong>Index.</strong> Postgres adds each new row to the HNSW index automatically. You never call it yourself. See Part 2.</li>
+</ol>
+
+<h3>What one indexed row looks like</h3>
+<pre data-lang="json" data-file="documents table · one row (illustrative)"><code>{
+  "id": 7,
+  "content": "Employees with 0–2 years of service receive 15 days of PTO annually. Employees with 3–5 years receive 20 days. Vacation requests should be submitted at least two weeks in advance through the HR portal. …",
+  "embedding": [0.0123, -0.0347, 0.0082, …, -0.0191]   // 1,536 numbers
+}</code></pre>
+
+<h3>When you must re-index</h3>
+<div class="table-wrap"><table>
+<tr><th>Change</th><th>Why the old index is wrong</th><th>What to do</th></tr>
+<tr><td>Chunk size or overlap (step 11)</td><td>Old rows keep the old chunking.</td><td><code>DELETE FROM documents;</code> then re-upload.</td></tr>
+<tr><td>Embedding model</td><td>Vectors from different models can't be compared.</td><td>Update the schema's <code>dimensions</code>, migrate, then re-upload everything.</td></tr>
+<tr><td>A document was updated</td><td>The old version's chunks are still there, so the bot may quote outdated rules.</td><td>Remove the old chunks first. This project has no per-document delete yet (see the "document management" idea in <a href="17-next-steps.html">step 17</a>).</td></tr>
+<tr><td>The same PDF was uploaded twice</td><td>Every chunk is stored twice, so search returns duplicates and fills the 3 result slots.</td><td>Same as above. Add a <code>source</code> column to delete or skip duplicates.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Re-index triggers: for each change (chunking, embedding model, updated document, duplicate upload) what goes wrong and what to do">
+  <text x="130" y="26" text-anchor="middle" class="small">You changed…</text>
+  <text x="385" y="26" text-anchor="middle" class="small">What goes wrong</text>
+  <text x="635" y="26" text-anchor="middle" class="small">What to do</text>
+  <rect class="box-warn" x="15" y="38" width="230" height="40" rx="8"/><text x="130" y="63" text-anchor="middle" class="label">Chunk size or overlap</text>
+  <rect class="box-bad" x="270" y="38" width="230" height="40" rx="8"/><text x="385" y="63" text-anchor="middle" class="label">old rows keep old chunks</text>
+  <rect class="box-ok" x="525" y="38" width="220" height="40" rx="8"/><text x="635" y="63" text-anchor="middle" class="small">DELETE FROM documents; re-upload</text>
+  <rect class="box-warn" x="15" y="92" width="230" height="40" rx="8"/><text x="130" y="117" text-anchor="middle" class="label">Embedding model</text>
+  <rect class="box-bad" x="270" y="92" width="230" height="40" rx="8"/><text x="385" y="117" text-anchor="middle" class="label">vectors can't be compared</text>
+  <rect class="box-ok" x="525" y="92" width="220" height="40" rx="8"/><text x="635" y="111" text-anchor="middle" class="small">new dimensions, migrate,</text><text x="635" y="125" text-anchor="middle" class="small">re-upload everything</text>
+  <rect class="box-warn" x="15" y="146" width="230" height="40" rx="8"/><text x="130" y="171" text-anchor="middle" class="label">A document was updated</text>
+  <rect class="box-bad" x="270" y="146" width="230" height="40" rx="8"/><text x="385" y="171" text-anchor="middle" class="label">bot may quote old rules</text>
+  <rect class="box-ok" x="525" y="146" width="220" height="40" rx="8"/><text x="635" y="171" text-anchor="middle" class="small">remove the old chunks first</text>
+  <rect class="box-warn" x="15" y="200" width="230" height="40" rx="8"/><text x="130" y="225" text-anchor="middle" class="label">Same PDF uploaded twice</text>
+  <rect class="box-bad" x="270" y="200" width="230" height="40" rx="8"/><text x="385" y="225" text-anchor="middle" class="label">duplicates fill the top 3</text>
+  <rect class="box-ok" x="525" y="200" width="220" height="40" rx="8"/><text x="635" y="225" text-anchor="middle" class="small">add a source column</text>
+  <path class="arrow" d="M245,58 H268"/><path class="arrow" d="M500,58 H523"/>
+  <path class="arrow" d="M245,112 H268"/><path class="arrow" d="M500,112 H523"/>
+  <path class="arrow" d="M245,166 H268"/><path class="arrow" d="M500,166 H523"/>
+  <path class="arrow" d="M245,220 H268"/><path class="arrow" d="M500,220 H523"/>
+</svg>
+<figcaption>The table above as "mistake → symptom → fix". The common thread: the stored rows were made <strong>under the old rules</strong>, and nothing updates them for you.</figcaption>
+</figure>
+
+<h2>Part 2: The database index (HNSW)</h2>
+
+<h3>The problem: searching without an index</h3>
+<p>To answer "which chunks are closest to this question?", the database could compare the question's vector with <strong>every</strong> stored vector, sort all of them, and keep the top 3. That's called a <em>sequential scan</em>, and its cost grows with the table:</p>
+<div class="table-wrap"><table>
+<tr><th>Rows (chunks)</th><th>Number crunching per question (rows × 1,536)</th><th>In practice</th></tr>
+<tr><td>30 (one handbook)</td><td>~46 thousand operations</td><td>Instant. An index doesn't matter yet.</td></tr>
+<tr><td>100,000</td><td>~154 million</td><td>Noticeable on every question.</td></tr>
+<tr><td>10,000,000</td><td>~15 billion</td><td>Far too slow for a chat.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 280" role="img" aria-label="Rows visited: a sequential scan compares all 80 rows; an HNSW index scan visits only about ten rows along a path before reaching the three nearest">
+  <rect class="zone" x="10" y="10" width="360" height="260" rx="10"/>
+  <text x="190" y="32" text-anchor="middle" class="title">Sequential scan</text>
+  <g class="dot-warn">
+    <circle cx="55" cy="60" r="5"/><circle cx="85" cy="60" r="5"/><circle cx="115" cy="60" r="5"/><circle cx="145" cy="60" r="5"/><circle cx="175" cy="60" r="5"/><circle cx="205" cy="60" r="5"/><circle cx="235" cy="60" r="5"/><circle cx="265" cy="60" r="5"/><circle cx="295" cy="60" r="5"/><circle cx="325" cy="60" r="5"/>
+    <circle cx="55" cy="84" r="5"/><circle cx="85" cy="84" r="5"/><circle cx="115" cy="84" r="5"/><circle cx="145" cy="84" r="5"/><circle cx="175" cy="84" r="5"/><circle cx="205" cy="84" r="5"/><circle cx="235" cy="84" r="5"/><circle cx="265" cy="84" r="5"/><circle cx="295" cy="84" r="5"/><circle cx="325" cy="84" r="5"/>
+    <circle cx="55" cy="108" r="5"/><circle cx="85" cy="108" r="5"/><circle cx="115" cy="108" r="5"/><circle cx="145" cy="108" r="5"/><circle cx="175" cy="108" r="5"/><circle cx="205" cy="108" r="5"/><circle cx="235" cy="108" r="5"/><circle cx="265" cy="108" r="5"/><circle cx="295" cy="108" r="5"/><circle cx="325" cy="108" r="5"/>
+    <circle cx="55" cy="132" r="5"/><circle cx="85" cy="132" r="5"/><circle cx="115" cy="132" r="5"/><circle cx="145" cy="132" r="5"/><circle cx="175" cy="132" r="5"/><circle cx="205" cy="132" r="5"/><circle cx="235" cy="132" r="5"/><circle cx="265" cy="132" r="5"/><circle cx="295" cy="132" r="5"/><circle cx="325" cy="132" r="5"/>
+    <circle cx="55" cy="156" r="5"/><circle cx="85" cy="156" r="5"/><circle cx="115" cy="156" r="5"/><circle cx="145" cy="156" r="5"/><circle cx="175" cy="156" r="5"/><circle cx="205" cy="156" r="5"/><circle cx="235" cy="156" r="5"/><circle cx="265" cy="156" r="5"/><circle cx="295" cy="156" r="5"/><circle cx="325" cy="156" r="5"/>
+    <circle cx="55" cy="180" r="5"/><circle cx="85" cy="180" r="5"/><circle cx="115" cy="180" r="5"/><circle cx="145" cy="180" r="5"/><circle cx="175" cy="180" r="5"/><circle cx="205" cy="180" r="5"/><circle cx="235" cy="180" r="5"/><circle cx="265" cy="180" r="5"/><circle cx="295" cy="180" r="5"/><circle cx="325" cy="180" r="5"/>
+    <circle cx="55" cy="204" r="5"/><circle cx="85" cy="204" r="5"/><circle cx="115" cy="204" r="5"/><circle cx="145" cy="204" r="5"/><circle cx="175" cy="204" r="5"/><circle cx="205" cy="204" r="5"/><circle cx="235" cy="204" r="5"/><circle cx="265" cy="204" r="5"/><circle cx="295" cy="204" r="5"/><circle cx="325" cy="204" r="5"/>
+    <circle cx="55" cy="228" r="5"/><circle cx="85" cy="228" r="5"/><circle cx="115" cy="228" r="5"/><circle cx="145" cy="228" r="5"/><circle cx="175" cy="228" r="5"/><circle cx="205" cy="228" r="5"/><circle cx="235" cy="228" r="5"/><circle cx="265" cy="228" r="5"/><circle cx="295" cy="228" r="5"/><circle cx="325" cy="228" r="5"/>
+  </g>
+  <circle class="dot-ok" cx="265" cy="180" r="8"/><circle class="dot-ok" cx="295" cy="180" r="8"/><circle class="dot-ok" cx="295" cy="204" r="8"/>
+  <text x="190" y="256" text-anchor="middle" class="small">all 80 rows compared, sorted, then top 3 kept</text>
+  <rect class="zone" x="390" y="10" width="360" height="260" rx="10"/>
+  <text x="570" y="32" text-anchor="middle" class="title">HNSW index scan</text>
+  <g class="box2">
+    <circle cx="435" cy="60" r="5"/><circle cx="465" cy="60" r="5"/><circle cx="495" cy="60" r="5"/><circle cx="525" cy="60" r="5"/><circle cx="555" cy="60" r="5"/><circle cx="585" cy="60" r="5"/><circle cx="615" cy="60" r="5"/><circle cx="645" cy="60" r="5"/><circle cx="675" cy="60" r="5"/><circle cx="705" cy="60" r="5"/>
+    <circle cx="435" cy="84" r="5"/><circle cx="465" cy="84" r="5"/><circle cx="495" cy="84" r="5"/><circle cx="525" cy="84" r="5"/><circle cx="555" cy="84" r="5"/><circle cx="585" cy="84" r="5"/><circle cx="615" cy="84" r="5"/><circle cx="645" cy="84" r="5"/><circle cx="675" cy="84" r="5"/><circle cx="705" cy="84" r="5"/>
+    <circle cx="435" cy="108" r="5"/><circle cx="465" cy="108" r="5"/><circle cx="495" cy="108" r="5"/><circle cx="525" cy="108" r="5"/><circle cx="555" cy="108" r="5"/><circle cx="585" cy="108" r="5"/><circle cx="615" cy="108" r="5"/><circle cx="645" cy="108" r="5"/><circle cx="675" cy="108" r="5"/><circle cx="705" cy="108" r="5"/>
+    <circle cx="435" cy="132" r="5"/><circle cx="465" cy="132" r="5"/><circle cx="495" cy="132" r="5"/><circle cx="525" cy="132" r="5"/><circle cx="555" cy="132" r="5"/><circle cx="585" cy="132" r="5"/><circle cx="615" cy="132" r="5"/><circle cx="645" cy="132" r="5"/><circle cx="675" cy="132" r="5"/><circle cx="705" cy="132" r="5"/>
+    <circle cx="435" cy="156" r="5"/><circle cx="465" cy="156" r="5"/><circle cx="495" cy="156" r="5"/><circle cx="525" cy="156" r="5"/><circle cx="555" cy="156" r="5"/><circle cx="585" cy="156" r="5"/><circle cx="615" cy="156" r="5"/><circle cx="645" cy="156" r="5"/><circle cx="675" cy="156" r="5"/><circle cx="705" cy="156" r="5"/>
+    <circle cx="435" cy="180" r="5"/><circle cx="465" cy="180" r="5"/><circle cx="495" cy="180" r="5"/><circle cx="525" cy="180" r="5"/><circle cx="555" cy="180" r="5"/><circle cx="585" cy="180" r="5"/><circle cx="615" cy="180" r="5"/><circle cx="645" cy="180" r="5"/><circle cx="675" cy="180" r="5"/><circle cx="705" cy="180" r="5"/>
+    <circle cx="435" cy="204" r="5"/><circle cx="465" cy="204" r="5"/><circle cx="495" cy="204" r="5"/><circle cx="525" cy="204" r="5"/><circle cx="555" cy="204" r="5"/><circle cx="585" cy="204" r="5"/><circle cx="615" cy="204" r="5"/><circle cx="645" cy="204" r="5"/><circle cx="675" cy="204" r="5"/><circle cx="705" cy="204" r="5"/>
+    <circle cx="435" cy="228" r="5"/><circle cx="465" cy="228" r="5"/><circle cx="495" cy="228" r="5"/><circle cx="525" cy="228" r="5"/><circle cx="555" cy="228" r="5"/><circle cx="585" cy="228" r="5"/><circle cx="615" cy="228" r="5"/><circle cx="645" cy="228" r="5"/><circle cx="675" cy="228" r="5"/><circle cx="705" cy="228" r="5"/>
+  </g>
+  <path class="line" d="M435,60 L495,84 L555,132 L615,156 L645,180"/>
+  <g class="dot-info"><circle cx="435" cy="60" r="6"/><circle cx="495" cy="84" r="6"/><circle cx="555" cy="132" r="6"/><circle cx="615" cy="156" r="6"/><circle cx="705" cy="180" r="6"/><circle cx="645" cy="156" r="6"/><circle cx="615" cy="204" r="6"/></g>
+  <circle class="dot-ok" cx="645" cy="180" r="8"/><circle class="dot-ok" cx="675" cy="180" r="8"/><circle class="dot-ok" cx="675" cy="204" r="8"/>
+  <text x="570" y="256" text-anchor="middle" class="small">about 10 of 80 rows visited (illustrative)</text>
+</svg>
+<figcaption>Each dot is one stored chunk; green dots are the 3 nearest to the question. Without an index (left), every row is compared, so the work grows with the table. With HNSW (right), the search <strong>walks a short path</strong> through linked neighbours (blue) and checks only a few rows. The counts are illustrative; the bigger the table, the bigger the difference.</figcaption>
+</figure>
+
+<h3>The solution: an approximate nearest-neighbour index</h3>
+<p><strong>HNSW</strong> (<em>Hierarchical Navigable Small World</em>) organises the vectors as a <strong>layered graph</strong>. Each vector is linked to a handful of its nearest neighbours:</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="HNSW layered graph search">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <text x="10" y="40" class="small">Layer 2 · few nodes, long links</text>
+  <line x1="200" y1="35" x2="420" y2="35" stroke="var(--border)" stroke-width="1.5"/><line x1="420" y1="35" x2="640" y2="35" stroke="var(--border)" stroke-width="1.5"/>
+  <circle cx="200" cy="35" r="7" class="box"/><circle cx="420" cy="35" r="7" class="box"/><circle cx="640" cy="35" r="7" class="box"/>
+  <text x="10" y="120" class="small">Layer 1 · more nodes</text>
+  <g stroke="var(--border)" stroke-width="1.5"><line x1="200" y1="115" x2="300" y2="115"/><line x1="300" y1="115" x2="420" y2="115"/><line x1="420" y1="115" x2="520" y2="115"/><line x1="520" y1="115" x2="640" y2="115"/></g>
+  <circle cx="200" cy="115" r="7" class="box"/><circle cx="300" cy="115" r="7" class="box"/><circle cx="420" cy="115" r="7" class="box"/><circle cx="520" cy="115" r="7" class="box"/><circle cx="640" cy="115" r="7" class="box"/>
+  <text x="10" y="200" class="small">Layer 0 · every vector</text>
+  <g stroke="var(--border)" stroke-width="1.5"><line x1="180" y1="195" x2="640" y2="195"/></g>
+  <g class="box"><circle cx="180" cy="195" r="6"/><circle cx="230" cy="195" r="6"/><circle cx="280" cy="195" r="6"/><circle cx="330" cy="195" r="6"/><circle cx="380" cy="195" r="6"/><circle cx="430" cy="195" r="6"/><circle cx="480" cy="195" r="6"/><circle cx="530" cy="195" r="6"/><circle cx="580" cy="195" r="6"/><circle cx="640" cy="195" r="6"/></g>
+  <circle cx="530" cy="195" r="10" fill="none" stroke="var(--accent)" stroke-width="2.5"/>
+  <path class="arrow" d="M200,44 Q310,10 412,30" style="stroke:var(--accent)"/>
+  <path class="arrow" d="M420,44 V106" style="stroke:var(--accent)"/>
+  <path class="arrow" d="M428,115 H511" style="stroke:var(--accent)"/>
+  <path class="arrow" d="M520,124 V186" style="stroke:var(--accent)"/>
+  <text x="560" y="232" class="small">nearest match found after visiting a handful of nodes</text>
+</svg>
+<figcaption>A search starts at the sparse top layer and jumps greedily towards the question's vector. It drops a layer each time it can't get closer, and finishes among the true neighbours on the bottom layer, touching a small fraction of the rows.</figcaption>
+</figure>
+<ul>
+<li>It is <strong>approximate</strong> (ANN, <em>approximate nearest neighbour</em>). It can occasionally miss one of the true top results, in exchange for being dramatically faster. With realistic, clustered embeddings recall is typically very high. In a test for this page, 3,000 clustered 1,536-dimension vectors gave the <strong>same top 3 as an exact search in 100% of 30 queries</strong>, about <strong>8× faster</strong>. The gap grows with table size.</li>
+<li>Uniformly random vectors are the worst case: everything is about equally far from everything else, and recall drops. Real embeddings aren't like that.</li>
+</ul>
+
+<details class="primer"><summary>New to "approximate" search? What recall means and why a rare miss is acceptable</summary>
+<p>An <strong>exact</strong> search checks every row, so it is guaranteed to return the true 3 closest chunks. An <strong>approximate</strong> search only checks the rows it reaches by walking the graph, so once in a while it may return, say, the 4th-closest chunk instead of the 3rd-closest.</p>
+<p><strong>Recall</strong> measures how often it gets it right: "100% recall" means the approximate top 3 were exactly the same as the exact top 3. Think of asking a local for directions: they get you to the right street almost every time, much faster than checking every street on a map.</p>
+<p>For RAG, a rare near-miss barely matters. The chunks that are found are still very close in meaning, and the model only needs relevant passages, not mathematically perfect ones.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Recall: the exact search returns chunks 12, 7 and 30; the approximate search usually returns the same three (100 percent recall) and rarely returns chunk 4 instead of chunk 30 (two of three)">
+  <text x="135" y="28" text-anchor="middle" class="title">Exact (every row)</text>
+  <text x="380" y="28" text-anchor="middle" class="title">HNSW: usual case</text>
+  <text x="625" y="28" text-anchor="middle" class="title">HNSW: rare near-miss</text>
+  <rect class="box2" x="20" y="46" width="230" height="30" rx="6"/><text x="34" y="66" class="label">#1 chunk 12</text><text x="236" y="66" text-anchor="end" class="small">0.91</text>
+  <rect class="box2" x="20" y="84" width="230" height="30" rx="6"/><text x="34" y="104" class="label">#2 chunk 7</text><text x="236" y="104" text-anchor="end" class="small">0.88</text>
+  <rect class="box2" x="20" y="122" width="230" height="30" rx="6"/><text x="34" y="142" class="label">#3 chunk 30</text><text x="236" y="142" text-anchor="end" class="small">0.86</text>
+  <rect class="box-ok" x="265" y="46" width="230" height="30" rx="6"/><text x="279" y="66" class="label">#1 chunk 12</text><text x="481" y="66" text-anchor="end" class="small">same</text>
+  <rect class="box-ok" x="265" y="84" width="230" height="30" rx="6"/><text x="279" y="104" class="label">#2 chunk 7</text><text x="481" y="104" text-anchor="end" class="small">same</text>
+  <rect class="box-ok" x="265" y="122" width="230" height="30" rx="6"/><text x="279" y="142" class="label">#3 chunk 30</text><text x="481" y="142" text-anchor="end" class="small">same</text>
+  <rect class="box-ok" x="510" y="46" width="230" height="30" rx="6"/><text x="524" y="66" class="label">#1 chunk 12</text><text x="726" y="66" text-anchor="end" class="small">same</text>
+  <rect class="box-ok" x="510" y="84" width="230" height="30" rx="6"/><text x="524" y="104" class="label">#2 chunk 7</text><text x="726" y="104" text-anchor="end" class="small">same</text>
+  <rect class="box-warn" x="510" y="122" width="230" height="30" rx="6"/><text x="524" y="142" class="label">#3 chunk 4</text><text x="726" y="142" text-anchor="end" class="small">4th-closest, 0.85</text>
+  <text x="135" y="184" text-anchor="middle" class="small">the reference answer</text>
+  <text x="380" y="184" text-anchor="middle" class="ok">3 of 3 → recall 100%</text>
+  <text x="625" y="184" text-anchor="middle" class="warn">2 of 3 → recall 67%</text>
+</svg>
+<figcaption>Recall compares the approximate top 3 with the exact top 3. Chunk numbers and similarity scores are <strong>illustrative</strong>. Even in the rare miss, the substitute (0.85) is almost as close as the chunk it replaced (0.86), which is why it barely matters for RAG. In the test for this page, all 30 queries looked like the middle column.</figcaption>
+</figure>
+
+<h3>The index definition, line by line</h3>
+<pre data-lang="ts" data-file="src/lib/db-schema.ts · third argument of pgTable"><code>(table) =&gt; [
+  index("embeddingIndex").using(
+    "hnsw",
+    table.embedding.op("vector_cosine_ops")
+  ),
+]</code></pre>
+<div class="table-wrap"><table>
+<tr><th>Part</th><th>Meaning</th></tr>
+<tr><td><code>index("embeddingIndex")</code></td><td>The index's name in Postgres. You will see it in query plans.</td></tr>
+<tr><td><code>.using("hnsw", …)</code></td><td>The index type. pgvector also offers <code>ivfflat</code>, which builds faster but needs data in the table before it's built and usually recalls less.</td></tr>
+<tr><td><code>table.embedding</code></td><td>The column being indexed.</td></tr>
+<tr><td><code>.op("vector_cosine_ops")</code></td><td>Which distance the index is organised by. This must match the operator your query sorts by (below).</td></tr>
+</table></div>
+<p>The resulting <a class="term" href="glossary.html#sql">SQL</a>, from the repo's <a class="term" href="glossary.html#migration">migration</a>:</p>
+<pre data-lang="sql"><code>CREATE INDEX "embeddingIndex" ON "documents" USING hnsw ("embedding" vector_cosine_ops);</code></pre>
+
+<h3>The operator class must match the query</h3>
+<div class="table-wrap"><table>
+<tr><th>Operator class</th><th>SQL operator</th><th>Drizzle helper</th><th>Distance</th></tr>
+<tr><td><code>vector_cosine_ops</code> ✓ (this project)</td><td><code>&lt;=&gt;</code></td><td><code>cosineDistance</code></td><td><a class="term" href="glossary.html#cosine">Cosine</a>: compares direction, which suits text embeddings</td></tr>
+<tr><td><code>vector_l2_ops</code></td><td><code>&lt;-&gt;</code></td><td><code>l2Distance</code></td><td>Euclidean (straight-line)</td></tr>
+<tr><td><code>vector_ip_ops</code></td><td><code>&lt;#&gt;</code></td><td><code>innerProduct</code></td><td>Negative inner product</td></tr>
+</table></div>
+<p>An index built with <code>vector_cosine_ops</code> can only speed up queries that <strong>sort by <code>&lt;=&gt;</code>, ascending, with a <code>LIMIT</code></strong>.</p>
+
+<h3>What an index costs</h3>
+<ul>
+<li><strong>Slower inserts:</strong> every new chunk has to be linked into the graph. Uploads take a little longer, which is fine because uploads are rare and questions are frequent.</li>
+<li><strong>Memory and disk:</strong> the graph is stored next to the table and is fastest when it fits in RAM.</li>
+<li><strong>Tuning knobs</strong> (pgvector defaults shown): <code>m = 16</code> (links per node) and <code>ef_construction = 64</code> (build effort), set with <code>WITH (m = 16, ef_construction = 64)</code>; plus <code>hnsw.ef_search = 40</code> (search effort per query, set with <code>SET hnsw.ef_search = 100;</code>). Higher values improve recall but cost speed. The defaults are fine for this project.</li>
+</ul>
+
+<h2>Part 3: Does the tutorial's search actually use the index?</h2>
+<div class="callout warn"><p><strong>No, as written it doesn't.</strong> The search in <a href="14-semantic-search.html">step 14</a> sorts by <em>similarity</em>, descending: <code>.orderBy(desc(similarity))</code> where <code>similarity = 1 - distance</code>. Mathematically that's the same order as distance ascending, but Postgres can't see that. It only uses the HNSW index when the <code>ORDER BY</code> is the raw <code>&lt;=&gt;</code> expression in ascending order. So every question does a <strong>full scan and sort</strong>, and the index the tutorial creates sits unused.</p></div>
+
+<h3>How this was verified</h3>
+<p>This was tested on Postgres with <strong>pgvector 0.8.0</strong> (via PGlite), using the repo's exact table and index migrations and the SQL that Drizzle generates for <code>search.ts</code>:</p>
+<div class="table-wrap"><table>
+<tr><th>Query</th><th>ORDER BY (generated by Drizzle)</th><th>Plan at 5,000 rows</th></tr>
+<tr><td>Tutorial (<code>desc(similarity)</code>)</td><td><code>1 - (embedding &lt;=&gt; $4) desc</code></td><td>Sort over a full scan. <strong>Index not used</strong>, even with sequential scans disabled.</td></tr>
+<tr><td>Fixed (<code>orderBy(distance)</code>)</td><td><code>embedding &lt;=&gt; $4</code></td><td><strong><code>Index Scan using "embeddingIndex"</code></strong></td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Two ORDER BY forms: the tutorial's one minus distance descending leads to a sort over a full scan; the fixed raw distance ascending with LIMIT leads to an index scan">
+  <text x="20" y="30" class="small">Tutorial, step 14: .orderBy(desc(similarity))</text>
+  <rect class="box2" x="20" y="40" width="320" height="36" rx="8"/><text x="180" y="63" text-anchor="middle" class="mono">ORDER BY 1 - (embedding &lt;=&gt; $4) DESC</text>
+  <path class="arrow-bad" d="M340,58 H408"/><text x="374" y="50" text-anchor="middle" class="small">planner</text>
+  <rect class="box-bad" x="410" y="40" width="330" height="36" rx="8"/><text x="575" y="63" text-anchor="middle" class="label">Sort over a full scan: index not used</text>
+  <text x="20" y="110" class="small">Fixed: .orderBy(distance)</text>
+  <rect class="box2" x="20" y="120" width="320" height="36" rx="8"/><text x="180" y="143" text-anchor="middle" class="mono">ORDER BY embedding &lt;=&gt; $4  LIMIT 3</text>
+  <path class="arrow-ok" d="M340,138 H408"/><text x="374" y="130" text-anchor="middle" class="small">planner</text>
+  <rect class="box-ok" x="410" y="120" width="330" height="36" rx="8"/><text x="575" y="143" text-anchor="middle" class="mono">Index Scan using "embeddingIndex"</text>
+</svg>
+<figcaption>Both forms return rows in the same order, but Postgres only <strong>recognises the second</strong> as something the HNSW index can answer: the raw <code>&lt;=&gt;</code>, ascending, with a <code>LIMIT</code>. (<code>$4</code> is the question's vector, passed as a query parameter.)</figcaption>
+</figure>
+
+<h3>The fix: sort by distance</h3>
+<p>Keep computing <code>similarity</code> for the threshold and the result, but <strong>sort by the raw distance</strong>. Results are the same, and Postgres can now use the index. This version was type-checked against the repo:</p>
+<pre data-file="src/lib/search.ts" data-lang="ts" data-tag="index-friendly · type-checked"><code>// src/lib/search.ts
+import { cosineDistance, gt, sql } from "drizzle-orm";
+import { db } from "./db-config";
+import { documents } from "./db-schema";
+import { generateEmbedding } from "./embeddings";
+
+/**
+ * Search for similar documents using Drizzle ORM with cosineDistance
+ */
+export async function searchDocuments(
+  query: string,
+  limit: number = 5,
+  threshold: number = 0.5,
+) {
+  // Generate embedding for the search query
+  const embedding = await generateEmbedding(query);
+
+  // Cosine distance: 0 = same direction, 2 = opposite. This is what the HNSW index sorts by.
+  const distance = cosineDistance(documents.embedding, embedding);
+
+  // Similarity = 1 - distance, used for the threshold and returned to the caller
+  const similarity = sql&lt;number&gt;`1 - (${distance})`;
+
+  const similarDocuments = await db
+    .select({
+      id: documents.id,
+      content: documents.content,
+      similarity,
+    })
+    .from(documents)
+    .where(gt(similarity, threshold))
+    // Order by the raw distance (ascending) so Postgres can use the HNSW index
+    .orderBy(distance)
+    .limit(limit);
+
+  return similarDocuments;
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>// src/lib/search.ts</code></td><td>The file's location. This version replaces the step 14 file.</td></tr>
+<tr><td>2</td><td><code>import { cosineDistance, gt, sql } from "drizzle-orm";</code></td><td>Drizzle helpers: <code>cosineDistance</code> builds the SQL <code>&lt;=&gt;</code> expression, <code>gt</code> means "greater than" (for the threshold), and <code>sql</code> lets you write a raw SQL snippet. <code>desc</code> is no longer imported because nothing sorts descending any more.</td></tr>
+<tr><td>3–4</td><td><code>import { db } from "./db-config";</code> <code>import { documents } from "./db-schema";</code></td><td>The database connection and the <code>documents</code> table definition. <code>./</code> means "in the same folder".</td></tr>
+<tr><td>5</td><td><code>import { generateEmbedding } from "./embeddings";</code></td><td>Turns the user's question into a vector (step 10).</td></tr>
+<tr><td>7–9</td><td><code>/** Search for similar documents … */</code></td><td>A documentation comment; editors show it when you hover over the function name.</td></tr>
+<tr><td>10–14</td><td><code>export async function searchDocuments( query: string, limit: number = 5, threshold: number = 0.5, ) {</code></td><td>The function the search tool calls. <code>limit</code> (how many results) and <code>threshold</code> (minimum similarity) have default values, used when the caller leaves them out.</td></tr>
+<tr><td>15–16</td><td><code>const embedding = await generateEmbedding(query);</code></td><td>One embedding API call for the question. This is the only API call in a search.</td></tr>
+<tr><td>18–19</td><td><code>const distance = cosineDistance(documents.embedding, embedding);</code></td><td><strong>(new variable)</strong> The SQL expression <code>embedding &lt;=&gt; '[…question vector…]'</code>. 0 means same direction (very similar), 2 means opposite. Keeping it in its own variable lets you reuse it for sorting.</td></tr>
+<tr><td>21–22</td><td><code>const similarity = sql&lt;number&gt;`1 - (${distance})`;</code></td><td>Similarity = 1 − distance, so higher means more similar (1 = same direction). <code>&lt;number&gt;</code> tells TypeScript the column's type. Used for the threshold and returned to the caller, exactly as in step 14.</td></tr>
+<tr><td>24–29</td><td><code>const similarDocuments = await db .select({ id: documents.id, content: documents.content, similarity, })</code></td><td>Builds a <code>SELECT</code> returning three columns: the row id, the chunk text and the computed similarity.</td></tr>
+<tr><td>30</td><td><code>.from(documents)</code></td><td>From the <code>documents</code> table.</td></tr>
+<tr><td>31</td><td><code>.where(gt(similarity, threshold))</code></td><td>Keeps only rows more similar than the threshold, so unrelated chunks are never sent to the model.</td></tr>
+<tr><td>32–33</td><td><code>.orderBy(distance)</code></td><td><strong>(the fix)</strong> Sorts by the raw distance, smallest first (ascending is the default). This is the exact form the HNSW index understands, so Postgres can use it. Step 14 had <code>.orderBy(desc(similarity))</code> here.</td></tr>
+<tr><td>34</td><td><code>.limit(limit);</code></td><td>Returns at most <code>limit</code> rows. A <code>LIMIT</code> is also required for the index to be used.</td></tr>
+<tr><td>36–37</td><td><code>return similarDocuments; }</code></td><td>Returns the array of <code>{ id, content, similarity }</code> objects, the same shape as before, so the search tool doesn't need to change.</td></tr>
+</table></div>
+<p>There are only two changes from step 14: the distance is kept in its own variable, and <code>.orderBy(distance)</code> replaces <code>.orderBy(desc(similarity))</code>, so <code>desc</code> is no longer imported.</p>
+
+<h3>Check it yourself in Neon</h3>
+<p>Paste this into <a class="term" href="glossary.html#neon">Neon</a>'s <strong>SQL Editor</strong> (in the Neon console, open your project and choose <em>SQL Editor</em> in the sidebar). It borrows a stored vector as the "question", so you don't have to paste 1,536 numbers:</p>
+<pre data-lang="sql"><code>EXPLAIN
+SELECT id FROM documents
+ORDER BY embedding &lt;=&gt; (SELECT embedding FROM documents LIMIT 1)
+LIMIT 3;</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>EXPLAIN</code></td><td>Asks Postgres to <em>describe</em> how it would run the query (its "plan") instead of returning results. Nothing is changed and no rows come back.</td></tr>
+<tr><td>2</td><td><code>SELECT id FROM documents</code></td><td>Fetch only the ids from the <code>documents</code> table; the content isn't needed for this check.</td></tr>
+<tr><td>3</td><td><code>ORDER BY embedding &lt;=&gt; (SELECT embedding FROM documents LIMIT 1)</code></td><td>Sort by cosine distance to a sample vector. The part in parentheses is a <em>subquery</em>: it grabs the embedding of one row to act as the "question". This is the index-friendly form: raw <code>&lt;=&gt;</code>, ascending.</td></tr>
+<tr><td>4</td><td><code>LIMIT 3;</code></td><td>Only the 3 nearest, like the app. The semicolon ends the statement.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to EXPLAIN? How to read a query plan</summary>
+<p><a class="term" href="glossary.html#explain">EXPLAIN</a> shows the <strong>plan</strong> Postgres chose: the steps it will take to answer your query. The output is a small tree of lines. Read it from the <strong>most indented lines upwards</strong>: inner steps run first and feed their rows to the step above them.</p>
+<pre data-lang="sql"><code>-- illustrative shape only: your names and numbers will differ
+Limit  (cost=… rows=3 width=…)
+  InitPlan 1
+    -&gt;  Limit  (cost=… rows=1 width=…)
+          -&gt;  Seq Scan on documents documents_1  (cost=… rows=… width=…)
+  -&gt;  Index Scan using "embeddingIndex" on documents  (cost=… rows=… width=…)
+        Order By: (embedding &lt;=&gt; …)</code></pre>
+<ul>
+<li><strong>Node names</strong> say what happens: <code>Seq Scan</code> = read every row; <code>Index Scan using "…"</code> = use that index; <code>Sort</code> = sort rows in memory; <code>Limit</code> = stop after N rows.</li>
+<li><strong><code>cost=A..B</code></strong> is Postgres's own estimate in abstract units: A is the cost before the first row comes out, B the total. Only compare costs of plans in the same database; they aren't milliseconds.</li>
+<li><strong><code>rows</code></strong> is how many rows it <em>expects</em>; <strong><code>width</code></strong> is the expected average row size in bytes.</li>
+<li><code>InitPlan</code> is a subquery that runs once before the main query, here the one that fetches the sample vector.</li>
+</ul>
+<p><code>EXPLAIN ANALYZE</code> actually runs the query and adds real timings. The exact layout of the output varies a little between Postgres versions.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Annotated EXPLAIN output: the subquery's Seq Scan and Limit fetch one sample vector first, the Index Scan using embeddingIndex sorts by distance, and the top Limit stops after 3 rows">
+  <text x="20" y="22" class="small">EXPLAIN output (illustrative shape)</text>
+  <rect class="ui-window" x="20" y="30" width="410" height="180" rx="8"/>
+  <rect class="box-ok" x="24" y="144" width="402" height="50" rx="4"/>
+  <text x="32" y="54" class="mono">Limit  (cost=… rows=3 …)</text>
+  <text x="46" y="80" class="mono">InitPlan 1</text>
+  <text x="60" y="106" class="mono">-&gt;  Limit  (cost=… rows=1 …)</text>
+  <text x="102" y="132" class="mono">-&gt;  Seq Scan on documents …</text>
+  <text x="46" y="162" class="mono">-&gt;  Index Scan using "embeddingIndex" …</text>
+  <text x="88" y="186" class="mono">Order By: (embedding &lt;=&gt; …)</text>
+  <circle class="dot-info" cx="452" cy="128" r="10"/><text x="452" y="132" text-anchor="middle" class="on-solid">1</text>
+  <text x="470" y="126" class="small">subquery: fetch one sample vector</text><text x="470" y="140" class="small">(a small Seq Scan here is normal)</text>
+  <text x="470" y="80" class="small">InitPlan + Limit 1: run once, first</text>
+  <circle class="dot-ok" cx="452" cy="170" r="10"/><text x="452" y="174" text-anchor="middle" class="on-solid">2</text>
+  <text x="470" y="166" class="ok">the line you want to see</text><text x="470" y="182" class="small">sorted by distance inside the index</text>
+  <circle class="dot" cx="452" cy="50" r="10"/><text x="452" y="54" text-anchor="middle" class="on-solid">3</text>
+  <text x="470" y="54" class="small">top Limit: stop after 3 rows (LIMIT 3)</text>
+  <rect class="box-warn" x="20" y="224" width="720" height="34" rx="8"/>
+  <text x="380" y="246" text-anchor="middle" class="label">Main query shows Sort + Seq Scan on documents instead? Then the index is not used.</text>
+</svg>
+<figcaption>How to read the plan: start at the <strong>most indented</strong> lines and work upwards (numbers show the order). On a small table, a Seq Scan for the main query is expected even with the fix; see the notes below.</figcaption>
+</figure>
+<ul>
+<li>Look for <code>Index Scan using "embeddingIndex"</code> in the output.</li>
+<li><strong>A small <code>Seq Scan</code> line for the subquery is normal.</strong> The output also shows a <code>Seq Scan</code> for the subquery <code>(SELECT embedding FROM documents LIMIT 1)</code> that fetches the sample vector. That line is expected. What matters is whether the <code>ORDER BY</code> uses <code>Index Scan using "embeddingIndex"</code>.</li>
+<li><strong>On a small table you'll see a <code>Seq Scan</code> even with the fix.</strong> That's correct: with a few dozen rows, reading them all is cheaper than walking a graph, so Postgres chooses the scan. In testing, the switch to the index happened somewhere between 30 and 5,000 rows. The fix matters as your knowledge base grows.</li>
+<li>Replace the <code>ORDER BY</code> line with <code>ORDER BY 1 - (embedding &lt;=&gt; (SELECT embedding FROM documents LIMIT 1)) DESC</code> to see the tutorial's plan, which always sorts.</li>
+</ul>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li><strong>Indexing documents</strong> (extract → chunk → embed → store) happens once per upload, so each question only needs to embed itself and look up 3 chunks. That's why RAG is cheap, fast and current.</li>
+<li><strong>The HNSW index</strong> lets Postgres find the nearest vectors without comparing every row. It's approximate, but very accurate on real embeddings.</li>
+<li>The index only helps a query that orders by the matching distance operator (<code>&lt;=&gt;</code>, ascending). Use <code>.orderBy(distance)</code> in <code>search.ts</code> so the index the tutorial creates is actually used.</li>
+<li>Re-index (clear and re-upload) after changing chunking or the embedding model, and watch out for duplicate uploads.</li>
+</ul></div>
+
+<nav class="pager"><a class="prev" href="09-vector-database.html"><small>← Related</small>Step 09 · Vector database</a><a class="next" href="12-server-action.html"><small>Related →</small>Step 12 · Server action</a></nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 2 · Designing State</title>
+<meta name="description" content="TypedDict, Pydantic and dataclasses, reducers like add_messages and operator.add, and keeping state small.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 2/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangGraph Handbook · Chapter 2 of 10</div>
+  <h1>Designing State</h1>
+  <p class="lead">TypedDict, Pydantic and dataclasses, reducers like add_messages and operator.add, and keeping state small.</p>
+</section>
+<h2>What you will learn</h2>
+<p>The course changes its <a class="term" href="glossary.html#state">state</a> several times. Graph 0 uses a bare string (<code>StateGraph(str)</code>). Graph 1 switches to a <a class="term" href="glossary.html#typeddict">TypedDict</a> with one key, <code>graph_str</code>. Graph 3 adds an optional <code>graph_int</code>. Graph 4 moves to <a class="term" href="glossary.html#messages-state">MessagesState</a>, whose list of messages <em>grows</em> instead of being replaced. This chapter explains the rules behind those choices so you can design state for your own graphs.</p>
+<ul>
+<li>what a state schema is, and what LangGraph does with it;</li>
+<li>three ways to declare it: <code>TypedDict</code>, Pydantic <code>BaseModel</code> and <code>dataclass</code> (all verified with LangGraph 1.2.11);</li>
+<li>how node updates are merged: overwrite by default, or a <a class="term" href="glossary.html#reducer">reducer</a> such as <code>add_messages</code>, <code>operator.add</code> or your own function;</li>
+<li>separate input and output schemas, and private keys passed between two nodes;</li>
+<li>what belongs in state and what doesn't.</li>
+</ul>
+<div class="callout ok"><strong>Why this matters for your project.</strong> Most bugs in small graphs are state bugs: a key that gets overwritten when you wanted a history, a node that returns the whole state when it meant to change one field, a <code>KeyError</code> because a key was never set. The tool-calling graphs (steps <a href="11-graph-5-binding-a-tool.html">11</a>–<a href="14-graph-9-memory.html">14</a>) only work because <code>messages</code> appends; with a plain list key, every node would wipe the conversation.</div>
+
+<h2>What a state schema is</h2>
+<p>A <strong>schema</strong> is a description of the shape of your data: which keys exist and what type each one holds. You pass it to the builder: <code>StateGraph(State)</code>. LangGraph reads it once and creates one storage slot (a <em>channel</em>, see <a href="lg-01-graphs-and-state-machines.html">chapter 1</a>) per key. From then on, three rules apply to every run:</p>
+<ol class="steps">
+<li><strong>Nodes read the whole state.</strong> Each node function receives the current state as its argument.</li>
+<li><strong>Nodes return an update, not a new state.</strong> The return value is a dict with only the keys the node wants to change. Keys it doesn't mention keep their value. Returning <code>None</code> changes nothing (verified).</li>
+<li><strong>LangGraph merges the update.</strong> For each key in the update, it either overwrites the old value (the default) or calls that key's reducer.</li>
+</ol>
+<p>Graph 1 (<a href="07-graph-1-typeddict-state.html">step 7</a>) shows rule 2 in its smallest form:</p>
+<pre data-lang="py" data-tag="from the repo"><code>class State(TypedDict):
+    graph_str:str
+
+# node
+def greeting(state: State) -&gt; State:
+    """function takes a dict and return a dict with greeting"""
+    return {"graph_str": state["graph_str"]+" welcome to AI Career Lab!"}
+</code></pre>
+<p>The node reads <code>state["graph_str"]</code> and returns a dict with that one key. Because the key has no reducer, the returned value replaces the old one.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="The state before a node, the node's partial update, and the merged state after: keys not in the update keep their values">
+  <rect class="box2" x="10" y="40" width="210" height="140" rx="10"/>
+  <text x="115" y="64" text-anchor="middle" class="title">state before</text>
+  <text x="30" y="96" class="mono">question: "hi"</text>
+  <text x="30" y="122" class="mono">answer: ""</text>
+  <text x="30" y="148" class="mono">attempts: 0</text>
+  <rect class="box-solid" x="270" y="70" width="180" height="80" rx="10"/>
+  <text x="360" y="100" text-anchor="middle" class="on-solid">node returns</text>
+  <text x="360" y="126" text-anchor="middle" class="on-solid">{"answer": "Hello!"}</text>
+  <rect class="box-ok" x="500" y="40" width="250" height="140" rx="10"/>
+  <text x="625" y="64" text-anchor="middle" class="title">state after</text>
+  <text x="520" y="96" class="mono">question: "hi"</text>
+  <text x="520" y="122" class="mono">answer: "Hello!"</text>
+  <text x="680" y="122" class="small">changed</text>
+  <text x="520" y="148" class="mono">attempts: 0</text>
+  <path class="arrow" d="M220,110 H266"/>
+  <path class="arrow-accent" d="M450,110 H496"/>
+  <text x="380" y="205" text-anchor="middle" class="small">illustrative keys; untouched keys are kept as they were</text>
+</svg>
+<figcaption>A node returns only what it changes. <strong>Return a small dict of changes, never a full copy of the state</strong>: a full copy works for overwrite keys but duplicates entries in keys that append.</figcaption>
+</figure>
+
+<h2>Three ways to declare state</h2>
+<p>Graph 0 shows that any type works as a schema: <code>StateGraph(str)</code> makes the whole state a single string. Real graphs need several named keys, and LangGraph accepts three common ways to declare them. We ran all three against LangGraph 1.2.11:</p>
+
+<pre data-lang="py" data-tag="verified"><code>from dataclasses import dataclass
+from pydantic import BaseModel
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class TDState(TypedDict):          # 1. TypedDict: the course's choice
+    count: int
+
+class PydState(BaseModel):         # 2. Pydantic model: checks types at run time
+    count: int = 0
+
+@dataclass
+class DCState:                     # 3. dataclass: defaults, attribute access
+    count: int = 0
+
+def bump_dict(state: TDState) -&gt; dict:
+    return {"count": state["count"] + 1}       # TypedDict state is a dict
+
+def bump_attr(state) -&gt; dict:
+    return {"count": state.count + 1}          # Pydantic / dataclass: attributes
+
+for schema, node in [(TDState, bump_dict), (PydState, bump_attr), (DCState, bump_attr)]:
+    builder = StateGraph(schema)
+    builder.add_node("bump", node)
+    builder.add_edge(START, "bump")
+    builder.add_edge("bump", END)
+    print(schema.__name__, builder.compile().invoke({"count": 1}))
+</code></pre>
+<p>All three print <code>{'count': 2}</code>. Notice two things. First, with Pydantic and dataclasses the node receives an <em>object</em>, so it reads <code>state.count</code>, not <code>state["count"]</code>. Second, whatever the schema, nodes still <strong>return a plain dict</strong> of updates and <code>invoke</code> still <strong>returns a dict</strong>.</p>
+
+<details class="primer"><summary>New to TypedDict, Pydantic and dataclasses? A one-minute tour</summary>
+<ul>
+<li><strong>TypedDict</strong> (from <code>typing_extensions</code> or <code>typing</code>): a normal <code>dict</code> plus <a class="term" href="glossary.html#type-hint">type hints</a> that your editor checks. Python itself doesn't check anything when the program runs.</li>
+<li><strong>Pydantic <code>BaseModel</code></strong>: a class whose fields are validated when an object is created. Pass <code>"three"</code> for an <code>int</code> and you get a <code>ValidationError</code>. Pydantic is already installed with LangChain.</li>
+<li><strong><code>@dataclass</code></strong> (standard library): a class with an automatic <code>__init__</code> and default values. No validation.</li>
+</ul>
+</details>
+
+<p>The difference shows up when the input is wrong. Send <code>{"count": "three"}</code>:</p>
+<pre data-lang="text" data-tag="verified"><code># Pydantic state: rejected before the node runs
+pydantic_core._pydantic_core.ValidationError: 1 validation error for PydState
+count
+  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, ...]
+
+# TypedDict state: accepted, then the node crashes
+TypeError: can only concatenate str (not "int") to str
+</code></pre>
+
+<div class="table-wrap"><table>
+<tr><th></th><th>TypedDict</th><th>Pydantic BaseModel</th><th>dataclass</th></tr>
+<tr><td>Node reads</td><td><code>state["key"]</code></td><td><code>state.key</code></td><td><code>state.key</code></td></tr>
+<tr><td>Checks types at run time</td><td>No</td><td>Yes, on input</td><td>No</td></tr>
+<tr><td>Default values</td><td>No (mark optional keys with <code>NotRequired</code>)</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Speed</td><td>Fastest</td><td>Slower (validation work)</td><td>Fast</td></tr>
+<tr><td>Used in</td><td>Graphs 1–3, <code>MessagesState</code>, most docs</td><td>Graphs that take untrusted input</td><td>Teams that prefer classes</td></tr>
+</table></div>
+<p>Rule of thumb: start with <code>TypedDict</code>, like the course. Reach for Pydantic when input comes from outside (an API, a form) and you want bad data rejected at the door.</p>
+
+<h3>Optional keys: <code>NotRequired</code></h3>
+<p>Graph 3 (<a href="09-graph-3-model-in-a-node.html">step 9</a>) declares <code>graph_int:NotRequired[int]</code>. That tells type checkers and LangGraph that callers don't have to provide it; <code>node1</code> sets it later. You can see the effect with <code>graph.get_input_jsonschema()</code>: its <code>required</code> list contains <code>graph_str</code> but not <code>graph_int</code> (verified). That's the kind of schema LangGraph Studio uses for its Input form, where the presenter's graph 2 field shows as "Required". Inside a node, read keys that may be missing with <code>state.get("graph_int", 0)</code> instead of <code>state["graph_int"]</code>, or a missing key raises <code>KeyError</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Three schema styles feed into StateGraph; the node receives a dict for TypedDict and an object for Pydantic or dataclass; all return a dict update">
+  <rect class="box" x="10" y="20" width="170" height="44" rx="8"/>
+  <text x="95" y="47" text-anchor="middle" class="mono">TypedDict</text>
+  <rect class="box" x="10" y="83" width="170" height="44" rx="8"/>
+  <text x="95" y="110" text-anchor="middle" class="mono">BaseModel</text>
+  <rect class="box" x="10" y="146" width="170" height="44" rx="8"/>
+  <text x="95" y="173" text-anchor="middle" class="mono">@dataclass</text>
+  <rect class="box-solid" x="240" y="80" width="150" height="50" rx="10"/>
+  <text x="315" y="110" text-anchor="middle" class="on-solid">StateGraph(...)</text>
+  <path class="arrow" d="M180,42 L238,92"/>
+  <path class="arrow" d="M180,105 H236"/>
+  <path class="arrow" d="M180,168 L238,118"/>
+  <rect class="box-info" x="440" y="30" width="150" height="44" rx="8"/>
+  <text x="515" y="50" text-anchor="middle" class="label">node gets a dict</text>
+  <text x="515" y="66" text-anchor="middle" class="mono">state["count"]</text>
+  <rect class="box-info" x="440" y="136" width="150" height="44" rx="8"/>
+  <text x="515" y="156" text-anchor="middle" class="label">node gets an object</text>
+  <text x="515" y="172" text-anchor="middle" class="mono">state.count</text>
+  <path class="arrow" d="M390,95 L436,58"/>
+  <path class="arrow" d="M390,115 L436,152"/>
+  <rect class="box-ok" x="630" y="80" width="120" height="50" rx="10"/>
+  <text x="690" y="102" text-anchor="middle" class="label">returns a dict</text>
+  <text x="690" y="120" text-anchor="middle" class="mono">{"count": 2}</text>
+  <path class="arrow" d="M590,58 L628,92"/>
+  <path class="arrow" d="M590,152 L628,118"/>
+</svg>
+<figcaption>Verified with LangGraph 1.2.11. <strong>Only the way a node <em>reads</em> state changes between the three styles</strong>; updates and results are dicts in every case.</figcaption>
+</figure>
+
+<h2>How updates are merged: overwrite or reduce</h2>
+<p>By default a key is <strong>overwritten</strong>: the newest value wins. That's what you want for a title, a counter or a route name. For a history (messages, log lines, search results) you want the new value <strong>added</strong> to the old one. That's the job of a <a class="term" href="glossary.html#reducer">reducer</a>: a function <code>reducer(old_value, new_value) -&gt; merged_value</code>. You attach it to a key with <code>Annotated[type, reducer]</code>.</p>
+
+<pre data-lang="py" data-tag="verified"><code>import operator
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+def keep_last_3(old: list, new: list) -&gt; list:      # a custom reducer
+    return (old + new)[-3:]
+
+class State(TypedDict):
+    title: str                                   # no reducer: overwrite
+    log: Annotated[list[str], operator.add]      # operator.add: append lists
+    recent: Annotated[list[int], keep_last_3]    # custom: keep the last 3
+
+def first(state: State) -&gt; dict:
+    return {"title": "draft", "log": ["first ran"], "recent": [1, 2]}
+
+def second(state: State) -&gt; dict:
+    return {"title": "final", "log": ["second ran"], "recent": [3, 4]}
+
+builder = StateGraph(State)
+builder.add_node("first", first)
+builder.add_node("second", second)
+builder.add_edge(START, "first")
+builder.add_edge("first", "second")
+builder.add_edge("second", END)
+graph = builder.compile()
+
+print(graph.invoke({"title": "", "log": ["start"], "recent": [0]}))
+</code></pre>
+<p>Output: <code>{'title': 'final', 'log': ['start', 'first ran', 'second ran'], 'recent': [2, 3, 4]}</code>. Three keys, three behaviours: <code>title</code> was replaced twice, <code>log</code> kept everything, <code>recent</code> kept a rolling window.</p>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import operator</code></td><td>Standard library module with functions for Python's operators. <code>operator.add(a, b)</code> is <code>a + b</code>, which for two lists means "join them".</td></tr>
+<tr><td>2</td><td><code>from typing import Annotated</code></td><td><code>Annotated[T, extra]</code> attaches extra information to a type. LangGraph looks for a callable in that extra slot and uses it as the reducer.</td></tr>
+<tr><td>6–7</td><td><code>def keep_last_3(old, new)</code></td><td>Any function taking (old value, new value) and returning the merged value can be a reducer. This one caps the list length.</td></tr>
+<tr><td>10</td><td><code>title: str</code></td><td>No reducer: the last write wins.</td></tr>
+<tr><td>11</td><td><code>Annotated[list[str], operator.add]</code></td><td>New lists are appended to the old list. Nodes must return a <em>list</em> (<code>["first ran"]</code>), not a bare string.</td></tr>
+<tr><td>12</td><td><code>Annotated[list[int], keep_last_3]</code></td><td>Uses the custom reducer on every update to this key.</td></tr>
+<tr><td>14–18</td><td><code>first</code>, <code>second</code></td><td>Each node returns updates for all three keys, so you can compare the three merge rules side by side.</td></tr>
+<tr><td>28</td><td><code>graph.invoke({...})</code></td><td>The input itself is written to the state; <code>log</code> starts as <code>["start"]</code> and the nodes' entries are appended to it.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Before and after: without a reducer the new list replaces the old; with operator.add the new list is appended to the old">
+  <rect class="zone" x="10" y="10" width="360" height="210" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">No reducer (overwrite)</text>
+  <rect class="box2" x="30" y="60" width="150" height="36" rx="6"/>
+  <text x="105" y="83" text-anchor="middle" class="mono">old: ["a", "b"]</text>
+  <rect class="box-info" x="200" y="60" width="150" height="36" rx="6"/>
+  <text x="275" y="83" text-anchor="middle" class="mono">update: ["c"]</text>
+  <rect class="box-warn" x="100" y="150" width="180" height="40" rx="6"/>
+  <text x="190" y="175" text-anchor="middle" class="mono">new: ["c"]</text>
+  <path class="arrow" d="M105,96 L170,146"/>
+  <path class="arrow" d="M275,96 L210,146"/>
+  <text x="190" y="212" text-anchor="middle" class="small">"a" and "b" are lost</text>
+  <rect class="zone" x="390" y="10" width="360" height="210" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">operator.add (append)</text>
+  <rect class="box2" x="410" y="60" width="150" height="36" rx="6"/>
+  <text x="485" y="83" text-anchor="middle" class="mono">old: ["a", "b"]</text>
+  <rect class="box-info" x="580" y="60" width="150" height="36" rx="6"/>
+  <text x="655" y="83" text-anchor="middle" class="mono">update: ["c"]</text>
+  <rect class="box-ok" x="460" y="150" width="220" height="40" rx="6"/>
+  <text x="570" y="175" text-anchor="middle" class="mono">new: ["a", "b", "c"]</text>
+  <path class="arrow" d="M485,96 L550,146"/>
+  <path class="arrow" d="M655,96 L590,146"/>
+  <text x="570" y="212" text-anchor="middle" class="small">history kept</text>
+</svg>
+<figcaption>Same update, two results. <strong>The reducer is chosen per key, in the schema</strong>, not by the node that writes.</figcaption>
+</figure>
+
+<h3><code>add_messages</code>: the reducer behind <code>MessagesState</code></h3>
+<p>Chat graphs keep a list of <a class="term" href="glossary.html#message">messages</a>. Graph 4 (<a href="10-graph-4-messages-state.html">step 10</a>) uses the built-in <code>MessagesState</code>; the repo keeps its definition in a docstring, and our lesson file makes it runnable:</p>
+<pre data-lang="py" data-tag="from the lesson file"><code># state: what MessagesState looks like inside (the version kept in the repo's docstring)
+class MessagesState(TypedDict):
+    messages: Annotated[List[AnyMessage], add_messages]
+</code></pre>
+<p><a class="term" href="glossary.html#add-messages">add_messages</a> is smarter than <code>operator.add</code>. It matches messages by their <code>id</code>:</p>
+<pre data-lang="py" data-tag="verified"><code>from langchain.messages import AIMessage, HumanMessage, RemoveMessage
+from langgraph.graph.message import add_messages
+
+history = [HumanMessage("hi", id="1"), AIMessage("hello", id="2")]
+
+print([m.content for m in add_messages(history, [AIMessage("more", id="3")])])    # new id: append
+print([m.content for m in add_messages(history, [AIMessage("edited", id="2")])])  # same id: replace
+print([m.content for m in add_messages(history, [RemoveMessage(id="1")])])        # remove by id
+</code></pre>
+<p>It prints <code>['hi', 'hello', 'more']</code>, <code>['hi', 'edited']</code> and <code>['hello']</code>. It also gives every message without an id a fresh one, and converts shortcuts like <code>("user", "hey")</code> or a plain dict into proper message objects. That's why the chat nodes in the course can simply return <code>{"messages": [model_llm.invoke(...)]}</code>: the model's reply is appended to the conversation.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="add_messages compares ids: a new id is appended, an existing id replaces the message in place, a RemoveMessage deletes the matching id">
+  <rect class="box2" x="10" y="20" width="200" height="160" rx="10"/>
+  <text x="110" y="44" text-anchor="middle" class="title">history</text>
+  <rect class="box-info" x="30" y="60" width="160" height="34" rx="6"/>
+  <text x="110" y="82" text-anchor="middle" class="mono">id 1 Human "hi"</text>
+  <rect class="box" x="30" y="110" width="160" height="34" rx="6"/>
+  <text x="110" y="132" text-anchor="middle" class="mono">id 2 AI "hello"</text>
+  <rect class="box-ok" x="300" y="20" width="200" height="40" rx="8"/>
+  <text x="400" y="45" text-anchor="middle" class="label">new id 3: append</text>
+  <rect class="box-warn" x="300" y="80" width="200" height="40" rx="8"/>
+  <text x="400" y="105" text-anchor="middle" class="label">same id 2: replace</text>
+  <rect class="box-bad" x="300" y="140" width="200" height="40" rx="8"/>
+  <text x="400" y="165" text-anchor="middle" class="label">RemoveMessage id 1</text>
+  <path class="arrow" d="M210,100 H296"/>
+  <path class="arrow" d="M210,100 L296,46"/>
+  <path class="arrow" d="M210,100 L296,155"/>
+  <text x="560" y="45" class="mono">hi, hello, more</text>
+  <text x="560" y="105" class="mono">hi, edited</text>
+  <text x="560" y="165" class="mono">hello</text>
+  <path class="arrow" d="M500,40 H552"/>
+  <path class="arrow" d="M500,100 H552"/>
+  <path class="arrow" d="M500,160 H552"/>
+</svg>
+<figcaption>Verified results of <code>add_messages</code>. <strong>Messages are matched by <code>id</code></strong>: that's how you can edit or delete an old message without rebuilding the list.</figcaption>
+</figure>
+
+<p>To add your own keys next to <code>messages</code>, subclass <code>MessagesState</code>:</p>
+<pre data-lang="py" data-tag="verified"><code>from langchain.messages import AIMessage, HumanMessage
+from langgraph.graph import StateGraph, START, END, MessagesState
+
+class ChatState(MessagesState):     # messages (with add_messages) + one extra key
+    turns: int
+
+def reply(state: ChatState) -&gt; dict:
+    return {"messages": [AIMessage("hello!")], "turns": state.get("turns", 0) + 1}
+
+builder = StateGraph(ChatState)
+builder.add_node("reply", reply)
+builder.add_edge(START, "reply")
+builder.add_edge("reply", END)
+graph = builder.compile()
+
+result = graph.invoke({"messages": [HumanMessage("hi")]})
+print([m.content for m in result["messages"]], result["turns"])   # ['hi', 'hello!'] 1
+</code></pre>
+
+<div class="callout"><strong>Reducers and parallel nodes.</strong> When two nodes run in the same <a class="term" href="glossary.html#superstep">superstep</a> and write the same key, LangGraph needs a reducer to combine the two values. Without one it raises <code>InvalidUpdateError: At key '...': Can receive only one value per step. Use an Annotated key to handle multiple values.</code> (verified). <a href="lg-03-control-flow.html">Chapter 3</a> shows the parallel patterns that need this.</div>
+
+<h2>Input, output and private schemas</h2>
+<p>By default one schema is used for everything: what callers send, what nodes see, and what <code>invoke</code> returns. For bigger graphs you can split it. <code>StateGraph</code> takes optional <code>input_schema</code> and <code>output_schema</code> arguments (both present in 1.2.11):</p>
+
+<pre data-lang="py" data-tag="verified"><code>from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class InputState(TypedDict):        # what callers may send
+    question: str
+
+class OutputState(TypedDict):       # what callers get back
+    answer: str
+
+class OverallState(TypedDict):      # everything the graph tracks
+    question: str
+    answer: str
+
+class PrivateState(TypedDict):      # only passed between two nodes
+    scratch: str
+
+def think(state: InputState) -&gt; PrivateState:
+    return {"scratch": state["question"].upper()}
+
+def reply(state: PrivateState) -&gt; OutputState:
+    return {"answer": state["scratch"] + "!"}
+
+builder = StateGraph(OverallState, input_schema=InputState, output_schema=OutputState)
+builder.add_node("think", think)
+builder.add_node("reply", reply)
+builder.add_edge(START, "think")
+builder.add_edge("think", "reply")
+builder.add_edge("reply", END)
+graph = builder.compile()
+
+print(graph.invoke({"question": "hi"}))   # {'answer': 'HI!'}
+</code></pre>
+<p>The caller sends a question and gets back only <code>{'answer': 'HI!'}</code>. The <code>scratch</code> key isn't in <code>OverallState</code> at all: LangGraph learns about it from the type hints on <code>think</code> and <code>reply</code>, so it works as a private hand-off between those two nodes and never appears in the result.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The caller sends InputState with question; inside the graph think writes the private key scratch, reply reads it and writes answer; the caller receives only OutputState with answer">
+  <rect class="box2" x="10" y="80" width="110" height="50" rx="10"/>
+  <text x="65" y="102" text-anchor="middle">caller</text>
+  <text x="65" y="120" text-anchor="middle" class="mono">question</text>
+  <rect class="zone" x="160" y="20" width="440" height="170" rx="10"/>
+  <text x="380" y="42" text-anchor="middle" class="small">inside the graph (OverallState + private keys)</text>
+  <rect class="box" x="190" y="80" width="120" height="50" rx="8"/>
+  <text x="250" y="110" text-anchor="middle" class="mono">think</text>
+  <rect class="box" x="450" y="80" width="120" height="50" rx="8"/>
+  <text x="510" y="110" text-anchor="middle" class="mono">reply</text>
+  <path class="arrow-accent" d="M310,105 H446"/>
+  <text x="378" y="96" text-anchor="middle" class="mono">scratch</text>
+  <text x="378" y="150" text-anchor="middle" class="small">private: never returned</text>
+  <rect class="box-ok" x="630" y="80" width="120" height="50" rx="10"/>
+  <text x="690" y="102" text-anchor="middle">result</text>
+  <text x="690" y="120" text-anchor="middle" class="mono">answer</text>
+  <path class="arrow" d="M120,105 H186"/>
+  <path class="arrow" d="M570,105 H626"/>
+</svg>
+<figcaption>Verified example. <strong>Input and output schemas are a public contract</strong>; everything else stays internal. Callers can't see or set <code>scratch</code>.</figcaption>
+</figure>
+
+<h2>Keeping state small</h2>
+<p>State is copied, merged, and (with a <a class="term" href="glossary.html#checkpointer">checkpointer</a>) saved after every superstep. The more you put in it, the slower and harder to debug your graph becomes. Some guidelines:</p>
+<div class="table-wrap"><table>
+<tr><th>Put in state</th><th>Keep out of state</th></tr>
+<tr><td>Data that changes during the run and that later nodes or routing functions need (<code>messages</code>, <code>route</code>, <code>attempts</code>)</td><td>Things that never change: model objects, API clients, tool lists, config. Create them once at module level, like <code>model_llm</code> in the course</td></tr>
+<tr><td>Small, serialisable values: strings, numbers, lists, dicts, messages</td><td>Open files, database connections, locks: a checkpointer can't save them</td></tr>
+<tr><td>IDs or short summaries of large data</td><td>Whole documents or images; store them elsewhere and keep a reference</td></tr>
+<tr><td>Facts the model produced that you'll reuse</td><td>Values you can recompute cheaply from other keys</td></tr>
+</table></div>
+<p>The course already follows one of these rules. In graphs 8 and 9 the <a class="term" href="glossary.html#system-message">system message</a> is a module-level constant added on each model call. It's never written to <code>messages</code>, so it doesn't pile up in the history every turn (FACTS finding 4; <a href="15-fix-and-harden.html">step 15</a> also moves it to the front).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="A decision tree: does the value change during the run? If no, keep it outside the state as a module constant. If yes, do several nodes write it in parallel or must it accumulate? If yes, add a reducer; if no, a plain key">
+  <rect class="box" x="10" y="65" width="200" height="50" rx="8"/>
+  <text x="110" y="87" text-anchor="middle" class="label">Changes during</text>
+  <text x="110" y="103" text-anchor="middle" class="label">the run?</text>
+  <rect class="box2" x="270" y="10" width="200" height="44" rx="8"/>
+  <text x="370" y="37" text-anchor="middle" class="label">module-level constant</text>
+  <rect class="box" x="270" y="110" width="200" height="56" rx="8"/>
+  <text x="370" y="134" text-anchor="middle" class="label">Must accumulate, or</text>
+  <text x="370" y="152" text-anchor="middle" class="label">written in parallel?</text>
+  <rect class="box-ok" x="540" y="70" width="210" height="44" rx="8"/>
+  <text x="645" y="97" text-anchor="middle" class="label">key with a reducer</text>
+  <rect class="box-info" x="540" y="128" width="210" height="44" rx="8"/>
+  <text x="645" y="155" text-anchor="middle" class="label">plain key (overwrite)</text>
+  <path class="arrow" d="M210,80 L266,40"/>
+  <text x="225" y="50" class="small">no</text>
+  <path class="arrow" d="M210,100 L266,134"/>
+  <text x="225" y="134" class="small">yes</text>
+  <path class="arrow-ok" d="M470,128 L536,96"/>
+  <text x="500" y="102" class="small">yes</text>
+  <path class="arrow" d="M470,148 H536"/>
+  <text x="500" y="164" class="small">no</text>
+</svg>
+<figcaption>A quick way to decide where a value lives. <strong>Most keys are plain; reducers are for histories and parallel writes.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Pitfalls</strong>
+<ul>
+<li>Returning a bare value instead of a dict: <code>return "hello"</code> in a TypedDict graph. Return <code>{"graph_str": "hello"}</code>. (Graph 0 is the exception: its whole state <em>is</em> a string.)</li>
+<li>Returning a string for an append key: <code>{"log": "ran"}</code> with <code>operator.add</code> fails with <code>TypeError: can only concatenate list (not "str") to list</code> (verified). Return <code>{"log": ["ran"]}</code>.</li>
+<li>Returning the whole state from a node. In a <code>MessagesState</code> graph it happens to look fine, because old messages keep their ids and are matched rather than duplicated (verified). With an <code>operator.add</code> key, the old entries are appended a second time.</li>
+<li>Mutating the state in place (<code>state["messages"].append(...)</code>) and returning nothing. In a quick test the change even leaked through (verified), which makes it tempting. But it skips the reducer, doesn't show up as that node's update in streams or checkpoints, and breaks as soon as nodes run in parallel. Always return an update.</li>
+<li>Reading an optional key with <code>state["key"]</code>. Use <code>state.get("key", default)</code>.</li>
+</ul></div>
+
+<div class="callout"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"TypedDict checks my types."</em> Only your editor does. At run time it's a plain dict.</li>
+<li><em>"The node's return value becomes the new state."</em> It's merged into the state, key by key.</li>
+<li><em>"Reducers run when I read a key."</em> They run when an update is written.</li>
+<li><em>"MessagesState is special magic."</em> It's a TypedDict with one key and the <code>add_messages</code> reducer. You can write the same class yourself, as the lesson file does.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A state schema declares the keys; LangGraph keeps one slot per key and merges each node's partial update.</li>
+<li><code>TypedDict</code>, Pydantic and dataclass schemas all work; Pydantic validates input, the others don't. Nodes always return dicts.</li>
+<li>Default merge is overwrite. <code>Annotated[list, operator.add]</code> appends; <code>add_messages</code> appends, replaces by id and removes with <code>RemoveMessage</code>; any <code>(old, new) -&gt; merged</code> function can be a reducer.</li>
+<li><code>input_schema</code> and <code>output_schema</code> define a public contract; keys only declared in node type hints stay private.</li>
+<li>Keep state small and serialisable: put constants and clients at module level.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/graph-api">LangGraph docs: Graph API (state, schemas, reducers)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/use-graph-api">LangGraph docs: Use the Graph API</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/messages">LangChain docs: Messages</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/errors/INVALID_CONCURRENT_GRAPH_UPDATE">LangGraph docs: INVALID_CONCURRENT_GRAPH_UPDATE error</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lg-01-graphs-and-state-machines.html"><small>← Chapter 1</small>Graphs &amp; State Machines</a>
+<a class="next" href="lg-03-control-flow.html"><small>Chapter 3 →</small>Control Flow: Edges, Routing, Loops &amp; Parallelism</a>
+</nav>
+</main>
+</body>
+</html>

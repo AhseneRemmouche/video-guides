@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 8 · Streaming, Debugging &amp; LangGraph Studio</title>
+<meta name="description" content="Stream modes, reading errors, LangSmith tracing and the Studio UI.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 8/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangGraph Handbook · Chapter 8 of 10</div>
+  <h1>Streaming, Debugging &amp; LangGraph Studio</h1>
+  <p class="lead">Stream modes, reading errors, LangSmith tracing and the Studio UI.</p>
+</section>
+<p>So far you have mostly called <code>graph.invoke(...)</code> and looked at the final result. That is fine while everything works. When something goes wrong, or when a user is waiting for a slow model, you want to <strong>see inside the run</strong>. This chapter covers the three ways to do that: <a class="term" href="glossary.html#stream">streaming</a> (getting results step by step, or token by token), reading error messages and <a class="term" href="glossary.html#traceback">tracebacks</a> calmly, and the two visual tools from the video, <a class="term" href="glossary.html#langsmith">LangSmith</a> <a class="term" href="glossary.html#tracing">tracing</a> and <a class="term" href="glossary.html#langgraph-studio">LangGraph Studio</a>.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> In the video the presenter debugged mostly by running graphs in Studio and reading the terminal (for example the <code>GraphLoadError</code> at around 112:18). <a href="19-streaming-and-drawing.html">Step 19</a> added <code>stream_mode="updates"</code> and <code>"values"</code>. Here you get the full picture: every stream mode that exists in LangGraph 1.2.11, the real errors this course produced and what each one means, and a tour of the Studio screen.</div>
+
+<h2>invoke vs stream</h2>
+<p><code>invoke</code> runs the whole graph and gives you one thing at the end: the final state. <code>stream</code> runs the same graph but hands you pieces <strong>while it runs</strong>. You loop over it with <code>for</code>. Nothing else changes: same input, same config, same nodes.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="invoke returns one final state at the end while stream yields a chunk after each node">
+  <text x="20" y="30" class="title">invoke</text>
+  <rect class="box2" x="120" y="12" width="110" height="30" rx="6"/><text x="175" y="32" text-anchor="middle" class="label">node1</text>
+  <rect class="box2" x="250" y="12" width="110" height="30" rx="6"/><text x="305" y="32" text-anchor="middle" class="label">node2</text>
+  <path class="arrow" d="M230,27 H248"/>
+  <path class="arrow-accent" d="M360,27 H588"/>
+  <rect class="box-ok" x="590" y="12" width="160" height="30" rx="6"/><text x="670" y="32" text-anchor="middle" class="label">final state only</text>
+  <text x="470" y="62" text-anchor="middle" class="small">you wait, then get everything at once</text>
+  <text x="20" y="120" class="title">stream</text>
+  <rect class="box2" x="120" y="102" width="110" height="30" rx="6"/><text x="175" y="122" text-anchor="middle" class="label">node1</text>
+  <rect class="box2" x="250" y="102" width="110" height="30" rx="6"/><text x="305" y="122" text-anchor="middle" class="label">node2</text>
+  <path class="arrow" d="M230,117 H248"/>
+  <path class="arrow-accent" d="M175,132 V160"/><path class="arrow-accent" d="M305,132 V160"/>
+  <rect class="box-info" x="100" y="162" width="150" height="34" rx="6"/><text x="175" y="184" text-anchor="middle" class="small">chunk 1 (node1 done)</text>
+  <rect class="box-info" x="260" y="162" width="150" height="34" rx="6"/><text x="335" y="184" text-anchor="middle" class="small">chunk 2 (node2 done)</text>
+  <text x="590" y="184" text-anchor="middle" class="small">your loop body runs for each chunk</text>
+</svg>
+<figcaption><strong>Same graph, same result; stream just lets you watch.</strong> What a "chunk" contains depends on the stream mode.</figcaption>
+</figure>
+
+<h2>The stream modes in LangGraph 1.2.11</h2>
+<p>The <code>stream_mode</code> argument chooses what each chunk contains. In the installed version, <code>typing.get_args(langgraph.types.StreamMode)</code> lists seven modes. All outputs below are real, from graph 2's shape (two nodes that each add a word) unless noted.</p>
+<div class="table-wrap"><table>
+<tr><th>Mode</th><th>Each chunk is</th><th>Real example</th><th>Use it for</th></tr>
+<tr><td><code>"values"</code></td><td>the <strong>full state</strong> after each step (input first)</td><td><code>{'graph_str': 'hi'}</code>, <code>{'graph_str': 'hi one'}</code>, <code>{'graph_str': 'hi one two'}</code></td><td>showing the current state; this is what <code>invoke</code> uses internally</td></tr>
+<tr><td><code>"updates"</code></td><td><strong>only what each node returned</strong>, keyed by node name</td><td><code>{'node1': {'graph_str': 'hi one'}}</code> then <code>{'node2': {...}}</code></td><td>progress ("tools finished"), logging; step 19's agent printout</td></tr>
+<tr><td><code>"messages"</code></td><td>a pair <code>(message_chunk, metadata)</code> for every <a class="term" href="glossary.html#token">token</a> a chat model produces</td><td><code>AIMessageChunk 'Rayleigh'</code>, <code>' '</code>, <code>'scattering'</code>... with <code>metadata["langgraph_node"] == 'chat'</code></td><td>typing-effect chat UIs</td></tr>
+<tr><td><code>"custom"</code></td><td>anything your node sends with <code>get_stream_writer()</code></td><td><code>{'progress': 'node1 started'}</code></td><td>your own progress messages</td></tr>
+<tr><td><code>"debug"</code></td><td>detailed events: <code>task</code> and <code>task_result</code> for every node</td><td><code>task 1 node1</code>, <code>task_result 1 node1</code>, ...</td><td>deep debugging</td></tr>
+<tr><td><code>"tasks"</code></td><td>a start event (<code>id, input, name, triggers</code>) and a finish event (<code>error, id, interrupts, name, result</code>) per node</td><td>two events per node</td><td>timing, errors per node</td></tr>
+<tr><td><code>"checkpoints"</code></td><td>each saved checkpoint (needs a checkpointer)</td><td><code>next ['node1'] values {'graph_str': 'hi'}</code></td><td>watching persistence (<a href="lg-06-persistence-and-memory.html">chapter 6</a>)</td></tr>
+</table></div>
+
+<p>The two you will use most are <code>"updates"</code> and <code>"messages"</code>. This is the agent loop from <a href="19-streaming-and-drawing.html">step 19</a>, unchanged:</p>
+<pre data-lang="py" data-tag="verified"><code>agent = load("8_graph_agent.py").graph
+for chunk in agent.stream({"messages": [HumanMessage(content="What is 12 multiplied by 7?")]},
+                          stream_mode="updates"):
+    for node, update in chunk.items():
+        last = update["messages"][-1]
+        print(f"[{node}] {type(last).__name__}: {last.content or last.tool_calls}")
+
+# [chat_with_tools] AIMessage: [tool call multiply 12, 7]
+# [tools] ToolMessage: 84
+# [chat_with_tools] AIMessage: ...</code></pre>
+
+<h3>Token streaming with <code>"messages"</code></h3>
+<p>A model can take several seconds to write an answer. With <code>stream_mode="messages"</code> your UI can show the words as they arrive. The surprising part: <strong>you do not have to change your node</strong>. Graph 4's node calls <code>model.invoke(...)</code>, not <code>model.stream(...)</code>, and LangGraph still captures the tokens. Verified with a fake model that streams word by word:</p>
+<pre data-lang="py" data-tag="verified"><code>for chunk, metadata in graph.stream({"messages": [HumanMessage(content="why?")]},
+                                    stream_mode="messages"):
+    print(type(chunk).__name__, repr(chunk.content), metadata["langgraph_node"])
+
+# AIMessageChunk 'Rayleigh' chat
+# AIMessageChunk ' ' chat
+# AIMessageChunk 'scattering' chat
+# ...</code></pre>
+<p>Use <code>metadata["langgraph_node"]</code> to filter: in an agent you may only want tokens from <code>chat_with_tools</code>, not from some helper node that also calls a model. With the real <code>ChatOpenAI</code> the chunks are whatever pieces OpenAI sends, usually a word or part of a word.</p>
+
+<h3>Your own progress messages with <code>"custom"</code></h3>
+<pre data-lang="py" data-tag="verified"><code>from langgraph.config import get_stream_writer
+
+
+def node1(state: State):
+    writer = get_stream_writer()
+    writer({"progress": "node1 started"})
+    return {"graph_str": state["graph_str"] + " one"}
+
+for chunk in graph.stream({"graph_str": "hi"}, stream_mode="custom"):
+    print(chunk)                    # {'progress': 'node1 started'}</code></pre>
+
+<h3>Several modes at once</h3>
+<p>Pass a list and every chunk becomes a pair <code>(mode, chunk)</code>. Verified output for <code>stream_mode=["updates", "custom"]</code>:</p>
+<pre data-lang="text" data-tag="verified"><code>custom {'progress': 'node1 started'}
+updates {'node1': {'graph_str': 'hi one'}}
+updates {'node2': {'graph_str': 'hi one two'}}</code></pre>
+<p>If your graph contains <a class="term" href="glossary.html#subgraph">subgraphs</a> (<a href="lg-10-multi-agent-and-roadmap.html">chapter 10</a>), add <code>subgraphs=True</code> to also receive their inner steps; each chunk then starts with a "namespace" tuple saying which subgraph it came from. LangGraph 1.2.11 also accepts <code>version="v2"</code>, which turns every chunk into one dictionary shape, <code>{'type': 'updates', 'ns': (), 'data': {...}}</code>; check the streaming docs for whether it has become the default when you read this.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Decision guide for stream modes: chat UI uses messages, progress uses updates or custom, full state uses values, deep debugging uses debug or tasks">
+  <rect class="box-solid" x="10" y="85" width="170" height="50" rx="8"/>
+  <text x="95" y="107" text-anchor="middle" class="on-solid">What do you</text>
+  <text x="95" y="124" text-anchor="middle" class="on-solid">want to show?</text>
+  <rect class="box" x="250" y="12" width="250" height="36" rx="8"/><text x="375" y="35" text-anchor="middle" class="label">the answer appearing word by word</text>
+  <rect class="box" x="250" y="60" width="250" height="36" rx="8"/><text x="375" y="83" text-anchor="middle" class="label">which step is running / finished</text>
+  <rect class="box" x="250" y="108" width="250" height="36" rx="8"/><text x="375" y="131" text-anchor="middle" class="label">the whole state each time</text>
+  <rect class="box" x="250" y="156" width="250" height="36" rx="8"/><text x="375" y="179" text-anchor="middle" class="label">everything, I am debugging</text>
+  <rect class="box-ok" x="570" y="12" width="180" height="36" rx="8"/><text x="660" y="35" text-anchor="middle" class="mono">"messages"</text>
+  <rect class="box-ok" x="570" y="60" width="180" height="36" rx="8"/><text x="660" y="83" text-anchor="middle" class="mono">"updates" / "custom"</text>
+  <rect class="box-ok" x="570" y="108" width="180" height="36" rx="8"/><text x="660" y="131" text-anchor="middle" class="mono">"values"</text>
+  <rect class="box-ok" x="570" y="156" width="180" height="36" rx="8"/><text x="660" y="179" text-anchor="middle" class="mono">"debug" / "tasks"</text>
+  <path class="arrow" d="M180,100 L248,32"/><path class="arrow" d="M180,106 L248,79"/><path class="arrow" d="M180,116 L248,125"/><path class="arrow" d="M180,124 L248,172"/>
+  <path class="arrow" d="M500,30 H568"/><path class="arrow" d="M500,78 H568"/><path class="arrow" d="M500,126 H568"/><path class="arrow" d="M500,174 H568"/>
+  <text x="380" y="212" text-anchor="middle" class="small">combine with a list, e.g. stream_mode=["updates", "messages"]</text>
+</svg>
+<figcaption>A chat app typically uses <code>"messages"</code> for the text plus <code>"updates"</code> to show "calling the multiply tool...". <strong>Start with "updates"; it is the easiest to read.</strong></figcaption>
+</figure>
+
+<h2>Reading errors without panic</h2>
+<p>A Python traceback is printed <strong>oldest call first, newest last</strong>. The most useful line is almost always the <strong>last one</strong>: the <a class="term" href="glossary.html#exception">exception</a> type and its message. Above it, look for the first line that points into <em>your</em> file (<code>module1/...</code>) rather than into <code>site-packages</code> (library code). LangGraph errors often end with a "For troubleshooting, visit:" link to a docs page about exactly that error.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Anatomy of a traceback: library frames at the top, your file in the middle, the exception type and message at the bottom, read bottom-up">
+  <rect class="ui-window" x="10" y="10" width="560" height="230" rx="8"/>
+  <text x="25" y="34" class="mono">Traceback (most recent call last):</text>
+  <rect class="box2" x="20" y="44" width="540" height="56" rx="4"/>
+  <text x="30" y="64" class="mono">File ".../site-packages/langgraph/...", line ...</text>
+  <text x="30" y="86" class="mono">File ".../site-packages/langgraph_api/graph.py", ...</text>
+  <rect class="box-info" x="20" y="108" width="540" height="40" rx="4"/>
+  <text x="30" y="133" class="mono">File "./module1/6_graph_tool_call.py", line ...</text>
+  <rect class="box-bad" x="20" y="158" width="540" height="70" rx="4"/>
+  <text x="30" y="180" class="mono">ValueError: Found edge ending at unknown node</text>
+  <text x="30" y="200" class="mono">`&lt;function tools_condition at 0x...&gt;`</text>
+  <text x="30" y="220" class="small">(under langgraph dev it is wrapped in GraphLoadError)</text>
+  <text x="665" y="78" text-anchor="middle" class="small">3. library code:</text>
+  <text x="665" y="94" text-anchor="middle" class="small">usually skip</text>
+  <text x="665" y="128" text-anchor="middle" class="small">2. your file:</text>
+  <text x="665" y="144" text-anchor="middle" class="small">where to look</text>
+  <text x="665" y="188" text-anchor="middle" class="small bad">1. read this first</text>
+  <path class="arrow-accent" d="M600,186 C590,186 585,186 572,186"/>
+</svg>
+<figcaption>The step 12 mistake (<code>add_edge</code> instead of <code>add_conditional_edges</code>), simplified. <strong>Read bottom-up: message, then your own line, and only then the library frames.</strong></figcaption>
+</figure>
+
+<p>Here are the real errors met in this course and its extensions. Every message was reproduced against the locked versions.</p>
+<div class="table-wrap"><table>
+<tr><th>You see</th><th>What it means</th><th>Fix</th><th>Where</th></tr>
+<tr><td><code>TypeError: 'function' object is not iterable</code></td><td>you passed the function <code>greeting</code> to <code>add_edge</code> instead of the node <em>name</em> <code>"greeting"</code></td><td>edges use node names (strings)</td><td><a href="06-graph-0-string-state.html">step 6</a></td></tr>
+<tr><td><code>ValueError: Found edge ending at unknown node `&lt;function tools_condition ...&gt;`</code>, or <code>GraphLoadError: Failed to load graph '6_graph'</code> in the <code>langgraph dev</code> log</td><td>a routing function was given to <code>add_edge</code>, so LangGraph treated it as a node name</td><td>use <code>add_conditional_edges(node, tools_condition)</code></td><td><a href="12-graph-6-toolnode.html">step 12</a></td></tr>
+<tr><td><code>NameError: name 'HumanMessage' is not defined</code></td><td>graph 9 uses a class it never imported</td><td>add the import</td><td><a href="15-fix-and-harden.html">step 15</a></td></tr>
+<tr><td><code>openai.OpenAIError: Missing credentials. Please pass an api_key ...</code></td><td>the key is not in the environment; graph 4 never calls <code>load_dotenv()</code></td><td>call <code>load_dotenv()</code>, or run under <code>langgraph dev</code> which reads <code>.env</code></td><td><a href="10-graph-4-messages-state.html">step 10</a></td></tr>
+<tr><td><code>ValueError: invalid literal for int() with base 10: 'Two'</code></td><td>the model answered in words and <code>int(...)</code> failed</td><td>parse with <code>try/except</code></td><td><a href="09-graph-3-model-in-a-node.html">step 9</a></td></tr>
+<tr><td><code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, ...</code></td><td>graph compiled with a checkpointer, called without a config</td><td>pass <code>{"configurable": {"thread_id": ...}}</code></td><td><a href="lg-06-persistence-and-memory.html">chapter 6</a></td></tr>
+<tr><td><code>ValueError: Heads up! Your graph ... includes a custom checkpointer</code></td><td><code>langgraph dev</code> refuses graphs with their own checkpointer</td><td>register a graph compiled without one</td><td><a href="17-persistent-memory-sqlite.html">step 17</a></td></tr>
+<tr><td><code>GraphRecursionError: Recursion limit of 5 reached without hitting a stop condition.</code></td><td>a loop never reached <code>END</code> within <code>recursion_limit</code> steps</td><td>fix the exit condition; set a sensible limit</td><td><a href="lg-03-control-flow.html">chapter 3</a></td></tr>
+<tr><td><code>InvalidUpdateError: Expected dict, got oops</code></td><td>a node returned something that is not a dictionary update</td><td>return <code>{"field": value}</code></td><td>any node</td></tr>
+<tr><td><code>ValueError: Graph must have an entrypoint: add at least one edge from START to another node</code></td><td>you forgot <code>add_edge(START, ...)</code></td><td>add it</td><td>any graph</td></tr>
+<tr><td>Studio: <code>SyntaxError: Expected ':' after property name in JSON</code></td><td>the Input box expects JSON; <code>{"Hel"}</code> is not valid JSON</td><td>for graph 0, type a JSON string: <code>"Hello"</code></td><td><a href="06-graph-0-string-state.html">step 6</a></td></tr>
+</table></div>
+
+<div class="callout warn"><strong>The error that does not appear.</strong> If a node returns a key that is not in the state, for example <code>{"grph_str": "x"}</code> (typo) in a graph whose state has <code>graph_str</code>, LangGraph 1.2.11 raises <strong>nothing</strong>: the verified run simply returned the old state unchanged. When a value "does not update", check the spelling of the key first. Tests (<a href="18-testing-graphs.html">step 18</a>) catch this kind of silent bug.</div>
+
+<details class="primer"><summary>New to debugging? A five-step routine that works for graphs</summary>
+<ol>
+<li><strong>Reproduce</strong> with the smallest input that fails. Write it down.</li>
+<li><strong>Read the last line</strong> of the traceback, then find your own file in it.</li>
+<li><strong>Watch the steps</strong>: run the same input with <code>stream_mode="updates"</code> and print each chunk. You will see which node produced the wrong value.</li>
+<li><strong>Look at the shape</strong>: <code>print(graph.get_graph().draw_mermaid())</code> (step 19) and paste it into mermaid.live. Missing or extra arrows are wiring bugs.</li>
+<li><strong>Remove the model</strong>: replace it with a <a class="term" href="glossary.html#fake-model">fake model</a> (step 18). If the bug remains, it is in your graph; if it disappears, it is about the model's answers.</li>
+</ol>
+</details>
+
+<h2>LangSmith tracing</h2>
+<p>A <strong>trace</strong> is a recording of one run: every node, every model call with its exact input messages and output, every tool call, how long each took and how many tokens were used. LangSmith is LangChain's hosted service that stores and displays traces. In the setup chapter the presenter created a LangSmith key and ran the quickstart in <code>main.py</code> to see the first trace (<a href="04-project-setup.html">step 4</a>).</p>
+<p>Tracing needs no code changes. LangChain and LangGraph read environment variables, which the course keeps in <code>.env</code>:</p>
+<pre data-lang="env" data-tag="illustrative"><code>LANGSMITH_API_KEY="lsv2_pt_..."     # never commit the real key
+LANGSMITH_TRACING=true              # current docs name; the repo's LANGSMITH_TRACING_V2=true also works
+LANGSMITH_PROJECT="LangGraph_ACL"   # traces are grouped by project</code></pre>
+<p>The repo's <code>.env.example</code> uses <code>LANGSMITH_TRACING_V2=true</code>. That was verified to work: the <code>langsmith</code> package accepts <code>TRACING_V2</code> or <code>TRACING</code> with either the <code>LANGSMITH_</code> or the older <code>LANGCHAIN_</code> prefix. New projects should use the name in the current docs, <code>LANGSMITH_TRACING</code>. Remember that in plain Python the variables only exist after <code>load_dotenv()</code> ran, while <code>langgraph dev</code> loads <code>.env</code> itself (<code>"env": ".env"</code> in <code>langgraph.json</code>).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="A trace tree for one run of graph 8: the run contains chat_with_tools with a model call, tools with the multiply tool, and chat_with_tools again">
+  <rect class="ui-window" x="10" y="10" width="740" height="220" rx="8"/>
+  <rect class="ui-chrome" x="10" y="10" width="740" height="30" rx="8"/>
+  <text x="25" y="30" class="label">Trace: one run of 8_graph (simplified)</text>
+  <rect class="box" x="25" y="52" width="300" height="26" rx="5"/><text x="35" y="70" class="label">LangGraph run</text>
+  <rect class="box2" x="55" y="84" width="270" height="26" rx="5"/><text x="65" y="102" class="label">chat_with_tools</text>
+  <rect class="box-info" x="85" y="116" width="240" height="26" rx="5"/><text x="95" y="134" class="label">ChatOpenAI (gpt-4o)</text>
+  <rect class="box2" x="55" y="148" width="270" height="26" rx="5"/><text x="65" y="166" class="label">tools</text>
+  <rect class="box-ok" x="85" y="180" width="240" height="26" rx="5"/><text x="95" y="198" class="label">multiply  12, 7 -&gt; 84</text>
+  <text x="340" y="70" class="small">total time, total tokens</text>
+  <text x="340" y="134" class="small">exact messages sent + reply + tokens</text>
+  <text x="340" y="198" class="small">tool input and output</text>
+  <rect class="box2" x="55" y="212" width="270" height="12" rx="3"/>
+  <text x="340" y="222" class="small">... chat_with_tools again (final answer)</text>
+</svg>
+<figcaption>Illustration (simplified); the real LangSmith UI shows more detail. <strong>A trace answers "what exactly did the model see?"</strong>, which no print statement does as conveniently.</figcaption>
+</figure>
+
+<div class="callout"><strong>Privacy note.</strong> Traces contain the full text of prompts, user messages and tool results. Before tracing real user data, check what your organisation allows, and consider separate projects for development and production.</div>
+
+<h2>A tour of LangGraph Studio</h2>
+<p>Studio is a web page (served from <code>smith.langchain.com/studio</code>, so it needs a LangSmith account) that connects to the <code>langgraph dev</code> server running on your computer at <code>http://127.0.0.1:2024</code>. It reads the graphs listed in <a class="term" href="glossary.html#langgraph-json">langgraph.json</a>, draws them, and lets you run them. Here are the parts you see in the video:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 360" role="img" aria-label="Simplified wireframe of LangGraph Studio: top bar with graph picker, Graph and Chat tabs, Deploy, Connected, thread, Interact and Trace; left side graph drawing with Memory and Interrupts buttons and an Input panel with Submit; right side the thread with turns">
+  <rect class="ui-window" x="10" y="10" width="740" height="340" rx="10"/>
+  <rect class="ui-chrome" x="10" y="10" width="740" height="38" rx="10"/>
+  <text x="24" y="34" class="label">Studio / 8_graph</text>
+  <rect class="ui-button" x="140" y="18" width="52" height="22" rx="5"/><text x="166" y="33" text-anchor="middle" class="on-solid">Graph</text>
+  <rect class="ui-button-ghost" x="196" y="18" width="44" height="22" rx="5"/><text x="218" y="33" text-anchor="middle" class="small">Chat</text>
+  <rect class="ui-button-ghost" x="270" y="18" width="56" height="22" rx="5"/><text x="298" y="33" text-anchor="middle" class="small">Deploy</text>
+  <circle class="dot-ok" cx="342" cy="29" r="4"/><text x="350" y="33" class="small">Connected</text>
+  <text x="430" y="33" class="small">Thread 01a0... / New Thread</text>
+  <rect class="ui-button-ghost" x="604" y="18" width="62" height="22" rx="5"/><text x="635" y="33" text-anchor="middle" class="small">Interact</text>
+  <rect class="ui-button-ghost" x="672" y="18" width="60" height="22" rx="5"/><text x="702" y="33" text-anchor="middle" class="small">Trace</text>
+  <path class="line" d="M415,48 V350"/>
+  <rect class="ui-button-ghost" x="230" y="58" width="70" height="24" rx="5"/><text x="265" y="74" text-anchor="middle" class="small">Memory</text>
+  <rect class="ui-button-ghost" x="306" y="58" width="90" height="24" rx="5"/><text x="351" y="74" text-anchor="middle" class="small">Interrupts</text>
+  <rect class="box2" x="130" y="88" width="100" height="26" rx="13"/><text x="180" y="105" text-anchor="middle" class="small">__start__</text>
+  <rect class="box" x="115" y="128" width="130" height="28" rx="6"/><text x="180" y="146" text-anchor="middle" class="small">chat_with_tools</text>
+  <rect class="box-warn" x="260" y="160" width="80" height="26" rx="6"/><text x="300" y="177" text-anchor="middle" class="small">tools</text>
+  <rect class="box2" x="130" y="196" width="100" height="26" rx="13"/><text x="180" y="213" text-anchor="middle" class="small">__end__</text>
+  <path class="arrow" d="M180,114 V126"/><path class="arrow" d="M245,148 L262,158"/><path class="arrow" d="M180,156 V194"/>
+  <rect class="ui-field" x="25" y="234" width="375" height="104" rx="8"/>
+  <text x="38" y="256" class="label">Input</text>
+  <text x="300" y="256" class="small">View Raw</text>
+  <rect class="ui-skeleton" x="38" y="268" width="200" height="12" rx="3"/>
+  <text x="38" y="300" class="small">Messages / State fields</text>
+  <rect class="ui-button" x="300" y="302" width="88" height="26" rx="6"/><text x="344" y="320" text-anchor="middle" class="on-solid">Submit</text>
+  <text x="583" y="72" text-anchor="middle" class="small">TURN 3</text>
+  <rect class="ui-bubble-user" x="430" y="84" width="230" height="26" rx="8"/><text x="442" y="102" class="ui-on-user">what is 10- 5, 20 * 3, 3 + 2</text>
+  <rect class="ui-bubble-ai" x="430" y="120" width="300" height="28" rx="8"/><text x="442" y="139" class="small">chat_with_tools (click to expand)</text>
+  <rect class="ui-bubble-ai" x="430" y="158" width="300" height="74" rx="8"/>
+  <text x="442" y="176" class="small">tools</text>
+  <text x="456" y="196" class="mono">subtraction  5</text>
+  <text x="456" y="212" class="mono">multiply  60</text>
+  <text x="456" y="228" class="mono">addition  5</text>
+  <text x="583" y="270" text-anchor="middle" class="small">each node's output, per turn</text>
+</svg>
+<figcaption>Illustration (simplified), based on the Studio screen at 131:10 in the video. <strong>Left: the graph and its input. Right: the thread, turn by turn.</strong></figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<tr><th>Part</th><th>What it does</th></tr>
+<tr><td>Graph picker (<code>Studio / 8_graph</code>)</td><td>switches between the graph ids from <code>langgraph.json</code></td></tr>
+<tr><td><strong>Graph</strong> | <strong>Chat</strong></td><td>Graph mode shows the drawing and full state; Chat mode is a simpler chat window for <code>messages</code> graphs</td></tr>
+<tr><td>Connected</td><td>Studio can reach your local server. If it says otherwise, check that <code>langgraph dev</code> is still running</td></tr>
+<tr><td>Input, View Raw, Submit</td><td>a form built from your state schema; View Raw switches to a JSON editor; Submit starts a run on the current thread</td></tr>
+<tr><td>Thread, New Thread</td><td>each thread is one saved conversation (the server persists it); New Thread starts with an empty state, which the presenter does several times to get "a fresh memory" (around 81:28)</td></tr>
+<tr><td>Memory</td><td>according to the Studio docs, manages the server's long-term memory store (<a href="lg-06-persistence-and-memory.html">chapter 6</a>); not used in the video</td></tr>
+<tr><td>Interrupts</td><td>breakpoints before/after chosen nodes (<a href="lg-07-human-in-the-loop.html">chapter 7</a>); not used in the video</td></tr>
+<tr><td>Interact | Trace</td><td>Interact shows the run as turns and nodes; Trace shows the LangSmith-style trace of the same run</td></tr>
+<tr><td>Deploy</td><td>starts a deployment to LangSmith's hosted platform (<a href="lg-09-deploying-and-production.html">chapter 9</a>); needs an account plan that includes it</td></tr>
+</table></div>
+
+<p>Two server behaviours make Studio pleasant to work with. First, <code>langgraph dev</code> <strong>hot-reloads</strong>: when you save a Python file, the log prints "changes detected" and Studio picks up the new code (visible in the video's terminal at 135:20). Second, errors in your graph files appear <strong>in the terminal</strong>, not in Studio. If a graph is missing from the picker, look at the terminal for a <code>GraphLoadError</code>.</p>
+
+<div class="callout warn"><strong>Windows note: harmless <code>UnicodeEncodeError</code> lines.</strong> On Windows, the <code>langgraph dev</code> log may print <code>UnicodeEncodeError</code> messages because the console's default encoding cannot represent some characters in the log output. The server keeps working. To get a clean log, set Python's output encoding to UTF-8 before starting it. In PowerShell: <code>$env:PYTHONIOENCODING="utf-8"</code> then <code>uv run langgraph dev</code>.</div>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"Streaming makes the graph faster."</em> The total time is the same; the user just sees progress sooner.</li>
+<li><em>"To stream tokens I must call <code>model.stream</code> in my node."</em> Not with LangGraph: <code>stream_mode="messages"</code> captures tokens even from <code>model.invoke</code>.</li>
+<li><em>"Studio runs my code in the cloud."</em> Your code runs on your computer in <code>langgraph dev</code>; the Studio page is only the window onto it.</li>
+<li><em>"No error means it worked."</em> A misspelled state key is silently ignored. Check the state after each step.</li>
+<li><em>"Tracing is on because I created a LangSmith key."</em> You also need the tracing variable set, and in plain Python <code>load_dotenv()</code> must run first.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>stream</code> = <code>invoke</code> that hands you chunks. Modes in 1.2.11: <code>values</code>, <code>updates</code>, <code>messages</code>, <code>custom</code>, <code>debug</code>, <code>tasks</code>, <code>checkpoints</code>.</li>
+<li><code>"updates"</code> for progress, <code>"messages"</code> for token-by-token text, <code>"custom"</code> + <code>get_stream_writer()</code> for your own events; lists give <code>(mode, chunk)</code> pairs.</li>
+<li>Read tracebacks bottom-up: message, your file, then library frames. Follow the "troubleshooting" link when there is one.</li>
+<li>A misspelled state key raises no error; test and inspect state.</li>
+<li>LangSmith tracing = API key + <code>LANGSMITH_TRACING=true</code> (the repo's <code>LANGSMITH_TRACING_V2</code> also works) + optional project name.</li>
+<li>Studio: graph picker, Graph/Chat, Input + Submit, threads, Memory, Interrupts, Interact/Trace; errors show in the terminal; on Windows set <code>PYTHONIOENCODING=utf-8</code>.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/streaming">LangGraph docs: Streaming</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/errors/GRAPH_RECURSION_LIMIT">LangGraph docs: GRAPH_RECURSION_LIMIT</a> and <a href="https://docs.langchain.com/oss/python/langgraph/errors/INVALID_GRAPH_NODE_RETURN_VALUE">INVALID_GRAPH_NODE_RETURN_VALUE</a></li>
+<li><a href="https://docs.langchain.com/langsmith/trace-with-langgraph">LangSmith docs: Trace with LangGraph</a></li>
+<li><a href="https://docs.langchain.com/langsmith/studio">LangSmith docs: Studio overview</a> and <a href="https://docs.langchain.com/langsmith/use-studio">How to use Studio</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/local-server">LangGraph docs: Run a local server</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lg-07-human-in-the-loop.html"><small>← Chapter 7</small>Human-in-the-Loop &amp; Interrupts</a>
+<a class="next" href="lg-09-deploying-and-production.html"><small>Chapter 9 →</small>Testing, Deploying &amp; Production</a>
+</nav>
+</main>
+</body>
+</html>

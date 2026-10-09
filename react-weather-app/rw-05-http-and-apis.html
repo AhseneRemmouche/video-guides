@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 5 · HTTP, REST APIs &amp; API Keys</title>
+<meta name="description" content="Requests and responses, status codes, query strings, CORS, HTTPS and keeping keys safe.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 5/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">React Handbook · Chapter 5 of 10</div>
+  <h1>HTTP, REST APIs &amp; API Keys</h1>
+  <p class="lead">Requests and responses, status codes, query strings, CORS, HTTPS and keeping keys safe.</p>
+</section>
+<h2>What you will learn</h2>
+<p>The weather dashboard has no server of its own. Everything it shows comes from <a class="term" href="glossary.html#openweather">OpenWeather</a> (and the base map from <a class="term" href="glossary.html#maptiler">MapTiler</a>), fetched directly by the browser. This chapter explains what actually travels over the network when the app loads, and the web rules that decide whether those requests succeed:</p>
+<ul>
+<li>requests and responses: methods, URLs, headers, bodies and <a class="term" href="glossary.html#json">JSON</a>;</li>
+<li>the anatomy of the OpenWeather URLs, <a class="term" href="glossary.html#query-string">query strings</a> and URL encoding;</li>
+<li><a class="term" href="glossary.html#http-status">HTTP status codes</a>, and why <code>fetch</code> doesn't throw on a 401;</li>
+<li><a class="term" href="glossary.html#https">HTTPS</a> and <a class="term" href="glossary.html#mixed-content">mixed content</a>;</li>
+<li><a class="term" href="glossary.html#cors">CORS</a>: what it is and why it doesn't bite this app;</li>
+<li><a class="term" href="glossary.html#api-key">API keys</a>: what they protect, why a browser app can't hide one, and what to do about it.</li>
+</ul>
+<div class="callout ok"><strong>Why this matters for your project.</strong> Four of the problems found while testing the finished app are HTTP problems: no <code>res.ok</code> check (a bad key shows up as a cryptic Zod error), two <code>http://</code> URLs that browsers will block once the site is on HTTPS, One Call 3.0 needing its own subscription, and keys that end up public in the deployed JavaScript. <a href="25-fix-the-bugs.html">Step 25</a>, <a href="26-error-boundaries.html">step 26</a> and <a href="28-ship-it.html">step 28</a> fix them; this chapter explains why they happen.</div>
+
+<h2>Requests and responses</h2>
+<p>HTTP is a conversation of single exchanges. The browser (the <em>client</em>) sends a <strong>request</strong>; a server sends back exactly one <strong>response</strong>.</p>
+<div class="table-wrap"><table>
+<tr><th>Request part</th><th>In this app</th></tr>
+<tr><td><strong>Method</strong> — what you want to do</td><td>Always <code>GET</code> ("give me this resource"), the default for <code>fetch</code>. Other methods like <code>POST</code> send data to create or change something.</td></tr>
+<tr><td><strong>URL</strong> — which resource</td><td><code>https://api.openweathermap.org/data/3.0/onecall?lat=...</code></td></tr>
+<tr><td><strong>Headers</strong> — metadata</td><td>Added by the browser: <code>Origin</code>, <code>Accept</code>, <code>User-Agent</code>...</td></tr>
+<tr><td><strong>Body</strong></td><td>None (GET requests don't send one).</td></tr>
+</table></div>
+<div class="table-wrap"><table>
+<tr><th>Response part</th><th>In this app</th></tr>
+<tr><td><strong>Status code</strong> — how it went</td><td><code>200 OK</code> normally; <code>401 Unauthorized</code> for a bad key.</td></tr>
+<tr><td><strong>Headers</strong></td><td><code>Content-Type: application/json</code>, <code>Access-Control-Allow-Origin: *</code> (more on that below).</td></tr>
+<tr><td><strong>Body</strong></td><td>JSON text: the weather, the geocoding result, or an error object.</td></tr>
+</table></div>
+<p>An <a class="term" href="glossary.html#api">API</a> (here: a web API) is a set of URLs designed for programs rather than people: you ask in a documented format and get structured data back. OpenWeather's APIs are "REST-style": each URL names a resource, you read it with <code>GET</code>, and the answer is JSON.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 400" role="img" aria-label="Sequence on page load: browser asks Vite or the static host for the app, then calls OpenWeather geocoding, One Call and Air Pollution, plus weather tiles, icons from openweathermap.org and base map tiles from MapTiler">
+  <text x="90" y="24" text-anchor="middle" class="title">Browser</text>
+  <text x="290" y="24" text-anchor="middle" class="title">Web host</text>
+  <text x="490" y="24" text-anchor="middle" class="title">OpenWeather</text>
+  <text x="680" y="24" text-anchor="middle" class="title">MapTiler</text>
+  <path class="line dashed" d="M90,34 V390"/>
+  <path class="line dashed" d="M290,34 V92"/>
+  <path class="line dashed" d="M490,34 V390"/>
+  <path class="line dashed" d="M680,34 V390"/>
+  <path class="arrow" d="M90,56 H286"/>
+  <text x="190" y="50" text-anchor="middle" class="small">1. GET index.html, JS, CSS</text>
+  <path class="arrow-ok" d="M290,80 H94"/>
+  <text x="190" y="74" text-anchor="middle" class="small">2. the app's files</text>
+  <path class="arrow-accent" d="M90,116 H486"/>
+  <text x="290" y="110" text-anchor="middle" class="small">3. GET /geo/1.0/direct?q=Tokyo</text>
+  <path class="arrow-ok" d="M490,140 H94"/>
+  <text x="290" y="134" text-anchor="middle" class="small">4. [{ name, lat, lon, ... }]</text>
+  <path class="arrow-accent" d="M90,176 H486"/>
+  <text x="290" y="170" text-anchor="middle" class="small">5. GET /data/3.0/onecall?lat=..&amp;lon=..</text>
+  <path class="arrow-accent" d="M90,206 H486"/>
+  <text x="290" y="200" text-anchor="middle" class="small">6. GET /data/2.5/air_pollution?lat=..</text>
+  <path class="arrow-ok" d="M490,236 H94"/>
+  <text x="290" y="230" text-anchor="middle" class="small">7. weather + air quality JSON</text>
+  <path class="arrow" d="M90,276 H486"/>
+  <text x="290" y="270" text-anchor="middle" class="small">8. weather tiles /map/clouds_new/{z}/{x}/{y}.png, icons</text>
+  <path class="arrow" d="M90,316 H676"/>
+  <text x="400" y="310" text-anchor="middle" class="small">9. base map style and tiles</text>
+  <rect class="box-warn" x="110" y="340" width="560" height="40" rx="8"/>
+  <text x="390" y="365" text-anchor="middle" class="small">As committed, steps 5–6 first run for lat 0 / lon 0, before step 3 finishes</text>
+</svg>
+<figcaption>Time flows down. <strong>After the first download, every request goes straight from the browser to third-party APIs</strong> — there is no backend in between. Open your browser's Network tab to watch these happen.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to the Network tab? How to watch requests</summary>
+<p>Press <kbd>F12</kbd> (or right-click → Inspect) and open the <strong>Network</strong> tab, then reload the page. Each row is one request. Filter by <em>Fetch/XHR</em> to see only API calls. Click a row to see its URL and query parameters, request and response headers, status code and the response body ("Preview" or "Response"). When something fails, this is the first place to look: the status code and body usually tell you why. Remember that anyone can do this on your deployed site, including reading any key in a URL.</p>
+</details>
+
+<h2>Anatomy of a URL</h2>
+<pre data-lang="ts" data-tag="verified · from src/api.ts (line 9)"><code>    `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&amp;lon=${lon}&amp;units=imperial&amp;exclude=minutely,alerts&amp;appid=${API_KEY}`
+</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="URL broken into scheme https, host api.openweathermap.org, path /data/3.0/onecall, and the query string with lat, lon, units, exclude and appid parameters">
+  <rect class="box-ok" x="10" y="30" width="70" height="40" rx="8"/>
+  <text x="45" y="55" text-anchor="middle" class="mono">https</text>
+  <rect class="box" x="90" y="30" width="210" height="40" rx="8"/>
+  <text x="195" y="55" text-anchor="middle" class="mono">api.openweathermap.org</text>
+  <rect class="box2" x="310" y="30" width="150" height="40" rx="8"/>
+  <text x="385" y="55" text-anchor="middle" class="mono">/data/3.0/onecall</text>
+  <rect class="box-info" x="470" y="30" width="280" height="40" rx="8"/>
+  <text x="610" y="55" text-anchor="middle" class="mono">?lat=..&amp;lon=..&amp;...&amp;appid=..</text>
+  <text x="45" y="95" text-anchor="middle" class="label">scheme</text>
+  <text x="45" y="112" text-anchor="middle" class="small">encrypted?</text>
+  <text x="195" y="95" text-anchor="middle" class="label">host</text>
+  <text x="195" y="112" text-anchor="middle" class="small">which server</text>
+  <text x="385" y="95" text-anchor="middle" class="label">path</text>
+  <text x="385" y="112" text-anchor="middle" class="small">which API + version</text>
+  <text x="610" y="95" text-anchor="middle" class="label">query string</text>
+  <text x="610" y="112" text-anchor="middle" class="small">key=value pairs joined by &amp;</text>
+  <rect class="box2" x="470" y="130" width="280" height="80" rx="8"/>
+  <text x="484" y="150" class="mono">lat, lon</text>
+  <text x="610" y="150" class="small">coordinates</text>
+  <text x="484" y="167" class="mono">units=imperial</text>
+  <text x="610" y="167" class="small">°F and mph</text>
+  <text x="484" y="184" class="mono">exclude=...</text>
+  <text x="610" y="184" class="small">skip sections</text>
+  <text x="484" y="201" class="mono">appid=...</text>
+  <text x="610" y="201" class="small">your API key</text>
+</svg>
+<figcaption>Every API URL in the project has these four parts. <strong>The query string carries the inputs, including the key</strong> — so the key is visible to anyone who looks at the request.</figcaption>
+</figure>
+
+<p>The three OpenWeather endpoints the app uses:</p>
+<div class="table-wrap"><table>
+<tr><th>Function in <code>api.ts</code></th><th>Endpoint</th><th>Inputs</th><th>Used by</th></tr>
+<tr><td><code>getGeocode</code></td><td><code>/geo/1.0/direct</code> (<a class="term" href="glossary.html#geocoding">Geocoding</a> API)</td><td><code>q</code> (city name), <code>limit=1</code></td><td><code>App.tsx</code> — city to coordinates</td></tr>
+<tr><td><code>getWeather</code></td><td><code>/data/3.0/onecall</code> (<a class="term" href="glossary.html#one-call">One Call 3.0</a>)</td><td><code>lat</code>, <code>lon</code>, <code>units=imperial</code>, <code>exclude=minutely,alerts</code></td><td>all four weather cards</td></tr>
+<tr><td><code>getAirPollution</code></td><td><code>/data/2.5/air_pollution</code></td><td><code>lat</code>, <code>lon</code></td><td>the side panel (<a class="term" href="glossary.html#aqi">AQI</a> and pollutants)</td></tr>
+</table></div>
+<p>The weather map overlay is a fourth kind of request: <a class="term" href="glossary.html#tile-layer">tiles</a> from <code>tile.openweathermap.org/map/{layer}/{z}/{x}/{y}.png</code>, requested by Leaflet itself, many at a time (<a href="16-weather-map-layers.html">step 16</a>, <a href="rw-08-maps-on-the-web.html">chapter 8</a>).</p>
+
+<h3>URL encoding</h3>
+<p>Some characters have a meaning inside URLs: <code>&amp;</code> separates parameters, <code>?</code> starts the query, <code>#</code> starts a fragment, and spaces are not allowed at all. A value that contains them must be <em>encoded</em>. <code>getGeocode</code> pastes the city in directly (<code>q=${location}</code>). For "New York" this happens to work because browsers encode the space for you, but a name containing <code>&amp;</code> or <code>#</code> would break the URL. Two standard tools do it properly:</p>
+<pre data-lang="js" data-tag="verified · Node 24"><code>encodeURIComponent("New York")            // "New%20York"
+encodeURIComponent("São Paulo &amp; Co")      // "S%C3%A3o%20Paulo%20%26%20Co"
+
+const u = new URL("https://api.openweathermap.org/geo/1.0/direct")
+u.searchParams.set("q", "New York")
+u.searchParams.set("limit", "1")
+u.toString() // "https://api.openweathermap.org/geo/1.0/direct?q=New+York&amp;limit=1"
+</code></pre>
+<p>Both forms (<code>%20</code> and <code>+</code>) mean a space in a query string. <a href="25-fix-the-bugs.html">Step 25</a> wraps the city in <code>encodeURIComponent</code>. The dropdown only offers fixed city names today, but code tends to outlive such assumptions — a search box would make this matter at once.</p>
+
+<h2>Status codes and what fetch does with them</h2>
+<p>Every response starts with a three-digit status code. The first digit tells you the category:</p>
+<div class="table-wrap"><table>
+<tr><th>Range</th><th>Meaning</th><th>Examples you may meet here</th></tr>
+<tr><td><code>2xx</code></td><td>Success</td><td><code>200 OK</code></td></tr>
+<tr><td><code>3xx</code></td><td>Redirect — look elsewhere</td><td><code>301</code>/<code>302</code>; <code>fetch</code> follows them automatically</td></tr>
+<tr><td><code>4xx</code></td><td>Client error — your request is wrong</td><td><code>400</code> bad parameters, <code>401</code> missing/invalid key or no subscription, <code>404</code> wrong path, <code>429</code> too many requests</td></tr>
+<tr><td><code>5xx</code></td><td>Server error — their problem</td><td><code>500</code>, <code>502</code>, <code>503</code>; often temporary, worth a retry</td></tr>
+</table></div>
+<p>We sent real requests to OpenWeather with a made-up key. Both endpoints answered 401 with a small JSON error object:</p>
+<pre data-lang="text" data-tag="verified · curl, air_pollution with an invalid key"><code>HTTP/1.1 401 Unauthorized
+Content-Type: application/json; charset=utf-8
+Access-Control-Allow-Origin: *
+
+{"cod":401, "message": "Invalid API key. Please see https://openweathermap.org/faq#error401 for more info."}
+</code></pre>
+<pre data-lang="text" data-tag="verified · curl, onecall 3.0 with an invalid key"><code>HTTP/1.1 401 Unauthorized
+
+{"cod":401, "message": "Please note that using One Call 3.0 requires a separate subscription to the One Call by Call plan. Learn more here https://openweathermap.org/price. If you have a valid subscription to the One Call by Call plan, but still receive this error, then please see https://openweathermap.org/faq#error401 for more info."}
+</code></pre>
+<p>The second message is important for anyone following the video: a regular OpenWeather key works for geocoding and air pollution, but One Call 3.0 answers 401 until the account also has the "One Call by Call" subscription. If your cards fail while the side panel works, this is the first thing to check (check OpenWeather's site for the current plans and terms).</p>
+
+<h3>fetch resolves on errors</h3>
+<p>Here is the trap. <code>fetch</code> only <em>rejects</em> (throws, when awaited) if no response arrived at all: no network, unknown host, a blocked request. Any HTTP response, including 401 or 500, counts as success:</p>
+<pre data-lang="js" data-tag="verified · Node 24 (save as .mjs)"><code>const res = await fetch("https://api.openweathermap.org/data/2.5/air_pollution?lat=35.68&amp;lon=139.69&amp;appid=INVALID")
+console.log("ok:", res.ok, "status:", res.status, res.statusText)
+console.log("body:", await res.json())
+try {
+  await fetch("https://no-such-host.invalid/")
+} catch (e) {
+  console.log("network error -&gt;", e.name + ":", e.message)
+}
+</code></pre>
+<pre data-lang="text" data-tag="verified · output"><code>ok: false status: 401 Unauthorized
+body: {
+  cod: 401,
+  message: 'Invalid API key. Please see https://openweathermap.org/faq#error401 for more info.'
+}
+network error -&gt; TypeError: fetch failed
+</code></pre>
+<p>(Browsers word the network error differently, e.g. "Failed to fetch", but it is the same <code>TypeError</code>.) The repo's helpers go straight from <code>fetch</code> to <code>res.json()</code> to Zod. With a bad key, the JSON is <code>{ cod, message }</code>, so Zod reports that <code>lat</code> was "expected number, received undefined" — true, but useless. Checking <code>res.ok</code> first turns it into a clear message. This is the helper from <a href="25-fix-the-bugs.html">step 25</a>:</p>
+<pre data-lang="ts" data-tag="verified · from step 25's src/api.ts (lines 10–17)"><code>async function fetchJson&lt;T extends z.ZodType&gt;(url: string, schema: T): Promise&lt;z.infer&lt;T&gt;&gt; {
+  const res = await fetch(url)
+  if (!res.ok) {
+    const body = await res.json().catch(() =&gt; null)
+    throw new Error(`OpenWeather request failed (${res.status}): ${body?.message ?? res.statusText}`)
+  }
+  return schema.parse(await res.json())
+}
+</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Decision tree for a request: if no response, fetch rejects with TypeError; if response but res.ok is false, throw a readable error with status and message; if ok, parse JSON and validate with Zod, which either returns typed data or throws a validation error">
+  <rect class="box-solid" x="290" y="10" width="180" height="40" rx="8"/>
+  <text x="380" y="35" text-anchor="middle" class="on-solid">await fetch(url)</text>
+  <rect class="box-bad" x="10" y="90" width="220" height="56" rx="8"/>
+  <text x="120" y="114" text-anchor="middle" class="label">no response</text>
+  <text x="120" y="134" text-anchor="middle" class="small">rejects: TypeError</text>
+  <rect class="box-warn" x="270" y="90" width="220" height="56" rx="8"/>
+  <text x="380" y="114" text-anchor="middle" class="label">res.ok is false (401...)</text>
+  <text x="380" y="134" text-anchor="middle" class="small">throw "failed (401): message"</text>
+  <rect class="box" x="530" y="90" width="220" height="56" rx="8"/>
+  <text x="640" y="114" text-anchor="middle" class="label">res.ok is true (2xx)</text>
+  <text x="640" y="134" text-anchor="middle" class="small">await res.json()</text>
+  <rect class="box-bad" x="400" y="200" width="170" height="56" rx="8"/>
+  <text x="485" y="224" text-anchor="middle" class="label">shape is wrong</text>
+  <text x="485" y="244" text-anchor="middle" class="small">ZodError</text>
+  <rect class="box-ok" x="590" y="200" width="160" height="56" rx="8"/>
+  <text x="670" y="224" text-anchor="middle" class="label">shape matches</text>
+  <text x="670" y="244" text-anchor="middle" class="small">typed data</text>
+  <path class="arrow-bad" d="M330,50 L150,86"/>
+  <path class="arrow" d="M380,50 V86"/>
+  <path class="arrow-ok" d="M430,50 L610,86"/>
+  <path class="arrow-bad" d="M610,146 L505,196"/>
+  <path class="arrow-ok" d="M660,146 L668,196"/>
+  <text x="120" y="190" text-anchor="middle" class="small">the repo skips the middle branch,</text>
+  <text x="120" y="206" text-anchor="middle" class="small">so a 401 reaches Zod instead</text>
+</svg>
+<figcaption>Three ways a request can end. <strong>Check <code>res.ok</code> before parsing</strong>, so each failure gets a message that says what actually went wrong. TanStack Query then retries and passes the error to an error boundary (<a href="26-error-boundaries.html">step 26</a>).</figcaption>
+</figure>
+
+<p>Retries deserve a word. TanStack Query retries a failed query three times by default, with increasing delays. That is helpful for a flaky network or a <code>503</code>, but pointless for a <code>401</code>: the key won't fix itself. In the browser test with an invalid key, the committed app made 28 requests in 20 seconds before giving up. Retrying too eagerly is also how you hit <code>429 Too Many Requests</code>. <a href="rw-06-tanstack-query.html">Chapter 6</a> shows how to tune <code>retry</code>.</p>
+
+<h2>HTTPS and mixed content</h2>
+<p>HTTPS is HTTP inside an encrypted, authenticated connection (TLS). Nobody between you and the server can read or change the data, and the browser checks the server's certificate so you know you're talking to the real host. On plain <code>http://</code>, anyone on the network path — public Wi-Fi, for example — can read the request, including the <code>appid</code> in the URL.</p>
+<p>Two of the three API URLs in the repo use plain HTTP:</p>
+<pre data-lang="ts" data-tag="verified · from src/api.ts (lines 17 and 31)"><code>    `http://api.openweathermap.org/geo/1.0/direct?q=${location}&amp;limit=1&amp;appid=${API_KEY}`
+    `http://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&amp;lon=${lon}&amp;appid=${API_KEY}`
+</code></pre>
+<p>During development nothing goes wrong: the page itself is <code>http://localhost:5173</code>, and OpenWeather still answers plain HTTP (we checked with curl; it does not redirect). The problem appears after deployment. Static hosts normally serve your site over HTTPS, and browsers enforce a <strong>mixed content</strong> rule: a secure (<code>https://</code>) page may not load scripts or make <code>fetch</code> requests to insecure (<code>http://</code>) URLs. The requests are blocked before they leave the browser, and the console shows a "Mixed Content" error. In this app that would mean no city lookup and no air-quality panel. (This was reasoned from the rule, not tested on a deployed site.)</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Left: page on http localhost calling http API works in development. Right: page on https host calling http API is blocked by the browser; calling https API works">
+  <rect class="zone" x="10" y="10" width="360" height="230" rx="12"/>
+  <text x="190" y="34" text-anchor="middle" class="title">npm run dev</text>
+  <rect class="box2" x="30" y="60" width="140" height="56" rx="8"/>
+  <text x="100" y="84" text-anchor="middle" class="label">page</text>
+  <text x="100" y="102" text-anchor="middle" class="mono">http://localhost</text>
+  <rect class="box-ok" x="220" y="60" width="130" height="56" rx="8"/>
+  <text x="285" y="84" text-anchor="middle" class="label">http:// API</text>
+  <text x="285" y="102" text-anchor="middle" class="small">allowed</text>
+  <path class="arrow-ok" d="M170,88 H216"/>
+  <text x="190" y="160" text-anchor="middle" class="small">http page → http API: no rule broken,</text>
+  <text x="190" y="176" text-anchor="middle" class="small">so the bug is invisible while developing</text>
+  <rect class="zone" x="390" y="10" width="360" height="230" rx="12"/>
+  <text x="570" y="34" text-anchor="middle" class="title">deployed site</text>
+  <rect class="box2" x="410" y="90" width="140" height="56" rx="8"/>
+  <text x="480" y="114" text-anchor="middle" class="label">page</text>
+  <text x="480" y="132" text-anchor="middle" class="mono">https://your.site</text>
+  <rect class="box-bad" x="600" y="50" width="130" height="56" rx="8"/>
+  <text x="665" y="74" text-anchor="middle" class="label">http:// API</text>
+  <text x="665" y="92" text-anchor="middle" class="small">blocked</text>
+  <rect class="box-ok" x="600" y="130" width="130" height="56" rx="8"/>
+  <text x="665" y="154" text-anchor="middle" class="label">https:// API</text>
+  <text x="665" y="172" text-anchor="middle" class="small">allowed</text>
+  <path class="arrow-bad" d="M550,108 L596,82"/>
+  <path class="arrow-ok" d="M550,128 L596,154"/>
+  <text x="570" y="220" text-anchor="middle" class="small">"Mixed Content" error in the console</text>
+</svg>
+<figcaption>Mixed content only exists on HTTPS pages. <strong>Use <code>https://</code> for every API URL from day one</strong>; step 25 does this with a single <code>BASE_URL</code> constant.</figcaption>
+</figure>
+
+<h2>CORS: who may read the response</h2>
+<p>Browsers follow the <strong>same-origin policy</strong>: JavaScript on one origin (scheme + host + port, e.g. <code>http://localhost:5173</code>) may not read responses from another origin unless that server agrees. The agreement is called <strong>CORS</strong> (Cross-Origin Resource Sharing) and is expressed in response headers. The browser sends an <code>Origin</code> header with the request; if the response says <code>Access-Control-Allow-Origin</code> with that origin or <code>*</code>, the browser hands the response to your code. If not, your code gets a network error and the console shows a CORS message — even though the server did answer.</p>
+<p>OpenWeather allows everyone. We sent a request with an <code>Origin</code> header and got:</p>
+<pre data-lang="text" data-tag="verified · curl -H &quot;Origin: http://localhost:5173&quot; (geocoding)"><code>HTTP/1.1 401 Unauthorized
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Credentials: true
+Access-Control-Allow-Methods: GET, POST
+</code></pre>
+<p>That is why the app can call the API directly from the browser, from localhost or from any deployed domain. Some APIs don't send these headers; then a browser app can't call them directly and needs a server in between.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="CORS check: browser sends request with Origin header; server answers with Access-Control-Allow-Origin; browser compares and either gives the response to JavaScript or blocks it">
+  <rect class="box2" x="10" y="80" width="160" height="70" rx="8"/>
+  <text x="90" y="108" text-anchor="middle" class="label">your JavaScript</text>
+  <text x="90" y="128" text-anchor="middle" class="small">localhost:5173</text>
+  <rect class="box" x="230" y="80" width="160" height="70" rx="8"/>
+  <text x="310" y="108" text-anchor="middle" class="label">browser</text>
+  <text x="310" y="128" text-anchor="middle" class="small">enforces the policy</text>
+  <rect class="box2" x="590" y="80" width="160" height="70" rx="8"/>
+  <text x="670" y="108" text-anchor="middle" class="label">API server</text>
+  <text x="670" y="128" text-anchor="middle" class="small">decides via headers</text>
+  <path class="arrow" d="M170,100 H226"/>
+  <path class="arrow" d="M390,95 H586"/>
+  <text x="488" y="88" text-anchor="middle" class="small">Origin: http://localhost:5173</text>
+  <path class="arrow-ok" d="M590,135 H394"/>
+  <text x="488" y="160" text-anchor="middle" class="small">Access-Control-Allow-Origin: *</text>
+  <path class="arrow-ok" d="M230,130 H174"/>
+  <rect class="box-ok" x="10" y="180" width="360" height="44" rx="8"/>
+  <text x="190" y="207" text-anchor="middle" class="small">header matches → response given to fetch()</text>
+  <rect class="box-bad" x="390" y="180" width="360" height="44" rx="8"/>
+  <text x="570" y="207" text-anchor="middle" class="small">missing or other origin → TypeError + CORS message</text>
+</svg>
+<figcaption>CORS is enforced by the browser, using permission headers sent by the server. <strong>It protects users' data in the browser; it does not protect an API from being called</strong> — curl and servers ignore it.</figcaption>
+</figure>
+<p>A common misunderstanding is to treat CORS as a security feature for the API. It isn't: tools like curl or a server don't check CORS at all. It stops a malicious <em>web page</em> from reading data from other sites using the visitor's browser and cookies. "Preflight" <code>OPTIONS</code> requests appear only for non-simple requests (custom headers, JSON bodies, methods like <code>PUT</code>); the app's plain <code>GET</code> calls don't trigger them.</p>
+
+<h2>API keys: identification, not secrecy</h2>
+<p>An API key identifies <em>who</em> is calling, so the provider can apply limits, track usage and (for paid plans) bill the right account. The app sends its OpenWeather key as <code>appid</code> on every request, including each weather map tile. The key comes from <code>import.meta.env.VITE_API_KEY</code>, and Vite pastes its value into the JavaScript bundle at build time (verified in <a href="rw-03-tooling.html">chapter 3</a>). So once deployed, the key is public: it is in the downloaded JavaScript and in every request in the Network tab. The repo also hard-codes a MapTiler key in <code>Map.tsx</code> (line 58; replaced by a placeholder in this guide), which makes it public on GitHub too.</p>
+<p>There is no way to hide a secret in code that runs in the visitor's browser. Your options:</p>
+<div class="table-wrap"><table>
+<tr><th>Approach</th><th>What it gives you</th><th>Fits</th></tr>
+<tr><td>Accept a public key, but restrict it</td><td>Some providers let you limit a key to your domains (MapTiler's dashboard has allowed origins). Check what your provider offers; for the OpenWeather key, real protection needs a proxy.</td><td>Map keys, demo projects</td></tr>
+<tr><td>Keep keys out of git</td><td>Put them in <code>.env.local</code> (ignored by the repo's <code>.gitignore</code>), never in source files. Prevents leaks in the repository; does not hide them in the deployed app.</td><td>Always</td></tr>
+<tr><td>Proxy through your own server</td><td>The browser calls <em>your</em> endpoint; the server adds the key and forwards. The key never reaches the browser, and you can add caching and rate limits.</td><td>Paid keys, anything you care about</td></tr>
+<tr><td>Rotate a leaked key</td><td>Create a new key in the provider dashboard and delete the old one. Removing it from git history is not enough — assume it was copied.</td><td>After any leak</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Top: browser holds the key and calls OpenWeather directly, key visible. Bottom: browser calls your proxy without a key, proxy adds the key from a server environment variable and calls OpenWeather">
+  <text x="10" y="24" class="title">Direct (this repo)</text>
+  <rect class="box-warn" x="10" y="36" width="220" height="60" rx="8"/>
+  <text x="120" y="62" text-anchor="middle" class="label">browser bundle</text>
+  <text x="120" y="82" text-anchor="middle" class="small">contains the key</text>
+  <rect class="box2" x="530" y="36" width="220" height="60" rx="8"/>
+  <text x="640" y="70" text-anchor="middle" class="label">OpenWeather</text>
+  <path class="arrow-bad" d="M230,66 H526"/>
+  <text x="378" y="58" text-anchor="middle" class="small">...&amp;appid=KEY (visible to everyone)</text>
+  <text x="10" y="140" class="title">Through a proxy</text>
+  <rect class="box-ok" x="10" y="152" width="200" height="60" rx="8"/>
+  <text x="110" y="178" text-anchor="middle" class="label">browser bundle</text>
+  <text x="110" y="198" text-anchor="middle" class="small">no key</text>
+  <rect class="box" x="280" y="152" width="200" height="60" rx="8"/>
+  <text x="380" y="178" text-anchor="middle" class="label">your server</text>
+  <text x="380" y="198" text-anchor="middle" class="small">key in server env</text>
+  <rect class="box2" x="550" y="152" width="200" height="60" rx="8"/>
+  <text x="650" y="186" text-anchor="middle" class="label">OpenWeather</text>
+  <path class="arrow-ok" d="M210,182 H276"/>
+  <text x="243" y="174" text-anchor="middle" class="small">/api/...</text>
+  <path class="arrow" d="M480,182 H546"/>
+  <text x="513" y="174" text-anchor="middle" class="small">+ appid</text>
+</svg>
+<figcaption>Where the key lives decides who can see it. <strong>Anything shipped to the browser is public</strong>; only a server can keep a secret.</figcaption>
+</figure>
+
+<p>A proxy can be very small. This Node script (standard library only) forwards three allowed OpenWeather paths and adds the key from the server's environment. We ran it with a fake key: <code>/api/geo/1.0/direct?q=Tokyo&amp;limit=1</code> came back with OpenWeather's 401 JSON, and any other path returned 404.</p>
+<pre data-lang="js" data-tag="verified · Node 24 (a sketch, not production-ready)"><code>import http from "node:http"
+
+const API_KEY = process.env.OPENWEATHER_KEY // lives only on the server
+const ALLOWED = new Set(["/data/3.0/onecall", "/geo/1.0/direct", "/data/2.5/air_pollution"])
+
+http
+  .createServer(async (req, res) =&gt; {
+    const url = new URL(req.url, "http://localhost")
+    const path = url.pathname.replace(/^\/api/, "")
+    if (!ALLOWED.has(path)) {
+      res.writeHead(404).end()
+      return
+    }
+    url.searchParams.set("appid", API_KEY)
+    const upstream = await fetch(`https://api.openweathermap.org${path}?${url.searchParams}`)
+    res.writeHead(upstream.status, { "Content-Type": "application/json" })
+    res.end(await upstream.text())
+  })
+  .listen(8787)
+</code></pre>
+<p>The allow-list matters: without it, your proxy would let anyone use your key for any OpenWeather endpoint. A real deployment would add error handling, caching and rate limiting, and usually runs as a serverless function on the same host as the site. The weather map tiles would need the same treatment, since their URLs carry the key too. <a href="28-ship-it.html">Step 28</a> and <a href="rw-10-shipping.html">chapter 10</a> discuss the deployment side.</p>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><strong>"<code>fetch</code> throws when the server returns an error."</strong> Only on network failure. Check <code>res.ok</code> or <code>res.status</code>.</li>
+<li><strong>"It works locally, so the URLs are fine."</strong> Mixed content only shows up on an HTTPS page. Use <code>https://</code> everywhere.</li>
+<li><strong>"A <code>.env</code> file keeps my key secret."</strong> It keeps it out of the source files. Any <code>VITE_</code> value is still inlined into the public bundle.</li>
+<li><strong>"CORS errors mean the server is down" / "CORS secures the API."</strong> CORS errors mean the server didn't grant permission to your origin; and CORS is a browser rule, not API protection.</li>
+<li><strong>"A 401 always means a wrong key."</strong> For One Call 3.0 it can also mean the separate subscription is missing — read the message body.</li>
+<li><strong>"Retrying always helps."</strong> Retry 5xx and network errors; don't hammer an API with requests that will fail the same way.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A request has a method, URL, headers and (sometimes) a body; a response has a status code, headers and a body — JSON for these APIs.</li>
+<li>URLs = scheme + host + path + query string; encode user input with <code>encodeURIComponent</code> or <code>URLSearchParams</code>.</li>
+<li>2xx success, 4xx your mistake, 5xx theirs. <code>fetch</code> resolves for all of them, so check <code>res.ok</code> before parsing.</li>
+<li>One Call 3.0 answers 401 without the separate "One Call by Call" subscription; the error body says so.</li>
+<li>HTTPS pages can't call <code>http://</code> APIs (mixed content); OpenWeather sends <code>Access-Control-Allow-Origin: *</code>, so CORS allows direct browser calls.</li>
+<li>Keys in browser code are public. Restrict them where possible, keep them out of git, and use a small server proxy when a key must stay secret.</li>
+</ul>
+</div>
+
+<h2>Learn more</h2>
+<ul>
+<li>MDN: <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Overview" target="_blank" rel="noopener">An overview of HTTP</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods" target="_blank" rel="noopener">HTTP request methods</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status" target="_blank" rel="noopener">HTTP response status codes</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching" target="_blank" rel="noopener">HTTP caching</a></li>
+<li>MDN: <a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch" target="_blank" rel="noopener">Using the Fetch API</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/ok" target="_blank" rel="noopener">Response.ok</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams" target="_blank" rel="noopener">URLSearchParams</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent" target="_blank" rel="noopener">encodeURIComponent()</a></li>
+<li>MDN: <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS" target="_blank" rel="noopener">Cross-Origin Resource Sharing (CORS)</a>, <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Mixed_content" target="_blank" rel="noopener">Mixed content</a></li>
+<li>OpenWeather API docs: <a href="https://openweathermap.org/api/one-call-3" target="_blank" rel="noopener">One Call API 3.0</a>, <a href="https://openweathermap.org/api/geocoding-api" target="_blank" rel="noopener">Geocoding API</a>, <a href="https://openweathermap.org/api/air-pollution" target="_blank" rel="noopener">Air Pollution API</a>, <a href="https://openweathermap.org/api/weathermaps" target="_blank" rel="noopener">Weather Maps</a></li>
+<li>Vite: <a href="https://vite.dev/guide/env-and-mode" target="_blank" rel="noopener">Env Variables and Modes</a> (see the security note on <code>VITE_</code> variables)</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="rw-04-styling.html"><small>← Chapter 4</small>Styling with Tailwind CSS &amp; shadcn/ui</a>
+<a class="next" href="rw-06-tanstack-query.html"><small>Chapter 6 →</small>TanStack Query in Depth</a>
+</nav>
+</main>
+</body>
+</html>

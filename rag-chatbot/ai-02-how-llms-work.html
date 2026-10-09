@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 2 · How Large Language Models Work</title>
+<meta name="description" content="Tokens, training, next-token prediction, temperature, context windows, hallucinations and reasoning models.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 2/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">AI &amp; Agents Handbook · Chapter 2 of 16</div>
+  <h1>How Large Language Models Work</h1>
+  <p class="lead">Tokens, training, next-token prediction, temperature, context windows, hallucinations and reasoning models.</p>
+</section>
+<p>In <a href="ai-01-what-is-ai.html">chapter 1</a> you saw that an <a class="term" href="glossary.html#llm">LLM</a> generates text by predicting what comes next. This chapter opens the box a little further. You will learn what <a class="term" href="glossary.html#token">tokens</a> are, how a model is trained in stages, how settings such as <a class="term" href="glossary.html#temperature">temperature</a> change its output, why long conversations cost more, why models make things up, what "reasoning models" do differently, and how all of this shows up in the code you wrote in Part 1.</p>
+
+<div class="callout"><p><strong>Why this matters for your chatbot.</strong> Almost every practical question about an AI app comes back to these mechanics. "Why did my bill go up?" (tokens and history). "Why did it invent a policy?" (hallucination). "Why is the first word slow to appear?" (reasoning and streaming). "Why doesn't it know about last week's document?" (knowledge cutoff, which is why we built RAG).</p></div>
+
+<h2>Tokens and tokenization</h2>
+<p>Models do not read letters or whole words. They read <strong>tokens</strong>: small chunks of text taken from a fixed vocabulary that the model's creators built before training. A token can be a whole common word, part of a word, a space plus a word, a punctuation mark, or a few bytes of an unusual character.</p>
+<p>The step that cuts text into tokens is called <strong>tokenization</strong>, and the program that does it is a <strong>tokenizer</strong>. Each model family has its own tokenizer, so the exact split differs between models. Here is the <em>kind</em> of split you would see (illustrative, not exact for any specific model):</p>
+<div class="table-wrap"><table>
+<tr><th>Text</th><th>Possible tokens</th><th>Why</th></tr>
+<tr><td>"The cat sat"</td><td><code>The</code> · <code> cat</code> · <code> sat</code></td><td>Common words are usually one token each, often including the space before them.</td></tr>
+<tr><td>"unbelievably"</td><td><code>un</code> · <code>bel</code> · <code>iev</code> · <code>ably</code></td><td>Rarer words are split into reusable pieces.</td></tr>
+<tr><td>"pgvector"</td><td><code>pg</code> · <code>vector</code></td><td>Technical names are built from smaller known pieces.</td></tr>
+<tr><td>"2025-07-14"</td><td><code>202</code> · <code>5</code> · <code>-</code> · <code>07</code> · <code>-</code> · <code>14</code></td><td>Numbers are often chopped into small groups of digits, one reason models can stumble on arithmetic.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 222" role="img" aria-label="The four example texts cut into tokens: The cat sat is 3 tokens, unbelievably 4, pgvector 2, and the date 6">
+  <text x="20" y="22" class="label">Text</text>
+  <text x="200" y="22" class="label">Tokens (illustrative)</text>
+  <text x="20" y="54">"The cat sat"</text>
+  <rect class="box" x="200" y="34" width="39" height="30" rx="6"/>
+  <text x="219.5" y="53.5" text-anchor="middle" class="mono">The</text>
+  <rect class="box-info" x="245" y="34" width="46" height="30" rx="6"/>
+  <text x="268" y="53.5" text-anchor="middle" class="mono">␣cat</text>
+  <rect class="box" x="297" y="34" width="46" height="30" rx="6"/>
+  <text x="320" y="53.5" text-anchor="middle" class="mono">␣sat</text>
+  <text x="363" y="54" class="small">3 tokens</text>
+  <text x="20" y="100">"unbelievably"</text>
+  <rect class="box" x="200" y="80" width="32" height="30" rx="6"/>
+  <text x="216" y="99.5" text-anchor="middle" class="mono">un</text>
+  <rect class="box-info" x="238" y="80" width="39" height="30" rx="6"/>
+  <text x="257.5" y="99.5" text-anchor="middle" class="mono">bel</text>
+  <rect class="box" x="283" y="80" width="39" height="30" rx="6"/>
+  <text x="302.5" y="99.5" text-anchor="middle" class="mono">iev</text>
+  <rect class="box-info" x="328" y="80" width="46" height="30" rx="6"/>
+  <text x="351" y="99.5" text-anchor="middle" class="mono">ably</text>
+  <text x="394" y="100" class="small">4 tokens</text>
+  <text x="20" y="146">"pgvector"</text>
+  <rect class="box" x="200" y="126" width="32" height="30" rx="6"/>
+  <text x="216" y="145.5" text-anchor="middle" class="mono">pg</text>
+  <rect class="box-info" x="238" y="126" width="60" height="30" rx="6"/>
+  <text x="268" y="145.5" text-anchor="middle" class="mono">vector</text>
+  <text x="318" y="146" class="small">2 tokens</text>
+  <text x="20" y="192">"2025-07-14"</text>
+  <rect class="box" x="200" y="172" width="39" height="30" rx="6"/>
+  <text x="219.5" y="191.5" text-anchor="middle" class="mono">202</text>
+  <rect class="box-info" x="245" y="172" width="25" height="30" rx="6"/>
+  <text x="257.5" y="191.5" text-anchor="middle" class="mono">5</text>
+  <rect class="box" x="276" y="172" width="25" height="30" rx="6"/>
+  <text x="288.5" y="191.5" text-anchor="middle" class="mono">-</text>
+  <rect class="box-info" x="307" y="172" width="32" height="30" rx="6"/>
+  <text x="323" y="191.5" text-anchor="middle" class="mono">07</text>
+  <rect class="box" x="345" y="172" width="25" height="30" rx="6"/>
+  <text x="357.5" y="191.5" text-anchor="middle" class="mono">-</text>
+  <rect class="box-info" x="376" y="172" width="32" height="30" rx="6"/>
+  <text x="392" y="191.5" text-anchor="middle" class="mono">14</text>
+  <text x="428" y="192" class="small">6 tokens</text>
+</svg>
+<figcaption>The same illustrative splits as the table, drawn as chips (not exact for any specific model). <strong>␣ marks a space that is part of the token.</strong> Every chip is one token, and tokens are what you pay for.</figcaption>
+</figure>
+
+<p><strong>Rule of thumb for English:</strong> one token is about 4 characters, or roughly ¾ of a word. So 100 tokens ≈ 75 words, and a 1,000-word document is somewhere around 1,300 tokens. Other languages, code and unusual text often need more tokens per word. Treat this as an estimate; providers offer tokenizer tools for exact counts.</p>
+
+<details class="primer"><summary>New to tokens? Why they matter so much in practice</summary>
+<p>Tokens are the unit for almost everything you care about as a developer:</p>
+<ul>
+<li><strong>Cost:</strong> API providers bill per token, usually with separate rates for input tokens (what you send) and output tokens (what the model writes).</li>
+<li><strong>Limits:</strong> every model has a maximum number of tokens it can handle in one request (the <a class="term" href="glossary.html#context-window">context window</a>).</li>
+<li><strong>Speed:</strong> models write one token at a time, so a long answer takes longer than a short one.</li>
+</ul>
+<p>The <a class="term" href="glossary.html#ai-sdk">AI SDK</a> reports usage for every call, for example <code>inputTokens</code> and <code>outputTokens</code> in the <code>usage</code> result, so you can log it and watch your costs.</p>
+</details>
+
+<h2>Next-token prediction: the core loop</h2>
+<p>An LLM does one thing over and over: given all the tokens so far, it outputs a <strong>probability for every token in its vocabulary</strong> (tens of thousands of options) of being the next one. For the text <em>"The capital of France is"</em> it might score <code> Paris</code> very high, <code> a</code> lower, <code> the</code> lower still, and <code> banana</code> near zero.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Bar chart of illustrative next-token probabilities: Paris very high, a, the and located low, banana near zero">
+  <text x="20" y="26" class="label">Text so far: "The capital of France is"   Which token comes next?</text>
+  <text x="150" y="61" text-anchor="end" class="mono">␣Paris</text>
+  <rect class="box-solid" x="165" y="46" width="451" height="20" rx="4"/>
+  <text x="624" y="61" class="small">82%</text>
+  <text x="150" y="93" text-anchor="end" class="mono">␣a</text>
+  <rect class="box" x="165" y="78" width="33" height="20" rx="4"/>
+  <text x="206" y="93" class="small">6%</text>
+  <text x="150" y="125" text-anchor="end" class="mono">␣the</text>
+  <rect class="box" x="165" y="110" width="22" height="20" rx="4"/>
+  <text x="195" y="125" class="small">4%</text>
+  <text x="150" y="157" text-anchor="end" class="mono">␣located</text>
+  <rect class="box" x="165" y="142" width="16.5" height="20" rx="4"/>
+  <text x="189.5" y="157" class="small">3%</text>
+  <text x="150" y="189" text-anchor="end" class="mono">␣banana</text>
+  <rect class="box" x="165" y="174" width="3" height="20" rx="4"/>
+  <text x="176" y="189" class="small">≈ 0%</text>
+  <text x="380" y="222" text-anchor="middle" class="small">… plus tens of thousands of other tokens, each with a tiny probability</text>
+</svg>
+<figcaption><strong>Illustrative</strong> probabilities. The model scores every token in its vocabulary; sampling then picks one, usually, but not always, the most likely.</figcaption>
+</figure>
+
+<p>Then a token is <strong>picked</strong> from those probabilities (that is <em>sampling</em>, covered below), added to the end of the text, and the whole thing runs again with the slightly longer text. This continues until the model produces a special "end" token or hits a length limit.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="The generation loop: tokens in, model scores next token, sample one, append, repeat, stream to user">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="10" y="40" width="150" height="70" rx="8"/><text x="85" y="70" text-anchor="middle">Tokens so far</text><text x="85" y="90" text-anchor="middle" class="small">system + history + question</text>
+  <rect class="box" x="200" y="40" width="160" height="70" rx="8"/><text x="280" y="70" text-anchor="middle">Model</text><text x="280" y="90" text-anchor="middle" class="small">scores every possible token</text>
+  <rect class="box" x="400" y="40" width="160" height="70" rx="8"/><text x="480" y="70" text-anchor="middle">Sample</text><text x="480" y="90" text-anchor="middle" class="small">temperature, top-p</text>
+  <rect class="box2" x="600" y="40" width="150" height="70" rx="8"/><text x="675" y="70" text-anchor="middle">New token</text><text x="675" y="90" text-anchor="middle" class="small">e.g. " Paris"</text>
+  <path class="arrow" d="M160,75 H198"/><path class="arrow" d="M360,75 H398"/><path class="arrow" d="M560,75 H598"/>
+  <path class="arrow" d="M675,110 V160 H85 V112"/>
+  <text x="380" y="152" text-anchor="middle" class="small">append it and repeat until an end token or the length limit</text>
+  <rect class="box2" x="600" y="180" width="150" height="40" rx="6"/><text x="675" y="205" text-anchor="middle" class="small">streamed to the browser</text>
+  <path class="arrow" d="M720,110 V178"/>
+</svg>
+<figcaption>Each turn of the loop produces exactly one token. Streaming simply sends each token to the user as soon as it exists.</figcaption>
+</figure>
+
+<p>Two surprising consequences:</p>
+<ul>
+<li><strong>The model has no plan written down anywhere.</strong> It does not draft the whole answer and then send it. Whatever "planning" happens is implicit in each next-token choice (reasoning models, below, add an explicit thinking phase).</li>
+<li><strong>Every token costs a full pass through the model.</strong> That is why long answers take longer and why output tokens are usually priced higher than input tokens.</li>
+</ul>
+
+<h2>How a chat model is made: three training stages</h2>
+<p>The chat models you call through an API usually go through several stages of <a class="term" href="glossary.html#training">training</a>. The exact recipes are proprietary and vary, but the broad shape is well known:</p>
+<ol class="steps">
+<li><strong>Pretraining.</strong> The model learns next-token prediction on an enormous amount of text (web pages, books, code and more). This is self-supervised: the "correct answer" is just the real next token. The result is a <em>base model</em>: very knowledgeable, but it simply continues text. Ask it "What is the capital of France?" and it might continue with more quiz questions instead of answering.</li>
+<li><strong>Instruction tuning (supervised <a class="term" href="glossary.html#fine-tuning">fine-tuning</a>).</strong> The base model is trained further on many example conversations written or curated by people: an instruction and a good response. Now it learns the <em>format</em> of being an assistant: answer the question, follow the instruction, stop when done.</li>
+<li><strong>Preference tuning (<a class="term" href="glossary.html#rlhf">RLHF</a> and similar methods).</strong> People (and sometimes other models) compare pairs of responses and say which is better: more helpful, more honest, safer. The model is then tuned to produce the preferred kind of answer. RLHF stands for <em>reinforcement learning from human feedback</em>; newer variants exist, but the idea is the same: learn from judgements of quality, not just from examples.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 248" role="img" aria-label="Three training stages in a row: pretraining gives a base model, instruction tuning gives an instruction follower, preference tuning gives a chat assistant">
+  <text x="125" y="40" text-anchor="middle" class="small">web pages, books, code</text>
+  <rect class="box" x="10" y="52" width="230" height="66" rx="8"/>
+  <text x="125" y="81.5" text-anchor="middle">1. Pretraining</text>
+  <text x="125" y="97.5" text-anchor="middle" class="small">next-token prediction on huge text</text>
+  <path class="arrow" d="M125,118 V146"/>
+  <rect class="box2" x="10" y="148" width="230" height="60" rx="8"/>
+  <text x="125" y="174.5" text-anchor="middle">Base model</text>
+  <text x="125" y="190.5" text-anchor="middle" class="small">just continues text</text>
+  <text x="380" y="40" text-anchor="middle" class="small">instruction + good response</text>
+  <rect class="box" x="265" y="52" width="230" height="66" rx="8"/>
+  <text x="380" y="81.5" text-anchor="middle">2. Instruction tuning</text>
+  <text x="380" y="97.5" text-anchor="middle" class="small">supervised fine-tuning</text>
+  <path class="arrow" d="M380,118 V146"/>
+  <rect class="box2" x="265" y="148" width="230" height="60" rx="8"/>
+  <text x="380" y="174.5" text-anchor="middle">Follows instructions</text>
+  <text x="380" y="190.5" text-anchor="middle" class="small">answers, then stops</text>
+  <text x="635" y="40" text-anchor="middle" class="small">which answer is better?</text>
+  <rect class="box" x="520" y="52" width="230" height="66" rx="8"/>
+  <text x="635" y="81.5" text-anchor="middle">3. Preference tuning</text>
+  <text x="635" y="97.5" text-anchor="middle" class="small">RLHF and similar methods</text>
+  <path class="arrow" d="M635,118 V146"/>
+  <rect class="box-ok" x="520" y="148" width="230" height="60" rx="8"/>
+  <text x="635" y="174.5" text-anchor="middle">Chat assistant</text>
+  <text x="635" y="190.5" text-anchor="middle" class="small">helpful, polite, safer</text>
+  <path class="arrow" d="M240,85 H263"/>
+  <path class="arrow" d="M495,85 H518"/>
+  <text x="380" y="236" text-anchor="middle" class="small">each stage starts from the model produced by the previous one</text>
+</svg>
+<figcaption>The broad recipe (exact details are proprietary). Asked "What is the capital of France?", <strong>a base model may just continue with more quiz questions</strong>; after stages 2 and 3 it answers like an assistant.</figcaption>
+</figure>
+
+<div class="callout"><p><strong>Why you should care:</strong> stage 3 is why models are polite, follow system prompts and refuse some requests. It is also part of why they can be <em>over-eager to please</em>, sometimes producing a confident answer rather than admitting uncertainty. Your <code>system</code> prompt in <a href="15-search-tool.html">step 15</a> pushes against that by telling the model to base its answers on the search results.</p></div>
+
+<h2>Inference and sampling: temperature and top-p</h2>
+<p>At <a class="term" href="glossary.html#inference">inference</a> time, the model gives probabilities, but something has to <em>choose</em> the next token. Always picking the single most likely token ("greedy" decoding) tends to produce repetitive, flat text. So most systems <strong>sample</strong>: they pick randomly, weighted by the probabilities. Two common settings control that randomness:</p>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>What it does</th><th>Low value</th><th>High value</th></tr>
+<tr><td><strong>Temperature</strong></td><td>Sharpens or flattens the probabilities before picking.</td><td>Near 0: almost always the most likely token. Focused, repeatable, a bit dull.</td><td>Higher: unlikely tokens get more chance. More varied and creative, and more likely to drift or make mistakes.</td></tr>
+<tr><td><strong>Top-p</strong> (nucleus sampling)</td><td>Only considers the smallest set of top tokens whose probabilities add up to <em>p</em>, then samples among those.</td><td>e.g. 0.1: only the very top candidates are allowed.</td><td>1.0: every token is allowed (no cut-off).</td></tr>
+</table></div>
+<p>An example of the effect, for the prompt <em>"Write a name for a coffee shop"</em> (illustrative):</p>
+<ul>
+<li><strong>Low temperature:</strong> asking five times gives "The Daily Grind", "The Daily Grind", "The Daily Grind", "Bean There", "The Daily Grind".</li>
+<li><strong>High temperature:</strong> asking five times gives "Moonlit Roastery", "The Velvet Bean", "Grounds for Celebration", "Steam &amp; Stories", "Copper Kettle Collective".</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Two bar charts for the same coffee-shop prompt: at low temperature one name dominates, at high temperature the probabilities are flatter">
+  <rect class="zone" x="10" y="10" width="360" height="220" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Low temperature</text>
+  <text x="190" y="52" text-anchor="middle" class="small">sharp: the top choice almost always wins</text>
+  <text x="140" y="86" text-anchor="end" class="small">The Daily Grind</text>
+  <rect class="box-solid" x="150" y="72" width="176" height="18" rx="4"/>
+  <text x="332" y="86" class="small">80%</text>
+  <text x="140" y="116" text-anchor="end" class="small">Bean There</text>
+  <rect class="box" x="150" y="102" width="26.4" height="18" rx="4"/>
+  <text x="182.4" y="116" class="small">12%</text>
+  <text x="140" y="146" text-anchor="end" class="small">Moonlit Roastery</text>
+  <rect class="box" x="150" y="132" width="8.8" height="18" rx="4"/>
+  <text x="164.8" y="146" class="small">4%</text>
+  <text x="140" y="176" text-anchor="end" class="small">The Velvet Bean</text>
+  <rect class="box" x="150" y="162" width="4.4" height="18" rx="4"/>
+  <text x="160.4" y="176" class="small">2%</text>
+  <text x="140" y="206" text-anchor="end" class="small">Copper Kettle</text>
+  <rect class="box" x="150" y="192" width="4.4" height="18" rx="4"/>
+  <text x="160.4" y="206" class="small">2%</text>
+  <rect class="zone" x="390" y="10" width="360" height="220" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">High temperature</text>
+  <text x="570" y="52" text-anchor="middle" class="small">flat: unlikely names get a real chance</text>
+  <text x="520" y="86" text-anchor="end" class="small">The Daily Grind</text>
+  <rect class="box-solid" x="530" y="72" width="57.2" height="18" rx="4"/>
+  <text x="593.2" y="86" class="small">26%</text>
+  <text x="520" y="116" text-anchor="end" class="small">Bean There</text>
+  <rect class="box" x="530" y="102" width="48.4" height="18" rx="4"/>
+  <text x="584.4" y="116" class="small">22%</text>
+  <text x="520" y="146" text-anchor="end" class="small">Moonlit Roastery</text>
+  <rect class="box" x="530" y="132" width="44" height="18" rx="4"/>
+  <text x="580" y="146" class="small">20%</text>
+  <text x="520" y="176" text-anchor="end" class="small">The Velvet Bean</text>
+  <rect class="box" x="530" y="162" width="37.4" height="18" rx="4"/>
+  <text x="573.4" y="176" class="small">17%</text>
+  <text x="520" y="206" text-anchor="end" class="small">Copper Kettle</text>
+  <rect class="box" x="530" y="192" width="33" height="18" rx="4"/>
+  <text x="569" y="206" class="small">15%</text>
+</svg>
+<figcaption><strong>Illustrative</strong> probabilities for the coffee-shop prompt. Temperature reshapes the same scores: <strong>low makes the top choice dominate, high flattens the bars</strong>, so sampling picks more varied names.</figcaption>
+</figure>
+
+<p>Rule of thumb: use low temperature for factual Q&amp;A, extraction and classification; use moderate-to-higher temperature for brainstorming and creative writing. A common recommendation is to change temperature <em>or</em> top-p, not both.</p>
+<p>In the AI SDK both are plain options:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { generateText } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const { text, usage } = await generateText({
+  model: openai("gpt-4.1-mini"),
+  prompt: "Write a name for a coffee shop.",
+  temperature: 1.2,
+  maxOutputTokens: 50,
+});
+
+console.log(text, usage.inputTokens, usage.outputTokens);</code></pre>
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { generateText } from "ai";</code></td><td>Imports the AI SDK function that waits for the whole answer (no streaming). Fine for scripts and background jobs.</td></tr>
+<tr><td>2</td><td><code>import { openai } from "@ai-sdk/openai";</code></td><td>Imports the OpenAI <a class="term" href="glossary.html#provider">provider</a>, which knows how to talk to OpenAI's API.</td></tr>
+<tr><td>3</td><td></td><td>Blank line for readability.</td></tr>
+<tr><td>4</td><td><code>const { text, usage } = await generateText({</code></td><td>Calls the model and waits (<code>await</code>) for the result, then pulls out the generated <code>text</code> and the token <code>usage</code> using <a class="term" href="glossary.html#destructuring">destructuring</a>.</td></tr>
+<tr><td>5</td><td><code>model: openai("gpt-4.1-mini"),</code></td><td>The model to run. A non-reasoning model is used here because temperature is meaningful for it (see the reasoning section below).</td></tr>
+<tr><td>6</td><td><code>prompt: "Write a name for a coffee shop.",</code></td><td>A single user message. For conversations you would pass <code>messages</code> instead.</td></tr>
+<tr><td>7</td><td><code>temperature: 1.2,</code></td><td>Turns up randomness for creative output. Leave it out to use the provider's default.</td></tr>
+<tr><td>8</td><td><code>maxOutputTokens: 50,</code></td><td>A hard cap on how many tokens the model may write. Protects cost and latency; the answer may be cut off if it is too low.</td></tr>
+<tr><td>9</td><td><code>});</code></td><td>Ends the options object and the call.</td></tr>
+<tr><td>10</td><td></td><td>Blank line.</td></tr>
+<tr><td>11</td><td><code>console.log(text, usage.inputTokens, usage.outputTokens);</code></td><td>Prints the answer and how many tokens went in and came out, the numbers your bill is based on.</td></tr>
+</table></div>
+
+<h2>The context window, and why history costs tokens</h2>
+<p>The <a class="term" href="glossary.html#context-window">context window</a> is the maximum number of tokens a model can consider in one request: your system prompt, the whole conversation, any documents or tool results, <em>and</em> the answer it writes. Context sizes vary a lot between models, from a few thousand tokens in older or small models to hundreds of thousands or more in some current ones. Check each model's documentation.</p>
+<p>Here is the crucial point beginners miss: <strong>the model has no memory between requests.</strong> It is stateless. A conversation only "continues" because your app sends the entire history every time.</p>
+<p>Look at the chat page from <a href="06-chatbot-ui.html">step 6</a>:</p>
+<pre data-lang="tsx" data-file="src/app/chat/page.tsx (excerpt)"><code>const { messages, sendMessage, status } = useChat();</code></pre>
+<p>When the user types a new question, <code>sendMessage</code> adds it to <code>messages</code> and, by default, <code>useChat</code> POSTs the <strong>whole <code>messages</code> array</strong> to <code>/api/chat</code>. The route from <a href="15-search-tool.html">step 15</a> then forwards all of it to the model:</p>
+<pre data-lang="ts" data-file="src/app/api/chat/route.ts (excerpt)"><code>const { messages }: { messages: ChatMessage[] } = await req.json();
+
+const result = streamText({
+  model: openai("gpt-5-mini"),
+  messages: convertToModelMessages(messages),</code></pre>
+<p>So turn 1 sends one message, turn 2 sends three (question, answer, new question), turn 10 sends nineteen, plus any tool results stored in earlier messages. Each request pays for all of those input tokens again.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 340" role="img" aria-label="Sequence diagram: on turn 1 the browser sends one message; on turn 2 it sends all three, and the server forwards the full history to OpenAI">
+  <rect class="box" x="20" y="10" width="180" height="44" rx="8"/>
+  <text x="110" y="28.5" text-anchor="middle">Browser</text>
+  <text x="110" y="44.5" text-anchor="middle" class="small">useChat</text>
+  <path class="line dashed" d="M110,54 V332"/>
+  <rect class="box" x="290" y="10" width="180" height="44" rx="8"/>
+  <text x="380" y="28.5" text-anchor="middle">Server</text>
+  <text x="380" y="44.5" text-anchor="middle" class="small">/api/chat</text>
+  <path class="line dashed" d="M380,54 V332"/>
+  <rect class="box" x="560" y="10" width="180" height="44" rx="8"/>
+  <text x="650" y="28.5" text-anchor="middle">OpenAI</text>
+  <text x="650" y="44.5" text-anchor="middle" class="small">gpt-5-mini</text>
+  <path class="line dashed" d="M650,54 V332"/>
+  <path class="arrow-accent" d="M110,80 H378"/>
+  <text x="245" y="74" text-anchor="middle" class="small">1. POST all messages (1 so far)</text>
+  <path class="arrow" d="M380,110 H648"/>
+  <text x="515" y="104" text-anchor="middle" class="small">2. system + 1 message</text>
+  <path class="arrow-ok" d="M650,140 H382"/>
+  <text x="515" y="134" text-anchor="middle" class="small">3. tokens stream back</text>
+  <path class="arrow-ok" d="M380,170 H112"/>
+  <text x="245" y="164" text-anchor="middle" class="small">4. answer streams into the UI</text>
+  <path class="arrow-accent" d="M110,230 H378"/>
+  <text x="245" y="224" text-anchor="middle" class="small">5. POST all messages (3 now)</text>
+  <path class="arrow" d="M380,260 H648"/>
+  <text x="515" y="254" text-anchor="middle" class="small">6. system + all 3 messages</text>
+  <path class="arrow-ok" d="M650,290 H382"/>
+  <text x="515" y="284" text-anchor="middle" class="small">7. tokens stream back</text>
+  <path class="arrow-ok" d="M380,320 H112"/>
+  <text x="245" y="314" text-anchor="middle" class="small">8. answer streams into the UI</text>
+  <text x="20" y="204" class="label">turn 2</text>
+  <path class="line dashed" d="M70,200 H740"/>
+</svg>
+<figcaption><strong>The model is stateless.</strong> On turn 2 the browser sends the whole history again and the server forwards all of it, so input tokens grow with every turn.</figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<tr><th>Turn</th><th>Messages sent</th><th>Rough input tokens (illustrative)</th></tr>
+<tr><td>1</td><td>system + 1 question</td><td>~300</td></tr>
+<tr><td>5</td><td>system + 9 earlier messages + question</td><td>~2,500</td></tr>
+<tr><td>20</td><td>system + 39 earlier messages + question</td><td>~10,000+</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 212" role="img" aria-label="Two fixed-size bars: on turn 1 the system prompt, question, chunks and answer leave free space; on turn 20 the history fills it and the answer overflows the limit">
+  <text x="420" y="24" text-anchor="middle" class="label">context window (fixed size)</text>
+  <text x="720" y="24" text-anchor="middle" class="small">limit</text>
+  <text x="20" y="65" class="label">Turn 1</text>
+  <rect class="box-info" x="120" y="40" width="60" height="40" rx="0"/>
+  <text x="150" y="65" text-anchor="middle" class="small">system</text>
+  <rect class="box2" x="180" y="40" width="70" height="40" rx="0"/>
+  <text x="215" y="65" text-anchor="middle" class="small">question</text>
+  <rect class="box-ok" x="250" y="40" width="150" height="40" rx="0"/>
+  <text x="325" y="65" text-anchor="middle" class="small">retrieved chunks</text>
+  <rect class="box" x="400" y="40" width="90" height="40" rx="0"/>
+  <text x="445" y="65" text-anchor="middle" class="small">answer</text>
+  <text x="605" y="65" text-anchor="middle" class="small">free space</text>
+  <text x="20" y="145" class="label">Turn 20</text>
+  <rect class="box-info" x="120" y="120" width="60" height="40" rx="0"/>
+  <text x="150" y="145" text-anchor="middle" class="small">system</text>
+  <rect class="box2" x="180" y="120" width="330" height="40" rx="0"/>
+  <text x="345" y="145" text-anchor="middle" class="small">history (39 messages)</text>
+  <rect class="box-ok" x="510" y="120" width="150" height="40" rx="0"/>
+  <text x="585" y="145" text-anchor="middle" class="small">retrieved chunks</text>
+  <rect class="box-bad" x="660" y="120" width="90" height="40" rx="0"/>
+  <text x="688" y="145" text-anchor="middle" class="small">answer</text>
+  <rect class="zone" x="120" y="40" width="600" height="40" rx="0"/>
+  <rect class="zone" x="120" y="120" width="600" height="40" rx="0"/>
+  <path class="line dashed" d="M720,30 V172"/>
+  <text x="420" y="196" text-anchor="middle" class="small">over the limit → "context length exceeded": trim history or retrieve fewer chunks</text>
+</svg>
+<figcaption>Illustration, sizes not to scale. Everything shares one fixed-size window: <strong>system prompt + history + retrieved chunks + the answer</strong>. As history grows, there is no room left for the answer.</figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>Pitfalls</strong></p>
+<ul>
+<li><strong>Bills that grow with conversation length.</strong> Long chats get more expensive per message. Common fixes: only send the last N messages, summarise old turns, or drop bulky tool results from history. <a href="ai-14-production.html">Chapter 14</a> covers cost control.</li>
+<li><strong>"Context length exceeded" errors.</strong> If history plus retrieved chunks plus the answer would exceed the window, the request fails. Trim history or retrieve fewer chunks.</li>
+<li><strong>Lost in the middle.</strong> Even inside the window, models do not use every token equally well; information buried in a very long prompt can be overlooked. Fewer, more relevant chunks often beat more chunks.</li>
+</ul></div>
+
+<h2>Knowledge cutoff, and why RAG exists</h2>
+<p>Pretraining uses data collected up to some date. After that, the model learns nothing new; that date is its <strong>knowledge cutoff</strong>. The model also never saw your private data: your company handbook, your PDFs, your database.</p>
+<p>You could, in theory, retrain or fine-tune the model on your documents, but that is slow, costly, hard to update and still does not guarantee exact recall. <a class="term" href="glossary.html#rag">RAG</a> takes a simpler route: <em>look up</em> the relevant passages at question time and put them in the prompt. That is exactly the <code>searchKnowledgeBase</code> tool from <a href="15-search-tool.html">step 15</a>. New document uploaded a minute ago? It is searchable immediately, no training required. <a href="ai-15-prompting-rag-finetuning.html">Chapter 15</a> compares prompting, RAG and fine-tuning in detail.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 238" role="img" aria-label="A timeline ends at the knowledge cutoff. Without RAG a question about a new PDF gets a guess; with RAG, searchKnowledgeBase puts the chunks in the prompt and the answer is grounded">
+  <rect class="box2" x="20" y="38" width="420" height="24" rx="4"/>
+  <text x="230" y="55" text-anchor="middle" class="small">pretraining data</text>
+  <path class="line dashed" d="M440,30 V70"/>
+  <text x="440" y="22" text-anchor="middle" class="small">knowledge cutoff</text>
+  <text x="595" y="55" text-anchor="middle" class="small">after the cutoff: nothing new learned</text>
+  <text x="20" y="92" class="label">Without RAG</text>
+  <rect class="box2" x="20" y="100" width="250" height="44" rx="8"/>
+  <text x="145" y="126.5" text-anchor="middle">Question about a new PDF</text>
+  <path class="arrow" d="M270,122 H318"/>
+  <rect class="box" x="320" y="100" width="150" height="44" rx="8"/>
+  <text x="395" y="126.5" text-anchor="middle">Model alone</text>
+  <path class="arrow" d="M470,122 H518"/>
+  <rect class="box-bad" x="520" y="100" width="220" height="44" rx="8"/>
+  <text x="630" y="126.5" text-anchor="middle">A guess (may be invented)</text>
+  <text x="20" y="172" class="label">With RAG</text>
+  <rect class="box2" x="20" y="180" width="150" height="44" rx="8"/>
+  <text x="95" y="206.5" text-anchor="middle">Same question</text>
+  <path class="arrow" d="M170,202 H198"/>
+  <rect class="box" x="200" y="180" width="190" height="44" rx="8"/>
+  <text x="295" y="206.5" text-anchor="middle" class="mono">searchKnowledgeBase</text>
+  <path class="arrow" d="M390,202 H408"/>
+  <rect class="box2" x="410" y="180" width="160" height="44" rx="8"/>
+  <text x="490" y="206.5" text-anchor="middle">Chunks in prompt</text>
+  <path class="arrow" d="M570,202 H588"/>
+  <rect class="box-ok" x="590" y="180" width="150" height="44" rx="8"/>
+  <text x="665" y="206.5" text-anchor="middle">Grounded answer</text>
+</svg>
+<figcaption>The model's knowledge stops at its cutoff and never included your private files. <strong>RAG looks the text up at question time</strong>, so a PDF uploaded a minute ago can be used straight away.</figcaption>
+</figure>
+
+
+<h2>Hallucinations: why models make things up</h2>
+<p>A <a class="term" href="glossary.html#hallucination">hallucination</a> is a fluent, confident answer that is false: an invented citation, a made-up API function, a policy your company never had.</p>
+<p>Why does it happen? Remember the core loop: the model always produces <em>some</em> next token, choosing what is <em>plausible</em> given its training. It has no built-in fact-checker and no reliable sense of "I have never seen this". If the true answer is not in its parameters or its prompt, a plausible-sounding guess is often what comes out. Preference training can make this worse if confident answers were rewarded over honest "I don't know"s.</p>
+<p>You cannot eliminate hallucinations, but you can reduce them a lot:</p>
+<ul>
+<li><strong>Ground the model with RAG.</strong> Put the real text in the prompt and tell it to answer from that. Your system prompt does this: <em>"Base your answers on the search results when available."</em></li>
+<li><strong>Give it tools for things it is bad at.</strong> The calculator tool in <a href="22-build-an-agent.html">step 22</a> means arithmetic is computed, not guessed.</li>
+<li><strong>Allow "I don't know".</strong> Explicitly say: "If the search results do not contain the answer, say so." Models follow this surprisingly well.</li>
+<li><strong>Ask for sources.</strong> Have it cite which chunk it used, so users (and you) can check (<a href="ai-08-advanced-rag.html">chapter 8</a>).</li>
+<li><strong>Lower temperature</strong> for factual tasks, and <strong>evaluate</strong> regularly (<a href="ai-12-evaluation.html">chapter 12</a>).</li>
+</ul>
+
+<h2>Reasoning models: thinking before answering</h2>
+<p>A <a class="term" href="glossary.html#reasoning-model">reasoning model</a> is trained to work through a problem step by step in an internal "thinking" phase <em>before</em> writing its visible answer. Those thinking steps are also tokens; they are generated by the same next-token loop, but they are usually hidden from you (some providers return a summary of them). The model has been trained, often with reinforcement learning on problems with checkable answers, to use that thinking productively.</p>
+<div class="table-wrap"><table>
+<tr><th>Benefit</th><th>Cost</th></tr>
+<tr><td>Better at multi-step problems: maths, logic, planning, tricky code, deciding which tool to call.</td><td>Slower: the first visible word can take noticeably longer, because thinking happens first.</td></tr>
+<tr><td>Often more careful with instructions and edge cases.</td><td>More tokens: reasoning tokens are typically billed as output tokens even though you do not see them.</td></tr>
+<tr><td>Some providers let you choose how much effort it spends (for example a "reasoning effort" option).</td><td>Some classic sampling settings such as <code>temperature</code> may not be supported; check the provider docs. The AI SDK reports unsupported settings as warnings.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Two token timelines: a non-reasoning model starts the visible answer right after the prompt; a reasoning model first generates hidden thinking tokens">
+  <text x="20" y="57" class="label">Non-reasoning</text>
+  <rect class="box2" x="150" y="35" width="150" height="34" rx="6"/>
+  <text x="225" y="56.5" text-anchor="middle">your prompt</text>
+  <rect class="box-ok" x="310" y="35" width="260" height="34" rx="6"/>
+  <text x="440" y="56.5" text-anchor="middle">visible answer tokens</text>
+  <text x="20" y="117" class="label">Reasoning</text>
+  <rect class="box2" x="150" y="95" width="150" height="34" rx="6"/>
+  <text x="225" y="116.5" text-anchor="middle">your prompt</text>
+  <rect class="box-warn" x="310" y="95" width="220" height="34" rx="6"/>
+  <text x="420" y="116.5" text-anchor="middle">hidden thinking tokens</text>
+  <rect class="box-ok" x="540" y="95" width="200" height="34" rx="6"/>
+  <text x="640" y="116.5" text-anchor="middle">visible answer</text>
+  <path class="line dashed" d="M310,26 V78"/>
+  <text x="310" y="20" text-anchor="middle" class="small">first visible word</text>
+  <path class="line dashed" d="M540,86 V138"/>
+  <text x="540" y="151" text-anchor="middle" class="small">first visible word (later)</text>
+  <path class="line" d="M310,160 V168 H740 V160"/>
+  <text x="525" y="186" text-anchor="middle" class="small">billed as output tokens: thinking + answer</text>
+  <text x="225" y="186" text-anchor="middle" class="small">time →</text>
+</svg>
+<figcaption>Illustration, lengths not to scale. A reasoning model generates <strong>thinking tokens before the visible answer</strong>: the first word appears later, and more output tokens are billed.</figcaption>
+</figure>
+
+<p><strong>In this project:</strong> the repo uses <code>gpt-5-mini</code>, which OpenAI documents as part of its GPT-5 family of reasoning models; the video uses <code>gpt-4.1-mini</code>, a non-reasoning model. Both work for the chatbot. You may notice <code>gpt-5-mini</code> pauses a little longer before the answer starts streaming; that is the thinking phase. As noted in <a href="05-chat-route-handler.html">step 5</a>, <code>gpt-5-mini</code> also needs an extra setting if your OpenAI organisation uses zero data retention. Model capabilities change over time, so check OpenAI's model pages for current details.</p>
+<p>Rule of thumb: use a reasoning model when the task needs several steps of thought (an agent choosing tools, analysing a contract). Use a fast non-reasoning model for simple, latency-sensitive work (rewriting, classification, OCR).</p>
+
+<h2>Embedding models vs chat models</h2>
+<p>Not every language model writes text. Your project uses two very different kinds:</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>Chat (generative) model</th><th>Embedding model</th></tr>
+<tr><td>Example in project</td><td><code>gpt-5-mini</code> / <code>gpt-4.1-mini</code></td><td><code>text-embedding-3-small</code></td></tr>
+<tr><td>Input</td><td>A conversation (text, maybe images)</td><td>A piece of text</td></tr>
+<tr><td>Output</td><td>New text, generated token by token</td><td>One fixed-length vector of numbers (1,536 here)</td></tr>
+<tr><td>Used for</td><td>Answering, summarising, calling tools</td><td>Measuring similarity of meaning, i.e. <a class="term" href="glossary.html#semantic-search">semantic search</a></td></tr>
+<tr><td>AI SDK function</td><td><code>streamText</code>, <code>generateText</code></td><td><code>embed</code>, <code>embedMany</code></td></tr>
+<tr><td>Cost and speed</td><td>Higher, depends on output length</td><td>Much cheaper and faster per token, single pass</td></tr>
+</table></div>
+<p>The two work as a team in RAG: the <a class="term" href="glossary.html#embedding">embedding</a> model finds relevant chunks (<a href="10-embedding-utility.html">step 10</a>, <a href="14-semantic-search.html">step 14</a>), the chat model reads them and writes the answer. <a href="ai-07-embeddings-vector-databases.html">Chapter 7</a> goes deeper.</p>
+
+<h2>System, user and assistant roles</h2>
+<p>Chat models are trained on conversations with labelled turns. Each message has a <strong>role</strong>:</p>
+<ul>
+<li><strong>system</strong>: instructions from <em>you, the developer</em> about how the assistant should behave. Users normally cannot see it. In the AI SDK you pass it as the <code>system</code> option, as in <a href="15-search-tool.html">step 15</a>: <em>"You are a helpful assistant with access to a knowledge base…"</em></li>
+<li><strong>user</strong>: what the person typed (or said, after transcription, or uploaded as an image).</li>
+<li><strong>assistant</strong>: what the model replied earlier, including any tool calls it made.</li>
+<li><strong>tool</strong>: the results your code returned from a tool call, fed back to the model.</li>
+</ul>
+<pre data-lang="ts" data-tag="illustrative"><code>const { text } = await generateText({
+  model: openai("gpt-4.1-mini"),
+  system: "You answer in one short sentence.",
+  messages: [
+    { role: "user", content: "What is pgvector?" },
+    { role: "assistant", content: "A Postgres extension for storing and searching vectors." },
+    { role: "user", content: "Who would use it?" },
+  ],
+});</code></pre>
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>const { text } = await generateText({</code> … <code>model: …</code></td><td>Calls a chat model and waits for the full reply.</td></tr>
+<tr><td>3</td><td><code>system: "You answer in one short sentence.",</code></td><td>The developer's instruction. Models are trained to give system messages high priority, though not absolute obedience.</td></tr>
+<tr><td>4</td><td><code>messages: [</code></td><td>The conversation history, oldest first.</td></tr>
+<tr><td>5</td><td><code>{ role: "user", content: "What is pgvector?" },</code></td><td>The user's first question.</td></tr>
+<tr><td>6</td><td><code>{ role: "assistant", content: "A Postgres extension…" },</code></td><td>The model's earlier answer, sent back so it "remembers" what it said.</td></tr>
+<tr><td>7</td><td><code>{ role: "user", content: "Who would use it?" },</code></td><td>The new question. "it" only makes sense because the history above is included.</td></tr>
+<tr><td>8–9</td><td><code>],</code> <code>});</code></td><td>Close the array, the options object and the call.</td></tr>
+</table></div>
+<p>In your chatbot you never build this array by hand: <code>useChat</code> keeps it in the browser, and <code>convertToModelMessages</code> converts it into this shape on the server.</p>
+
+<h2>Streaming tokens</h2>
+<p>Because the model produces one token at a time, an app can show each token as soon as it exists instead of waiting for the whole answer. That is <a class="term" href="glossary.html#streaming">streaming</a>. It does not make the model faster, but it makes the app <em>feel</em> much faster: the user starts reading after a fraction of a second instead of staring at a spinner.</p>
+<p>In Part 1, <code>streamText</code> starts the generation loop on OpenAI's servers, <code>result.toUIMessageStreamResponse()</code> forwards the tokens (and tool-call events) to the browser as an HTTP stream, and <code>useChat</code> updates <code>messages</code> as pieces arrive, so React re-renders the growing answer. The <code>status</code> value moves from <code>"submitted"</code> (waiting for the first token) to <code>"streaming"</code> (tokens arriving) to <code>"ready"</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 140" role="img" aria-label="The useChat status moves from submitted to streaming to ready, and back to submitted when the user sends another message">
+  <rect class="box" x="20" y="40" width="200" height="56" rx="8"/>
+  <text x="120" y="64.5" text-anchor="middle" class="mono">"submitted"</text>
+  <text x="120" y="80.5" text-anchor="middle" class="small">request sent, no tokens yet</text>
+  <rect class="box" x="280" y="40" width="200" height="56" rx="8"/>
+  <text x="380" y="64.5" text-anchor="middle" class="mono">"streaming"</text>
+  <text x="380" y="80.5" text-anchor="middle" class="small">tokens arriving, text grows</text>
+  <rect class="box-ok" x="540" y="40" width="200" height="56" rx="8"/>
+  <text x="640" y="64.5" text-anchor="middle" class="mono">"ready"</text>
+  <text x="640" y="80.5" text-anchor="middle" class="small">answer complete</text>
+  <path class="arrow" d="M220,68 H278"/>
+  <path class="arrow" d="M480,68 H538"/>
+  <path class="arrow-accent" d="M640,96 V126 H120 V98"/>
+  <text x="380" y="119" text-anchor="middle" class="small">user sends the next message</text>
+  <text x="250" y="28" text-anchor="middle" class="small">first token</text>
+  <text x="510" y="28" text-anchor="middle" class="small">last token</text>
+</svg>
+<figcaption>The <code>status</code> value from <code>useChat</code> during one answer. <strong>Streaming makes the wait feel shorter</strong> because text appears while the model is still generating.</figcaption>
+</figure>
+
+<p>Two speed numbers are worth knowing: <strong>time to first token</strong> (how long until anything appears; reasoning and long prompts increase it) and <strong>tokens per second</strong> (how fast text flows once it starts). <a class="term" href="glossary.html#latency">Latency</a> is covered in <a href="ai-14-production.html">chapter 14</a>.</p>
+
+<div class="callout warn"><p><strong>Common misconceptions</strong></p>
+<ul>
+<li><strong>"The model learns from my chats."</strong> Not during your request. Weights are frozen at inference. (Whether a provider may use API data for future training is a policy question; check their data-usage terms.)</li>
+<li><strong>"Bigger context window means I can skip RAG."</strong> Stuffing everything in costs more per request, is slower, and can reduce answer quality. Retrieval is still useful.</li>
+<li><strong>"Temperature 0 makes it fully deterministic."</strong> It makes output much more consistent, but providers generally do not guarantee identical results every time.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Models read and write <strong>tokens</strong> (≈ ¾ of an English word). Tokens drive cost, limits and speed.</li>
+<li>Generation is a loop: score every next token, sample one, append, repeat.</li>
+<li>Chat models are made by <strong>pretraining</strong>, <strong>instruction tuning</strong> and <strong>preference tuning (RLHF)</strong>.</li>
+<li><strong>Temperature</strong> and <strong>top-p</strong> control randomness: low for facts, higher for creativity.</li>
+<li>Models are stateless; <code>useChat</code> resends the whole history, so long chats cost more tokens.</li>
+<li>Knowledge cutoffs and private data are why we use <strong>RAG</strong>; RAG and tools also reduce <strong>hallucinations</strong>.</li>
+<li><strong>Reasoning models</strong> (such as the GPT-5 family, including <code>gpt-5-mini</code>) think before answering: smarter on hard tasks, slower and more token-hungry.</li>
+<li>Embedding models output vectors, chat models output text; messages have system, user, assistant and tool roles; streaming shows tokens as they are generated.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://ai-sdk.dev/docs">AI SDK documentation</a> (generating text, settings such as temperature and topP, streaming)</li>
+<li><a href="https://platform.openai.com/docs">OpenAI platform documentation</a> (tokens, reasoning models, embeddings)</li>
+<li><a href="https://docs.anthropic.com">Anthropic documentation</a> (context windows, extended thinking)</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="ai-01-what-is-ai.html"><small>← Chapter 1</small>What Is AI? From Machine Learning to LLMs</a>
+<a class="next" href="ai-03-models-and-providers.html"><small>Chapter 3 →</small>Models, Providers &amp; Choosing One</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 10 · Subgraphs, Multi-Agent Systems &amp; Your Roadmap</title>
+<meta name="description" content="Composing graphs, supervisor and handoff patterns, and what to learn next.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 10/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangGraph Handbook · Chapter 10 of 10</div>
+  <h1>Subgraphs, Multi-Agent Systems &amp; Your Roadmap</h1>
+  <p class="lead">Composing graphs, supervisor and handoff patterns, and what to learn next.</p>
+</section>
+<p>The course ends with one agent: graph 9, a math teacher with three tools and memory. Real applications often need more than one "brain": a researcher and a writer, a triage step that sends questions to the right specialist, a team of agents that hand work to each other. LangGraph builds these from a single idea you already know, <strong>a graph can be a node in another graph</strong>. This chapter shows how <a class="term" href="glossary.html#subgraph">subgraphs</a> work, the main <a class="term" href="glossary.html#multi-agent">multi-agent</a> patterns, when <em>not</em> to use them, and then gives you a learning roadmap and practice projects that grow out of graphs 8 and 9.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> At the end of the video (136:17) the presenter says "we are just scratching the surface. There's a lot more to be done" and asks viewers to request a continuation. This chapter is a map of that "more": what to learn next, in which order, and small projects that practise each step using the code you already have.</div>
+
+<h2>Subgraphs: a graph inside a graph</h2>
+<p>A compiled graph is a <code>CompiledStateGraph</code>, and LangGraph lets you pass one to <code>add_node</code> exactly like a function. From the outside it behaves like one node: it receives the state, runs all its own nodes, and returns an update. Reasons to do this:</p>
+<ul>
+<li><strong>Organisation</strong>: build and test a "research team" graph on its own, then plug it into a bigger app.</li>
+<li><strong>Reuse</strong>: the same subgraph in several parent graphs.</li>
+<li><strong>Teams</strong>: different people own different subgraphs.</li>
+<li><strong>Multi-agent systems</strong>: each agent is its own graph (for example the ReAct loop from <a href="13-graph-8-agent-loop.html">step 13</a>).</li>
+</ul>
+
+<h3>Way 1: shared state keys, add the compiled graph directly</h3>
+<p>If the subgraph and the parent use the same state keys (here both use <code>MessagesState</code>), add the compiled subgraph as a node. Verified with LangGraph 1.2.11:</p>
+<pre data-lang="py" data-tag="verified"><code>from langgraph.graph import StateGraph, START, MessagesState
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain.messages import AIMessage, HumanMessage
+
+
+def research(state: MessagesState):
+    return {"messages": [AIMessage(content="research notes", name="researcher")]}
+
+sub = StateGraph(MessagesState)
+sub.add_node("research", research)
+sub.add_edge(START, "research")
+research_graph = sub.compile()                  # no checkpointer on the subgraph
+
+
+def writer(state: MessagesState):
+    notes = state["messages"][-1].content
+    return {"messages": [AIMessage(content=f"article based on: {notes}", name="writer")]}
+
+parent = StateGraph(MessagesState)
+parent.add_node("research_team", research_graph)   # a compiled graph as a node
+parent.add_node("writer", writer)
+parent.add_edge(START, "research_team")
+parent.add_edge("research_team", "writer")
+graph = parent.compile(checkpointer=InMemorySaver())
+
+out = graph.invoke({"messages": [HumanMessage(content="write about owls")]},
+                   {"configurable": {"thread_id": "1"}})
+print([(m.type, m.content) for m in out["messages"]])
+# [('human', 'write about owls'), ('ai', 'research notes'), ('ai', 'article based on: research notes')]</code></pre>
+<p>Notice that only the <strong>parent</strong> gets a checkpointer; the subgraph uses the parent's automatically. To see inside the subgraph, draw with <code>graph.get_graph(xray=True).draw_mermaid()</code> (the Mermaid text then contains a <code>subgraph research_team</code> block), and stream with <code>subgraphs=True</code>. The verified stream printed three chunks: first <code>('research_team:&lt;id&gt;',) ['research']</code> from inside the subgraph, then <code>() ['research_team']</code> and <code>() ['writer']</code> from the parent. The tuple is the "namespace", the path to where the chunk came from.</p>
+
+<h3>Way 2: different state, call the subgraph from a function</h3>
+<p>If the subgraph has its own state shape, wrap it in a normal node function that translates in and out:</p>
+<pre data-lang="py" data-tag="verified"><code>from typing_extensions import TypedDict
+
+
+class NotesState(TypedDict):
+    topic: str
+    notes: str
+
+def find_notes(state: NotesState):
+    return {"notes": f"3 facts about {state['topic']}"}
+
+nb = StateGraph(NotesState)
+nb.add_node("find_notes", find_notes)
+nb.add_edge(START, "find_notes")
+notes_graph = nb.compile()
+
+
+def call_notes(state: MessagesState):                  # parent node
+    result = notes_graph.invoke({"topic": state["messages"][-1].content, "notes": ""})
+    return {"messages": [AIMessage(content=result["notes"])]}
+# with input "owls" the parent's last message becomes "3 facts about owls"</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Two ways to use a subgraph: added directly as a node when state keys are shared, or invoked inside a wrapper function that translates state when shapes differ">
+  <rect class="zone" x="10" y="10" width="360" height="230" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Way 1: shared keys</text>
+  <rect class="box2" x="30" y="55" width="100" height="32" rx="16"/><text x="80" y="76" text-anchor="middle" class="small">__start__</text>
+  <rect class="zone" x="150" y="48" width="200" height="90" rx="8"/>
+  <text x="250" y="66" text-anchor="middle" class="small">research_team (subgraph)</text>
+  <rect class="box" x="190" y="78" width="120" height="32" rx="8"/><text x="250" y="99" text-anchor="middle" class="label">research</text>
+  <rect class="box" x="190" y="170" width="120" height="32" rx="8"/><text x="250" y="191" text-anchor="middle" class="label">writer</text>
+  <path class="arrow" d="M130,71 H148"/><path class="arrow" d="M250,138 V168"/>
+  <text x="190" y="228" text-anchor="middle" class="mono">add_node("research_team", research_graph)</text>
+  <rect class="zone" x="390" y="10" width="360" height="230" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">Way 2: different state</text>
+  <rect class="box" x="420" y="55" width="300" height="40" rx="8"/><text x="570" y="80" text-anchor="middle" class="label">call_notes (MessagesState)</text>
+  <path class="arrow-accent" d="M500,95 V128"/><text x="505" y="116" class="small">topic</text>
+  <rect class="box-info" x="420" y="130" width="300" height="40" rx="8"/><text x="570" y="155" text-anchor="middle" class="label">notes_graph (NotesState)</text>
+  <path class="arrow-ok" d="M640,128 V97"/><text x="645" y="116" class="small">notes</text>
+  <text x="570" y="200" text-anchor="middle" class="small">the wrapper translates state in and out</text>
+  <text x="570" y="228" text-anchor="middle" class="mono">notes_graph.invoke({...}) inside a node</text>
+</svg>
+<figcaption>Pick Way 1 when parent and child share keys like <code>messages</code>; Way 2 when the child needs private fields. <strong>Either way, the parent sees one node.</strong></figcaption>
+</figure>
+
+<p>One more useful fact: LangChain's <code>create_agent</code> (<a href="lg-05-agent-architectures.html">chapter 5</a>) also returns a <code>CompiledStateGraph</code>. Verified: an agent made with <code>create_agent(model, tools=[multiply], name="math_expert")</code> and a fake model, added with <code>parent.add_node("math_expert", agent)</code>, produced Human, AI (tool call), Tool <code>"84"</code>, AI inside the parent graph. Prebuilt agents and hand-built graphs mix freely.</p>
+
+<h2>Multi-agent systems</h2>
+<p>A multi-agent system is a graph where several nodes are agents, each with its own prompt and tools, and something decides who works next. Why bother, when one agent with all the tools might do?</p>
+<div class="table-wrap"><table>
+<tr><th>Reason to split</th><th>Reason not to</th></tr>
+<tr><td>Each agent gets a short, focused prompt and a small tool list. Models choose tools more reliably from 3 tools than from 30.</td><td>More model calls: someone has to decide who works next, and that is usually another call.</td></tr>
+<tr><td>You can use a different model per agent (cheap for triage, strong for hard work).</td><td>Harder to debug: the bug may be in a handoff, not in an agent.</td></tr>
+<tr><td>Agents can be built and tested separately (subgraphs).</td><td>Agents can pass work back and forth forever; you need limits.</td></tr>
+</table></div>
+<div class="callout"><strong>Rule of thumb.</strong> Start with one agent (graph 8). Split only when you can name the problem a split solves: too many tools, prompts that contradict each other, or parts that need different models or permissions.</div>
+
+<h3>Pattern 1: a supervisor (or router) in the middle</h3>
+<p>One node decides which specialist runs, the specialist reports back, and the supervisor decides again or finishes. The decision can be plain code, as here, or a model call with <a href="lg-04-models-in-graphs.html">structured output</a>. This version routes with <code>Command</code> (<a href="lg-03-control-flow.html">chapter 3</a>) and was verified:</p>
+<pre data-lang="py" data-tag="verified"><code>from typing import Literal
+from langgraph.graph import END
+from langgraph.types import Command
+
+
+def supervisor(state: MessagesState) -&gt; Command[Literal["math_agent", "writer_agent", "__end__"]]:
+    last = state["messages"][-1]
+    if last.type == "human":
+        goto = "math_agent" if any(ch.isdigit() for ch in last.content) else "writer_agent"
+        return Command(goto=goto)
+    return Command(goto=END)          # a specialist has answered: finish
+
+
+def math_agent(state: MessagesState):       # in a real app: graph 8, added as a subgraph
+    return {"messages": [AIMessage(content="84", name="math_agent")]}
+
+def writer_agent(state: MessagesState):
+    return {"messages": [AIMessage(content="a poem", name="writer_agent")]}
+
+builder = StateGraph(MessagesState)
+builder.add_node("supervisor", supervisor)
+builder.add_node("math_agent", math_agent)
+builder.add_node("writer_agent", writer_agent)
+builder.add_edge(START, "supervisor")
+builder.add_edge("math_agent", "supervisor")
+builder.add_edge("writer_agent", "supervisor")
+graph = builder.compile()
+# "12 times 7?"   -&gt; ['12 times 7?', '84']
+# "a poem please" -&gt; ['a poem please', 'a poem']</code></pre>
+<p>The return type hint <code>Command[Literal[...]]</code> tells LangGraph where the supervisor can go, so <code>get_graph()</code> draws dotted edges to both agents and to <code>__end__</code> (verified in the Mermaid output).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Supervisor pattern: the supervisor in the middle sends work to math_agent or writer_agent, both report back to the supervisor, which finishes when done">
+  <rect class="box2" x="20" y="100" width="100" height="36" rx="18"/><text x="70" y="123" text-anchor="middle" class="label">__start__</text>
+  <rect class="box-solid" x="200" y="95" width="150" height="46" rx="8"/><text x="275" y="123" text-anchor="middle" class="on-solid">supervisor</text>
+  <rect class="box" x="460" y="20" width="150" height="46" rx="8"/><text x="535" y="40" text-anchor="middle" class="label">math_agent</text><text x="535" y="57" text-anchor="middle" class="small">graph 8 + tools</text>
+  <rect class="box" x="460" y="170" width="150" height="46" rx="8"/><text x="535" y="190" text-anchor="middle" class="label">writer_agent</text><text x="535" y="207" text-anchor="middle" class="small">no tools</text>
+  <rect class="box2" x="650" y="100" width="90" height="36" rx="18"/><text x="695" y="123" text-anchor="middle" class="label">__end__</text>
+  <path class="arrow" d="M120,118 H198"/>
+  <path class="arrow-accent" d="M300,95 L458,36"/>
+  <path class="arrow-accent" d="M300,141 L458,200"/>
+  <path class="arrow line dashed" d="M480,68 L352,110"/>
+  <path class="arrow line dashed" d="M480,168 L352,126"/>
+  <path class="arrow" d="M350,118 H648"/>
+  <text x="300" y="55" class="small">send work</text>
+  <text x="560" y="84" class="small">report back</text>
+  <text x="600" y="112" class="small">done</text>
+</svg>
+<figcaption>All decisions go through one place, which makes the flow easy to follow and to limit. <strong>The cost: every hop goes through the supervisor.</strong></figcaption>
+</figure>
+
+<h3>Pattern 2: handoffs (agents pass control directly)</h3>
+<p>In a handoff design there is no central boss. The agent that is currently working decides to hand the conversation to another agent, usually by calling a "transfer to X" tool. Inside LangGraph, a handoff is a <code>Command</code> that jumps to another node. When the agent is a subgraph, it must jump in the <strong>parent</strong> graph, which is what <code>graph=Command.PARENT</code> means. Verified:</p>
+<pre data-lang="py" data-tag="verified"><code>def triage(state: MessagesState):                     # a node inside the "support" subgraph
+    return Command(goto="billing", graph=Command.PARENT,
+                   update={"messages": [AIMessage(content="handing off to billing")]})
+
+support = StateGraph(MessagesState)
+support.add_node("triage", triage)
+support.add_edge(START, "triage")
+
+parent = StateGraph(MessagesState)
+parent.add_node("support", support.compile(), destinations=("billing",))
+parent.add_node("billing", lambda s: {"messages": [AIMessage(content="billing here")]})
+parent.add_edge(START, "support")
+# invoke with "refund" -&gt; ['refund', 'handing off to billing', 'billing here']</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Handoff pattern: inside the support subgraph, triage returns a Command with graph PARENT that jumps to the billing node in the parent graph">
+  <rect class="zone" x="10" y="10" width="740" height="180" rx="10"/>
+  <text x="30" y="34" class="title">parent graph</text>
+  <rect class="zone" x="60" y="55" width="260" height="110" rx="8"/>
+  <text x="190" y="75" text-anchor="middle" class="small">support (subgraph)</text>
+  <rect class="box" x="110" y="90" width="160" height="44" rx="8"/><text x="190" y="110" text-anchor="middle" class="label">triage</text><text x="190" y="126" text-anchor="middle" class="small">Command(graph=PARENT)</text>
+  <rect class="box-ok" x="480" y="90" width="160" height="44" rx="8"/><text x="560" y="117" text-anchor="middle" class="label">billing</text>
+  <path class="arrow-accent" d="M270,112 H478"/>
+  <text x="375" y="104" text-anchor="middle" class="small">goto="billing"</text>
+  <text x="375" y="155" text-anchor="middle" class="small">the jump leaves the subgraph and lands in the parent</text>
+</svg>
+<figcaption>A handoff is control flow, not a message. <strong><code>Command.PARENT</code> lets an agent inside a subgraph route the parent graph.</strong> Listing <code>destinations</code> keeps the drawing honest.</figcaption>
+</figure>
+
+<h3>Other patterns, and the names you will meet</h3>
+<p>The current LangChain multi-agent docs group the designs into five patterns: <strong>Subagents</strong> (a main agent calls other agents as if they were tools), <strong>Handoffs</strong>, <strong>Skills</strong> (one agent loads specialised prompts and knowledge on demand), <strong>Router</strong> (a classification step sends the input to one or more specialists, then combines the results) and <strong>Custom workflow</strong> (your own LangGraph graph mixing all of the above). Older tutorials use the words "supervisor" (close to Subagents/Router) and "swarm" (agents handing off to each other, close to Handoffs). Two add-on packages from the LangGraph team with those names exist on PyPI at the time of writing, <code>langgraph-supervisor</code> and <code>langgraph-swarm</code> (both MIT-licensed, source under github.com/langchain-ai). They were not used or tested for this guide; check the docs to see whether they are still the recommended route before adopting them. For running several specialists <em>in parallel</em> and collecting their results, use <code>Send</code> (<a href="lg-03-control-flow.html">chapter 3</a>).</p>
+
+<div class="table-wrap"><table>
+<tr><th>Your situation</th><th>Try first</th></tr>
+<tr><td>One assistant, under about a dozen related tools</td><td>a single agent (graph 8)</td></tr>
+<tr><td>Clearly different kinds of requests (math vs writing vs billing)</td><td>router / supervisor</td></tr>
+<tr><td>A conversation that moves between departments, each keeping the user</td><td>handoffs</td></tr>
+<tr><td>One task that needs several independent pieces of research</td><td>subagents, or <code>Send</code> fan-out</td></tr>
+<tr><td>A fixed business process with a few smart steps</td><td>custom workflow (plain graph with model nodes)</td></tr>
+</table></div>
+
+<div class="callout warn"><strong>Pitfalls with multi-agent graphs</strong>
+<ul>
+<li><strong>Ping-pong loops</strong>: two agents keep handing work back. Set a <code>recursion_limit</code> on every call (the 1.2.11 default is very high, see <a href="lg-09-deploying-and-production.html">chapter 9</a>) and count handoffs in state.</li>
+<li><strong>Everyone sees everything</strong>: with a shared <code>messages</code> list, every agent reads every other agent's tool chatter. Give agents private state (Way 2) or pass summaries.</li>
+<li><strong>Names matter</strong>: setting <code>name=</code> on messages (as above) helps both you and the models tell agents apart.</li>
+<li><strong>A checkpointer on a subgraph</strong> is usually a mistake; give it to the parent only (and to none of them under <code>langgraph dev</code>).</li>
+</ul></div>
+
+<h2>Your learning roadmap</h2>
+<p>You now know the core of LangGraph: <a class="term" href="glossary.html#state">state</a>, nodes, edges, routing, models, tools, the <a class="term" href="glossary.html#agent-loop">agent loop</a> and memory. This video ends by saying it only scratches the surface and asking viewers whether they want a continuation (136:17); it does not name the next topics. The same channel's earlier LangChain crash course listed its later topics as MCP, context and state, multi-agent systems, middleware and human-in-the-loop. Two of those are covered in this handbook already (chapters 7 and 10). Here is a suggested order, with what each stage adds:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Learning roadmap in four stages: consolidate the course, intermediate topics MCP context and multi-agent, advanced topics human in the loop durable execution and evaluation, production topics deployment security and observability">
+  <path class="line" d="M40,60 H720"/>
+  <circle class="dot" cx="100" cy="60" r="9"/><circle class="dot-info" cx="280" cy="60" r="9"/><circle class="dot-warn" cx="460" cy="60" r="9"/><circle class="dot-ok" cx="640" cy="60" r="9"/>
+  <text x="100" y="35" text-anchor="middle" class="title">1. Consolidate</text>
+  <text x="280" y="35" text-anchor="middle" class="title">2. Intermediate</text>
+  <text x="460" y="35" text-anchor="middle" class="title">3. Advanced</text>
+  <text x="640" y="35" text-anchor="middle" class="title">4. Production</text>
+  <rect class="box" x="20" y="85" width="160" height="160" rx="8"/>
+  <text x="100" y="108" text-anchor="middle" class="label">redo graphs 0-9</text>
+  <text x="100" y="128" text-anchor="middle" class="label">from memory</text>
+  <text x="100" y="152" text-anchor="middle" class="label">steps 15-19</text>
+  <text x="100" y="176" text-anchor="middle" class="label">chapters 1-5</text>
+  <text x="100" y="200" text-anchor="middle" class="small">state, reducers,</text>
+  <text x="100" y="216" text-anchor="middle" class="small">Command, Send</text>
+  <rect class="box-info" x="200" y="85" width="160" height="160" rx="8"/>
+  <text x="280" y="108" text-anchor="middle" class="label">MCP tools</text>
+  <text x="280" y="132" text-anchor="middle" class="label">context engineering</text>
+  <text x="280" y="156" text-anchor="middle" class="label">multi-agent</text>
+  <text x="280" y="180" text-anchor="middle" class="label">subgraphs</text>
+  <text x="280" y="210" text-anchor="middle" class="small">chapter 10</text>
+  <rect class="box-warn" x="380" y="85" width="160" height="160" rx="8"/>
+  <text x="460" y="108" text-anchor="middle" class="label">human-in-the-loop</text>
+  <text x="460" y="132" text-anchor="middle" class="label">long-term memory</text>
+  <text x="460" y="156" text-anchor="middle" class="label">time travel</text>
+  <text x="460" y="180" text-anchor="middle" class="label">evaluation</text>
+  <text x="460" y="210" text-anchor="middle" class="small">chapters 6-8</text>
+  <rect class="box-ok" x="560" y="85" width="180" height="160" rx="8"/>
+  <text x="650" y="108" text-anchor="middle" class="label">tests in CI</text>
+  <text x="650" y="132" text-anchor="middle" class="label">deployment</text>
+  <text x="650" y="156" text-anchor="middle" class="label">security, cost limits</text>
+  <text x="650" y="180" text-anchor="middle" class="label">tracing, feedback</text>
+  <text x="650" y="210" text-anchor="middle" class="small">chapter 9</text>
+</svg>
+<figcaption>A suggested order, not a rule. <strong>Each stage should end with something you built, not only something you watched.</strong></figcaption>
+</figure>
+
+<h3>Stage 2 in one paragraph each</h3>
+<p><strong>MCP (Model Context Protocol).</strong> An open protocol that lets tools live in separate "MCP servers" which any compatible app can connect to, instead of being Python functions in your file. With the <code>langchain-mcp-adapters</code> package (published on PyPI by the LangChain team, MIT) MCP tools become ordinary LangChain tools, so they plug into <code>bind_tools</code> and <code>ToolNode</code> exactly like the course's <code>multiply</code>. Treat every MCP server as code you are choosing to trust: it can see the arguments your agent sends.</p>
+<p><strong>Context engineering.</strong> Deciding exactly what goes into each model call: which system prompt, which slice of history (chapter 6 trimming), which facts from the store, which tools. Most agent quality problems are context problems, not model problems. A good exercise: print the exact message list <code>chat_with_tools</code> sends (or read it in a LangSmith trace) and ask "does the model have what it needs, and nothing it does not?"</p>
+<p><strong>Multi-agent.</strong> This chapter. Practise by splitting graph 8 into a math agent and an "explain in words" agent behind a router.</p>
+
+<details class="primer"><summary>New to "protocol"? What MCP standardises</summary>
+<p>A protocol is an agreed format for two programs to talk, like HTTP for browsers and web servers. MCP fixes how an AI application asks a tool server "what tools do you have?", reads their names, descriptions and argument schemas (the same information <code>@tool</code> creates from your docstring and type hints), and calls them. Because the format is shared, one MCP server can serve many different apps and frameworks.</p>
+</details>
+
+<h2>Practice projects that build on graphs 8 and 9</h2>
+<p>Each project is small, uses only what this guide covers, and can be tested with the fake model from <a href="18-testing-graphs.html">step 18</a> before you spend anything on API calls.</p>
+<div class="table-wrap"><table>
+<tr><th>#</th><th>Project</th><th>Start from</th><th>You practise</th></tr>
+<tr><td>1</td><td><strong>Study buddy that knows you</strong>: the SQLite chat loop, plus a store that remembers the student's name and weak topics across threads</td><td>step 17 + chapter 6</td><td>checkpointers vs stores, <code>context</code></td></tr>
+<tr><td>2</td><td><strong>Careful calculator</strong>: graph 8 with a review node; any calculation with a result over 1,000 needs approval</td><td>step 13 + chapter 7</td><td><code>interrupt</code>, <code>Command(resume=...)</code>, ToolMessage on reject</td></tr>
+<tr><td>3</td><td><strong>Streaming terminal chat</strong>: print tokens as they arrive and "[using multiply...]" when a tool starts</td><td>step 19 + chapter 8</td><td><code>stream_mode=["messages", "updates"]</code></td></tr>
+<tr><td>4</td><td><strong>Math or words router</strong>: a supervisor sends number questions to graph 8 and everything else to a plain chat agent</td><td>this chapter</td><td>subgraphs, <code>Command</code> routing</td></tr>
+<tr><td>5</td><td><strong>Homework checker</strong>: one subgraph solves, another checks the solution with the tools, a third writes feedback</td><td>this chapter + chapter 5 (reflection)</td><td>subgraphs with private state</td></tr>
+<tr><td>6</td><td><strong>Ship it</strong>: tests for projects 1&ndash;5, <code>python_version</code> in <code>langgraph.json</code>, <code>langgraph validate</code>, an explicit recursion limit, tracing on</td><td>step 18 + chapter 9</td><td>the production checklist</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Project 2 graph: chat_with_tools, a review node that interrupts only for big results, tools, and the loop back">
+  <rect class="box2" x="10" y="95" width="90" height="34" rx="17"/><text x="55" y="117" text-anchor="middle" class="label">__start__</text>
+  <rect class="box" x="140" y="92" width="150" height="40" rx="8"/><text x="215" y="117" text-anchor="middle" class="label">chat_with_tools</text>
+  <rect class="box-warn" x="350" y="20" width="160" height="52" rx="8"/><text x="430" y="42" text-anchor="middle" class="label">review</text><text x="430" y="60" text-anchor="middle" class="small">interrupt if big</text>
+  <rect class="box" x="590" y="25" width="120" height="42" rx="8"/><text x="650" y="51" text-anchor="middle" class="label">tools</text>
+  <rect class="box2" x="350" y="160" width="90" height="34" rx="17"/><text x="395" y="182" text-anchor="middle" class="label">__end__</text>
+  <path class="arrow" d="M100,112 H138"/>
+  <path class="arrow" d="M290,102 L348,55"/>
+  <path class="arrow" d="M290,124 L348,172"/>
+  <path class="arrow-ok" d="M510,46 H588"/><text x="549" y="38" text-anchor="middle" class="small">approved</text>
+  <path class="arrow" d="M650,67 C650,140 380,140 292,118"/>
+  <path class="arrow-bad" d="M380,72 C360,90 320,100 292,106"/><text x="400" y="98" class="small">rejected</text>
+</svg>
+<figcaption>Project 2 is chapter 7's review node with one extra rule. <strong>Small changes to a graph you understand teach more than big new tutorials.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>How to know you are ready for the next stage.</strong> You can draw your graph on paper before writing it; you can say what is in the state after each node; you can write a test with a fake model; and when you see an error you go to the last line of the traceback first.</div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A compiled graph can be a node: add it directly when keys are shared, or call it from a wrapper function when state differs. Only the parent gets a checkpointer.</li>
+<li>See inside with <code>get_graph(xray=True)</code> and <code>stream(..., subgraphs=True)</code>.</li>
+<li><code>create_agent</code> returns a compiled graph too, so prebuilt agents can be subgraphs.</li>
+<li>Supervisor/router: a central node routes with <code>Command</code>. Handoffs: an agent jumps to another with <code>Command(goto=..., graph=Command.PARENT)</code>.</li>
+<li>Start with one agent; split only for a named reason; always cap loops.</li>
+<li>Next topics: MCP, context engineering, multi-agent, human-in-the-loop, then production. Build a project at every stage.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/use-subgraphs">LangGraph docs: Subgraphs</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/multi-agent">LangChain docs: Multi-agent</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/workflows-agents">LangGraph docs: Workflows and agents</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/mcp">LangChain docs: Model Context Protocol (MCP)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/context-engineering">LangChain docs: Context engineering</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/overview">LangGraph docs: Overview</a> and <a href="https://github.com/langchain-ai/langgraph">the LangGraph source on GitHub</a></li>
+<li><a href="https://academy.langchain.com/">LangChain Academy (official courses)</a></li>
+<li>PyPI: <a href="https://pypi.org/project/langgraph-supervisor/">langgraph-supervisor</a>, <a href="https://pypi.org/project/langgraph-swarm/">langgraph-swarm</a>, <a href="https://pypi.org/project/langchain-mcp-adapters/">langchain-mcp-adapters</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lg-09-deploying-and-production.html"><small>← Chapter 9</small>Testing, Deploying &amp; Production</a>
+<a class="next" href="index.html"><small>Done →</small>Contents</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How an Agent Thinks</title>
+<meta name="description" content="The agent loop, message by message: what the model sees, when it calls tools, and why it stops.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Concept</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concept · read with steps 5–10</div>
+  <h1>How an Agent Thinks</h1>
+  <p class="lead">The agent loop, message by message: what the model sees, when it calls tools, and why it stops.</p>
+</section>
+<p>In the video, a single line such as <code>agent.invoke({"messages": [...]})</code> sometimes returns one message and sometimes four or more. It can search the web several times, or remember your favourite colour. This page opens the box. Using the project's own examples, it follows an <a class="term" href="glossary.html#agent">agent</a> message by message: what the model sees, when it calls a <a class="term" href="glossary.html#tool">tool</a>, why it stops, and what memory really saves.</p>
+<p>Read it alongside <a href="05-first-agent.html">step 05</a> (first agent), <a href="08-first-tool.html">step 08</a> (first tool), <a href="09-web-search-tavily.html">step 09</a> (web search) and <a href="10-short-term-memory.html">step 10</a> (memory). Everything described here was checked against the repo's locked versions (langchain 1.3.12, langgraph 1.2.9) with an offline test harness.</p>
+
+<h2>Model versus agent</h2>
+<p>A <a class="term" href="glossary.html#chat-model">chat model</a> is a function from messages to one reply: text in, text out. It cannot look anything up, and it forgets everything between calls. An agent wraps that model in a <strong>loop</strong> and gives it tools. The model can then say "run <code>web_search</code> for me", read the result, and decide what to do next.</p>
+<p>The video shows the difference directly. With the <code>web_search</code> tool, "give me the lastest news of the day" (the typo is the presenter's) produces a summary of real headlines (around 54:20). With the tools removed, the same agent answers that it can't pull real-time headlines (at 55:07).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 228" role="img" aria-label="Same question with and without tools: without tools the model can only say it cannot pull real-time headlines; with web_search the model calls the tool and answers with a summary of real stories">
+  <rect class="zone" x="10" y="10" width="360" height="206" rx="10"/>
+  <text x="190" y="32" text-anchor="middle" class="title">Model only (no tools)</text>
+  <rect class="box2" x="30" y="48" width="320" height="38" rx="8"/><text x="190" y="72" text-anchor="middle" class="label">Human: give me the lastest news of the day</text>
+  <rect class="box-solid" x="120" y="108" width="140" height="38" rx="8"/><text x="190" y="132" text-anchor="middle" class="on-solid">gpt-5-nano</text>
+  <rect class="box-warn" x="30" y="168" width="320" height="38" rx="8"/><text x="190" y="192" text-anchor="middle" class="label">AI: I can't pull real-time headlines</text>
+  <path class="arrow" d="M190,86 V106"/><path class="arrow" d="M190,146 V166"/>
+  <rect class="zone" x="390" y="10" width="360" height="206" rx="10"/>
+  <text x="570" y="32" text-anchor="middle" class="title">Agent with web_search</text>
+  <rect class="box2" x="410" y="48" width="320" height="38" rx="8"/><text x="570" y="72" text-anchor="middle" class="label">Human: give me the lastest news of the day</text>
+  <rect class="box-solid" x="410" y="108" width="140" height="38" rx="8"/><text x="480" y="132" text-anchor="middle" class="on-solid">gpt-5-nano</text>
+  <rect class="box" x="590" y="108" width="140" height="38" rx="8"/><text x="660" y="132" text-anchor="middle" class="mono">web_search</text>
+  <path class="arrow" d="M550,118 H588"/><path class="arrow-ok" d="M590,136 H552"/>
+  <rect class="box-ok" x="410" y="168" width="320" height="38" rx="8"/><text x="570" y="192" text-anchor="middle" class="label">AI: a summary of today's real stories</text>
+  <path class="arrow" d="M570,86 V106"/><path class="arrow-ok" d="M480,146 V166"/>
+</svg>
+<figcaption>The same question on the same model. On the left the model can only use what it learned in training. On the right it can ask for a search, get real results back and write from them. <strong>The tool plus the loop is what makes it an agent.</strong></figcaption>
+</figure>
+
+<h2>Everything is a list of messages</h2>
+<p>An agent's input and output have the same shape: a <a class="term" href="glossary.html#dict">dictionary</a> with one key, <code>"messages"</code>, whose value is a <a class="term" href="glossary.html#list">list</a>. Each item is a <a class="term" href="glossary.html#message">message</a> with a role. While the agent works it <em>appends</em> messages to this list. When it finishes, it hands the whole list back to you. That's why the video always reads the answer with <code>response["messages"][-1].content</code>: <code>[-1]</code> is the last message, the final answer.</p>
+
+<details class="primer"><summary>New to message roles? Who says what</summary>
+<p>Chat models don't receive one long string. They receive a conversation, where every message is labelled with who wrote it. LangChain has a class for each role. Under the hood, the OpenAI API uses the names in the third column.</p>
+<div class="table-wrap"><table>
+<tr><th>LangChain class</th><th>Written by</th><th>OpenAI role</th><th>Example from this project</th></tr>
+<tr><td><a class="term" href="glossary.html#system-message">SystemMessage</a></td><td>You, as standing rules</td><td><code>system</code></td><td>"You are the best chef in the world…" (<code>SYSTEM_CHEF_PROMPT</code>)</td></tr>
+<tr><td><a class="term" href="glossary.html#human-message">HumanMessage</a></td><td>The user</td><td><code>user</code></td><td>"Hello I am a student and my name is Luca"</td></tr>
+<tr><td><a class="term" href="glossary.html#ai-message">AIMessage</a></td><td>The model</td><td><code>assistant</code></td><td>"Rome (Italian: Roma)." or a request to call a tool</td></tr>
+<tr><td><a class="term" href="glossary.html#tool-message">ToolMessage</a></td><td>Your tool, via LangChain</td><td><code>tool</code></td><td>"this is the document of Luca"</td></tr>
+</table></div>
+<p>The model reads the roles to understand the conversation. In <a href="06-conversation-history.html">step 06</a> the presenter writes an AIMessage by hand ("Rome (Italian: Roma).") so that the follow-up "tell me more about it" makes sense. The model has no memory, so the history <em>is</em> the memory.</p>
+</details>
+
+<p>One detail surprises many beginners. The <a class="term" href="glossary.html#system-prompt">system prompt</a> you pass to <code>create_agent(system_prompt=...)</code> is sent to the model on <strong>every</strong> model call, but it is <strong>not</strong> stored in <code>response["messages"]</code>. Verified: in the step 8 example the model receives <code>SystemMessage, HumanMessage</code> on its first call, but the returned list starts with the HumanMessage.</p>
+
+<h2>The loop in one picture</h2>
+<p>Here is the whole algorithm. It has two working steps (LangGraph calls them <em>nodes</em>) and one question:</p>
+<ol class="steps">
+<li><strong>Model node.</strong> Send the system prompt plus every message so far to the model. Append its reply (an AIMessage) to the list.</li>
+<li><strong>Question.</strong> Does that AIMessage contain any <a class="term" href="glossary.html#tool-call">tool calls</a>? If not, stop: the reply is the final answer.</li>
+<li><strong>Tools node.</strong> If it does, run each requested tool with the arguments the model chose. Append one ToolMessage per call. Then go back to step 1.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="The agent loop: START goes to the model node; if the last AIMessage has tool_calls, the tools node runs them and goes back to the model node; if not, the graph goes to END">
+  <rect class="box2" x="20" y="100" width="90" height="44" rx="8"/><text x="65" y="127" text-anchor="middle" class="mono">START</text>
+  <rect class="box-solid" x="170" y="92" width="170" height="60" rx="8"/><text x="255" y="116" text-anchor="middle" class="on-solid">model node</text><text x="255" y="136" text-anchor="middle" class="on-solid">calls the LLM</text>
+  <rect class="box-info" x="400" y="92" width="170" height="60" rx="8"/><text x="485" y="116" text-anchor="middle">tool_calls?</text><text x="485" y="136" text-anchor="middle" class="small">in the last AIMessage</text>
+  <rect class="box-ok" x="630" y="100" width="110" height="44" rx="8"/><text x="685" y="127" text-anchor="middle" class="mono">END</text>
+  <rect class="box" x="170" y="196" width="170" height="54" rx="8"/><text x="255" y="218" text-anchor="middle">tools node</text><text x="255" y="236" text-anchor="middle" class="small">runs each tool call</text>
+  <path class="arrow" d="M110,122 H168"/>
+  <path class="arrow" d="M340,122 H398"/>
+  <path class="arrow-ok" d="M570,122 H628"/>
+  <text x="600" y="112" text-anchor="middle" class="small ok">no</text>
+  <path class="arrow-accent" d="M485,152 V223 H342"/>
+  <text x="497" y="190" class="small accent">yes</text>
+  <path class="arrow-accent" d="M255,196 V154"/>
+  <text x="152" y="182" text-anchor="end" class="small">adds ToolMessages,</text>
+  <text x="152" y="198" text-anchor="end" class="small">then back to the model</text>
+  <text x="255" y="40" text-anchor="middle" class="small">adds one AIMessage per call</text>
+  <path class="line dashed" d="M255,46 V90"/>
+  <text x="485" y="40" text-anchor="middle" class="small">a reply with no tool calls is the answer</text>
+  <path class="line dashed" d="M485,46 V90"/>
+</svg>
+<figcaption>The agent loop. A single <code>agent.invoke(...)</code> starts at START and ends at END, possibly going round the model → tools circle many times. <strong>The model decides when to stop</strong>, by replying without tool calls.</figcaption>
+</figure>
+
+<h2>Trace 1: <code>print_document</code> (step 8)</h2>
+<p>In <a href="08-first-tool.html">step 08</a> the presenter gives the agent one tool and a strict system prompt. Here is the code from that step, shortened to the lines that matter for the loop:</p>
+<pre data-lang="py" data-tag="excerpt"><code>@tool
+def print_document(name: str) -&gt; str:
+    """use this tool to generate the propre document for your student"""
+    return f"this is the document of {name}"
+
+agent = create_agent(model="gpt-5-nano",
+                     tools=[print_document],
+                     system_prompt="YOU are an employee that use your tools for generating documents. DO Not say anything else")
+
+response = agent.invoke(
+    {"messages": [HumanMessage(content="Hello I am a student and my name is Luca")]}
+)</code></pre>
+<p>The user never says "print a document". The model works out from the system prompt and the tool's <a class="term" href="glossary.html#docstring">docstring</a> that it should call <code>print_document</code>, and that the argument <code>name</code> should be "Luca". This is the run the presenter scrolls through at 45:49–47:22, step by step:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 402" role="img" aria-label="Sequence diagram of the print_document run: your code invokes the agent; the agent sends system and human messages to gpt-5-nano; the model replies with an empty AIMessage that asks for print_document with name Luca; the agent runs the tool, adds a ToolMessage, calls the model again, gets the final text and returns four messages">
+  <rect class="box2" x="30" y="14" width="120" height="36" rx="8"/><text x="90" y="37" text-anchor="middle">Your code</text>
+  <rect class="box-solid" x="230" y="14" width="140" height="36" rx="8"/><text x="300" y="37" text-anchor="middle" class="on-solid">Agent (graph)</text>
+  <rect class="box2" x="415" y="14" width="170" height="36" rx="8"/><text x="500" y="37" text-anchor="middle">OpenAI · gpt-5-nano</text>
+  <rect class="box" x="600" y="14" width="140" height="36" rx="8"/><text x="670" y="37" text-anchor="middle" class="mono">print_document</text>
+  <path class="line dashed" d="M90,50 V392"/><path class="line dashed" d="M300,50 V392"/><path class="line dashed" d="M500,50 V392"/><path class="line dashed" d="M670,50 V392"/>
+  <text x="195" y="82" text-anchor="middle" class="small">1 invoke(Human: …Luca)</text>
+  <path class="arrow-accent" d="M90,90 H298"/>
+  <text x="400" y="122" text-anchor="middle" class="small">2 System + Human</text>
+  <path class="arrow" d="M300,130 H498"/>
+  <text x="400" y="162" text-anchor="middle" class="small">3 AI: content "" + tool_calls</text>
+  <path class="arrow" d="M500,170 H302"/>
+  <text x="510" y="202" class="small">4 run tool: name=Luca</text>
+  <path class="arrow" d="M300,210 H668"/>
+  <text x="510" y="242" class="small">5 ToolMessage (result)</text>
+  <path class="arrow-ok" d="M670,250 H302"/>
+  <text x="400" y="282" text-anchor="middle" class="small">6 System + Human + AI + Tool</text>
+  <path class="arrow" d="M300,290 H498"/>
+  <text x="400" y="322" text-anchor="middle" class="small">7 AI: final text</text>
+  <path class="arrow-ok" d="M500,330 H302"/>
+  <text x="195" y="362" text-anchor="middle" class="small">8 {"messages": [4 messages]}</text>
+  <path class="arrow-ok" d="M300,370 H92"/>
+</svg>
+<figcaption>Time flows down. The model is called <strong>twice</strong> for one <code>invoke</code>: first to choose the tool (3), then to write the answer using the tool's result (7). The tool itself runs on your computer (4–5), never on OpenAI's servers.</figcaption>
+</figure>
+
+<p>Now look at the list itself. Each node adds to it, and nothing is ever removed:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 232" role="img" aria-label="The messages list growing in four snapshots: after invoke it holds the human message; after the first model call an AI message with tool_calls is added; after the tools node a tool message is added; after the second model call the final AI message is added and is item minus one">
+  <rect class="zone" x="10" y="10" width="175" height="192" rx="10"/>
+  <text x="97" y="32" text-anchor="middle" class="title">1 · you invoke</text>
+  <rect class="box2" x="20" y="52" width="130" height="26" rx="6"/><text x="85" y="69" text-anchor="middle" class="label">Human: …Luca</text>
+  <text x="97" y="190" text-anchor="middle" class="small">1 message</text>
+  <rect class="zone" x="197" y="10" width="175" height="192" rx="10"/>
+  <text x="284" y="32" text-anchor="middle" class="title">2 · model node</text>
+  <rect class="box2" x="207" y="52" width="130" height="26" rx="6"/><text x="272" y="69" text-anchor="middle" class="label">Human: …Luca</text>
+  <rect class="box" x="207" y="84" width="130" height="26" rx="6"/><text x="272" y="101" text-anchor="middle" class="label">AI: tool_calls</text>
+  <text x="284" y="190" text-anchor="middle" class="small">2 messages</text>
+  <rect class="zone" x="384" y="10" width="175" height="192" rx="10"/>
+  <text x="471" y="32" text-anchor="middle" class="title">3 · tools node</text>
+  <rect class="box2" x="394" y="52" width="130" height="26" rx="6"/><text x="459" y="69" text-anchor="middle" class="label">Human: …Luca</text>
+  <rect class="box" x="394" y="84" width="130" height="26" rx="6"/><text x="459" y="101" text-anchor="middle" class="label">AI: tool_calls</text>
+  <rect class="box-info" x="394" y="116" width="130" height="26" rx="6"/><text x="459" y="133" text-anchor="middle" class="label">Tool: result</text>
+  <text x="471" y="190" text-anchor="middle" class="small">3 messages</text>
+  <rect class="zone" x="571" y="10" width="179" height="192" rx="10"/>
+  <text x="660" y="32" text-anchor="middle" class="title">4 · model node</text>
+  <rect class="box2" x="581" y="52" width="130" height="26" rx="6"/><text x="646" y="69" text-anchor="middle" class="label">Human: …Luca</text>
+  <rect class="box" x="581" y="84" width="130" height="26" rx="6"/><text x="646" y="101" text-anchor="middle" class="label">AI: tool_calls</text>
+  <rect class="box-info" x="581" y="116" width="130" height="26" rx="6"/><text x="646" y="133" text-anchor="middle" class="label">Tool: result</text>
+  <rect class="box-ok" x="581" y="148" width="130" height="26" rx="6"/><text x="646" y="165" text-anchor="middle" class="label">AI: final answer</text>
+  <text x="716" y="165" class="mono">[-1]</text>
+  <text x="380" y="222" text-anchor="middle" class="small">The list only grows. response["messages"] is snapshot 4.</text>
+</svg>
+<figcaption>The state of <code>response["messages"]</code> after each node. <strong>The final answer is always the last item</strong>, which is why <code>response["messages"][-1].content</code> works whether or not tools were used.</figcaption>
+</figure>
+
+<p>When the presenter prints <code>response["messages"]</code>, the output looks like this. It is simplified: the real output also has IDs, token counts and metadata, and the call ID is generated by OpenAI.</p>
+<pre data-lang="text" data-tag="illustrative"><code>[HumanMessage(content='Hello I am a student and my name is Luca', ...),
+ AIMessage(content='', tool_calls=[{'name': 'print_document', 'args': {'name': 'Luca'}, 'id': 'call_...', 'type': 'tool_call'}], ...),
+ ToolMessage(content='this is the document of Luca', name='print_document', tool_call_id='call_...'),
+ AIMessage(content='this is the document of Luca', ...)]</code></pre>
+<div class="table-wrap"><table>
+<tr><th>#</th><th>Message</th><th>What to notice</th></tr>
+<tr><td>1</td><td><code>HumanMessage</code></td><td>Exactly what you passed in.</td></tr>
+<tr><td>2</td><td><code>AIMessage</code> with <code>content=''</code></td><td>The "empty" message the presenter finds puzzling at 46:12. It isn't empty: the content is blank because the model's whole reply is the <code>tool_calls</code> list. The model chose the tool name and wrote the arguments <code>{'name': 'Luca'}</code> as JSON. The <code>id</code> is a receipt number.</td></tr>
+<tr><td>3</td><td><code>ToolMessage</code></td><td>Added by the tools node after running your Python function. <code>tool_call_id</code> matches the receipt number in message 2, so the model can pair each result with its request even when several tools run at once.</td></tr>
+<tr><td>4</td><td><code>AIMessage</code> with text</td><td>The model saw messages 1–3 (plus the system prompt) and wrote the answer. It has no tool calls, so the loop stopped.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to "the model calls a tool"? What really happens</summary>
+<p>The model never runs code. It only writes text. When an agent has tools, LangChain sends the model a short description of each one: the name (<code>print_document</code>), the description (the docstring) and the input schema (from the <a class="term" href="glossary.html#type-hint">type hint</a> <code>name: str</code>). The model can then answer in a special structured format that means "please call <code>print_document</code> with <code>{"name": "Luca"}</code>".</p>
+<p>LangChain reads that request, calls your Python function with those arguments, wraps the return value in a ToolMessage and sends everything back to the model. From the model's point of view, it asked a question and someone answered. That's why a tool must return something the model can read, such as a string or a dictionary.</p>
+</details>
+
+<div class="callout warn"><p><strong>Why the model ignored the tool at first.</strong> Before the strict system prompt, the presenter's agent simply chatted with Luca and never called <code>print_document</code> (43:19–45:25). Calling a tool is always the model's <em>choice</em>. A vague docstring ("generate the propre document") and a task the model can answer alone make skipping it likely. The presenter fixed it with a strict system prompt. Clear docstrings help too. The handbook chapter <a href="lc-05-tools-in-depth.html">Designing Good Tools</a> covers this.</p></div>
+
+<h2>Trace 2: <code>web_search</code> (step 9), several laps</h2>
+<p>In <a href="09-web-search-tavily.html">step 09</a> the tool is <code>web_search</code>, which calls the <a class="term" href="glossary.html#tavily">Tavily</a> API and returns a dictionary of results. For "give me the lastest news of the day" the model doesn't stop after one search. The presenter remarks that the agent uses its tools "over and over" (at 54:20): each search result can prompt the model to search again with a more specific query.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="One invoke, several laps: model asks for a search, tools node runs web_search, model asks again, tools node runs web_search again, model writes the final summary">
+  <path class="line" d="M10,22 H750"/><path class="line" d="M10,16 V28"/><path class="line" d="M750,16 V28"/>
+  <rect class="box2" x="300" y="10" width="160" height="24" rx="6"/><text x="380" y="27" text-anchor="middle" class="label">one agent.invoke(...)</text>
+  <rect class="box-solid" x="10" y="52" width="105" height="54" rx="8"/><text x="62" y="75" text-anchor="middle" class="on-solid">model</text><text x="62" y="93" text-anchor="middle" class="on-solid">asks search</text>
+  <rect class="box" x="135" y="52" width="105" height="54" rx="8"/><text x="187" y="75" text-anchor="middle">tools</text><text x="187" y="93" text-anchor="middle" class="small">web_search</text>
+  <rect class="box-solid" x="260" y="52" width="105" height="54" rx="8"/><text x="312" y="75" text-anchor="middle" class="on-solid">model</text><text x="312" y="93" text-anchor="middle" class="on-solid">asks again</text>
+  <rect class="box" x="385" y="52" width="105" height="54" rx="8"/><text x="437" y="75" text-anchor="middle">tools</text><text x="437" y="93" text-anchor="middle" class="small">web_search</text>
+  <rect class="box-solid" x="510" y="52" width="105" height="54" rx="8"/><text x="562" y="75" text-anchor="middle" class="on-solid">model</text><text x="562" y="93" text-anchor="middle" class="on-solid">writes</text>
+  <rect class="box-ok" x="635" y="52" width="115" height="54" rx="8"/><text x="692" y="75" text-anchor="middle">AIMessage</text><text x="692" y="93" text-anchor="middle" class="small">final summary</text>
+  <path class="arrow" d="M115,79 H133"/><path class="arrow" d="M240,79 H258"/><path class="arrow" d="M365,79 H383"/><path class="arrow" d="M490,79 H508"/><path class="arrow-ok" d="M615,79 H633"/>
+  <text x="62" y="128" text-anchor="middle" class="mono">+AI</text><text x="187" y="128" text-anchor="middle" class="mono">+Tool</text><text x="312" y="128" text-anchor="middle" class="mono">+AI</text><text x="437" y="128" text-anchor="middle" class="mono">+Tool</text><text x="562" y="128" text-anchor="middle" class="mono">+AI</text>
+  <text x="380" y="156" text-anchor="middle" class="small">each lap appends to the messages list and costs one more model call and a Tavily search</text>
+</svg>
+<figcaption>Two search laps are shown; the real number is decided by the model on each run (illustrative). <strong>Every lap is another model call</strong>, with a longer list of messages each time, so tool-heavy questions are slower and use more tokens.</figcaption>
+</figure>
+
+<p>Two practical consequences:</p>
+<ul>
+<li><strong>Cost and speed.</strong> Every lap resends the whole growing list, including the search results. Web results are long, so the <a class="term" href="glossary.html#context-window">context window</a> and the token bill grow quickly. The presenter checks the Tavily dashboard afterwards to see how many searches were used (around 55:54).</li>
+<li><strong>Trust.</strong> Search results go straight into the model's input as ToolMessages. A web page could contain instructions aimed at the model. That's <a class="term" href="glossary.html#prompt-injection">prompt injection</a>, covered in the handbook chapter <a href="lc-09-security-cost.html">Security, Secrets &amp; Cost</a>.</li>
+</ul>
+<p>A single AIMessage can also ask for <em>several</em> tools at once (for example two searches with different queries). The tools node then runs all of them and adds one ToolMessage per call, each with its own <code>tool_call_id</code>.</p>
+
+<h2>Why the loop stops</h2>
+<p>The loop has exactly one normal exit: <strong>the model replies with an AIMessage that has no tool calls</strong>. Nothing in your code counts searches or decides the answer is "good enough". The model makes that decision each time it is called.</p>
+<p>LangGraph also has a safety net: a maximum number of steps per run, the <em>recursion limit</em>. If a confused model kept calling tools forever, the run would stop with a <code>GraphRecursionError</code> instead of looping endlessly. You can set it per call, for example <code>agent.invoke({...}, {"recursion_limit": 10})</code>. Each model call and each tools run counts as one step. You won't hit it in this guide's projects.</p>
+
+<h2>What <code>create_agent</code> actually builds</h2>
+<p><code>create_agent</code> doesn't return a model. It returns a LangGraph <code>CompiledStateGraph</code>: a small program made of nodes (steps) and edges (arrows between them), with shared state (the messages list). You can ask the graph for its node names. Verified with the locked versions:</p>
+<pre data-lang="py" data-tag="illustrative"><code>agent = create_agent(model="gpt-5-nano", tools=[print_document])
+print(type(agent).__name__)             # CompiledStateGraph
+print(list(agent.get_graph().nodes))    # ['__start__', 'model', 'tools', '__end__']
+
+agent = create_agent(model="gpt-5-nano")  # no tools
+print(list(agent.get_graph().nodes))    # ['__start__', 'model', '__end__']</code></pre>
+
+<details class="primer"><summary>New to graphs? Nodes, edges and state</summary>
+<p>In programming, a <em>graph</em> is a set of boxes joined by arrows, like a flowchart. Each box (node) is a function that does one job. Each arrow (edge) says what runs next. A <em>conditional edge</em> is an arrow with a question on it: "if the last message has tool calls, go to tools, otherwise go to the end".</p>
+<p>All nodes share one <em>state</em>, here a dictionary holding the messages list. A node reads the state, does its job and returns what to add. <a class="term" href="glossary.html#langgraph">LangGraph</a> is the library that runs these graphs, and <code>create_agent</code> writes this one for you so you don't have to.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="The graph create_agent builds: without tools it is start, model, end; with tools it is start, model, a loop between model and tools, then end">
+  <rect class="zone" x="10" y="10" width="360" height="240" rx="10"/>
+  <text x="190" y="32" text-anchor="middle" class="title">create_agent(model)</text>
+  <rect class="box2" x="130" y="52" width="120" height="34" rx="8"/><text x="190" y="74" text-anchor="middle" class="mono">__start__</text>
+  <rect class="box-solid" x="130" y="118" width="120" height="34" rx="8"/><text x="190" y="140" text-anchor="middle" class="on-solid">model</text>
+  <rect class="box2" x="130" y="184" width="120" height="34" rx="8"/><text x="190" y="206" text-anchor="middle" class="mono">__end__</text>
+  <path class="arrow" d="M190,86 V116"/><path class="arrow" d="M190,152 V182"/>
+  <text x="190" y="240" text-anchor="middle" class="small">one model call, then stop</text>
+  <rect class="zone" x="390" y="10" width="360" height="240" rx="10"/>
+  <text x="570" y="32" text-anchor="middle" class="title">create_agent(model, tools=[...])</text>
+  <rect class="box2" x="440" y="52" width="120" height="34" rx="8"/><text x="500" y="74" text-anchor="middle" class="mono">__start__</text>
+  <rect class="box-solid" x="440" y="118" width="120" height="34" rx="8"/><text x="500" y="140" text-anchor="middle" class="on-solid">model</text>
+  <rect class="box" x="610" y="118" width="120" height="34" rx="8"/><text x="670" y="140" text-anchor="middle">tools</text>
+  <rect class="box2" x="440" y="184" width="120" height="34" rx="8"/><text x="500" y="206" text-anchor="middle" class="mono">__end__</text>
+  <path class="arrow" d="M500,86 V116"/>
+  <path class="arrow-accent" d="M560,126 H608"/><path class="arrow-accent" d="M610,144 H562"/>
+  <path class="arrow-ok" d="M500,152 V182"/>
+  <text x="670" y="174" text-anchor="middle" class="small">if tool_calls</text>
+  <text x="570" y="240" text-anchor="middle" class="small">loop until no tool_calls</text>
+</svg>
+<figcaption>The real node names, read from the graph with <code>get_graph()</code>. Without tools, an agent is just a model call with extra bookkeeping. <strong>Adding <code>tools=[...]</code> adds the tools node and the loop.</strong></figcaption>
+</figure>
+
+<p>Because the agent is a graph, every option of <code>create_agent</code> plugs into a specific place. <code>system_prompt</code> is used by the model node. <code>tools</code> creates the tools node. <code>checkpointer</code> saves the state between steps, which is the next section. <code>response_format</code> (<a href="17-structured-recipe.html">step 17</a>) and <code>middleware</code> (on the video's advanced roadmap) also hook into these nodes.</p>
+
+<h2>Memory: what the checkpointer saves</h2>
+<p>By default, every <code>invoke</code> starts with only the messages you pass in. In <a href="10-short-term-memory.html">step 10</a> the presenter says "My favorite color is green" in one call, then asks "what is my favorite color" in a second call. The agent has no idea (around 60:10). The second call's model saw exactly one message.</p>
+<p>The fix adds two things. A <a class="term" href="glossary.html#checkpointer">checkpointer</a> (<code>InMemorySaver()</code>) saves the graph's state after every step. A <a class="term" href="glossary.html#thread-id">thread ID</a> in the config says which conversation the state belongs to. On the next <code>invoke</code> with the same thread ID, LangGraph first loads the saved messages, <em>then</em> appends your new message, so the model sees the whole history.</p>
+<pre data-lang="py" data-tag="excerpt"><code>agent = create_agent(model="gpt-5-nano",
+                     checkpointer=InMemorySaver())
+
+config = {"configurable":{"thread_id":"1"}}
+
+response = agent.invoke(
+    {"messages": [HumanMessage(content="My favorite color is green")]},
+    config
+)</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 292" role="img" aria-label="Without a checkpointer the second invoke sends only one message and the model does not know the colour; with InMemorySaver and thread_id 1 the second invoke sends three messages and the model answers green">
+  <rect class="zone" x="10" y="10" width="360" height="272" rx="10"/>
+  <text x="190" y="32" text-anchor="middle" class="title">Without a checkpointer</text>
+  <text x="30" y="56" class="small">invoke 1</text>
+  <rect class="box2" x="30" y="62" width="320" height="28" rx="6"/><text x="190" y="81" text-anchor="middle" class="label">Human: My favorite color is green</text>
+  <text x="30" y="118" class="small">invoke 2 · the model sees 1 message</text>
+  <rect class="box2" x="30" y="124" width="320" height="28" rx="6"/><text x="190" y="143" text-anchor="middle" class="label">Human: what is my favorite color</text>
+  <path class="arrow-bad" d="M190,152 V184"/>
+  <rect class="box-bad" x="30" y="186" width="320" height="34" rx="6"/><text x="190" y="208" text-anchor="middle" class="label">AI: doesn't know your favorite color</text>
+  <text x="190" y="256" text-anchor="middle" class="small">each invoke starts from an empty history</text>
+  <rect class="zone" x="390" y="10" width="360" height="272" rx="10"/>
+  <text x="570" y="32" text-anchor="middle" class="title">With InMemorySaver, thread "1"</text>
+  <text x="410" y="56" class="small">invoke 1</text>
+  <rect class="box2" x="410" y="62" width="320" height="28" rx="6"/><text x="570" y="81" text-anchor="middle" class="label">Human: My favorite color is green</text>
+  <text x="410" y="118" class="small">invoke 2 · the model sees 3 messages</text>
+  <rect class="box-info" x="410" y="124" width="320" height="26" rx="6"/><text x="570" y="142" text-anchor="middle" class="label">Human: My favorite color is green</text>
+  <rect class="box-info" x="410" y="154" width="320" height="26" rx="6"/><text x="570" y="172" text-anchor="middle" class="label">AI: (its reply to invoke 1)</text>
+  <rect class="box2" x="410" y="184" width="320" height="26" rx="6"/><text x="570" y="202" text-anchor="middle" class="label">Human: what is my favorite color</text>
+  <path class="arrow-ok" d="M570,210 V230"/>
+  <rect class="box-ok" x="410" y="232" width="320" height="34" rx="6"/><text x="570" y="254" text-anchor="middle" class="label">AI: green</text>
+</svg>
+<figcaption>Same two calls, same code except the checkpointer and config. The tinted messages on the right were <strong>loaded from the checkpointer</strong>, not passed in by your code. Verified: without memory the second model call receives 1 message; with it, 3 (Human, AI, Human).</figcaption>
+</figure>
+
+<p>What exactly is stored? The checkpointer stores the graph's state, the messages list, under the thread ID. It saves a new snapshot ("checkpoint") after each step, so it could even resume a run that was interrupted halfway. <code>InMemorySaver</code> keeps all of this in a Python dictionary in your computer's RAM.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 266" role="img" aria-label="InMemorySaver keeps one message history per thread_id in RAM; invoking with thread 1 or thread 2 continues that conversation; invoking without a thread_id raises a ValueError; when the program exits all threads are lost">
+  <rect class="box2" x="10" y="40" width="200" height="44" rx="8"/><text x="110" y="58" text-anchor="middle">invoke(..., config)</text><text x="110" y="76" text-anchor="middle" class="small">thread_id "1"</text>
+  <rect class="box2" x="10" y="110" width="200" height="44" rx="8"/><text x="110" y="128" text-anchor="middle">invoke(..., config)</text><text x="110" y="146" text-anchor="middle" class="small">thread_id "2"</text>
+  <rect class="box-bad" x="10" y="180" width="200" height="44" rx="8"/><text x="110" y="198" text-anchor="middle">invoke(...)</text><text x="110" y="216" text-anchor="middle" class="small">no config at all</text>
+  <rect class="zone" x="250" y="14" width="500" height="160" rx="10"/>
+  <text x="500" y="34" text-anchor="middle" class="title">InMemorySaver (in RAM)</text>
+  <text x="270" y="66" class="mono">thread "1"</text>
+  <rect class="box2" x="370" y="50" width="70" height="24" rx="5"/><text x="405" y="66" text-anchor="middle" class="label">Human</text>
+  <rect class="box2" x="450" y="50" width="70" height="24" rx="5"/><text x="485" y="66" text-anchor="middle" class="label">AI</text>
+  <rect class="box2" x="530" y="50" width="70" height="24" rx="5"/><text x="565" y="66" text-anchor="middle" class="label">Human</text>
+  <rect class="box2" x="610" y="50" width="70" height="24" rx="5"/><text x="645" y="66" text-anchor="middle" class="label">AI</text>
+  <text x="270" y="136" class="mono">thread "2"</text>
+  <rect class="box2" x="370" y="120" width="70" height="24" rx="5"/><text x="405" y="136" text-anchor="middle" class="label">Human</text>
+  <rect class="box2" x="450" y="120" width="70" height="24" rx="5"/><text x="485" y="136" text-anchor="middle" class="label">AI</text>
+  <path class="arrow" d="M210,62 H248"/>
+  <path class="arrow" d="M210,132 H248"/>
+  <path class="arrow-bad" d="M210,202 H248"/>
+  <text x="256" y="206" class="small bad">ValueError: Checkpointer requires ... thread_id</text>
+  <rect class="box-warn" x="250" y="222" width="500" height="32" rx="8"/><text x="500" y="243" text-anchor="middle" class="label">Program exits → RAM is cleared → every thread is lost</text>
+</svg>
+<figcaption>One saved history per thread ID, kept apart from each other. <strong>Forgetting the config is an error, not silent forgetting</strong>, and <code>InMemorySaver</code> only lasts while the program runs. Database-backed checkpointers keep threads across restarts; see the handbook chapter <a href="lc-06-memory-and-state.html">Memory, State &amp; Checkpointers</a>.</figcaption>
+</figure>
+
+<div class="callout"><p><strong>Memory versus history you pass yourself.</strong> In <a href="06-conversation-history.html">step 06</a> your code passed Human, AI and Human messages by hand. In <a href="10-short-term-memory.html">step 10</a> the checkpointer does the same thing for you. Either way, the model only "remembers" what is in the list it receives. The checkpointer keeps that list between calls.</p></div>
+
+<h2>The chef, end to end</h2>
+<p>The chef project (<a href="13-chef-setup-and-decoder.html">steps 13</a>–<a href="14-chef-agent-and-logging.html">14</a>) uses the same loop with an image. <code>main.py</code> creates the agent with <code>tools=[web_search]</code> and <code>system_prompt=SYSTEM_CHEF_PROMPT</code>, asks you to pick a photo, builds one <a class="term" href="glossary.html#multimodal">multimodal</a> HumanMessage and invokes the agent. It has no checkpointer: one question, one answer.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 312" role="img" aria-label="The chef run: choose_image_file opens a file picker, build_image_message creates a human message with a text block and an image data URL, agent.invoke starts the loop; the model node sees the system prompt and the message, the tools node runs web_search against Tavily, and the final AIMessage is the recipe printed by main.py">
+  <rect class="box2" x="10" y="40" width="175" height="54" rx="8"/><text x="97" y="63" text-anchor="middle" class="mono">choose_image_file</text><text x="97" y="81" text-anchor="middle" class="small">tkinter picker → Path</text>
+  <rect class="box2" x="205" y="40" width="180" height="54" rx="8"/><text x="295" y="63" text-anchor="middle" class="mono">build_image_message</text><text x="295" y="81" text-anchor="middle" class="small">text + image data URL</text>
+  <rect class="box-solid" x="410" y="40" width="150" height="54" rx="8"/><text x="485" y="63" text-anchor="middle" class="on-solid">agent.invoke</text><text x="485" y="81" text-anchor="middle" class="on-solid">messages: [message]</text>
+  <rect class="box2" x="590" y="40" width="160" height="54" rx="8"/><text x="670" y="63" text-anchor="middle">Tavily API</text><text x="670" y="81" text-anchor="middle" class="small">recipes on the web</text>
+  <path class="arrow" d="M185,67 H203"/><path class="arrow" d="M385,67 H408"/>
+  <rect class="box-info" x="10" y="140" width="375" height="96" rx="8"/>
+  <text x="24" y="162" class="small">what the model receives on its first call</text>
+  <text x="24" y="184" class="label">SystemMessage: SYSTEM_CHEF_PROMPT</text>
+  <text x="24" y="204" class="label">Human text block: the word "prompt" (bug)</text>
+  <text x="24" y="224" class="label">Human image block: data:image/...;base64,…</text>
+  <rect class="box-solid" x="410" y="150" width="150" height="54" rx="8"/><text x="485" y="173" text-anchor="middle" class="on-solid">model node</text><text x="485" y="191" text-anchor="middle" class="on-solid">gpt-5-nano looks</text>
+  <rect class="box" x="590" y="150" width="160" height="54" rx="8"/><text x="670" y="173" text-anchor="middle">tools node</text><text x="670" y="191" text-anchor="middle" class="small">web_search(query)</text>
+  <path class="arrow" d="M485,94 V148"/>
+  <path class="arrow-accent" d="M385,177 H408"/>
+  <path class="arrow" d="M560,166 H588"/><path class="arrow-ok" d="M590,188 H562"/>
+  <path class="arrow" d="M660,150 V96"/><path class="arrow-ok" d="M680,96 V148"/>
+  <text x="670" y="224" text-anchor="middle" class="small">logs "searching for …"</text>
+  <rect class="box-ok" x="410" y="250" width="150" height="48" rx="8"/><text x="485" y="270" text-anchor="middle">final AIMessage</text><text x="485" y="287" text-anchor="middle" class="small">recipe, printed</text>
+  <path class="arrow-ok" d="M485,204 V248"/>
+</svg>
+<figcaption>The whole chef in one picture. The loop is identical to step 9. Only the input changed: it now contains an image. The tinted box shows a real bug in the repo: <strong>the model receives the word "prompt" instead of the request</strong>.</figcaption>
+</figure>
+
+<p>Two findings from verifying the repo are visible right here, in what the model receives:</p>
+<ul>
+<li>In <code>photo_decoder.py</code> the text block is <code>{"type": "text", "text": "prompt"}</code>: the <em>string</em> <code>"prompt"</code> in quotes, not the variable <code>prompt</code>. The harness confirmed the model receives the literal word <strong>prompt</strong>. The chef still works in the video because the system prompt already says what to do. The fix (<code>"text": prompt</code>) is in <a href="16-fix-and-harden.html">step 16</a>.</li>
+<li><code>SYSTEM_CHEF_PROMPT</code> joins two strings without a space, so the model reads "…in the photo.once you do that…". It's harmless here, but it's the kind of detail you only notice by looking at exactly what the model receives. Also fixed in step 16.</li>
+</ul>
+<p>When the model decides to search, the tools node runs <code>web_search</code>, and its <code>logging.info</code> line shows the query the model wrote. In the video's run those are lines like "searching for recipe using oyster sauce" (around 100:24). Each such log line is one lap of the loop.</p>
+
+<h2>Where streaming fits</h2>
+<p><code>agent.stream(..., stream_mode="messages")</code> runs the same loop but hands you pieces as they are produced instead of waiting for the end (<a href="07-streaming.html">step 07</a>). With tools, the stream includes more than the final answer: you also receive the ToolMessages from the tools node. The lesson code prints anything with <code>.content</code>, so a tool's result would be printed too. The chat chef in <a href="18-chat-with-your-chef.html">step 18</a> prints only the model's text chunks (<code>AIMessageChunk</code>), so you see the answer and not the raw search results.</p>
+
+<div class="callout warn"><p><strong>Common mistakes when reasoning about agents</strong></p>
+<ul>
+<li><strong>Expecting the model to run your function.</strong> It only asks. If a tool raises an error, the error comes from your Python code, on your machine.</li>
+<li><strong>Reading <code>response["messages"][0]</code> for the answer.</strong> Item 0 is your own question. The answer is <code>[-1]</code>.</li>
+<li><strong>Calling <code>create_agent.invoke(...)</code>.</strong> <code>create_agent</code> is the factory. Call <code>invoke</code> on the <code>agent</code> it returned, or you get <code>AttributeError: 'function' object has no attribute 'invoke'</code> (at 70:11).</li>
+<li><strong>Adding a checkpointer but no config.</strong> You get <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, ...</code>. Pass <code>{"configurable": {"thread_id": "1"}}</code> as the second argument.</li>
+<li><strong>Using a new thread ID by accident.</strong> A different ID is a different conversation, so the agent "forgets". Build the config once and reuse the same variable, as step 10 does.</li>
+<li><strong>Assuming memory survives a restart.</strong> <code>InMemorySaver</code> is lost when the script ends.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>An agent's input and output are <code>{"messages": [...]}</code>. The list only grows, and the answer is always <code>[-1]</code>.</li>
+<li>The loop: <strong>model node</strong> → if the AIMessage has <code>tool_calls</code>, <strong>tools node</strong> adds ToolMessages → back to the model. It stops when the model replies without tool calls.</li>
+<li>An "empty" AIMessage is a tool request. Its <code>tool_calls</code> carry the name, the arguments and an ID that the ToolMessage's <code>tool_call_id</code> answers.</li>
+<li><code>create_agent</code> builds a LangGraph graph with nodes <code>model</code> and <code>tools</code>. The system prompt is sent on every model call but isn't stored in the result.</li>
+<li>Memory = checkpointer + thread ID. It saves the messages per thread after each step and reloads them on the next <code>invoke</code>. <code>InMemorySaver</code> lasts only while the program runs.</li>
+<li>Every lap costs a model call. Look at exactly what the model receives: that's how the chef's <code>"prompt"</code> bug was found.</li>
+</ul></div>
+
+<nav class="pager"><a class="prev" href="05-first-agent.html"><small>← Related</small>Step 05 · Your first agent</a><a class="next" href="08-first-tool.html"><small>Related →</small>Step 08 · Your first tool</a></nav>
+</main>
+</body>
+</html>

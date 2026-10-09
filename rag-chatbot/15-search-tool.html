@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15 · Integrating Search Tool for AI</title>
+<meta name="description" content="Give the model a searchKnowledgeBase tool — the full RAG loop.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 15/23</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 15 of 23 · 58:50</div>
+  <h1>Integrating Search Tool for AI</h1>
+  <p class="lead">Give the model a searchKnowledgeBase tool — the full RAG loop.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=3E5OxozYuA8&amp;t=3530s" target="_blank" rel="noopener">▶ Watch this part (58:50)</a>
+</section>
+<h2>Goal</h2>
+<p>You can now upload documents, search them, and chat with the AI. This step connects them. You give the model a <strong>tool</strong> called <code>searchKnowledgeBase</code>, and the model decides when to call it, reads the results and answers from them. This completes the RAG loop.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="Two-step tool call flow">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="10" y="45" width="130" height="50" rx="8"/><text x="75" y="67" text-anchor="middle">Question</text><text x="75" y="83" text-anchor="middle" class="small">"vacation policy?"</text>
+  <rect class="box" x="180" y="45" width="160" height="50" rx="8"/><text x="260" y="67" text-anchor="middle">Step 1 · model</text><text x="260" y="83" text-anchor="middle" class="small">calls searchKnowledgeBase</text>
+  <rect class="box2" x="380" y="45" width="160" height="50" rx="8"/><text x="460" y="67" text-anchor="middle">execute()</text><text x="460" y="83" text-anchor="middle" class="small">top-3 chunks, formatted</text>
+  <rect class="box" x="580" y="45" width="170" height="50" rx="8"/><text x="665" y="67" text-anchor="middle">Step 2 · model</text><text x="665" y="83" text-anchor="middle" class="small">answers from results</text>
+  <path class="arrow" d="M140,70 H178"/><path class="arrow" d="M340,70 H378"/><path class="arrow" d="M540,70 H578"/>
+  <text x="380" y="130" text-anchor="middle" class="small">stopWhen: stepCountIs(2) allows both steps</text>
+</svg>
+</figure>
+
+<details class="primer"><summary>New to tool calling? How an AI "uses" your function</summary>
+<p>An <a class="term" href="glossary.html#llm">LLM</a> can only produce text. It can't open your database. <a class="term" href="glossary.html#tool-calling">Tool calling</a> is a trick that lets it ask <em>you</em> to run code on its behalf:</p>
+<ol>
+<li>Along with the conversation, you send the model a list of tools: a name, a description and the shape of the input each one needs.</li>
+<li>The model reads the question. If it decides a tool would help, instead of answering it replies with a structured request, for example: <em>"call <code>searchKnowledgeBase</code> with <code>{ query: "vacation policy" }</code>"</em>.</li>
+<li>The <a class="term" href="glossary.html#ai-sdk">AI SDK</a> sees this request, runs your <code>execute</code> function on your server, and sends the result back to the model.</li>
+<li>The model reads the result and writes the final answer.</li>
+</ol>
+<p>The model never runs code itself. It only <em>chooses</em> which tool to call and with what arguments. Your server stays in control of what actually happens.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 515" role="img" aria-label="Sequence diagram of one RAG question: browser, route handler, OpenAI, the tool's execute function and Neon exchange twelve numbered messages over two model steps">
+  <rect class="box2" x="10" y="10" width="120" height="44" rx="8" /><text x="70" y="29" text-anchor="middle" class="title">Browser</text><text x="70" y="45" text-anchor="middle" class="small">/chat · useChat</text>
+  <rect class="box" x="165" y="10" width="130" height="44" rx="8" /><text x="230" y="29" text-anchor="middle" class="title">route.ts</text><text x="230" y="45" text-anchor="middle" class="small">POST /api/chat</text>
+  <rect class="box-info" x="325" y="10" width="130" height="44" rx="8" /><text x="390" y="29" text-anchor="middle" class="title">OpenAI</text><text x="390" y="45" text-anchor="middle" class="small">chat + embeddings</text>
+  <rect class="box" x="485" y="10" width="130" height="44" rx="8" /><text x="550" y="29" text-anchor="middle" class="title">execute()</text><text x="550" y="45" text-anchor="middle" class="small">searchDocuments</text>
+  <rect class="box-info" x="630" y="10" width="120" height="44" rx="8" /><text x="690" y="29" text-anchor="middle" class="title">Neon</text><text x="690" y="45" text-anchor="middle" class="small">pgvector</text>
+  <path class="line dashed" d="M70,54 V500" /><path class="line dashed" d="M230,54 V500" /><path class="line dashed" d="M390,54 V500" /><path class="line dashed" d="M550,54 V500" /><path class="line dashed" d="M690,54 V500" />
+  <rect class="zone" x="160" y="104" width="300" height="70" rx="8" /><text x="150" y="143" text-anchor="end" class="accent">model step 1</text>
+  <rect class="zone" x="160" y="389" width="300" height="70" rx="8" /><text x="150" y="428" text-anchor="end" class="accent">model step 2</text>
+  <path class="arrow" d="M70,90 H228" /><text x="150" y="83" text-anchor="middle" class="small">1. POST /api/chat</text>
+  <path class="arrow-accent" d="M230,125 H388" /><text x="310" y="118" text-anchor="middle" class="small">2. messages + tools</text>
+  <path class="arrow-accent" d="M390,160 H232" /><text x="310" y="153" text-anchor="middle" class="small">3. tool call { query }</text>
+  <path class="arrow" d="M230,200 H548" /><text x="470" y="193" text-anchor="middle" class="small">4. execute({ query })</text>
+  <path class="arrow" d="M550,235 H392" /><text x="470" y="228" text-anchor="middle" class="small">5. embed the query</text>
+  <path class="arrow" d="M390,270 H548" /><text x="470" y="263" text-anchor="middle" class="small">6. 1536 numbers</text>
+  <path class="arrow" d="M550,305 H688" /><text x="620" y="298" text-anchor="middle" class="small">7. SQL: top 3, &gt; 0.5</text>
+  <path class="arrow" d="M690,340 H552" /><text x="620" y="333" text-anchor="middle" class="small">8. up to 3 rows</text>
+  <path class="arrow" d="M550,375 H232" /><text x="470" y="368" text-anchor="middle" class="small">9. "[1] … [2] … [3] …"</text>
+  <path class="arrow-accent" d="M230,410 H388" /><text x="310" y="403" text-anchor="middle" class="small">10. + tool result</text>
+  <path class="arrow-accent" d="M390,445 H232" /><text x="310" y="438" text-anchor="middle" class="small">11. answer text</text>
+  <path class="arrow-ok" d="M230,485 H72" /><text x="150" y="478" text-anchor="middle" class="small">12. streamed reply</text>
+</svg>
+<figcaption>The whole RAG round trip for one question. Time flows <strong>downwards</strong>; read the numbered arrows in order. The two dashed frames are the two calls to the chat model: in <strong>step 1</strong> it asks for the tool, in <strong>step 2</strong> it reads the numbered snippets and writes the answer. Messages 4–9 all happen on your server inside <code>execute</code>: <code>searchDocuments</code> embeds the query with OpenAI (1536 numbers), then asks Neon for at most 3 chunks with similarity above 0.5.</figcaption>
+</figure>
+
+<h2>Step by step</h2>
+<p>All the changes are in <code>src/app/api/chat/route.ts</code>.</p>
+<ol class="steps">
+<li><strong>Add imports</strong>
+<p><code>tool</code> from <code>ai</code> lets you define tools for the AI. <code>z</code> from <code>zod</code> defines the tool's input schema. <code>searchDocuments</code> comes from <code>@/lib/search</code>.</p></li>
+
+<li><strong>Define the tool before the <code>POST</code> handler</strong>
+<ul>
+<li><code>description</code>: "Search the knowledge base for relevant information". The model reads this to decide <em>when</em> to use the tool.</li>
+<li><code>inputSchema</code>: <code>z.object({ query: z.string().describe(...) })</code>. This tells the model <em>what arguments</em> to provide.</li>
+<li><code>execute</code>: an async function that receives <code>{ query }</code> and runs the search.</li>
+</ul>
+<figure class="diagram">
+<svg viewBox="0 0 760 265" role="img" aria-label="Anatomy of the searchKnowledgeBase tool: description says when, inputSchema says what to send, execute is the code your server runs">
+  <rect class="box2" x="10" y="10" width="440" height="200" rx="8" />
+  <text x="24" y="32" class="small">src/app/api/chat/route.ts (simplified)</text>
+  <text x="24" y="60" class="mono">searchKnowledgeBase: tool({</text>
+  <text x="40" y="90" class="mono">description: "Search the knowledge base…",</text>
+  <text x="40" y="120" class="mono">inputSchema: z.object({ query: z.string() }),</text>
+  <text x="40" y="150" class="mono">execute: async ({ query }) =&gt; { … },</text>
+  <text x="24" y="180" class="mono">}),</text>
+  <rect class="box" x="480" y="20" width="270" height="56" rx="8" /><text x="496" y="42" class="title">description</text><text x="496" y="62" class="small">WHEN to call it · read by the model</text>
+  <rect class="box" x="480" y="96" width="270" height="56" rx="8" /><text x="496" y="118" class="title">inputSchema</text><text x="496" y="138" class="small">WHAT to send · { query: string }</text>
+  <rect class="box-ok" x="480" y="172" width="270" height="56" rx="8" /><text x="496" y="194" class="title">execute</text><text x="496" y="214" class="small">WHAT RUNS · your code, on your server</text>
+  <path class="arrow-accent" d="M350,86 L478,50" />
+  <path class="arrow-accent" d="M368,116 L478,124" />
+  <path class="arrow-ok" d="M305,146 L478,198" />
+  <text x="380" y="250" text-anchor="middle" class="small">The model only sees the name, description and schema. The code inside execute never leaves your server.</text>
+</svg>
+<figcaption>The three parts of a tool. <strong><code>description</code></strong> and <strong><code>inputSchema</code></strong> are sent to the model so it can decide <em>when</em> to call the tool and <em>what</em> to pass; <strong><code>execute</code></strong> is ordinary server code that the AI SDK runs for it.</figcaption>
+</figure></li>
+
+<li><strong>Implement <code>execute</code></strong>
+<ul>
+<li>Call <code>searchDocuments(query, 3, 0.5)</code>. Limiting to <strong>3</strong> results keeps the context focused. <code>0.5</code> is already the default, so you can leave it out.</li>
+<li>If there are no results, return <em>"No relevant information found in the knowledge base"</em>.</li>
+<li>Otherwise format each result as <code>[1] content</code>, <code>[2] content</code>… joined by blank lines, and return that string.</li>
+<li>In <code>catch</code>, log <code>"Search error:"</code> and return <em>"Error searching the knowledge base"</em>, so the model gets a readable message instead of a crash.</li>
+</ul>
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Three search results are turned by map and join into one numbered string; an empty result list becomes a no-information message">
+  <text x="10" y="22" class="small">results (from searchDocuments)</text>
+  <text x="340" y="22" class="small">formattedResults (one string)</text>
+  <rect class="box2" x="10" y="32" width="250" height="40" rx="8" /><text x="22" y="49" class="label">results[0] · similarity 0.82</text><text x="22" y="64" class="small">PTO: 15 days for 0–2 years…</text>
+  <rect class="box2" x="10" y="80" width="250" height="40" rx="8" /><text x="22" y="97" class="label">results[1] · similarity 0.74</text><text x="22" y="112" class="small">PTO: 20 days for 3–5 years…</text>
+  <rect class="box2" x="10" y="128" width="250" height="40" rx="8" /><text x="22" y="145" class="label">results[2] · similarity 0.61</text><text x="22" y="160" class="small">Submit requests two weeks ahead…</text>
+  <path class="arrow-accent" d="M264,100 H336" /><text x="300" y="90" text-anchor="middle" class="mono">.map</text><text x="300" y="118" text-anchor="middle" class="mono">.join</text>
+  <rect class="box" x="340" y="32" width="410" height="136" rx="8" />
+  <text x="354" y="56" class="mono">[1] PTO: 15 days for 0–2 years of service…</text>
+  <text x="354" y="76" class="small">(blank line)</text>
+  <text x="354" y="100" class="mono">[2] PTO: 20 days for 3–5 years of service…</text>
+  <text x="354" y="120" class="small">(blank line)</text>
+  <text x="354" y="144" class="mono">[3] Submit requests two weeks ahead…</text>
+  <rect class="box-warn" x="10" y="190" width="250" height="44" rx="8" /><text x="135" y="216" text-anchor="middle" class="mono">results.length === 0</text>
+  <path class="arrow" d="M262,212 H336" />
+  <rect class="box-warn" x="340" y="190" width="410" height="44" rx="8" /><text x="545" y="216" text-anchor="middle" class="mono">No relevant information found in the knowledge base.</text>
+</svg>
+<figcaption>What <code>execute</code> hands back to the model. Top: up to 3 rows become <strong>one string</strong> with numbered snippets separated by a blank line (<code>"\n\n"</code>). Bottom: no rows means a plain sentence, so the model can say it doesn't know. The similarity values and snippet texts are <strong>illustrative</strong>.</figcaption>
+</figure></li>
+
+<li><strong>Export typed message types</strong>
+<p>Import <code>InferUITools</code> and <code>UIDataTypes</code> from <code>ai</code>, then add these after the tools:</p>
+<ul>
+<li><code>ChatTools = InferUITools&lt;typeof tools&gt;</code></li>
+<li><code>ChatMessage = UIMessage&lt;never, UIDataTypes, ChatTools&gt;</code>. Use <code>never</code> because there is no metadata.</li>
+</ul>
+<p>With these, TypeScript knows about your tools throughout the app. Update the <code>POST</code> handler so <code>messages</code> is typed as <code>ChatMessage[]</code>.</p></li>
+
+<li><strong>Pass the tools and a system prompt to <code>streamText</code></strong>
+<p>Use <code>tools</code> (shorthand, since key and value are the same) and a <code>system</code> prompt that tells the AI when to search and how to answer. The presenter pasted the prompt. It is reproduced in full below.</p></li>
+
+<li><strong>Allow two steps</strong>
+<p>When the AI uses a tool, that is one step. It then needs another step to process the results and reply. Import <code>stepCountIs</code> and add <code>stopWhen: stepCountIs(2)</code>. Without it, generation would stop after the tool call and the user would never see an answer.</p></li>
+</ol>
+
+<details class="primer"><summary>New to Zod schemas? Describing the shape of data</summary>
+<p><a class="term" href="glossary.html#zod">Zod</a> is a library for describing what data should look like, and checking it at runtime. TypeScript types disappear when your code runs; a Zod schema still exists and can validate real data.</p>
+<pre data-lang="ts"><code>const schema = z.object({ query: z.string() });
+schema.parse({ query: "vacation" });  // OK, returns the object
+schema.parse({ query: 42 });          // throws: expected string</code></pre>
+<p>For tools, the schema does two jobs. The AI SDK converts it into a JSON description that is sent to the model, so the model knows it must provide a <code>query</code> string. <code>.describe("…")</code> adds a hint the model reads. When the model's arguments come back, they're checked against the same schema before <code>execute</code> runs, and TypeScript knows <code>query</code> is a <code>string</code>.</p>
+</details>
+
+<details class="primer"><summary>New to system prompts? The model's standing instructions</summary>
+<p>A chat with an LLM is a list of messages, each with a role. <strong>User</strong> messages come from the person, <strong>assistant</strong> messages from the AI, and the <strong>system</strong> message is a set of instructions from you, the developer, that applies to the whole conversation. The user never sees it.</p>
+<p>The system <a class="term" href="glossary.html#prompt">prompt</a> is where you set behaviour: "search before answering", "be concise", "base your answer on the results". The model follows it fairly reliably, but it's guidance, not a guarantee. If answers are too long or the model skips the search, the system prompt is the first thing to adjust.</p>
+</details>
+
+<details class="primer"><summary>New to steps and <code>stopWhen</code>? Why one request can need two model calls</summary>
+<p>A <strong>step</strong> is one round-trip to the model: send messages, get a reply. In the tool flow, the first reply is "please call the tool" (step 1). After <code>execute</code> runs, the SDK must call the model <em>again</em> with the tool result so it can write the answer (step 2).</p>
+<p>By default <code>streamText</code> stops after one step. <code>stopWhen: stepCountIs(2)</code> means "keep going until 2 steps have happened". If the model answers directly without a tool, it simply finishes after step 1. If you wanted the model to be able to search twice (for example once for "vacation" and once for "sick leave"), you'd raise it to 3 or more.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 245" role="img" aria-label="Three timelines: without stopWhen generation stops after the tool call; with stepCountIs(2) a second step writes the answer; with no tool needed the model finishes after one step">
+  <text x="10" y="22" class="label">No stopWhen (default: 1 step)</text>
+  <rect class="box" x="10" y="30" width="200" height="40" rx="8" /><text x="110" y="47" text-anchor="middle">step 1: model</text><text x="110" y="62" text-anchor="middle" class="small">asks for the tool</text>
+  <path class="arrow" d="M210,50 H248" />
+  <rect class="box2" x="250" y="30" width="180" height="40" rx="8" /><text x="340" y="47" text-anchor="middle">execute()</text><text x="340" y="62" text-anchor="middle" class="small">runs the search</text>
+  <path class="arrow-bad" d="M430,50 H468" />
+  <rect class="box-bad" x="470" y="30" width="280" height="40" rx="8" /><text x="610" y="47" text-anchor="middle" class="bad">stops here</text><text x="610" y="62" text-anchor="middle" class="small">no step 2, so no answer text</text>
+  <text x="10" y="102" class="label">stopWhen: stepCountIs(2)</text>
+  <rect class="box" x="10" y="110" width="200" height="40" rx="8" /><text x="110" y="127" text-anchor="middle">step 1: model</text><text x="110" y="142" text-anchor="middle" class="small">asks for the tool</text>
+  <path class="arrow" d="M210,130 H248" />
+  <rect class="box2" x="250" y="110" width="180" height="40" rx="8" /><text x="340" y="127" text-anchor="middle">execute()</text><text x="340" y="142" text-anchor="middle" class="small">runs the search</text>
+  <path class="arrow-ok" d="M430,130 H468" />
+  <rect class="box-ok" x="470" y="110" width="280" height="40" rx="8" /><text x="610" y="127" text-anchor="middle" class="ok">step 2: model</text><text x="610" y="142" text-anchor="middle" class="small">reads the results, writes the answer</text>
+  <text x="10" y="182" class="label">Same setting, no tool needed (for example "hello")</text>
+  <rect class="box" x="10" y="190" width="200" height="40" rx="8" /><text x="110" y="207" text-anchor="middle">step 1: model</text><text x="110" y="222" text-anchor="middle" class="small">answers directly</text>
+  <path class="arrow-ok" d="M210,210 H248" />
+  <rect class="box-ok" x="250" y="190" width="180" height="40" rx="8" /><text x="340" y="207" text-anchor="middle" class="ok">done after 1 step</text><text x="340" y="222" text-anchor="middle" class="small">the limit is a maximum</text>
+</svg>
+<figcaption>Why <code>stopWhen</code> matters. A tool call <strong>uses up a step</strong>. With the default limit of one step, the request ends right after <code>execute</code> and the user sees nothing; <code>stepCountIs(2)</code> leaves room for the answer. It is a <strong>maximum</strong>, not a requirement: a question that needs no search still finishes after one step.</figcaption>
+</figure>
+
+<h2>Complete file</h2>
+<pre data-file="src/app/api/chat/route.ts" data-lang="ts" data-tag="from the GitHub repo"><code>// src/app/api/chat/route.ts
+import {
+  streamText,
+  UIMessage,
+  convertToModelMessages,
+  tool,
+  InferUITools,
+  UIDataTypes,
+  stepCountIs,
+} from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+import { searchDocuments } from "@/lib/search";
+
+const tools = {
+  searchKnowledgeBase: tool({
+    description: "Search the knowledge base for relevant information",
+    inputSchema: z.object({
+      query: z.string().describe("The search query to find relevant documents"),
+    }),
+    execute: async ({ query }) =&gt; {
+      try {
+        // Search the vector database
+        const results = await searchDocuments(query, 3, 0.5);
+
+        if (results.length === 0) {
+          return "No relevant information found in the knowledge base.";
+        }
+
+        // Format results for the AI
+        const formattedResults = results
+          .map((r, i) =&gt; `[${i + 1}] ${r.content}`)
+          .join("\n\n");
+
+        return formattedResults;
+      } catch (error) {
+        console.error("Search error:", error);
+        return "Error searching the knowledge base.";
+      }
+    },
+  }),
+};
+
+export type ChatTools = InferUITools&lt;typeof tools&gt;;
+export type ChatMessage = UIMessage&lt;never, UIDataTypes, ChatTools&gt;;
+
+export async function POST(req: Request) {
+  try {
+    const { messages }: { messages: ChatMessage[] } = await req.json();
+
+    const result = streamText({
+      model: openai("gpt-5-mini"),
+      messages: convertToModelMessages(messages),
+      tools,
+      system: `You are a helpful assistant with access to a knowledge base. 
+          When users ask questions, search the knowledge base for relevant information.
+          Always search before answering if the question might relate to uploaded documents.
+          Base your answers on the search results when available. Give concise answers that correctly answer what the user is asking for. Do not flood them with all the information from the search results.`,
+      stopWhen: stepCountIs(2),
+    });
+
+    return result.toUIMessageStreamResponse();
+  } catch (error) {
+    console.error("Error streaming chat completion:", error);
+    return new Response("Failed to stream chat completion", { status: 500 });
+  }
+}</code></pre>
+
+<div class="callout"><p><strong>Video vs repo, the model:</strong> the repo&#39;s final <code>route.ts</code> uses <code>openai("gpt-5-mini")</code>, while the video uses <code>gpt-4.1-mini</code> and recommends it for following along. Both work. As the presenter explains in step 5, <code>gpt-5-mini</code> needs an extra setup step if your OpenAI organization has <em>zero data retention</em> enabled. The repo&#39;s tool messages also end with a period ("…knowledge base."). That has no effect on behaviour.</p></div>
+
+<div class="callout"><p><strong>Why the chat page needs no changes.</strong> Tool calls arrive as message parts of type <code>tool-searchKnowledgeBase</code>. The page's <code>switch</code> only renders <code>"text"</code> parts and returns <code>null</code> for anything else (the <code>default</code> case), so tool calls stay invisible and only the final answer shows. To show "Searching…" in the UI, add a <code>case "tool-searchKnowledgeBase":</code>, typing <code>useChat&lt;ChatMessage&gt;()</code> so it is checked.</p></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 165" role="img" aria-label="An assistant message has a tool part and a text part; the page's switch renders only the text part and returns null for the tool part">
+  <text x="10" y="20" class="small">assistant message · parts</text>
+  <rect class="box2" x="10" y="30" width="290" height="44" rx="8" /><text x="155" y="56" text-anchor="middle" class="mono">type: "tool-searchKnowledgeBase"</text>
+  <rect class="box" x="10" y="100" width="290" height="44" rx="8" /><text x="155" y="126" text-anchor="middle" class="mono">type: "text"</text>
+  <path class="arrow" d="M300,52 H338" /><path class="arrow" d="M300,122 H338" />
+  <rect class="box2" x="340" y="30" width="150" height="114" rx="8" /><text x="415" y="82" text-anchor="middle" class="mono">switch</text><text x="415" y="100" text-anchor="middle" class="mono">(part.type)</text>
+  <path class="arrow-bad" d="M490,52 H528" /><path class="arrow-ok" d="M490,122 H528" />
+  <rect class="box-warn" x="530" y="30" width="220" height="44" rx="8" /><text x="640" y="48" text-anchor="middle" class="label">default → null</text><text x="640" y="64" text-anchor="middle" class="small">invisible in the chat</text>
+  <rect class="box-ok" x="530" y="100" width="220" height="44" rx="8" /><text x="640" y="118" text-anchor="middle" class="label">case "text" → &lt;Response&gt;</text><text x="640" y="134" text-anchor="middle" class="small">the answer bubble you see</text>
+</svg>
+<figcaption>One assistant message can hold <strong>several parts</strong>. The tool call is a part too, but the chat page from step 6 only draws <code>"text"</code> parts, so the search happens <strong>silently</strong> and only the final answer appears.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to TypeScript generics? Reading <code>InferUITools&lt;typeof tools&gt;</code> and <code>UIMessage&lt;…&gt;</code></summary>
+<p>A <strong>generic</strong> is a type with "blanks" you fill in, written in angle brackets. You already know one from everyday code: <code>Array&lt;string&gt;</code> means "an array, and the blank (what's inside) is <code>string</code>".</p>
+<ul>
+<li><code>typeof tools</code> asks TypeScript for the <a class="term" href="glossary.html#type">type</a> of the <code>tools</code> object you wrote: its tool names, their inputs and outputs.</li>
+<li><code>InferUITools&lt;…&gt;</code> is a helper from the AI SDK that takes that type and converts it into the format chat messages use for tool parts. You never write those types by hand; they're <em>inferred</em> (worked out) from your code.</li>
+<li><code>UIMessage&lt;Metadata, DataParts, Tools&gt;</code> is the type of one chat message, with three blanks. You fill in <code>never</code> for metadata ("this never exists"), the SDK's default <code>UIDataTypes</code> for custom data parts, and your <code>ChatTools</code> for tools.</li>
+</ul>
+<p>These are only types: they vanish when the code runs and change no behaviour. Their value is that your editor now knows a message can contain a part of type <code>"tool-searchKnowledgeBase"</code> with an input <code>{ query: string }</code>, and warns you about typos.</p>
+</details>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>// src/app/api/chat/route.ts</code></td><td>A comment naming the file. Because it's <code>route.ts</code> inside <code>app/api/chat/</code>, this is a <a class="term" href="glossary.html#route-handler">route handler</a> answering requests to <code>/api/chat</code>.</td></tr>
+<tr><td>2–10</td><td><code>import { streamText, UIMessage, convertToModelMessages, tool, InferUITools, UIDataTypes, stepCountIs, } from "ai";</code></td><td>Everything from the AI SDK core package <code>ai</code>: <code>streamText</code> (call the model and stream the reply), <code>UIMessage</code> (type of a chat message in the UI), <code>convertToModelMessages</code> (turn UI messages into the format the model expects), <code>tool</code> (define a tool), <code>InferUITools</code> and <code>UIDataTypes</code> (type helpers), <code>stepCountIs</code> (a stop condition). The list is split over several lines only for readability.</td></tr>
+<tr><td>11</td><td><code>import { openai } from "@ai-sdk/openai";</code></td><td>The OpenAI <a class="term" href="glossary.html#provider">provider</a>. <code>openai("model-name")</code> creates a model object <code>streamText</code> can use. It reads <code>OPENAI_API_KEY</code> from the environment automatically.</td></tr>
+<tr><td>12</td><td><code>import { z } from "zod";</code></td><td>Zod, for the tool's input schema. By convention it's imported as <code>z</code>.</td></tr>
+<tr><td>13</td><td><code>import { searchDocuments } from "@/lib/search";</code></td><td>Your semantic search function from step 14.</td></tr>
+<tr><td>15</td><td><code>const tools = {</code></td><td>An <a class="term" href="glossary.html#object">object</a> holding all tools. Each <strong>key</strong> is a tool name the model will see. It's defined outside <code>POST</code> so it's created once, not on every request, and so its type can be exported below.</td></tr>
+<tr><td>16</td><td><code>searchKnowledgeBase: tool({</code></td><td>The tool's name. The model calls it by this exact name, and in the UI its parts get the type <code>"tool-searchKnowledgeBase"</code>. <code>tool({…})</code> is mostly a typing helper: it connects the schema to the type of <code>execute</code>'s argument.</td></tr>
+<tr><td>17</td><td><code>description: "Search the knowledge base for relevant information",</code></td><td>Plain-English explanation sent to the model. The model uses it to decide <em>when</em> the tool is useful. A vague description means the model may not call it.</td></tr>
+<tr><td>18–20</td><td><code>inputSchema: z.object({ query: z.string().describe("The search query to find relevant documents"), }),</code></td><td>The arguments the model must provide: an object with one field, <code>query</code>, a string. <code>.describe(…)</code> tells the model what to put there. The model usually rewrites the user's question into a good search phrase.</td></tr>
+<tr><td>21</td><td><code>execute: async ({ query }) =&gt; {</code></td><td>The function the SDK runs when the model calls the tool. It receives the validated input; <code>{ query }</code> destructures the <code>query</code> field out of it. <code>async</code> because it waits for the search.</td></tr>
+<tr><td>22</td><td><code>try {</code></td><td>Protects against errors (for example the database is unreachable).</td></tr>
+<tr><td>23–24</td><td><code>const results = await searchDocuments(query, 3, 0.5);</code></td><td>Runs the semantic search: at most <strong>3</strong> chunks with similarity above <strong>0.5</strong>. Fewer, better chunks keep the model's <a class="term" href="glossary.html#context-window">context</a> focused and cheaper.</td></tr>
+<tr><td>26–28</td><td><code>if (results.length === 0) { return "No relevant information found in the knowledge base."; }</code></td><td>If nothing matched, return a clear sentence. The model reads it and can tell the user it doesn't know, instead of making something up.</td></tr>
+<tr><td>30–33</td><td><code>const formattedResults = results.map((r, i) =&gt; `[${i + 1}] ${r.content}`).join("\n\n");</code></td><td><a class="term" href="glossary.html#map"><code>.map</code></a> turns each result <code>r</code> (with its position <code>i</code>, starting at 0) into a string like <code>[1] chunk text</code>. <code>i + 1</code> makes the numbering start at 1. <code>.join("\n\n")</code> glues them into one string with a blank line between snippets (<code>\n</code> is a line break). The numbers help the model tell the snippets apart.</td></tr>
+<tr><td>35</td><td><code>return formattedResults;</code></td><td>Whatever <code>execute</code> returns becomes the tool result the model reads in step 2.</td></tr>
+<tr><td>36–39</td><td><code>} catch (error) { console.error("Search error:", error); return "Error searching the knowledge base."; }</code></td><td>If the search throws, log the real error in your server terminal (for you) and give the model a readable message (for it). Without this, the whole chat request would fail.</td></tr>
+<tr><td>40–42</td><td><code>}, }), };</code></td><td>Closes <code>execute</code>, the <code>tool({…})</code> call and the <code>tools</code> object.</td></tr>
+<tr><td>44</td><td><code>export type ChatTools = InferUITools&lt;typeof tools&gt;;</code></td><td>Creates and exports a type describing your tools in UI-message form (see the generics primer). <code>export</code> lets the chat page import it.</td></tr>
+<tr><td>45</td><td><code>export type ChatMessage = UIMessage&lt;never, UIDataTypes, ChatTools&gt;;</code></td><td>The type of one message in <em>this</em> app: no metadata (<code>never</code>), default data parts, and your tools.</td></tr>
+<tr><td>47</td><td><code>export async function POST(req: Request) {</code></td><td>Handles <a class="term" href="glossary.html#http-methods">HTTP POST</a> requests to <code>/api/chat</code>. The name must be exactly <code>POST</code>; Next.js maps it to that method. <code>req</code> is the incoming request.</td></tr>
+<tr><td>48</td><td><code>try {</code></td><td>Catches anything that goes wrong while starting the stream.</td></tr>
+<tr><td>49</td><td><code>const { messages }: { messages: ChatMessage[] } = await req.json();</code></td><td>Reads the request body as JSON and pulls out <code>messages</code>, the whole conversation that <code>useChat</code> sends. The type annotation tells TypeScript it's an array of <code>ChatMessage</code>.</td></tr>
+<tr><td>51</td><td><code>const result = streamText({</code></td><td>Starts the model call. It returns immediately with a stream object; text arrives piece by piece. (No <code>await</code> needed.)</td></tr>
+<tr><td>52</td><td><code>model: openai("gpt-5-mini"),</code></td><td>Which model to use (the video uses <code>gpt-4.1-mini</code>; see the callout above).</td></tr>
+<tr><td>53</td><td><code>messages: convertToModelMessages(messages),</code></td><td>UI messages contain extra UI details (ids, parts). This converts them into the plain format the model API expects.</td></tr>
+<tr><td>54</td><td><code>tools,</code></td><td>Shorthand for <code>tools: tools</code>. Makes <code>searchKnowledgeBase</code> available to the model.</td></tr>
+<tr><td>55–58</td><td><code>system: `You are a helpful assistant … Do not flood them with all the information from the search results.`,</code></td><td>The system prompt, written as a backtick string so it can span lines. It tells the model: you have a knowledge base; search it when questions may relate to uploaded documents; base answers on the results; be concise. (The extra spaces at the start of lines are sent too, but they don't matter to the model.)</td></tr>
+<tr><td>59</td><td><code>stopWhen: stepCountIs(2),</code></td><td>Allows up to two steps: the tool call and the answer.</td></tr>
+<tr><td>60</td><td><code>});</code></td><td>Ends the options object and the <code>streamText</code> call.</td></tr>
+<tr><td>62</td><td><code>return result.toUIMessageStreamResponse();</code></td><td>Turns the stream into an HTTP response in the format <code>useChat</code> understands, and sends it back as it's generated (<a class="term" href="glossary.html#streaming">streaming</a>). That's why the answer appears word by word.</td></tr>
+<tr><td>63–66</td><td><code>} catch (error) { console.error(…); return new Response("Failed to stream chat completion", { status: 500 }); }</code></td><td>If something fails before streaming starts, log it and answer with <a class="term" href="glossary.html#status">status code</a> 500 ("server error"), so the client knows the request failed.</td></tr>
+<tr><td>67</td><td><code>}</code></td><td>Ends the <code>POST</code> function.</td></tr>
+</table></div>
+
+<h2>Test the full RAG system</h2>
+<ol class="steps">
+<li><strong>Make sure a PDF has been uploaded</strong> on <code>/upload</code>.</li>
+<li><strong>Ask "What is our vacation policy?"</strong> on <code>/chat</code>
+<p>The AI searches the knowledge base and answers from the handbook. In the video: PTO of <strong>15 days</strong> for 0–2 years of service and <strong>20 days</strong> for 3–5 years, with requests submitted <strong>at least two weeks in advance through the HR portal</strong>. These figures match the PDF.</p></li>
+<li><strong>Ask "Are there any professional development benefits?"</strong>
+<p>Answer: yes, an <strong>annual education budget of $2,000 per employee</strong>.</p></li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Two chat wireframes: before step 15 the bot can only guess about the vacation policy; after step 15 it answers with the handbook's figures">
+  <text x="190" y="20" text-anchor="middle" class="title">Before step 15</text>
+  <rect class="ui-window" x="10" y="30" width="360" height="220" rx="10" />
+  <rect class="ui-chrome" x="11" y="31" width="358" height="24" rx="9" /><text x="24" y="48" class="small">/chat</text>
+  <rect class="ui-bubble-user" x="150" y="70" width="205" height="30" rx="12" /><text x="252" y="89" text-anchor="middle" class="ui-on-user">What is our vacation policy?</text>
+  <rect class="ui-bubble-ai" x="24" y="114" width="300" height="52" rx="12" /><text x="36" y="136" class="label">I don't have access to your company's</text><text x="36" y="154" class="label">documents, so I can only guess…</text>
+  <rect class="ui-field" x="24" y="204" width="332" height="32" rx="8" /><rect class="ui-skeleton" x="36" y="216" width="140" height="8" rx="4" />
+  <text x="190" y="274" text-anchor="middle" class="bad">No knowledge base: a generic reply</text>
+  <text x="570" y="20" text-anchor="middle" class="title">After step 15</text>
+  <rect class="ui-window" x="390" y="30" width="360" height="220" rx="10" />
+  <rect class="ui-chrome" x="391" y="31" width="358" height="24" rx="9" /><text x="404" y="48" class="small">/chat</text>
+  <rect class="ui-bubble-user" x="530" y="70" width="205" height="30" rx="12" /><text x="632" y="89" text-anchor="middle" class="ui-on-user">What is our vacation policy?</text>
+  <rect class="ui-bubble-ai" x="404" y="114" width="320" height="72" rx="12" /><text x="416" y="136" class="label">PTO is 15 days (0–2 years of service)</text><text x="416" y="154" class="label">and 20 days (3–5 years). Submit requests</text><text x="416" y="172" class="label">two weeks ahead via the HR portal.</text>
+  <rect class="ui-field" x="404" y="204" width="332" height="32" rx="8" /><rect class="ui-skeleton" x="416" y="216" width="140" height="8" rx="4" />
+  <text x="570" y="274" text-anchor="middle" class="ok">Searched the PDF, answered from it</text>
+</svg>
+<figcaption>Illustration (simplified). The same question <strong>before</strong> and <strong>after</strong> the tool is added. The left reply is a made-up example of a generic answer; the right one uses the figures the video gets from the handbook PDF. The search itself stays invisible: you only see the grounded answer.</figcaption>
+</figure>
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Forgetting <code>stopWhen</code>:</strong> the chat shows nothing (or an empty reply) after a question, because generation stopped right after the tool call.</li>
+<li><strong>No documents uploaded:</strong> the tool returns "No relevant information found…" and the AI says it doesn't know. Upload a PDF on <code>/upload</code> first.</li>
+<li><strong>The AI answers without searching:</strong> the question may not look document-related to it. Rephrase, or make the system prompt stricter ("Always search the knowledge base before answering").</li>
+<li><strong>"Search error:" in the terminal:</strong> usually the database URL or OpenAI key is missing from <code>.env.local</code>. Restart <code>npm run dev</code> after editing it.</li>
+</ul></div>
+
+<div class="callout ok"><p>The AI doesn't need to know your documents in advance. It looks up the relevant information when a question is asked and uses it to answer accurately.</p></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>The tool's <code>description</code> and <code>inputSchema</code> tell the model when and how to search. <code>execute</code> runs <code>searchDocuments</code> and returns numbered snippets.</li>
+<li>The system prompt pushes the model to search first and keep answers short and grounded.</li>
+<li><code>stopWhen: stepCountIs(2)</code> allows one step for the tool call and one for the answer.</li>
+<li>Last feature: restrict uploads to admins.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="14-semantic-search.html"><small>← Previous · Step 14</small>Implementing Semantic Search</a>
+<a class="next" href="16-rbac.html"><small>Next · Step 16 →</small>Adding Role-Based Access Control</a>
+</nav>
+</main>
+</body>
+</html>

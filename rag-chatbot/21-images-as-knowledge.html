@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>21 · Images &amp; Scanned PDFs as Knowledge</title>
+<meta name="description" content="Make images and scanned PDFs searchable with a vision model.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 21/23</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 21 of 23 · Extra, not in the video</div>
+  <h1>Images &amp; Scanned PDFs as Knowledge</h1>
+  <p class="lead">Make images and scanned PDFs searchable with a vision model.</p>
+  <span class="video-link extra">Extension · code type-checked against the repo</span>
+</section>
+<h2>Goal</h2>
+<p>So far the knowledge base only learns from PDFs that contain real text. This step adds two sources:</p>
+<ul>
+<li><strong>Images</strong>: a photo of a notice board, a screenshot of a policy, a diagram or a whiteboard.</li>
+<li><strong>Scanned PDFs</strong>: PDFs that are just pictures of pages. In step 12 they failed with <em>"No text found in PDF"</em>.</li>
+</ul>
+<p>The approach is to let a <strong>vision model read the file</strong> and return its text, then reuse the existing chunk → embed → store pipeline. The chat side doesn't change: the extracted text becomes ordinary chunks that <code>searchKnowledgeBase</code> finds.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Before and after: in step 12 only text PDFs worked; after step 21 text PDFs, scanned PDFs and images all become searchable knowledge">
+  <rect class="zone" x="10" y="10" width="360" height="180" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Before: step 12</text>
+  <rect class="box-ok" x="25" y="50" width="330" height="36" rx="8"/><text x="40" y="73" class="label">Text PDF</text><text x="342" y="73" text-anchor="end" class="small">pdf-parse → chunks</text>
+  <rect class="box-bad" x="25" y="96" width="330" height="36" rx="8"/><text x="40" y="119" class="label">Scanned PDF</text><text x="342" y="119" text-anchor="end" class="small">"No text found in PDF"</text>
+  <rect class="box-bad" x="25" y="142" width="330" height="36" rx="8"/><text x="40" y="165" class="label">Image (PNG, JPEG…)</text><text x="342" y="165" text-anchor="end" class="small">not supported</text>
+  <rect class="zone" x="390" y="10" width="360" height="180" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">After: step 21</text>
+  <rect class="box-ok" x="405" y="50" width="330" height="36" rx="8"/><text x="420" y="73" class="label">Text PDF</text><text x="722" y="73" text-anchor="end" class="small">pdf-parse (free, as before)</text>
+  <rect class="box-ok" x="405" y="96" width="330" height="36" rx="8"/><text x="420" y="119" class="label">Scanned PDF</text><text x="722" y="119" text-anchor="end" class="small">vision model reads it</text>
+  <rect class="box-ok" x="405" y="142" width="330" height="36" rx="8"/><text x="420" y="165" class="label">Image (PNG, JPEG…)</text><text x="722" y="165" text-anchor="end" class="small">vision model reads it</text>
+</svg>
+<figcaption>What this step adds: two new <strong>sources of knowledge</strong>. Any other file type (for example <code>.docx</code>) is still refused, now with a clear "Unsupported file type" message.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to scanned PDFs? Why some PDFs have no text inside</summary>
+<p>A PDF can hold two very different things:</p>
+<ul>
+<li><strong>A text PDF</strong> (made by "Save as PDF" in Word, Google Docs or a browser) stores the actual letters and their positions. You can select and copy the text, and <code>pdf-parse</code> can read it. This is called having a <em>text layer</em>.</li>
+<li><strong>A scanned PDF</strong> (made by a scanner, a phone scanning app or "print to PDF" of a photo) stores only <em>pictures</em> of pages. To a computer it's a grid of coloured dots; there are no letters to extract. <code>pdf-parse</code> returns an empty string.</li>
+</ul>
+<p>Quick test: open the PDF and try to highlight a sentence with the mouse. If you can't select individual words, it's a scan.</p>
+</details>
+
+<details class="primer"><summary>New to OCR and vision models? How a model "reads" a picture</summary>
+<p><a class="term" href="glossary.html#ocr">OCR</a> (optical character recognition) is software that looks at an image of text and works out which letters are in it. Classic OCR engines do only that: they find letters, line by line.</p>
+<p>A <a class="term" href="glossary.html#multimodal">multimodal</a> (vision) model like <code>gpt-4.1-mini</code> can do OCR <em>and</em> understand the picture. It can read a crooked photo of a notice board, follow the reading order of a two-column layout, and, if there is hardly any text, describe what it sees ("a whiteboard listing three Q3 goals"). You ask for this in plain English, with a <a class="term" href="glossary.html#prompt">prompt</a>.</p>
+<p>The trade-offs: each call costs money and takes a few seconds, and, like any model, it can occasionally misread or invent a word. That's why text PDFs still go through the free, exact <code>pdf-parse</code> path first.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="File routing to text extraction">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="10" y="70" width="110" height="50" rx="8"/><text x="65" y="92" text-anchor="middle">Uploaded file</text><text x="65" y="108" text-anchor="middle" class="small">FormData "file"</text>
+  <rect class="box" x="170" y="10" width="150" height="46" rx="8"/><text x="245" y="30" text-anchor="middle">PDF → pdf-parse</text><text x="245" y="46" text-anchor="middle" class="small">has a text layer</text>
+  <rect class="box" x="170" y="72" width="150" height="46" rx="8"/><text x="245" y="92" text-anchor="middle">PDF, no text</text><text x="245" y="108" text-anchor="middle" class="small">scanned → vision model</text>
+  <rect class="box" x="170" y="134" width="150" height="46" rx="8"/><text x="245" y="154" text-anchor="middle">Image</text><text x="245" y="170" text-anchor="middle" class="small">→ vision model</text>
+  <rect class="box2" x="370" y="70" width="120" height="50" rx="8"/><text x="430" y="92" text-anchor="middle">text</text><text x="430" y="108" text-anchor="middle" class="small">one string</text>
+  <rect class="box" x="540" y="70" width="210" height="50" rx="8"/><text x="645" y="92" text-anchor="middle">chunk → embed → insert</text><text x="645" y="108" text-anchor="middle" class="small">unchanged from step 12</text>
+  <path class="arrow" d="M120,90 L168,35"/><path class="arrow" d="M120,95 H168"/><path class="arrow" d="M120,100 L168,155"/>
+  <path class="arrow" d="M320,33 L368,88"/><path class="arrow" d="M320,95 H368"/><path class="arrow" d="M320,157 L368,102"/>
+  <path class="arrow" d="M490,95 H538"/>
+</svg>
+</figure>
+<p>Every path ends in the same place: one plain text string. From there, nothing new is needed, because the existing pipeline only cares about text.</p>
+
+<h2>Step by step</h2>
+<ol class="steps">
+<li><strong>Create the vision text extractor</strong>
+<p><code>extractTextWithVision(data, mediaType)</code> sends the file and an instruction to <code>gpt-4.1-mini</code> with the AI SDK's <code>generateText</code>:</p>
+<ul>
+<li>Images go in as an <code>{ type: "image" }</code> content part. PDFs go in as a <code>{ type: "file", mediaType: "application/pdf" }</code> part. The OpenAI provider in the repo's version sends PDFs to the model directly, and the model reads both the page images and any text.</li>
+<li>The prompt asks for <strong>only the extracted text, in reading order</strong>. For a picture with little text (a photo or a diagram), it asks for a short factual description instead, so the image can still be found by meaning ("whiteboard with Q3 goals").</li>
+</ul>
+<p>Create <code>src/lib/extract-text.ts</code>:</p>
+<pre data-file="src/lib/extract-text.ts" data-lang="ts" data-tag="new file"><code>// src/lib/extract-text.ts
+import { generateText } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const OCR_PROMPT = `Extract all readable text from this file, in reading order.
+Return only the extracted text, with no commentary.
+If the file contains little or no text (for example a photo or a diagram),
+describe what it shows in a few factual sentences instead.`;
+
+// Uses a vision-capable model to read text from an image or a scanned PDF.
+export async function extractTextWithVision(data: Buffer, mediaType: string) {
+  const { text } = await generateText({
+    model: openai("gpt-4.1-mini"),
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: OCR_PROMPT },
+          mediaType.startsWith("image/")
+            ? { type: "image", image: data, mediaType }
+            : { type: "file", data, mediaType },
+        ],
+      },
+    ],
+  });
+
+  return text;
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>// src/lib/extract-text.ts</code></td><td>The file's location.</td></tr>
+<tr><td>2</td><td><code>import { generateText } from "ai";</code></td><td>The <a class="term" href="glossary.html#ai-sdk">AI SDK</a> function that sends a prompt to a model and waits for the complete answer. Unlike <code>streamText</code> in the chat route, it doesn't stream, because nobody is watching the text appear; the server action just needs the final result.</td></tr>
+<tr><td>3</td><td><code>import { openai } from "@ai-sdk/openai";</code></td><td>The OpenAI provider, which reads <code>OPENAI_API_KEY</code> from the environment.</td></tr>
+<tr><td>5–8</td><td><code>const OCR_PROMPT = `Extract all readable text from this file, in reading order. …`;</code></td><td>The instruction, stored once as a constant. It's a <a class="term" href="glossary.html#template-literal">template literal</a> (backticks), so it can span several lines. Each sentence has a job: "in reading order" keeps columns and paragraphs in sense; "only the extracted text, with no commentary" stops the model from adding "Here is the text:" (which would end up in your database); the last sentence handles photos and diagrams with little text by asking for a factual description instead.</td></tr>
+<tr><td>10</td><td><code>// Uses a vision-capable model …</code></td><td>Describes the function for the next reader.</td></tr>
+<tr><td>11</td><td><code>export async function extractTextWithVision(data: Buffer, mediaType: string) {</code></td><td>The function the server action calls. <code>data</code> is the file's raw bytes as a Node.js <code>Buffer</code>; <code>mediaType</code> is its MIME type, such as <code>image/png</code> or <code>application/pdf</code>.</td></tr>
+<tr><td>12</td><td><code>const { text } = await generateText({</code></td><td>Calls the model and waits. The result has many properties (token usage, finish reason…); only <code>text</code> is kept.</td></tr>
+<tr><td>13</td><td><code>model: openai("gpt-4.1-mini"),</code></td><td>A cheap, vision-capable model that also accepts PDF files.</td></tr>
+<tr><td>14</td><td><code>messages: [</code></td><td>Instead of a simple <code>prompt</code> string, a list of messages is used, because a message can contain several <em>parts</em> (text plus a file).</td></tr>
+<tr><td>15–16</td><td><code>{ role: "user",</code></td><td>One message, sent as if the user wrote it.</td></tr>
+<tr><td>17</td><td><code>content: [</code></td><td>The message's parts, in order.</td></tr>
+<tr><td>18</td><td><code>{ type: "text", text: OCR_PROMPT },</code></td><td>Part 1: the instruction.</td></tr>
+<tr><td>19</td><td><code>mediaType.startsWith("image/")</code></td><td>Part 2 depends on the file kind. This checks whether the MIME type begins with <code>image/</code>.</td></tr>
+<tr><td>20</td><td><code>? { type: "image", image: data, mediaType }</code></td><td>For images: an image part with the bytes. <code>mediaType</code> is shorthand for <code>mediaType: mediaType</code>.</td></tr>
+<tr><td>21</td><td><code>: { type: "file", data, mediaType },</code></td><td>For anything else (here, only PDFs reach this function): a file part. The provider uploads the PDF to the model as a document.</td></tr>
+<tr><td>22–25</td><td><code>], }, ], });</code></td><td>Close the content list, the message, the message list and the options.</td></tr>
+<tr><td>27</td><td><code>return text;</code></td><td>Returns the model's answer: the extracted text, or the description.</td></tr>
+<tr><td>28</td><td><code>}</code></td><td>End of the function.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 185" role="img" aria-label="Vision OCR: an image that contains only pixels is sent with the OCR prompt as two message parts to gpt-4.1-mini through generateText, which returns plain text">
+  <rect class="box2" x="20" y="34" width="160" height="120" rx="8"/>
+  <g transform="rotate(-4 100 94)">
+    <rect class="ui-window" x="40" y="52" width="120" height="84" rx="4"/>
+    <rect class="ui-skeleton" x="52" y="66" width="90" height="7" rx="3"/>
+    <rect class="ui-skeleton" x="52" y="82" width="96" height="7" rx="3"/>
+    <rect class="ui-skeleton" x="52" y="98" width="70" height="7" rx="3"/>
+    <rect class="ui-skeleton" x="52" y="114" width="84" height="7" rx="3"/>
+  </g>
+  <text x="100" y="24" text-anchor="middle" class="small">photo / scanned page</text>
+  <text x="100" y="172" text-anchor="middle" class="small">pixels only, no letters</text>
+  <path class="arrow" d="M180,94 H226"/>
+  <rect class="zone" x="228" y="20" width="200" height="148" rx="8"/>
+  <text x="328" y="38" text-anchor="middle" class="small">one user message, content:</text>
+  <rect class="box" x="242" y="48" width="172" height="46" rx="6"/><text x="328" y="68" text-anchor="middle" class="label">text part</text><text x="328" y="84" text-anchor="middle" class="small">OCR_PROMPT</text>
+  <rect class="box" x="242" y="106" width="172" height="50" rx="6"/><text x="328" y="126" text-anchor="middle" class="label">image or file part</text><text x="328" y="143" text-anchor="middle" class="small">bytes + mediaType</text>
+  <path class="arrow-accent" d="M428,100 H460"/>
+  <text x="522" y="62" text-anchor="middle" class="small">generateText</text>
+  <rect class="box-solid" x="462" y="72" width="120" height="56" rx="8"/><text x="522" y="105" text-anchor="middle" class="on-solid">gpt-4.1-mini</text>
+  <path class="arrow-ok" d="M582,100 H608"/>
+  <rect class="box-ok" x="610" y="34" width="135" height="120" rx="8"/>
+  <text x="677" y="54" text-anchor="middle" class="label">text</text>
+  <text x="622" y="80" class="small">Vacation requests</text>
+  <text x="622" y="98" class="small">must be submitted</text>
+  <text x="622" y="116" class="small">two weeks ahead.</text>
+  <text x="677" y="142" text-anchor="middle" class="small">→ chunk → embed</text>
+</svg>
+<figcaption>What <code>extractTextWithVision</code> does. The file is just a grid of coloured dots, so the code sends it together with the instruction as <strong>two parts of one message</strong>; the vision model "reads" it and answers with plain text, which the normal pipeline then handles. Example image and text, for illustration.</figcaption>
+</figure>
+</li>
+
+<li><strong>Generalise the server action</strong>
+<p>Rename <code>processPdfFile</code> to <code>processFile</code> and send every file type through one small router, <code>extractText</code>:</p>
+<div class="table-wrap"><table>
+<tr><th>File</th><th>How the text is extracted</th></tr>
+<tr><td>PDF with a text layer</td><td><code>pdf-parse</code>, exactly as before. Fast and free.</td></tr>
+<tr><td>PDF with <em>no</em> text</td><td>Probably scanned, so it goes to <code>extractTextWithVision(buffer, "application/pdf")</code>. This is the case that failed in step 12.</td></tr>
+<tr><td>PNG / JPEG / WebP / GIF</td><td><code>extractTextWithVision(buffer, file.type)</code>.</td></tr>
+<tr><td>Anything else</td><td>Throws "Unsupported file type…". The <code>catch</code> passes that message to the UI.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 335" role="img" aria-label="Decision tree of extractText: PDFs try pdf-parse first and fall back to the vision model when no text is found; supported images go to the vision model; anything else throws Unsupported file type">
+  <rect class="box2" x="270" y="10" width="220" height="32" rx="8"/><text x="380" y="31" text-anchor="middle" class="mono">extractText(file, buffer)</text>
+  <path class="arrow" d="M380,42 V62"/>
+  <rect class="box-info" x="215" y="64" width="330" height="34" rx="8"/><text x="380" y="86" text-anchor="middle" class="mono">file.type === "application/pdf" ?</text>
+  <path class="arrow-ok" d="M215,81 H160 V128"/><text x="190" y="75" text-anchor="middle" class="small">yes</text>
+  <path class="arrow-bad" d="M545,81 H590 V128"/><text x="566" y="75" text-anchor="middle" class="small">no</text>
+  <rect class="box-info" x="30" y="130" width="260" height="34" rx="8"/><text x="160" y="152" text-anchor="middle" class="mono">pdf(buffer) found text ?</text>
+  <rect class="box-info" x="440" y="130" width="300" height="34" rx="8"/><text x="590" y="152" text-anchor="middle" class="mono">IMAGE_TYPES.includes(file.type) ?</text>
+  <path class="arrow-ok" d="M90,164 V198"/><text x="98" y="185" class="small">yes</text>
+  <path class="arrow-bad" d="M232,164 V198"/><text x="240" y="185" class="small">no</text>
+  <path class="arrow-ok" d="M515,164 V198"/><text x="523" y="185" class="small">yes</text>
+  <path class="arrow-bad" d="M670,164 V198"/><text x="678" y="185" class="small">no</text>
+  <rect class="box-ok" x="20" y="200" width="140" height="46" rx="8"/><text x="90" y="220" text-anchor="middle" class="mono">return data.text</text><text x="90" y="237" text-anchor="middle" class="small">free, local</text>
+  <rect class="box-warn" x="172" y="200" width="120" height="46" rx="8"/><text x="232" y="220" text-anchor="middle">vision model</text><text x="232" y="237" text-anchor="middle" class="small">probably a scan</text>
+  <rect class="box-warn" x="450" y="200" width="130" height="46" rx="8"/><text x="515" y="220" text-anchor="middle">vision model</text><text x="515" y="237" text-anchor="middle" class="small">real image type</text>
+  <rect class="box-bad" x="600" y="200" width="145" height="46" rx="8"/><text x="672" y="220" text-anchor="middle">throw Error</text><text x="672" y="237" text-anchor="middle" class="small">Unsupported file type</text>
+  <path class="arrow" d="M90,246 L210,286"/><path class="arrow" d="M232,246 L290,286"/><path class="arrow" d="M515,246 L470,286"/>
+  <rect class="box" x="120" y="288" width="440" height="36" rx="8"/><text x="340" y="311" text-anchor="middle" class="label">text → chunkContent → generateEmbeddings → db.insert</text>
+  <text x="672" y="270" text-anchor="middle" class="small">catch → the message</text>
+  <text x="672" y="286" text-anchor="middle" class="small">is shown on the page</text>
+</svg>
+<figcaption>The router <code>extractText</code> as a decision tree. Read it top-down: each blue box is an <code>if</code> in the code. The <strong>cheapest method that works</strong> is tried first, and every successful path ends in the same unchanged pipeline.</figcaption>
+</figure>
+<p>The rest of the function is the step 12 pipeline: <code>chunkContent</code> → <code>generateEmbeddings</code> → <code>db.insert</code>. The form field is renamed from <code>"pdf"</code> to <code>"file"</code>, and the code checks <code>file instanceof File</code> instead of casting, so a missing upload returns a clear error.</p>
+<p>Replace the whole content of <code>src/app/upload/actions.ts</code> with:</p>
+<pre data-file="src/app/upload/actions.ts" data-lang="ts" data-tag="replaces the step 12 version"><code>// src/app/upload/actions.ts
+"use server";
+
+import pdf from "pdf-parse";
+import { db } from "@/lib/db-config";
+import { documents } from "@/lib/db-schema";
+import { generateEmbeddings } from "@/lib/embeddings";
+import { chunkContent } from "@/lib/chunking";
+import { extractTextWithVision } from "@/lib/extract-text";
+
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+async function extractText(file: File, buffer: Buffer) {
+  if (file.type === "application/pdf") {
+    const data = await pdf(buffer);
+    if (data.text.trim().length &gt; 0) {
+      return data.text;
+    }
+    // No text layer: probably a scanned PDF, so let the vision model read it
+    return extractTextWithVision(buffer, "application/pdf");
+  }
+
+  if (IMAGE_TYPES.includes(file.type)) {
+    return extractTextWithVision(buffer, file.type);
+  }
+
+  throw new Error(`Unsupported file type: ${file.type || "unknown"}`);
+}
+
+export async function processFile(formData: FormData) {
+  try {
+    const file = formData.get("file");
+    if (!(file instanceof File)) {
+      return { success: false, error: "No file provided" };
+    }
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const text = await extractText(file, buffer);
+
+    if (!text || text.trim().length === 0) {
+      return { success: false, error: "No text found in file" };
+    }
+
+    // Same pipeline as before: chunk, embed, store
+    const chunks = await chunkContent(text);
+    const embeddings = await generateEmbeddings(chunks);
+
+    const records = chunks.map((chunk, index) =&gt; ({
+      content: chunk,
+      embedding: embeddings[index],
+    }));
+
+    await db.insert(documents).values(records);
+
+    return {
+      success: true,
+      message: `Created ${records.length} searchable chunks from ${file.name}`,
+    };
+  } catch (error) {
+    console.error("File processing error:", error);
+    return {
+      success: false,
+      error:
+        error instanceof Error &amp;&amp; error.message.startsWith("Unsupported")
+          ? error.message
+          : "Failed to process file",
+    };
+  }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>// src/app/upload/actions.ts</code></td><td>The file's location.</td></tr>
+<tr><td>2</td><td><code>"use server";</code></td><td>Makes every exported function in this file a <a class="term" href="glossary.html#server-action">server action</a>: the upload page can call it like a normal function, but it runs on the server, where the API key and database live. Unchanged.</td></tr>
+<tr><td>4</td><td><code>import pdf from "pdf-parse";</code></td><td>The PDF text extractor from step 12. Unchanged.</td></tr>
+<tr><td>5–8</td><td><code>import { db } …</code> <code>import { documents } …</code> <code>import { generateEmbeddings } …</code> <code>import { chunkContent } …</code></td><td>The database connection, the table definition, the embedding helper and the chunking helper. Unchanged.</td></tr>
+<tr><td>9</td><td><code>import { extractTextWithVision } from "@/lib/extract-text";</code></td><td><strong>(new)</strong> The helper from step 1 of this page.</td></tr>
+<tr><td>11</td><td><code>const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];</code></td><td><strong>(new)</strong> The image formats the vision model accepts, the same list as in the chat page (step 18).</td></tr>
+<tr><td>13</td><td><code>async function extractText(file: File, buffer: Buffer) {</code></td><td><strong>(new)</strong> The "router" that decides how to get text out of a file. It is <em>not</em> exported, so it is a private helper, not a server action the browser could call.</td></tr>
+<tr><td>14</td><td><code>if (file.type === "application/pdf") {</code></td><td>PDFs first. <code>file.type</code> is the MIME type the browser reported.</td></tr>
+<tr><td>15</td><td><code>const data = await pdf(buffer);</code></td><td>Tries the free, local text extraction.</td></tr>
+<tr><td>16–18</td><td><code>if (data.text.trim().length &gt; 0) { return data.text; }</code></td><td>If any real text came out (after removing whitespace), use it. Most PDFs stop here.</td></tr>
+<tr><td>19–20</td><td><code>// No text layer … return extractTextWithVision(buffer, "application/pdf");</code></td><td>No text means it's probably a scan, so the vision model reads it instead. This is the case that used to fail.</td></tr>
+<tr><td>21</td><td><code>}</code></td><td>End of the PDF branch.</td></tr>
+<tr><td>23–25</td><td><code>if (IMAGE_TYPES.includes(file.type)) { return extractTextWithVision(buffer, file.type); }</code></td><td>Supported images go straight to the vision model, with their real MIME type.</td></tr>
+<tr><td>27</td><td><code>throw new Error(`Unsupported file type: ${file.type || "unknown"}`);</code></td><td>Anything else is refused. Some files have no MIME type at all (an empty string), so <code>|| "unknown"</code> gives the message something to show. The message starts with "Unsupported" on purpose: line 64 looks for that word.</td></tr>
+<tr><td>28</td><td><code>}</code></td><td>End of <code>extractText</code>.</td></tr>
+<tr><td>30</td><td><code>export async function processFile(formData: FormData) {</code></td><td><strong>(changed)</strong> Renamed from <code>processPdfFile</code>, because it now handles more than PDFs. Receives the <a class="term" href="glossary.html#formdata">FormData</a> sent by the upload page.</td></tr>
+<tr><td>31</td><td><code>try {</code></td><td>Everything is guarded; errors go to <code>catch</code> on line 59.</td></tr>
+<tr><td>32</td><td><code>const file = formData.get("file");</code></td><td><strong>(changed)</strong> The field is now called <code>"file"</code> (it was <code>"pdf"</code>). The page must use the same name.</td></tr>
+<tr><td>33–35</td><td><code>if (!(file instanceof File)) { return { success: false, error: "No file provided" }; }</code></td><td><strong>(new)</strong> The old code wrote <code>as File</code>, which only silences TypeScript and crashes later if nothing was uploaded. <code>instanceof File</code> really checks, and returns a clear error. After this line TypeScript knows <code>file</code> is a <code>File</code>.</td></tr>
+<tr><td>37</td><td><code>const buffer = Buffer.from(await file.arrayBuffer());</code></td><td>Reads the uploaded file's bytes (<code>arrayBuffer()</code>) and wraps them in a Node.js <code>Buffer</code>, the format both <code>pdf-parse</code> and the AI SDK accept. Same as before, written on one line.</td></tr>
+<tr><td>38</td><td><code>const text = await extractText(file, buffer);</code></td><td><strong>(new)</strong> Gets the text by whichever method fits the file.</td></tr>
+<tr><td>40–42</td><td><code>if (!text || text.trim().length === 0) { return { success: false, error: "No text found in file" }; }</code></td><td>A safety net: if even the vision model returned nothing, stop instead of storing empty chunks.</td></tr>
+<tr><td>44–46</td><td><code>// Same pipeline as before … const chunks = await chunkContent(text); const embeddings = await generateEmbeddings(chunks);</code></td><td>The step 11 and step 10 helpers: split the text into overlapping <a class="term" href="glossary.html#chunk">chunks</a>, then turn every chunk into an <a class="term" href="glossary.html#embedding">embedding</a> in one batched call. Unchanged.</td></tr>
+<tr><td>48–51</td><td><code>const records = chunks.map((chunk, index) =&gt; ({ content: chunk, embedding: embeddings[index], }));</code></td><td>Pairs each chunk with its vector (same position in both arrays) to build one database row per chunk. The <code>({ … })</code> parentheses make the arrow function return an object. Unchanged.</td></tr>
+<tr><td>53</td><td><code>await db.insert(documents).values(records);</code></td><td>Inserts all rows in one query. The HNSW index updates automatically. Unchanged.</td></tr>
+<tr><td>55–58</td><td><code>return { success: true, message: `Created ${records.length} searchable chunks from ${file.name}`, };</code></td><td><strong>(changed)</strong> The success message now also names the file, e.g. "…from screenshot.png".</td></tr>
+<tr><td>59–60</td><td><code>} catch (error) { console.error("File processing error:", error);</code></td><td>Logs the full error in the terminal for you.</td></tr>
+<tr><td>61–67</td><td><code>return { success: false, error: error instanceof Error &amp;&amp; error.message.startsWith("Unsupported") ? error.message : "Failed to process file", };</code></td><td><strong>(changed)</strong> Decides what the <em>user</em> sees. If the error is our own "Unsupported file type…" message, it's safe and useful, so it is shown as-is. Any other error (API failure, database error) could contain internal details, so the user gets the generic "Failed to process file".</td></tr>
+<tr><td>68–69</td><td><code>} }</code></td><td>End of <code>catch</code> and of the function.</td></tr>
+</table></div>
+</li>
+
+<li><strong>Raise the server action body limit</strong>
+<p>Server actions reject request bodies over <strong>1&nbsp;MB</strong> by default, and phone photos and scans are usually bigger. Raise the limit in <code>next.config.ts</code>:</p>
+
+<details class="primer"><summary>New to body size limits? Why servers refuse big uploads by default</summary>
+<p>Every request has a <em>body</em>: the data sent along with it (here, the uploaded file inside FormData). Servers set a maximum body size to protect themselves: without one, anyone could send a 5&nbsp;GB request and tie up memory and bandwidth.</p>
+<p>Next.js sets the limit for server actions to 1&nbsp;MB by default. That's plenty for forms and text PDFs, but a single phone photo is often 2–5&nbsp;MB. If the file is too big, the action never runs: the request fails, and the upload page shows its generic "An error occurred while processing the file" message (the terminal shows an error saying the body exceeded the 1&nbsp;MB limit).</p>
+<p>Raising the limit to 10&nbsp;MB is a deliberate trade-off: big enough for photos and short scans, small enough to stay safe. Hosting platforms can have their own, separate limits; on Vercel, for example, request bodies to functions are limited to about 4.5&nbsp;MB regardless of this setting.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Bar chart of upload size limits: server action default 1 MB, bodySizeLimit 10 MB, Vercel request body about 4.5 MB, a typical phone photo 2 to 5 MB">
+  <text x="20" y="57" class="label">Next.js default</text>
+  <rect class="box-bad" x="230" y="40" width="50" height="26" rx="4"/><text x="288" y="58" class="label">1 MB</text>
+  <text x="20" y="97" class="mono">bodySizeLimit: "10mb"</text>
+  <rect class="box-ok" x="230" y="80" width="500" height="26" rx="4"/><text x="720" y="98" text-anchor="end" class="label">10 MB</text>
+  <text x="20" y="137" class="label">Vercel request body</text>
+  <rect class="box-warn" x="230" y="120" width="225" height="26" rx="4"/><text x="463" y="138" class="label">about 4.5 MB</text>
+  <text x="20" y="177" class="label">Phone photo (often)</text>
+  <rect class="box-info" x="330" y="160" width="150" height="26" rx="4"/><text x="405" y="178" text-anchor="middle" class="label">2–5 MB</text>
+  <path class="line" d="M230,200 H730"/>
+  <path class="line" d="M230,196 V204 M280,196 V204 M330,196 V204 M380,196 V204 M430,196 V204 M480,196 V204 M530,196 V204 M580,196 V204 M630,196 V204 M680,196 V204 M730,196 V204"/>
+  <text x="230" y="219" text-anchor="middle" class="small">0</text><text x="280" y="219" text-anchor="middle" class="small">1</text><text x="330" y="219" text-anchor="middle" class="small">2</text><text x="380" y="219" text-anchor="middle" class="small">3</text><text x="430" y="219" text-anchor="middle" class="small">4</text><text x="480" y="219" text-anchor="middle" class="small">5</text><text x="530" y="219" text-anchor="middle" class="small">6</text><text x="580" y="219" text-anchor="middle" class="small">7</text><text x="630" y="219" text-anchor="middle" class="small">8</text><text x="680" y="219" text-anchor="middle" class="small">9</text><text x="730" y="219" text-anchor="middle" class="small">10 MB</text>
+  <path class="line dashed" d="M280,34 V192"/>
+</svg>
+<figcaption>The limits from the primer on one scale. A typical phone photo is <strong>past the 1&nbsp;MB default</strong> (dashed line), so without the setting the action never runs. <code>"10mb"</code> covers it locally; on a host with its own smaller limit (Vercel's is about 4.5&nbsp;MB), the <strong>smallest limit wins</strong>.</figcaption>
+</figure>
+
+<pre data-file="next.config.ts" data-lang="ts" data-tag="updated"><code>import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  serverExternalPackages: ["pdf-parse"],
+  experimental: {
+    serverActions: {
+      bodySizeLimit: "10mb", // default is 1mb; photos and scans are often bigger
+    },
+  },
+};
+
+export default nextConfig;</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import type { NextConfig } from "next";</code></td><td>Imports only the type that describes valid config options, so your editor autocompletes them and flags typos. Unchanged.</td></tr>
+<tr><td>3</td><td><code>const nextConfig: NextConfig = {</code></td><td>The configuration object. Unchanged.</td></tr>
+<tr><td>4</td><td><code>serverExternalPackages: ["pdf-parse"],</code></td><td>From step 12: tells Next.js not to bundle <code>pdf-parse</code> but load it as a normal Node.js package at runtime, which it needs to work correctly. Unchanged.</td></tr>
+<tr><td>5</td><td><code>experimental: {</code></td><td><strong>(new)</strong> A group for options that Next.js still labels "experimental" in this version. Despite the name, this one is widely used.</td></tr>
+<tr><td>6</td><td><code>serverActions: {</code></td><td><strong>(new)</strong> Settings for server actions.</td></tr>
+<tr><td>7</td><td><code>bodySizeLimit: "10mb",</code></td><td><strong>(new)</strong> Allows request bodies up to 10&nbsp;MB. The value is a string with a unit (<code>"500kb"</code>, <code>"2mb"</code>…).</td></tr>
+<tr><td>8–10</td><td><code>}, }, };</code></td><td>Close the nested objects.</td></tr>
+<tr><td>12</td><td><code>export default nextConfig;</code></td><td>Hands the config to Next.js. Unchanged.</td></tr>
+</table></div>
+<div class="callout warn"><p><strong>Restart the dev server after editing <code>next.config.ts</code>.</strong> Next.js reads it only at start-up. Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal and run <code>npm run dev</code> again, otherwise the old 1&nbsp;MB limit stays in force.</p></div>
+</li>
+
+<li><strong>Update the upload page</strong>
+<p>These are small changes to the step 13 page, so its structure stays the same:</p>
+<ul>
+<li>Import and call <code>processFile</code> instead of <code>processPdfFile</code>, and append the file under <code>"file"</code>.</li>
+<li><code>accept=".pdf,image/png,image/jpeg,image/webp,image/gif"</code>.</li>
+<li>Generic wording: the "Upload Knowledge" title, the "Upload a PDF or an image…" label, "Processing file…" and "Failed to process file".</li>
+<li>The input <code>id</code> and the label's <code>htmlFor</code> become <code>file-upload</code>.</li>
+</ul>
+<pre data-file="src/app/upload/page.tsx" data-lang="tsx" data-tag="replaces the step 13 version"><code>// src/app/upload/page.tsx
+"use client";
+
+import { useState } from "react";
+import { processFile } from "./actions";
+import { Card, CardContent } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Loader2 } from "lucide-react";
+
+export default function KnowledgeUpload() {
+  const [isLoading, setIsLoading] = useState(false);
+  const [message, setMessage] = useState&lt;{
+    type: "error" | "success";
+    text: string;
+  } | null&gt;(null);
+
+  const handleFileUpload = async (e: React.ChangeEvent&lt;HTMLInputElement&gt;) =&gt; {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsLoading(true);
+    setMessage(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const result = await processFile(formData);
+
+      if (result.success) {
+        setMessage({
+          type: "success",
+          text: result.message || "File processed successfully",
+        });
+        e.target.value = "";
+      } else {
+        setMessage({
+          type: "error",
+          text: result.error || "Failed to process file",
+        });
+      }
+    } catch (err) {
+      setMessage({
+        type: "error",
+        text: "An error occurred while processing the file",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    &lt;div className="min-h-screen bg-gray-50 py-12 px-4"&gt;
+      &lt;div className="max-w-4xl mx-auto"&gt;
+        &lt;h1 className="text-3xl font-bold text-gray-900 mb-8 text-center"&gt;
+          Upload Knowledge
+        &lt;/h1&gt;
+        &lt;Card className="mb-6"&gt;
+          &lt;CardContent className="pt-6"&gt;
+            &lt;div className="space-y-4"&gt;
+              &lt;div&gt;
+                &lt;Label htmlFor="file-upload"&gt;
+                  Upload a PDF or an image (PNG, JPEG, WebP, GIF)
+                &lt;/Label&gt;
+                &lt;Input
+                  id="file-upload"
+                  type="file"
+                  accept=".pdf,image/png,image/jpeg,image/webp,image/gif"
+                  onChange={handleFileUpload}
+                  disabled={isLoading}
+                  className="mt-2"
+                /&gt;
+              &lt;/div&gt;
+
+              {isLoading &amp;&amp; (
+                &lt;div className="flex items-center gap-2"&gt;
+                  &lt;Loader2 className="h-5 w-5 animate-spin" /&gt;
+                  &lt;span className="text-muted-foreground"&gt;
+                    Processing file...
+                  &lt;/span&gt;
+                &lt;/div&gt;
+              )}
+
+              {message &amp;&amp; (
+                &lt;Alert
+                  variant={message.type === "error" ? "destructive" : "default"}
+                &gt;
+                  &lt;AlertTitle&gt;
+                    {message.type === "error" ? "Error!" : "Success!"}
+                  &lt;/AlertTitle&gt;
+                  &lt;AlertDescription&gt;{message.text}&lt;/AlertDescription&gt;
+                &lt;/Alert&gt;
+              )}
+            &lt;/div&gt;
+          &lt;/CardContent&gt;
+        &lt;/Card&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+
+<h3>Line by line (only what changed since step 13)</h3>
+<div class="callout"><p><strong>Only the changed lines are explained here.</strong> Every other line is identical to the repo's step 13 version of <code>src/app/upload/page.tsx</code>; see <a href="13-pdf-upload-ui.html">step 13</a> for those.</p></div>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>5</td><td><code>import { processFile } from "./actions";</code></td><td><strong>(changed)</strong> Imports the renamed server action. If you keep the old name here, the build fails with "has no exported member 'processPdfFile'".</td></tr>
+<tr><td>12</td><td><code>export default function KnowledgeUpload() {</code></td><td><strong>(changed)</strong> The component was renamed from <code>PDFUpload</code> to match what it does. The name is only for humans and error messages; the URL still comes from the folder (<code>/upload</code>).</td></tr>
+<tr><td>28</td><td><code>formData.append("file", file);</code></td><td><strong>(changed)</strong> The field name must match <code>formData.get("file")</code> in the action. With the old <code>"pdf"</code>, the action would answer "No file provided".</td></tr>
+<tr><td>30</td><td><code>const result = await processFile(formData);</code></td><td><strong>(changed)</strong> Calls the new action. It runs on the server even though it looks like a normal function call.</td></tr>
+<tr><td>35</td><td><code>text: result.message || "File processed successfully",</code></td><td><strong>(changed)</strong> Fallback success text, now generic.</td></tr>
+<tr><td>41</td><td><code>text: result.error || "Failed to process file",</code></td><td><strong>(changed)</strong> Fallback error text, now generic. Usually <code>result.error</code> is set, e.g. "Unsupported file type: …".</td></tr>
+<tr><td>47</td><td><code>text: "An error occurred while processing the file",</code></td><td><strong>(changed)</strong> Shown when the call itself fails (for example the body was over the size limit or the network dropped).</td></tr>
+<tr><td>58</td><td><code>Upload Knowledge</code></td><td><strong>(changed)</strong> The page heading.</td></tr>
+<tr><td>64–66</td><td><code>&lt;Label htmlFor="file-upload"&gt; Upload a PDF or an image (PNG, JPEG, WebP, GIF) &lt;/Label&gt;</code></td><td><strong>(changed)</strong> The label text tells users what's allowed. <code>htmlFor</code> links the label to the input with the same <code>id</code>: clicking the label opens the file picker, and screen readers announce the label for the input.</td></tr>
+<tr><td>68</td><td><code>id="file-upload"</code></td><td><strong>(changed)</strong> Must match <code>htmlFor</code> above.</td></tr>
+<tr><td>70</td><td><code>accept=".pdf,image/png,image/jpeg,image/webp,image/gif"</code></td><td><strong>(changed)</strong> The file picker shows PDFs (by extension) and the four image types (by MIME type). This is only a convenience filter: users can switch the picker to "All files", which is why the server checks the type again.</td></tr>
+<tr><td>81</td><td><code>Processing file...</code></td><td><strong>(changed)</strong> The loading text next to the spinner. Vision extraction can take several seconds, so this matters more now.</td></tr>
+</table></div>
+<p>The admin-only protection from step 16 still applies, because <code>/upload</code> is unchanged as a route.</p>
+</li>
+</ol>
+
+<h2>Test it</h2>
+<p>Here is everything that happens, in order, when you upload an image or a scanned PDF:</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 425" role="img" aria-label="Sequence diagram of an image upload: the upload page calls processFile, the server asks OpenAI to read the image, chunks the text, asks OpenAI for embeddings, inserts rows into Neon and returns a success message">
+  <path class="line dashed" d="M95,52 V415"/>
+  <path class="line dashed" d="M300,52 V415"/>
+  <path class="line dashed" d="M505,52 V415"/>
+  <path class="line dashed" d="M675,52 V415"/>
+  <rect class="box2" x="15" y="10" width="160" height="42" rx="8"/><text x="95" y="28" text-anchor="middle" class="title">Browser</text><text x="95" y="44" text-anchor="middle" class="small">/upload page</text>
+  <rect class="box" x="210" y="10" width="180" height="42" rx="8"/><text x="300" y="28" text-anchor="middle" class="title">Server action</text><text x="300" y="44" text-anchor="middle" class="small">processFile (actions.ts)</text>
+  <rect class="box2" x="435" y="10" width="140" height="42" rx="8"/><text x="505" y="28" text-anchor="middle" class="title">OpenAI</text><text x="505" y="44" text-anchor="middle" class="small">models</text>
+  <rect class="box2" x="610" y="10" width="130" height="42" rx="8"/><text x="675" y="28" text-anchor="middle" class="title">Neon</text><text x="675" y="44" text-anchor="middle" class="small">documents table</text>
+  <path class="arrow-accent" d="M97,85 H296"/><text x="197" y="78" text-anchor="middle" class="label">1 · processFile(formData)</text><text x="197" y="100" text-anchor="middle" class="small">body must fit the 10 MB limit</text>
+  <rect class="box-info" x="215" y="118" width="170" height="26" rx="6"/><text x="300" y="136" text-anchor="middle" class="label">2 · extractText: route</text>
+  <path class="arrow-accent" d="M302,175 H501"/><text x="402" y="168" text-anchor="middle" class="label">3 · generateText</text><text x="402" y="190" text-anchor="middle" class="small">gpt-4.1-mini · image or scan only</text>
+  <path class="arrow-ok" d="M503,215 H304"/><text x="402" y="208" text-anchor="middle" class="label">4 · extracted text</text>
+  <rect class="box-info" x="215" y="232" width="170" height="26" rx="6"/><text x="300" y="250" text-anchor="middle" class="label">5 · chunkContent</text>
+  <path class="arrow-accent" d="M302,288 H501"/><text x="402" y="281" text-anchor="middle" class="label">6 · generateEmbeddings</text>
+  <path class="arrow-ok" d="M503,322 H304"/><text x="402" y="315" text-anchor="middle" class="label">7 · one vector per chunk</text>
+  <path class="arrow-accent" d="M302,352 H671"/><text x="580" y="345" text-anchor="middle" class="label">8 · db.insert(documents)</text>
+  <path class="arrow-ok" d="M298,392 H99"/><text x="197" y="385" text-anchor="middle" class="label">9 · { success, message }</text><text x="197" y="407" text-anchor="middle" class="small">green alert names the file</text>
+</svg>
+<figcaption>Only messages 3–4 are new in this step, and they are <strong>skipped for text PDFs</strong> (pdf-parse runs inside the server instead). Steps 5–9 are the pipeline from step 12, unchanged.</figcaption>
+</figure>
+<ol class="steps">
+<li><strong>Upload an image with text</strong>, for example a screenshot of a policy paragraph. Expect <em>"Success! Created N searchable chunks from screenshot.png"</em>.</li>
+<li><strong>Check Neon</strong>. The new rows' <code>content</code> is the text the model read from the image.</li>
+<li><strong>Ask about it in /chat</strong>. The answer comes from the image's content, retrieved through the normal search tool.</li>
+<li><strong>Upload a scanned PDF</strong> (or "print to PDF" an image). Before this step it failed with "No text found". Now the vision model reads it.</li>
+<li><strong>Upload an unsupported file</strong>: switch the file picker to "All files" and choose a <code>.docx</code>. You see <em>"Unsupported file type: …"</em>.</li>
+</ol>
+
+<p>To check Neon, open your project in the Neon console, go to the <strong>SQL Editor</strong> and run <code>SELECT id, content FROM documents ORDER BY id DESC LIMIT 5;</code>. This shows the five newest rows; their <code>content</code> should match the words in your image.</p>
+
+<div class="callout ok"><p><strong>How to know it worked:</strong> the green success alert names your file, the newest rows in Neon contain readable text (not a description of "an image of text"), and a question in <code>/chat</code> about something only written in the image gets a correct answer.</p></div>
+
+<div class="callout warn"><p><strong>Common mistakes:</strong></p>
+<ul>
+<li><strong>Uploading a photo fails with "An error occurred while processing the file"</strong> – the file is over the body size limit. Check that <code>next.config.ts</code> has <code>bodySizeLimit</code> and that you restarted the dev server.</li>
+<li><strong>"No file provided" for every upload</strong> – the page still appends <code>"pdf"</code> while the action reads <code>"file"</code>. Both must say <code>"file"</code>.</li>
+<li><strong>Build error "has no exported member 'processPdfFile'"</strong> – the page still imports the old name.</li>
+<li><strong>"Failed to process file" for images</strong> – look at the terminal: a 401 means the API key is wrong or missing; restart after editing <code>.env.local</code>.</li>
+<li><strong>Stored content starts with "Here is the extracted text:"</strong> – the prompt was shortened. Keep the "Return only the extracted text, with no commentary" line.</li>
+</ul></div>
+
+<div class="callout warn"><p><strong>Things to watch:</strong></p>
+<ul>
+<li><strong>Cost:</strong> each image or scanned PDF costs one vision call on top of the embeddings. Text PDFs still use free local parsing.</li>
+<li><strong>Accuracy:</strong> vision OCR is very good on clear screenshots but can misread handwriting or poor scans. Spot-check important documents in Neon.</li>
+<li><strong>Long scanned PDFs:</strong> one call reads the whole document and the answer length is limited, so a 100-page scan may come back incomplete. For big scans, split the PDF into page ranges first, or use a dedicated OCR service.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li><code>extractTextWithVision</code> turns images and scanned PDFs into text with one <code>generateText</code> call.</li>
+<li><code>processFile</code> picks the cheapest method for each file and then runs the unchanged chunk → embed → store pipeline.</li>
+<li>Your knowledge base now accepts text PDFs, scanned PDFs and images, and the chat side didn't change at all.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="20-text-to-speech.html"><small>← Previous · Step 20</small>Text to Speech</a>
+<a class="next" href="22-build-an-agent.html"><small>Next · Step 22 →</small>Turn the Chatbot into an AI Agent</a>
+</nav>
+</main>
+</body>
+</html>

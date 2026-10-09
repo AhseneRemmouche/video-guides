@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 6 · TanStack Query in Depth</title>
+<meta name="description" content="The cache, query keys, staleTime, retries, suspense queries, errors and devtools.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 6/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">React Handbook · Chapter 6 of 10</div>
+  <h1>TanStack Query in Depth</h1>
+  <p class="lead">The cache, query keys, staleTime, retries, suspense queries, errors and devtools.</p>
+</section>
+<p>In <a href="04-tanstack-query-setup.html">step 4</a> the presenter wrapped the app in a <code>QueryClientProvider</code>. In <a href="06-usequery.html">step 6</a> they fetched weather with <code>useQuery</code>. In <a href="19-skeletons-suspense.html">step 19</a> they switched the cards to <code>useSuspenseQuery</code> so skeletons could show while data loads. Those three steps use a small part of what <a class="term" href="glossary.html#tanstack-query">TanStack Query</a> does. This chapter explains what happens underneath: the <a class="term" href="glossary.html#cache">cache</a>, <a class="term" href="glossary.html#query-key">query keys</a>, "fresh" and "stale" data, automatic <a class="term" href="glossary.html#retry">retries</a>, suspense queries, queries that must wait for something, refreshing data on purpose, and the devtools.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> Four of the bugs found when testing this app come from TanStack Query behaviour that the video never mentions. The <code>lat 0 / lon 0</code> requests come from a query that should have waited. The 28 requests in 20 seconds after a bad key come from the default retries. The blank page comes from a suspense query throwing an error with nothing there to catch it. Once you know the rules in this chapter, each of these becomes easy to spot and fix (<a href="25-fix-the-bugs.html">step 25</a>, <a href="26-error-boundaries.html">step 26</a>).</div>
+
+<p>Every library fact below was checked in the versions locked in the project: <code>@tanstack/react-query</code> and <code>@tanstack/query-core</code> 5.90.5. Snippets marked <em>verified</em> were run with Node or type-checked with the project's own <code>tsc</code> settings.</p>
+
+<h2>Server state is different from component state</h2>
+<p>React's <code>useState</code> holds data that your app owns: which city is selected, whether the side panel is open, which map layer is shown. Nobody else can change it. Weather data is different. It lives on OpenWeather's servers. Your app only holds a <em>copy</em>, and that copy gets old. People call this kind of data <strong>server state</strong>.</p>
+<p>Server state brings questions that <code>useState</code> does not answer. Is the copy still recent enough? Two components need the same data: do we download it twice? The request failed: do we try again? The user switches back to a city: can we show the old data instantly? TanStack Query answers all of these with one object, the <code>QueryClient</code>, and one hook family, <code>useQuery</code> and friends.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Components call useQuery hooks, which read and write a QueryCache inside the QueryClient; only the cache calls the query functions that talk to OpenWeather">
+  <rect class="zone" x="10" y="30" width="200" height="220" rx="8"/>
+  <text x="110" y="22" text-anchor="middle" class="label">Components</text>
+  <rect class="box" x="25" y="45" width="170" height="34" rx="8"/>
+  <text x="110" y="67" text-anchor="middle" class="label">CurrentWeather</text>
+  <rect class="box" x="25" y="89" width="170" height="34" rx="8"/>
+  <text x="110" y="111" text-anchor="middle" class="label">DailyForecast</text>
+  <rect class="box" x="25" y="133" width="170" height="34" rx="8"/>
+  <text x="110" y="155" text-anchor="middle" class="label">HourlyForecast</text>
+  <rect class="box" x="25" y="177" width="170" height="34" rx="8"/>
+  <text x="110" y="199" text-anchor="middle" class="label">AdditionalInfo</text>
+  <text x="110" y="237" text-anchor="middle" class="small">each calls useSuspenseQuery</text>
+  <rect class="zone" x="260" y="30" width="270" height="220" rx="8"/>
+  <text x="395" y="22" text-anchor="middle" class="label">QueryClient (main.tsx)</text>
+  <rect class="box-solid" x="280" y="60" width="230" height="40" rx="8"/>
+  <text x="395" y="85" text-anchor="middle" class="on-solid">QueryCache</text>
+  <rect class="box2" x="280" y="115" width="230" height="30" rx="8"/>
+  <text x="395" y="135" text-anchor="middle" class="mono">["weather", coords]</text>
+  <rect class="box2" x="280" y="152" width="230" height="30" rx="8"/>
+  <text x="395" y="172" text-anchor="middle" class="mono">["pollution", coords]</text>
+  <rect class="box2" x="280" y="189" width="230" height="30" rx="8"/>
+  <text x="395" y="209" text-anchor="middle" class="mono">["geocode", location]</text>
+  <rect class="box-info" x="580" y="95" width="170" height="70" rx="8"/>
+  <text x="665" y="122" text-anchor="middle" class="label">OpenWeather</text>
+  <text x="665" y="142" text-anchor="middle" class="small">One Call, Geo, Air</text>
+  <path class="arrow" d="M195,128 H278"/>
+  <path class="arrow-accent" d="M510,135 H578"/>
+  <text x="550" y="122" text-anchor="middle" class="small">queryFn</text>
+</svg>
+<figcaption>Components never call <code>fetch</code> themselves. They ask the cache for a key; the cache decides whether to run the <a class="term" href="glossary.html#query-function">query function</a>. <strong>The cache sits between your components and the network.</strong></figcaption>
+</figure>
+
+<h2>The QueryClient and its cache</h2>
+<p>The project creates exactly one client, with no options, in <code>src/main.tsx</code>:</p>
+<pre data-lang="tsx" data-tag="verified"><code>const queryClient = new QueryClient()
+
+createRoot(document.getElementById("root")!).render(
+  &lt;StrictMode&gt;
+    &lt;QueryClientProvider client={queryClient}&gt;</code></pre>
+<p>The client owns a <strong>QueryCache</strong>: think of it as a dictionary. Each entry ("a query") stores the last data, the last error, a status, the time the data arrived, and the list of components currently using it (TanStack calls those <em>observers</em>). The <code>QueryClientProvider</code> is a React <a class="term" href="glossary.html#context">context</a> provider, so every hook below it reaches the same cache. Create the client <strong>once</strong>, outside any component. If you created it inside a component, every re-render would make a fresh, empty cache.</p>
+
+<h2>Query keys: the name of a cache entry</h2>
+<p>A query key is an array that names the data. Every card in the project uses the same one:</p>
+<pre data-lang="tsx" data-tag="verified"><code>const { data } = useSuspenseQuery({
+  queryKey: ["weather", coords],
+  queryFn: () =&gt; getWeather({ lat: coords.lat, lon: coords.lon }),
+})</code></pre>
+<p>That is <code>src/components/cards/CurrentWeather.tsx</code> lines 12–15; <code>DailyForecast</code>, <code>HourlyForecast</code> and <code>AdditionalInfo</code> repeat it. TanStack Query turns the key into a string (a <em>hash</em>) and uses it to find the entry. Two hooks with keys that hash the same share one entry. The presenter points this out at 37:16 and again at 52:47: four cards, one request.</p>
+<p>Here is that claim checked directly against the installed <code>query-core</code>. Four requests for the same key start at the same moment; the query function runs once:</p>
+<pre data-lang="js" data-tag="verified"><code>const coords = { lat: 35.68, lon: 139.69 }
+const opts = { queryKey: ["weather", coords], queryFn: () =&gt; getWeather(coords) }
+await Promise.all([qc.fetchQuery(opts), qc.fetchQuery(opts), qc.fetchQuery(opts), qc.fetchQuery(opts)])
+// four fetchQuery calls, queryFn ran: 1
+
+hashKey(["weather", { lat: 35.68, lon: 139.69 }])
+// '["weather",{"lat":35.68,"lon":139.69}]'
+hashKey(["weather", { lat: 1, lon: 2 }]) === hashKey(["weather", { lon: 2, lat: 1 }])
+// true</code></pre>
+<p>Two things follow. First, the hash is plain JSON, so a <em>new</em> <code>coords</code> object with the same numbers still finds the same entry. That is lucky for this app, because <code>App.tsx</code> builds a new <code>{ lat, lon }</code> object on every render. Second, the order of properties inside an object does not matter (the hash sorts them), but the order of array items does: <code>["weather", coords]</code> and <code>[coords, "weather"]</code> are different keys.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Four cards share the weather key and cause one One Call request; the side panel uses the pollution key and causes one Air Pollution request">
+  <rect class="box" x="10" y="20" width="170" height="34" rx="8"/>
+  <text x="95" y="42" text-anchor="middle" class="label">CurrentWeather</text>
+  <rect class="box" x="10" y="64" width="170" height="34" rx="8"/>
+  <text x="95" y="86" text-anchor="middle" class="label">DailyForecast</text>
+  <rect class="box" x="10" y="108" width="170" height="34" rx="8"/>
+  <text x="95" y="130" text-anchor="middle" class="label">HourlyForecast</text>
+  <rect class="box" x="10" y="152" width="170" height="34" rx="8"/>
+  <text x="95" y="174" text-anchor="middle" class="label">AdditionalInfo</text>
+  <rect class="box" x="10" y="204" width="170" height="34" rx="8"/>
+  <text x="95" y="226" text-anchor="middle" class="label">SidePanel</text>
+  <rect class="box-ok" x="260" y="80" width="230" height="44" rx="8"/>
+  <text x="375" y="107" text-anchor="middle" class="mono">["weather", coords]</text>
+  <rect class="box2" x="260" y="199" width="230" height="44" rx="8"/>
+  <text x="375" y="226" text-anchor="middle" class="mono">["pollution", coords]</text>
+  <path class="arrow" d="M180,37 L258,92"/>
+  <path class="arrow" d="M180,81 L258,98"/>
+  <path class="arrow" d="M180,125 L258,108"/>
+  <path class="arrow" d="M180,169 L258,116"/>
+  <path class="arrow" d="M180,221 H258"/>
+  <rect class="box-info" x="560" y="80" width="190" height="44" rx="8"/>
+  <text x="655" y="100" text-anchor="middle" class="label">1 request</text>
+  <text x="655" y="116" text-anchor="middle" class="small">data/3.0/onecall</text>
+  <rect class="box-info" x="560" y="199" width="190" height="44" rx="8"/>
+  <text x="655" y="219" text-anchor="middle" class="label">1 request</text>
+  <text x="655" y="235" text-anchor="middle" class="small">data/2.5/air_pollution</text>
+  <path class="arrow-accent" d="M490,102 H558"/>
+  <path class="arrow-accent" d="M490,221 H558"/>
+</svg>
+<figcaption>Five components, two keys, two requests per location. <strong>Same key = same cache entry = one network request</strong>, no matter how many components ask.</figcaption>
+</figure>
+
+<h3>Put every input in the key</h3>
+<p>The rule is simple: <strong>anything the query function uses must be in the key</strong>. At 1:57:25 the presenter explains why <code>coords</code> was added: with a fixed <code>["weather"]</code> key, changing the location would keep showing "whatever the first cache value is". The function would get new coordinates, but TanStack Query would think it already had the answer. The same rule explains <code>["geocode", location]</code> in <code>App.tsx</code>. If you later add a units switch (the app is fixed to <code>units=imperial</code>), the units must join the key: <code>["weather", coords, units]</code>.</p>
+<p>Keys also work as a hierarchy. <code>["weather"]</code> is a <em>prefix</em> of every <code>["weather", coords]</code> key. Several client methods, such as <code>invalidateQueries</code>, match by prefix, so one call can target every city at once. Keep the first item a stable word like <code>"weather"</code> for that reason.</p>
+
+<details class="primer"><summary>New to hashing? Why a key is turned into a string</summary>
+<p>JavaScript compares objects by identity, not by content: <code>{ lat: 1 } === { lat: 1 }</code> is <code>false</code>, because they are two different objects in memory. A cache that compared keys that way would miss every time, since React components create new objects on every render. So TanStack Query converts the key into text with <code>JSON.stringify</code> (after sorting object properties). Two keys that produce the same text are "the same key". This is also why keys must be serializable: plain strings, numbers, booleans, arrays and plain objects. Functions or class instances do not belong in a key.</p>
+</details>
+
+<h2>The life of a query: status and fetchStatus</h2>
+<p>A query has two separate states. <code>status</code> says <em>what data you have</em>: <code>pending</code> (nothing yet), <code>success</code> (data available) or <code>error</code>. <code>fetchStatus</code> says <em>whether a request is running right now</em>: <code>fetching</code>, <code>paused</code> (no network) or <code>idle</code>. They are independent: a query can be <code>success</code> and <code>fetching</code> at the same time, which means "showing old data while getting new data in the background".</p>
+<div class="table-wrap"><table>
+<tr><th>Flag on the result</th><th>True when</th><th>Typical use</th></tr>
+<tr><td><code>isPending</code></td><td>no data yet</td><td>show a loading state the first time</td></tr>
+<tr><td><code>isFetching</code></td><td>a request is in flight (first load or background)</td><td>small "updating" indicator</td></tr>
+<tr><td><code>isLoading</code></td><td><code>isPending &amp;&amp; isFetching</code> (from the type definitions)</td><td>first load that is actually running</td></tr>
+<tr><td><code>isError</code> / <code>error</code></td><td>the last attempt failed after all retries</td><td>error message, "Try again" button</td></tr>
+<tr><td><code>isSuccess</code> / <code>data</code></td><td>data is available</td><td>render the card</td></tr>
+<tr><td><code>isStale</code></td><td>data is older than <code>staleTime</code></td><td>rarely needed directly</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="State machine: pending moves to success or error; success becomes stale over time; a stale query refetches in the background and returns to success">
+  <rect class="box2" x="10" y="75" width="130" height="50" rx="8"/>
+  <text x="75" y="97" text-anchor="middle" class="label">pending</text>
+  <text x="75" y="114" text-anchor="middle" class="small">no data yet</text>
+  <rect class="box-ok" x="230" y="20" width="150" height="50" rx="8"/>
+  <text x="305" y="42" text-anchor="middle" class="label">success, fresh</text>
+  <text x="305" y="59" text-anchor="middle" class="small">served from cache</text>
+  <rect class="box-warn" x="470" y="20" width="150" height="50" rx="8"/>
+  <text x="545" y="42" text-anchor="middle" class="label">success, stale</text>
+  <text x="545" y="59" text-anchor="middle" class="small">still shown</text>
+  <rect class="box-bad" x="230" y="130" width="150" height="50" rx="8"/>
+  <text x="305" y="152" text-anchor="middle" class="label">error</text>
+  <text x="305" y="169" text-anchor="middle" class="small">after the retries</text>
+  <rect class="box-info" x="640" y="130" width="110" height="50" rx="8"/>
+  <text x="695" y="152" text-anchor="middle" class="label">refetch</text>
+  <text x="695" y="169" text-anchor="middle" class="small">in background</text>
+  <path class="arrow-ok" d="M140,92 L228,52"/>
+  <path class="arrow-bad" d="M140,108 L228,150"/>
+  <path class="arrow" d="M380,45 H468"/>
+  <text x="424" y="37" text-anchor="middle" class="small">staleTime</text>
+  <path class="arrow" d="M600,70 L668,128"/>
+  <path class="arrow-ok dashed" d="M640,150 C560,110 430,90 382,62"/>
+  <text x="470" y="125" text-anchor="middle" class="small">new data</text>
+</svg>
+<figcaption>The <code>status</code> path of one cache entry. Stale data is <em>not</em> thrown away; it stays on screen while a background refetch runs. <strong>"Stale" means "may be refreshed", not "deleted".</strong></figcaption>
+</figure>
+
+<h2>Fresh, stale and garbage collected: staleTime and gcTime</h2>
+<p>Two timers control how long the cache trusts and keeps data. They are easy to confuse, so here they are side by side, with the defaults read from <code>query-core</code> 5.90.5:</p>
+<div class="table-wrap"><table>
+<tr><th>Option</th><th>Question it answers</th><th>Default</th><th>Where the default lives</th></tr>
+<tr><td><a class="term" href="glossary.html#stale-time"><code>staleTime</code></a></td><td>How long is data considered fresh, so no refetch happens?</td><td><code>0</code>: stale immediately</td><td><code>query.js</code>: <code>isStaleByTime(staleTime = 0)</code></td></tr>
+<tr><td><code>gcTime</code></td><td>How long is an <em>unused</em> entry kept before it is deleted?</td><td>5 minutes in the browser (<code>Infinity</code> on a server)</td><td><code>removable.js</code>: <code>isServer ? Infinity : 5 * 60 * 1e3</code></td></tr>
+</table></div>
+<p>With <code>staleTime: 0</code>, data is fresh for no time at all. That sounds wasteful, but stale data is still <em>shown</em>; it is only <em>refetched</em> when a trigger happens. The default triggers are: a new component mounts that uses the key, the browser window regains focus, and the network reconnects (<code>refetchOnMount</code>, <code>refetchOnWindowFocus</code>, <code>refetchOnReconnect</code> all default to "yes, if stale"). In this app that means: switch to another browser tab and back, and the weather is downloaded again.</p>
+<p>One special case matters here. Suspense queries clamp <code>staleTime</code> to at least 1,000 ms (<code>MIN_SUSPENSE_TIME_MS</code> in <code>react-query/build/modern/suspense.js</code>). Without that, a component that suspends and then re-mounts would find stale data and start fetching again in a loop.</p>
+<p><code>gcTime</code> starts counting only when <em>no</em> component uses the entry any more. Pick Tokyo, then Paris: the Tokyo entry loses its observers and gets 5 minutes. Switch back within that time and Tokyo appears instantly from the cache (and, because it is stale, is refetched in the background).</p>
+<p>The improved setup in <a href="26-error-boundaries.html">step 26</a> changes both <code>retry</code> and <code>staleTime</code> for the whole app:</p>
+<pre data-lang="tsx" data-tag="verified"><code>const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1, // one quick retry instead of three: a wrong key or missing subscription won't fix itself
+      staleTime: 5 * 60 * 1000, // weather data stays fresh for 5 minutes: switching back to a city reuses it
+    },
+  },
+})</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Timeline: data arrives at time 0; with staleTime 5 minutes it is fresh until 5 minutes; when the last component unmounts the gcTime countdown of 5 minutes starts and the entry is deleted at the end">
+  <path class="line" d="M30,110 H730"/>
+  <text x="30" y="135" text-anchor="middle" class="small">0:00</text>
+  <text x="250" y="135" text-anchor="middle" class="small">5:00</text>
+  <text x="420" y="135" text-anchor="middle" class="small">7:00</text>
+  <text x="700" y="135" text-anchor="middle" class="small">12:00</text>
+  <circle class="dot-ok" cx="30" cy="110" r="6"/>
+  <rect class="box-ok" x="30" y="40" width="220" height="40" rx="8"/>
+  <text x="140" y="65" text-anchor="middle" class="label">fresh: no refetch</text>
+  <rect class="box-warn" x="250" y="40" width="450" height="40" rx="8"/>
+  <text x="475" y="65" text-anchor="middle" class="label">stale: shown, refetched on focus or mount</text>
+  <circle class="dot-warn" cx="420" cy="110" r="6"/>
+  <text x="420" y="160" text-anchor="middle" class="small">last card unmounts</text>
+  <text x="420" y="175" text-anchor="middle" class="small">(user picked another city)</text>
+  <rect class="box2" x="420" y="185" width="280" height="18" rx="4"/>
+  <text x="560" y="198" text-anchor="middle" class="small">gcTime: 5 minutes of waiting</text>
+  <circle class="dot-bad" cx="700" cy="110" r="6"/>
+  <text x="700" y="160" text-anchor="middle" class="small">entry deleted</text>
+</svg>
+<figcaption>Illustrative times with step 26's <code>staleTime</code> of 5 minutes and the default <code>gcTime</code>. <strong>staleTime decides when to refetch; gcTime decides when to forget.</strong></figcaption>
+</figure>
+
+<h2>Retries and exponential backoff</h2>
+<p>When a query function throws (or its <a class="term" href="glossary.html#promise">promise</a> rejects), TanStack Query does not give up at once. In <code>retryer.js</code> the defaults are:</p>
+<pre data-lang="js" data-tag="verified"><code>function defaultRetryDelay(failureCount) {
+  return Math.min(1e3 * 2 ** failureCount, 3e4);
+}
+// ...
+const retry = config.retry ?? (isServer ? 0 : 3);</code></pre>
+<p>So in the browser a failing query is tried <strong>4 times in total</strong> (1 + 3 retries), waiting 1 s, 2 s and 4 s between attempts. The wait doubles each time and never exceeds 30 s. This pattern is called <em>exponential backoff</em>: it gives a struggling server time to recover and avoids hammering it.</p>
+<p>Retries help with temporary problems (a dropped connection, a server hiccup). They do not help with permanent ones. In the browser test with an invalid key, OpenWeather answered <a class="term" href="glossary.html#http-status">401</a> every time. Every query key went through its retries, and <strong>28 requests were recorded in 20 seconds</strong> before the page went blank. Step 26 sets <code>retry: 1</code>. You can be smarter and skip retries for errors that will never fix themselves. This was type-checked against the project:</p>
+<pre data-lang="ts" data-tag="verified"><code>new QueryClient({
+  defaultOptions: {
+    queries: {
+      // the message comes from fetchJson in step 25: "OpenWeather request failed (401): ..."
+      retry: (failureCount: number, error: Error) =&gt;
+        !error.message.includes("(401)") &amp;&amp; failureCount &lt; 2,
+      retryDelay: (attempt: number) =&gt; Math.min(1000 * 2 ** attempt, 30_000),
+    },
+  },
+})</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Timeline of default retries: attempt 1 at 0 seconds, wait 1 second, attempt 2, wait 2 seconds, attempt 3, wait 4 seconds, attempt 4, then error">
+  <path class="line" d="M30,80 H700"/>
+  <circle class="dot-bad" cx="40" cy="80" r="8"/>
+  <circle class="dot-bad" cx="140" cy="80" r="8"/>
+  <circle class="dot-bad" cx="300" cy="80" r="8"/>
+  <circle class="dot-bad" cx="580" cy="80" r="8"/>
+  <text x="40" y="55" text-anchor="middle" class="label">try 1</text>
+  <text x="140" y="55" text-anchor="middle" class="label">try 2</text>
+  <text x="300" y="55" text-anchor="middle" class="label">try 3</text>
+  <text x="580" y="55" text-anchor="middle" class="label">try 4</text>
+  <text x="90" y="105" text-anchor="middle" class="small">wait 1 s</text>
+  <text x="220" y="105" text-anchor="middle" class="small">wait 2 s</text>
+  <text x="440" y="105" text-anchor="middle" class="small">wait 4 s</text>
+  <rect class="box-bad" x="620" y="62" width="130" height="36" rx="8"/>
+  <text x="685" y="85" text-anchor="middle" class="label">status: error</text>
+  <text x="380" y="145" text-anchor="middle" class="small">about 7 s per key before the error reaches your UI (plus request time); multiply by every key and every re-mount</text>
+</svg>
+<figcaption>The default retry schedule in the browser. <strong>For a permanent error like a wrong API key, retries only delay the message and multiply requests.</strong></figcaption>
+</figure>
+
+<h2>useQuery or useSuspenseQuery?</h2>
+<p>Both hooks read from the same cache. They differ in how they report "not ready yet" and "failed".</p>
+<div class="table-wrap"><table>
+<tr><th></th><th><code>useQuery</code></th><th><a class="term" href="glossary.html#usesuspensequery"><code>useSuspenseQuery</code></a></th></tr>
+<tr><td>While loading</td><td>returns <code>isPending: true</code>, <code>data: undefined</code>; you write the loading UI</td><td>suspends: the nearest <code>&lt;Suspense fallback&gt;</code> shows its fallback</td></tr>
+<tr><td>Type of <code>data</code></td><td><code>T | undefined</code>, so you must check it</td><td>always <code>T</code></td></tr>
+<tr><td>On error (no data yet)</td><td>returns <code>error</code></td><td>throws it to the nearest <a class="term" href="glossary.html#error-boundary">error boundary</a></td></tr>
+<tr><td><code>enabled</code> option</td><td>available</td><td>not available (forced to <code>true</code>)</td></tr>
+<tr><td><code>skipToken</code></td><td>allowed</td><td>not allowed (type error, plus a console error in development)</td></tr>
+<tr><td><code>placeholderData</code></td><td>available</td><td>forced to <code>undefined</code></td></tr>
+<tr><td>Used in this app</td><td>the geocode query in <code>App.tsx</code></td><td>the four cards and the side panel</td></tr>
+</table></div>
+<p>The rows about <code>enabled</code>, errors and <code>placeholderData</code> come straight from the installed source of <code>useSuspenseQuery.js</code>, which calls the base hook with <code>enabled: true, suspense: true, throwOnError: defaultThrowOnError, placeholderData: void 0</code>. <code>defaultThrowOnError</code> throws only when there is no data yet; if old data exists and a background refetch fails, the card keeps the old data.</p>
+<p>That throwing is why the committed app shows a <strong>blank page</strong> when OpenWeather fails: the error travels up to the root, and React removes the whole tree when nothing catches it. Step 26 wraps each card in a <code>WeatherErrorBoundary</code> that uses TanStack's <code>QueryErrorResetBoundary</code>, so one card can fail, show a message and a "Try again" button, while the others keep working.</p>
+<p>At 3:15:14 the presenter notices that a <a class="term" href="glossary.html#suspense">Suspense</a> fallback did not appear while only one card was wrapped, and concludes it is "all or nothing" because the cards are "subscribed to the exact same query". The practical lesson in the final code is simple: every component that calls a suspense query gets its own <code>&lt;Suspense&gt;</code> with its own <a class="term" href="glossary.html#skeleton">skeleton</a>, so each card decides what to show while the shared entry loads.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Component tree after step 26: each card sits inside a WeatherErrorBoundary and a Suspense boundary; pending goes to the Suspense fallback, errors go to the error boundary">
+  <rect class="box-solid" x="300" y="10" width="160" height="34" rx="8"/>
+  <text x="380" y="32" text-anchor="middle" class="on-solid">App</text>
+  <rect class="box-bad" x="60" y="70" width="280" height="40" rx="8"/>
+  <text x="200" y="95" text-anchor="middle" class="label">WeatherErrorBoundary</text>
+  <rect class="box-warn" x="90" y="130" width="220" height="40" rx="8"/>
+  <text x="200" y="155" text-anchor="middle" class="label">Suspense (CurrentSkeleton)</text>
+  <rect class="box" x="120" y="190" width="160" height="40" rx="8"/>
+  <text x="200" y="215" text-anchor="middle" class="label">CurrentWeather</text>
+  <rect class="box-bad" x="420" y="70" width="280" height="40" rx="8"/>
+  <text x="560" y="95" text-anchor="middle" class="label">WeatherErrorBoundary</text>
+  <rect class="box-warn" x="450" y="130" width="220" height="40" rx="8"/>
+  <text x="560" y="155" text-anchor="middle" class="label">Suspense (DailySkeleton)</text>
+  <rect class="box" x="480" y="190" width="160" height="40" rx="8"/>
+  <text x="560" y="215" text-anchor="middle" class="label">DailyForecast</text>
+  <path class="line" d="M380,44 L200,68"/>
+  <path class="line" d="M380,44 L560,68"/>
+  <path class="line" d="M200,110 V128"/>
+  <path class="line" d="M200,170 V188"/>
+  <path class="line" d="M560,110 V128"/>
+  <path class="line" d="M560,170 V188"/>
+  <path class="arrow-accent dashed" d="M118,205 C40,200 40,160 88,152"/>
+  <text x="40" y="248" class="small">pending: "suspend" up to Suspense</text>
+  <path class="arrow-bad dashed" d="M642,210 C730,200 730,100 702,92"/>
+  <text x="720" y="248" text-anchor="end" class="small">error: throw up to the error boundary</text>
+</svg>
+<figcaption>Simplified tree from <code>ext28/src/App.tsx</code> (two of the four cards shown). <strong>Suspense catches "not ready"; an error boundary catches "failed".</strong> You need both around every suspense query.</figcaption>
+</figure>
+
+<h2>Queries that must wait: enabled and skipToken</h2>
+<p>The weather depends on coordinates, and the coordinates depend on the geocode query. That is a <em>dependent query</em>. The committed code does not wait. It fills in zeros while the city is still loading:</p>
+<pre data-lang="tsx" data-tag="verified"><code>const coords =
+  location === "custom"
+    ? coordinates
+    : { lat: geocodeData?.[0].lat ?? 0, lon: geocodeData?.[0].lon ?? 0 }</code></pre>
+<p>With that, the cards immediately ask for <code>["weather", {lat: 0, lon: 0}]</code>. The browser test recorded the order: One Call for 0,0, Air Pollution for 0,0, then the geocode for Tokyo, then One Call and Air Pollution for Tokyo. Two wasted requests on every load, and a flash of the Gulf of Guinea (the presenter sees it at about 2:28:00). TanStack Query offers two ways to say "not yet":</p>
+<pre data-lang="tsx" data-tag="verified"><code>// 1. enabled: the query exists but does not run while the condition is false
+const { data } = useQuery({
+  queryKey: ["weather", coords],
+  queryFn: () =&gt; getWeather(coords!),
+  enabled: coords !== null,
+})
+
+// 2. skipToken: same effect, and TypeScript knows coords is not null inside the function
+const result = useQuery({
+  queryKey: ["weather", coords],
+  queryFn: coords ? () =&gt; getWeather(coords) : skipToken,
+})</code></pre>
+<p>Both were type-checked inside the project. <code>skipToken</code> is exported by <code>@tanstack/query-core</code> 5.90.5 (it is a <code>Symbol</code>) and re-exported by <code>@tanstack/react-query</code>. With a disabled or skipped query, <code>isPending</code> is <code>true</code> but <code>isFetching</code> is <code>false</code>: "no data and not trying".</p>
+<p>Neither works with <code>useSuspenseQuery</code>, which the cards use. <code>enabled</code> is not part of its options, and passing <code>skipToken</code> is a TypeScript error (its <code>queryFn</code> type is <code>Exclude&lt;..., SkipToken&gt;</code>) and logs <code>skipToken is not allowed for useSuspenseQuery</code> in development. For suspense, the fix is to <strong>not render the component</strong> until the input exists. That is what <a href="25-fix-the-bugs.html">step 25</a> does: <code>coords</code> becomes <code>null</code> until the geocode arrives, and each card slot renders its skeleton instead of the card.</p>
+<pre data-lang="tsx" data-tag="verified"><code>const place = geocodeData?.[0]
+// null until we know where to look: no requests for lat 0 / lon 0 while the city is loading
+const coords: Coords | null =
+  location === "custom" ? coordinates : place ? { lat: place.lat, lon: place.lon } : null
+// ...
+{coords ? &lt;CurrentWeather coords={coords} /&gt; : &lt;CurrentSkeleton /&gt;}</code></pre>
+<p>After this change the browser test recorded 3 requests on load, all for Tokyo.</p>
+<p>The fixed app also uses <code>enabled</code> where it fits, on the plain <code>useQuery</code> for geocoding. In the repo, a map click sets <code>location</code> to <code>"custom"</code>, and the geocode query then dutifully asked OpenWeather to look up a city called "custom" (verified in the browser test). Step 25 switches that query off for map clicks:</p>
+<pre data-lang="tsx" data-tag="verified"><code>  const { data: geocodeData, error: geocodeError } = useQuery({
+    queryKey: ["geocode", location],
+    queryFn: () =&gt; getGeocode(location),
+    enabled: location !== "custom", // a map click sets "custom": there is no city to look up
+  })</code></pre>
+<p>So the project shows both techniques: <code>enabled</code> for the <code>useQuery</code> that must sometimes not run, and "don't render it yet" for the suspense queries.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Before and after: before, weather for 0,0 is requested before geocode finishes; after, the weather request waits until coords exist">
+  <text x="190" y="20" text-anchor="middle" class="title">Before (repo)</text>
+  <text x="570" y="20" text-anchor="middle" class="title">After (step 25)</text>
+  <rect class="box-bad" x="20" y="35" width="340" height="32" rx="8"/>
+  <text x="190" y="56" text-anchor="middle" class="label">1. onecall lat=0 lon=0</text>
+  <rect class="box-bad" x="20" y="75" width="340" height="32" rx="8"/>
+  <text x="190" y="96" text-anchor="middle" class="label">2. air_pollution lat=0 lon=0</text>
+  <rect class="box" x="20" y="115" width="340" height="32" rx="8"/>
+  <text x="190" y="136" text-anchor="middle" class="label">3. geo/1.0/direct q=Tokyo</text>
+  <rect class="box-ok" x="20" y="155" width="340" height="32" rx="8"/>
+  <text x="190" y="176" text-anchor="middle" class="label">4. onecall 35.68, 139.69</text>
+  <rect class="box-ok" x="20" y="195" width="340" height="28" rx="8"/>
+  <text x="190" y="214" text-anchor="middle" class="label">5. air_pollution 35.68, 139.69</text>
+  <rect class="box" x="400" y="35" width="340" height="32" rx="8"/>
+  <text x="570" y="56" text-anchor="middle" class="label">1. geo/1.0/direct q=Tokyo</text>
+  <rect class="box2" x="400" y="75" width="340" height="32" rx="8"/>
+  <text x="570" y="96" text-anchor="middle" class="small">coords is null: skeletons, no request</text>
+  <rect class="box-ok" x="400" y="115" width="340" height="32" rx="8"/>
+  <text x="570" y="136" text-anchor="middle" class="label">2. onecall 35.68, 139.69</text>
+  <rect class="box-ok" x="400" y="155" width="340" height="32" rx="8"/>
+  <text x="570" y="176" text-anchor="middle" class="label">3. air_pollution 35.68, 139.69</text>
+</svg>
+<figcaption>Request order recorded in the browser test. <strong>A dependent query must wait for its input; never feed it placeholder numbers.</strong></figcaption>
+</figure>
+
+<h2>Refreshing data on purpose: refetch and invalidation</h2>
+<p>Sometimes you want new data now: a "Refresh" button, or after the user changes a setting. There are two tools.</p>
+<ul>
+<li><code>refetch()</code> is returned by <code>useQuery</code> and <code>useSuspenseQuery</code>. It re-runs <em>this</em> query immediately.</li>
+<li><code>queryClient.invalidateQueries({ queryKey })</code> marks every matching entry as stale and refetches the ones that are currently on screen. Matching is by prefix, so <code>["weather"]</code> hits every city.</li>
+</ul>
+<pre data-lang="tsx" data-tag="verified"><code>import { useQueryClient } from "@tanstack/react-query"
+
+export function RefreshButton() {
+  const queryClient = useQueryClient()
+  return (
+    &lt;button onClick={() =&gt; queryClient.invalidateQueries({ queryKey: ["weather"] })}&gt;
+      Refresh weather
+    &lt;/button&gt;
+  )
+}</code></pre>
+<p>A detail checked in Node: after <code>invalidateQueries</code> on an entry that no component uses, the entry is marked <code>isInvalidated: true</code> but the query function is <em>not</em> called. It runs the next time a component mounts with that key. Invalidation is "this is out of date", not "download everything now".</p>
+
+<h2>Sharing options with queryOptions</h2>
+<p>The project copies the same key and function into four files. If one copy changes and the others do not, the cards stop sharing a cache entry. The <code>queryOptions</code> helper lets you define the pair once (type-checked in the project):</p>
+<pre data-lang="ts" data-tag="verified"><code>import { queryOptions } from "@tanstack/react-query"
+
+export const weatherQuery = (coords: Coords) =&gt;
+  queryOptions({
+    queryKey: ["weather", coords],
+    queryFn: () =&gt; getWeather(coords),
+  })
+
+// in each card:
+const { data } = useSuspenseQuery(weatherQuery(coords))</code></pre>
+
+<h2>Seeing the cache: the devtools</h2>
+<p>TanStack ships a separate package, <code>@tanstack/react-query-devtools</code> (version 5.104.1 on npm at the time of writing; install a version that matches your <code>@tanstack/react-query</code>). It adds a floating panel that lists every query key, its status, when it was updated and its data. It is the fastest way to see the <code>lat 0 / lon 0</code> entry for yourself. The project does not include it. The official docs show this setup, and state that the devtools are only included in bundles when <code>process.env.NODE_ENV</code> is <code>'development'</code>, so they disappear from production builds:</p>
+<pre data-lang="sh" data-tag="illustrative"><code>npm i @tanstack/react-query-devtools</code></pre>
+<pre data-lang="tsx" data-tag="illustrative"><code>import { ReactQueryDevtools } from "@tanstack/react-query-devtools"
+
+&lt;QueryClientProvider client={queryClient}&gt;
+  &lt;ThemeProvider&gt;
+    &lt;App /&gt;
+  &lt;/ThemeProvider&gt;
+  &lt;ReactQueryDevtools initialIsOpen={false} /&gt;
+&lt;/QueryClientProvider&gt;</code></pre>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"Each <code>useQuery</code> call makes its own request."</em> No. Calls with the same key share one entry and one request.</li>
+<li><em>"Stale data is deleted."</em> No. Stale data stays on screen; it is just allowed to be refetched. Deletion is <code>gcTime</code>'s job, and only for unused entries.</li>
+<li><em>"<code>staleTime: 0</code> means a request on every render."</em> No. Refetches need a trigger: mount, window focus, reconnect, invalidation or <code>refetch()</code>.</li>
+<li><em>"Retries fix errors."</em> Only temporary ones. A 401 stays a 401; the default 3 retries just multiply requests (step 26 lowers it to 1).</li>
+<li><em>"<code>enabled: false</code> works with <code>useSuspenseQuery</code>."</em> It is not an option there. Don't render the component until its input exists.</li>
+<li><em>"I can leave a variable out of the key if the function reads it."</em> Then the cache returns old data when that variable changes, exactly the bug the presenter fixes at 1:57:25.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>One <code>QueryClient</code> per app; its cache maps hashed query keys to data, status and observers.</li>
+<li>Same key, same entry, one request: the four cards share <code>["weather", coords]</code>. Every input of the query function belongs in the key.</li>
+<li><code>staleTime</code> (default 0) decides when to refetch; <code>gcTime</code> (default 5 min in the browser) decides when unused data is forgotten. Suspense raises <code>staleTime</code> to at least 1 s.</li>
+<li>Default retries in the browser: 3, waiting 1 s, 2 s, 4 s (capped at 30 s). Lower or customise them for permanent errors.</li>
+<li><code>useSuspenseQuery</code> suspends and throws; pair it with <code>&lt;Suspense&gt;</code> and an error boundary. It has no <code>enabled</code> and rejects <code>skipToken</code>.</li>
+<li>Dependent queries wait with <code>enabled</code> / <code>skipToken</code> (<code>useQuery</code>) or by not rendering the component (suspense).</li>
+<li><code>refetch()</code> re-runs one query; <code>invalidateQueries</code> marks matching keys stale and refetches the active ones.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://tanstack.com/query/latest/docs/framework/react/overview">TanStack Query docs: Overview</a> and <a href="https://tanstack.com/query/latest/docs/framework/react/guides/important-defaults">Important Defaults</a></li>
+<li><a href="https://tanstack.com/query/latest/docs/framework/react/guides/query-keys">Query Keys</a> and <a href="https://tanstack.com/query/latest/docs/framework/react/guides/caching">Caching Examples</a></li>
+<li><a href="https://tanstack.com/query/latest/docs/framework/react/guides/query-retries">Query Retries</a></li>
+<li><a href="https://tanstack.com/query/latest/docs/framework/react/guides/suspense">Suspense</a> and <a href="https://tanstack.com/query/latest/docs/framework/react/guides/disabling-queries">Disabling/Pausing Queries (enabled, skipToken)</a></li>
+<li><a href="https://tanstack.com/query/latest/docs/framework/react/guides/query-invalidation">Query Invalidation</a> and the <a href="https://tanstack.com/query/latest/docs/reference/QueryClient">QueryClient reference</a></li>
+<li><a href="https://tanstack.com/query/latest/docs/framework/react/devtools">Devtools</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="rw-05-http-and-apis.html"><small>← Chapter 5</small>HTTP, REST APIs &amp; API Keys</a>
+<a class="next" href="rw-07-zod-validation.html"><small>Chapter 7 →</small>Validating Data with Zod</a>
+</nav>
+</main>
+</body>
+</html>

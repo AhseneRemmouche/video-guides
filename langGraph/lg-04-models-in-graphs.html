@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 4 · Models Inside Graphs</title>
+<meta name="description" content="Messages, prompts, tool binding, structured output and choosing a model per node.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 4/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangGraph Handbook · Chapter 4 of 10</div>
+  <h1>Models Inside Graphs</h1>
+  <p class="lead">Messages, prompts, tool binding, structured output and choosing a model per node.</p>
+</section>
+<h2>What you will learn</h2>
+<p>Graphs 0–2 contain no AI at all. From graph 3 (<a href="09-graph-3-model-in-a-node.html">step 9</a>) on, a <a class="term" href="glossary.html#chat-model">chat model</a> appears inside a node, and by graph 8 the whole graph revolves around it. This chapter explains how models fit into a graph: what goes in and comes out, where the prompt belongs, how tools are attached, how to get answers you can route on reliably, and how to protect a node against slow or failing API calls.</p>
+<ul>
+<li>a model call is just code inside a node;</li>
+<li>the four message types, and the order the model should see them in;</li>
+<li><code>bind_tools</code>, <code>tool_calls</code> and how <code>ToolNode</code> answers them;</li>
+<li><code>with_structured_output</code> for routing decisions you can trust;</li>
+<li>a different model per node;</li>
+<li>retries and timeouts: on the model client, and on the node with <code>RetryPolicy</code>.</li>
+</ul>
+<div class="callout ok"><strong>Why this matters for your project.</strong> Graph 3 routes on the model's free-text reply and crashes with <code>ValueError</code> when the model writes "Two" instead of "2" (FACTS finding 2). Graphs 8 and 9 put the system message <em>last</em>. Graph 5 asks for a tool that never runs. Each of these is a "model inside a graph" question, and this chapter gives the general rule behind each fix in <a href="15-fix-and-harden.html">step 15</a>.</div>
+
+<h2>A model call is just code in a node</h2>
+<p>LangGraph has no special "LLM node". A node is a Python function; if that function calls a model, it's a model node. Graph 4 (<a href="10-graph-4-messages-state.html">step 10</a>) is the cleanest example:</p>
+<pre data-lang="py" data-tag="from the repo"><code>model_llm = ChatOpenAI(model="gpt-4o")
+
+# nodes
+def chat(state: MessagesState) -&gt; MessagesState:
+    return {"messages": [model_llm.invoke(state["messages"])]}
+</code></pre>
+<p>Three things to notice:</p>
+<ol class="steps">
+<li><strong>The model object is created once</strong>, at module level, not inside the node. Creating it per call would work, but it's wasted effort, and the model isn't data that belongs in the state (<a href="lg-02-designing-state.html">chapter 2</a>).</li>
+<li><strong>Messages go in, one message comes out.</strong> <code>model_llm.invoke(list_of_messages)</code> returns a single <code>AIMessage</code>.</li>
+<li><strong>The node returns an update</strong>, <code>{"messages": [reply]}</code>. The <code>add_messages</code> reducer appends the reply to the conversation.</li>
+</ol>
+<p>The model name, <code>gpt-4o</code> in the course, is only an example at the time of writing. You can swap in any chat model LangChain supports; the graph doesn't care, as long as the node returns the same kind of update.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Inside the chat node: read state messages, call the model through the OpenAI API, wrap the AIMessage in an update; the reducer appends it to the state">
+  <rect class="box2" x="10" y="70" width="140" height="70" rx="10"/>
+  <text x="80" y="100" text-anchor="middle" class="title">state</text>
+  <text x="80" y="122" text-anchor="middle" class="mono">messages: [...]</text>
+  <rect class="zone" x="190" y="20" width="360" height="180" rx="10"/>
+  <text x="370" y="42" text-anchor="middle" class="small">node chat (your Python process)</text>
+  <rect class="box" x="210" y="80" width="140" height="50" rx="8"/>
+  <text x="280" y="110" text-anchor="middle" class="mono">model_llm.invoke</text>
+  <rect class="box" x="390" y="80" width="140" height="50" rx="8"/>
+  <text x="460" y="102" text-anchor="middle" class="mono">{"messages":</text>
+  <text x="460" y="118" text-anchor="middle" class="mono">[AIMessage]}</text>
+  <rect class="box-info" x="210" y="150" width="140" height="40" rx="8"/>
+  <text x="280" y="175" text-anchor="middle" class="label">OpenAI API</text>
+  <rect class="box-ok" x="600" y="70" width="150" height="70" rx="10"/>
+  <text x="675" y="100" text-anchor="middle" class="title">add_messages</text>
+  <text x="675" y="122" text-anchor="middle" class="small">appends the reply</text>
+  <path class="arrow" d="M150,105 H206"/>
+  <path class="arrow" d="M350,105 H386"/>
+  <path class="arrow dashed" d="M265,130 V148"/>
+  <path class="arrow dashed" d="M295,148 V132"/>
+  <path class="arrow-accent" d="M530,105 H596"/>
+</svg>
+<figcaption>The whole life of a model call in graph 4. <strong>The network call happens inside an ordinary function</strong>; everything around it is normal LangGraph state handling.</figcaption>
+</figure>
+
+<h2>Messages: the model's input format</h2>
+<p>Chat models don't take one string; they take a list of <a class="term" href="glossary.html#message">messages</a>, each with a role. LangChain has a class for each role, importable from <code>langchain.messages</code> (as in graphs 8 and 9):</p>
+<div class="table-wrap"><table>
+<tr><th>Class</th><th>Role</th><th>Who creates it</th><th>Key fields</th></tr>
+<tr><td><a class="term" href="glossary.html#system-message">SystemMessage</a></td><td>Instructions: who the model is, rules to follow</td><td>You, in code</td><td><code>content</code></td></tr>
+<tr><td><a class="term" href="glossary.html#human-message">HumanMessage</a></td><td>What the user said</td><td>The caller (input to <code>invoke</code>, or Studio)</td><td><code>content</code></td></tr>
+<tr><td><a class="term" href="glossary.html#ai-message">AIMessage</a></td><td>The model's reply</td><td>The model</td><td><code>content</code>, <code>tool_calls</code></td></tr>
+<tr><td><a class="term" href="glossary.html#tool-message">ToolMessage</a></td><td>A tool's result</td><td><code>ToolNode</code> (or your own tool node)</td><td><code>content</code>, <code>tool_call_id</code></td></tr>
+</table></div>
+<p>Every message also gets an <code>id</code>, which <code>add_messages</code> uses to append or replace (<a href="lg-02-designing-state.html">chapter 2</a>). The model behind it (an <a class="term" href="glossary.html#llm">LLM</a>) is stateless: it remembers nothing between calls. Every call must include the whole conversation it should know about. That's why graphs keep the history in <code>messages</code>, and why graph 9 needs a checkpointer to remember earlier turns.</p>
+
+<h2>Prompts as system messages, and why order matters</h2>
+<p>A <a class="term" href="glossary.html#prompt">prompt</a> that sets the model's role is sent as a <code>SystemMessage</code>. The convention, followed by model providers and the LangChain docs, is to put it <strong>first</strong>, before the conversation. Graph 8 in the repo does it the other way around:</p>
+<pre data-lang="py" data-tag="from the repo (graph 8)"><code>system_message = SystemMessage(content="you are a helpful Math teach")
+
+# nodes
+def chat_with_tools(state: MessagesState) -&gt; MessagesState:
+    return {"messages": [model_llm_with_tools.invoke(state["messages"] + [system_message])]}
+</code></pre>
+<p>It works, but the instruction arrives after the user's question, as the last thing the model reads. The fixed version from <a href="15-fix-and-harden.html">step 15</a> puts it first:</p>
+<pre data-lang="py" data-tag="from the extension (step 15)"><code>system_message = SystemMessage(content="You are a helpful math teacher. Use the tools for every calculation.")
+
+# nodes
+def chat_with_tools(state: MessagesState) -&gt; MessagesState:
+    # the system message goes first: it sets the role before the conversation starts
+    return {"messages": [model_llm_with_tools.invoke([system_message] + state["messages"])]}
+</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Before: Human, AI, Tool, then System at the end. After: System first, then Human, AI, Tool. In both cases the system message is not stored in state">
+  <rect class="zone" x="10" y="10" width="360" height="200" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Repo (graph 8)</text>
+  <rect class="box-info" x="40" y="50" width="300" height="28" rx="6"/>
+  <text x="190" y="69" text-anchor="middle" class="label">Human: what is 12 times 7?</text>
+  <rect class="box" x="40" y="84" width="300" height="28" rx="6"/>
+  <text x="190" y="103" text-anchor="middle" class="label">AI: tool_calls multiply(12, 7)</text>
+  <rect class="box2" x="40" y="118" width="300" height="28" rx="6"/>
+  <text x="190" y="137" text-anchor="middle" class="label">Tool: 84</text>
+  <rect class="box-warn" x="40" y="152" width="300" height="28" rx="6"/>
+  <text x="190" y="171" text-anchor="middle" class="label">System: you are a helpful Math teach</text>
+  <text x="190" y="200" text-anchor="middle" class="small">instructions arrive last</text>
+  <rect class="zone" x="390" y="10" width="360" height="200" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">Step 15 fix</text>
+  <rect class="box-ok" x="420" y="50" width="300" height="28" rx="6"/>
+  <text x="570" y="69" text-anchor="middle" class="label">System: You are a helpful math teacher...</text>
+  <rect class="box-info" x="420" y="84" width="300" height="28" rx="6"/>
+  <text x="570" y="103" text-anchor="middle" class="label">Human: what is 12 times 7?</text>
+  <rect class="box" x="420" y="118" width="300" height="28" rx="6"/>
+  <text x="570" y="137" text-anchor="middle" class="label">AI: tool_calls multiply(12, 7)</text>
+  <rect class="box2" x="420" y="152" width="300" height="28" rx="6"/>
+  <text x="570" y="171" text-anchor="middle" class="label">Tool: 84</text>
+  <text x="570" y="200" text-anchor="middle" class="small">role set before the conversation</text>
+</svg>
+<figcaption>What the model receives on its second call in graph 8. <strong>Same messages, different order: put the system message first.</strong> In both versions it's added per call and never stored in <code>messages</code>.</figcaption>
+</figure>
+
+<p>Here's the pattern as a small, complete graph you can run without an API key. <code>GenericFakeChatModel</code> from <code>langchain_core</code> replays the replies you give it, so the graph logic can be tested for free:</p>
+<pre data-lang="py" data-tag="verified"><code>from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain.messages import SystemMessage, HumanMessage, AIMessage
+from langgraph.graph import StateGraph, START, END, MessagesState
+from langgraph.types import RetryPolicy
+
+# a fake model that always gives this reply: no API key needed
+model = GenericFakeChatModel(messages=iter([AIMessage("Paris.")]))
+system_message = SystemMessage("You are a concise geography tutor.")
+
+def chat(state: MessagesState) -&gt; dict:
+    reply = model.invoke([system_message] + state["messages"])   # system first
+    return {"messages": [reply]}
+
+builder = StateGraph(MessagesState)
+builder.add_node("chat", chat, retry_policy=RetryPolicy(max_attempts=3))
+builder.add_edge(START, "chat")
+builder.add_edge("chat", END)
+graph = builder.compile()
+
+result = graph.invoke({"messages": [HumanMessage("Capital of France?")]})
+for m in result["messages"]:
+    print(type(m).__name__, "|", m.content)
+</code></pre>
+<p>It prints <code>HumanMessage | Capital of France?</code> then <code>AIMessage | Paris.</code>: the system message was sent to the model but isn't in the result. To use a real model, replace the fake with <code>ChatOpenAI(model="gpt-4o")</code>. The <code>retry_policy</code> argument is explained at the end of this chapter. For a fuller fake model that also calls tools, see <a href="18-testing-graphs.html">step 18</a>.</p>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>GenericFakeChatModel</code></td><td>A <a class="term" href="glossary.html#fake-model">fake chat model</a> shipped with <code>langchain_core</code>. It behaves like a real chat model but returns the messages you give it, in order.</td></tr>
+<tr><td>2</td><td><code>from langchain.messages import ...</code></td><td>The message classes, from the same module the course uses.</td></tr>
+<tr><td>4</td><td><code>from langgraph.types import RetryPolicy</code></td><td>Node-level retry settings; used on line 15.</td></tr>
+<tr><td>7</td><td><code>messages=iter([...])</code></td><td>An iterator of replies. Each <code>invoke</code> takes the next one; a second call here would raise <code>StopIteration</code> because the list is used up (verified).</td></tr>
+<tr><td>8</td><td><code>system_message = SystemMessage(...)</code></td><td>A module-level constant: the same instructions on every call, never stored in state.</td></tr>
+<tr><td>11</td><td><code>[system_message] + state["messages"]</code></td><td>Builds a new list for this call only, system message first. The state itself is untouched.</td></tr>
+<tr><td>12</td><td><code>return {"messages": [reply]}</code></td><td>Only the reply is returned; <code>add_messages</code> appends it.</td></tr>
+<tr><td>15</td><td><code>add_node(..., retry_policy=...)</code></td><td>If the node raises a retryable error, LangGraph runs it again, up to 3 attempts in total.</td></tr>
+<tr><td>20–22</td><td><code>graph.invoke(...)</code>, loop</td><td>Runs the graph and prints each message's class and text.</td></tr>
+</table></div>
+
+<h2>Tools: <code>bind_tools</code> and <code>tool_calls</code></h2>
+<p>A <a class="term" href="glossary.html#tool">tool</a> is a Python function the model may ask you to run. The <code>@tool</code> decorator (from <code>langchain.tools</code>) turns a function into a tool object with a name, a description (from the docstring) and an argument schema (from the type hints). <a class="term" href="glossary.html#bind-tools">bind_tools</a> attaches those schemas to every request the model makes:</p>
+<pre data-lang="py" data-tag="from the repo (graph 6)"><code>@tool
+def multiply(nb1: int, nb2: int) -&gt; int:
+    """This tool is used for multiplying 2 numbers and returning the product"""
+    return nb1*nb2
+
+model_llm_with_tool = model_llm.bind_tools([multiply])
+</code></pre>
+<p><code>bind_tools</code> returns a <strong>new</strong> model object; <code>model_llm</code> itself is unchanged. That's why the course keeps both names. When the bound model decides a tool would help, its <code>AIMessage</code> has empty (or short) <code>content</code> and a <code>tool_calls</code> list. With LangChain 1.3.18 a tool call looks like this (verified):</p>
+<pre data-lang="text" data-tag="verified"><code>[{'name': 'multiply', 'args': {'nb1': 12, 'nb2': 7}, 'id': 'call_1', 'type': 'tool_call'}]
+</code></pre>
+<p>The model never runs the tool. It only <em>asks</em>. Something in your graph must run it and reply with a <code>ToolMessage</code> whose <code>tool_call_id</code> matches the request's <code>id</code>. In graph 5 (<a href="11-graph-5-binding-a-tool.html">step 11</a>) nothing does, so the run ends with the request unanswered. Graph 6 adds a <a class="term" href="glossary.html#toolnode">ToolNode</a> and the <a class="term" href="glossary.html#tools-condition">tools_condition</a> router; graph 8 loops back so the model can use the result.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Sequence: the chat node sends messages plus tool schemas to the OpenAI API, receives an AIMessage with tool_calls, tools_condition routes to the tools node, which runs multiply and returns a ToolMessage 84, then the chat node calls the API again and gets the final answer">
+  <rect class="box-solid" x="10" y="10" width="160" height="36" rx="6"/>
+  <text x="90" y="33" text-anchor="middle" class="on-solid">chat_with_tools</text>
+  <rect class="box2" x="210" y="10" width="160" height="36" rx="6"/>
+  <text x="290" y="33" text-anchor="middle">OpenAI API</text>
+  <rect class="box-warn" x="410" y="10" width="160" height="36" rx="6"/>
+  <text x="490" y="33" text-anchor="middle" class="mono">tools_condition</text>
+  <rect class="box-info" x="600" y="10" width="150" height="36" rx="6"/>
+  <text x="675" y="33" text-anchor="middle" class="mono">tools (ToolNode)</text>
+  <path class="line dashed" d="M90,46 V320"/>
+  <path class="line dashed" d="M290,46 V320"/>
+  <path class="line dashed" d="M490,46 V320"/>
+  <path class="line dashed" d="M675,46 V320"/>
+  <path class="arrow-accent" d="M90,75 H286"/>
+  <text x="190" y="68" text-anchor="middle" class="small">1. messages + tool schemas</text>
+  <path class="arrow" d="M290,105 H94"/>
+  <text x="190" y="98" text-anchor="middle" class="small">2. AIMessage, tool_calls</text>
+  <path class="arrow" d="M90,135 H486"/>
+  <text x="390" y="128" text-anchor="middle" class="small">3. has tool_calls?</text>
+  <path class="arrow-accent" d="M490,165 H671"/>
+  <text x="580" y="158" text-anchor="middle" class="small">4. yes: "tools"</text>
+  <path class="arrow" d="M675,200 H94"/>
+  <text x="582" y="193" text-anchor="middle" class="small">5. ToolMessage "84"</text>
+  <text x="390" y="193" text-anchor="middle" class="small">graph 8 loops back</text>
+  <path class="arrow-accent" d="M90,235 H286"/>
+  <text x="190" y="228" text-anchor="middle" class="small">6. messages incl. "84"</text>
+  <path class="arrow" d="M290,265 H94"/>
+  <text x="190" y="258" text-anchor="middle" class="small">7. AIMessage: the answer</text>
+  <path class="arrow-ok" d="M90,300 H486"/>
+  <text x="390" y="293" text-anchor="middle" class="small">8. no tool_calls: END</text>
+</svg>
+<figcaption>Graph 8's verified run: Human, AI(tool_calls), ToolMessage "84", AI final. <strong>The model asks; your graph runs the tool and reports back.</strong> Graph 5 stops after message 2; graph 6 stops after message 5.</figcaption>
+</figure>
+
+<h2>Structured output for routing</h2>
+<p>Graph 3 asks the model "choose between 1 or 3 or 2. reply only with a number", then does <code>int(model_response.content)</code>. If the model replies "Two" or "2.", <code>int()</code> raises <code>ValueError</code> and the run crashes (verified). Free text is meant for humans; code needs a guaranteed shape.</p>
+<p><code>with_structured_output(Schema)</code> solves this. You describe the answer you want as a Pydantic class; the returned runnable gives you an <strong>instance of that class</strong>, already parsed and validated, instead of an <code>AIMessage</code>. That's ideal for a router node: the model decides, the node stores the decision, and an ordinary conditional edge reads it.</p>
+<pre data-lang="py" data-tag="illustrative"><code>from typing import Literal
+from pydantic import BaseModel, Field
+from langchain_openai import ChatOpenAI
+from langchain.messages import SystemMessage, HumanMessage, AIMessage
+from langgraph.graph import StateGraph, START, END, MessagesState
+
+class Route(BaseModel):
+    """Where to send the user's message."""
+    destination: Literal["math", "chitchat"] = Field(description="math for any calculation")
+
+router_model = ChatOpenAI(model="gpt-4o", temperature=0).with_structured_output(Route)
+answer_model = ChatOpenAI(model="gpt-4o")
+
+class State(MessagesState):
+    route: str
+
+def classify(state: State) -&gt; dict:
+    decision = router_model.invoke(
+        [SystemMessage("Classify the user's last message.")] + state["messages"])
+    return {"route": decision.destination}          # a Route object, not text
+
+def pick(state: State) -&gt; Literal["math", "chitchat"]:
+    return state["route"]
+
+def math(state: State) -&gt; dict:
+    return {"messages": [answer_model.invoke(
+        [SystemMessage("You are a careful math tutor.")] + state["messages"])]}
+
+def chitchat(state: State) -&gt; dict:
+    return {"messages": [AIMessage("Happy to chat! Ask me a math question any time.")]}
+
+builder = StateGraph(State)
+builder.add_node("classify", classify)
+builder.add_node("math", math)
+builder.add_node("chitchat", chitchat)
+builder.add_edge(START, "classify")
+builder.add_conditional_edges("classify", pick)
+builder.add_edge("math", END)
+builder.add_edge("chitchat", END)
+graph = builder.compile()
+</code></pre>
+<p>This needs an OpenAI key to run for real. We ran this exact file with a fake model substituted for <code>ChatOpenAI</code>: "what is 12 times 7?" was routed to <code>math</code>, "hi there!" to <code>chitchat</code>, and <code>get_graph()</code> shows <code>classify</code> with dashed edges to both. That proves the wiring and the <code>Route</code> object, not how a real model classifies.</p>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>7–9</td><td><code>class Route(BaseModel)</code></td><td>The answer's shape. The docstring and the <code>Field(description=...)</code> are sent to the model as instructions. The <a class="term" href="glossary.html#literal">Literal</a> type limits the answer to two allowed values.</td></tr>
+<tr><td>11</td><td><code>temperature=0</code>, <code>.with_structured_output(Route)</code></td><td><a class="term" href="glossary.html#temperature">Temperature</a> 0 makes classification as repeatable as possible. The returned runnable outputs a <code>Route</code> object.</td></tr>
+<tr><td>12</td><td><code>answer_model</code></td><td>A second model object for answering. It could be a different model (see below).</td></tr>
+<tr><td>14–15</td><td><code>class State(MessagesState)</code></td><td>Messages plus one extra key, <code>route</code>, to hand the decision to the router function.</td></tr>
+<tr><td>17–20</td><td><code>classify</code></td><td>The model makes the decision; the node stores <code>decision.destination</code>, a plain string, in the state.</td></tr>
+<tr><td>22–23</td><td><code>pick</code></td><td>A tiny routing function that only reads <code>route</code>. Its <code>Literal</code> return hint draws the graph correctly.</td></tr>
+<tr><td>29–30</td><td><code>chitchat</code></td><td>Doesn't call a model at all. Not every branch needs one.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Free text versus structured output: the model's free text Two breaks int(); with_structured_output returns a Route object with destination math which a routing function reads safely">
+  <rect class="zone" x="10" y="10" width="360" height="200" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Free text (graph 3)</text>
+  <rect class="box2" x="40" y="55" width="300" height="34" rx="6"/>
+  <text x="190" y="77" text-anchor="middle" class="mono">AIMessage(content="Two")</text>
+  <rect class="box-bad" x="40" y="120" width="300" height="50" rx="6"/>
+  <text x="190" y="142" text-anchor="middle" class="mono">int("Two")</text>
+  <text x="190" y="160" text-anchor="middle" class="small">ValueError: invalid literal for int()</text>
+  <path class="arrow-bad" d="M190,89 V116"/>
+  <rect class="zone" x="390" y="10" width="360" height="200" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">Structured output</text>
+  <rect class="box2" x="420" y="55" width="300" height="34" rx="6"/>
+  <text x="570" y="77" text-anchor="middle" class="mono">Route(destination="math")</text>
+  <rect class="box-ok" x="420" y="120" width="300" height="50" rx="6"/>
+  <text x="570" y="142" text-anchor="middle" class="mono">decision.destination</text>
+  <text x="570" y="160" text-anchor="middle" class="small">always one of the allowed values</text>
+  <path class="arrow-ok" d="M570,89 V116"/>
+</svg>
+<figcaption>Route on data, not on prose. <strong>When code must act on a model's answer, ask for a schema</strong>; when a human will read it, free text is fine.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to structured output? What happens under the hood</summary>
+<p><code>with_structured_output</code> turns your Pydantic class into a JSON schema and asks the provider to return data matching it, using the provider's native structured-output feature or tool calling, depending on the model and the <code>method</code> argument. LangChain then parses the reply into your class. If the model's answer doesn't match, parsing fails with an error rather than silently passing bad data on. Combined with a <code>RetryPolicy</code> on the node, an occasional bad answer can simply be retried.</p>
+</details>
+
+<h2>A different model per node</h2>
+<p>Each node is independent code, so each can use a different model, or the same model with different settings. Common reasons:</p>
+<ul>
+<li><strong>Routing and grading</strong> are short, constrained tasks; a smaller, faster model with <code>temperature=0</code> is often enough.</li>
+<li><strong>Writing the final answer</strong> may deserve a larger model.</li>
+<li><strong>Different providers</strong> for different jobs: LangChain's <code>init_chat_model("provider:model-name")</code> (in <code>langchain.chat_models</code>) creates a chat model from a string, so a node's model can come from configuration.</li>
+</ul>
+<pre data-lang="py" data-tag="illustrative"><code>from langchain_openai import ChatOpenAI
+
+router_model = ChatOpenAI(model="gpt-4o-mini", temperature=0)   # small and steady
+writer_model = ChatOpenAI(model="gpt-4o", temperature=0.7)      # more capable, more varied
+</code></pre>
+<p>Model names here are examples at the time of writing; check your provider's current list. Bind tools only on the models that need them: in graph 8, only the chat node's model is bound.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Three nodes in a row, classify, research and write, each using its own model: a small model at temperature 0, a model bound to tools, and a larger model for writing">
+  <rect class="box" x="10" y="30" width="200" height="56" rx="8"/>
+  <text x="110" y="62" text-anchor="middle" class="mono">classify</text>
+  <rect class="box" x="280" y="30" width="200" height="56" rx="8"/>
+  <text x="380" y="62" text-anchor="middle" class="mono">research</text>
+  <rect class="box" x="550" y="30" width="200" height="56" rx="8"/>
+  <text x="650" y="62" text-anchor="middle" class="mono">write</text>
+  <path class="arrow" d="M210,58 H276"/>
+  <path class="arrow" d="M480,58 H546"/>
+  <rect class="box-info" x="30" y="110" width="160" height="40" rx="8"/>
+  <text x="110" y="135" text-anchor="middle" class="label">small model, temp 0</text>
+  <rect class="box-info" x="300" y="110" width="160" height="40" rx="8"/>
+  <text x="380" y="135" text-anchor="middle" class="label">model + bind_tools</text>
+  <rect class="box-info" x="570" y="110" width="160" height="40" rx="8"/>
+  <text x="650" y="135" text-anchor="middle" class="label">larger model</text>
+  <path class="line dashed" d="M110,86 V110"/>
+  <path class="line dashed" d="M380,86 V110"/>
+  <path class="line dashed" d="M650,86 V110"/>
+</svg>
+<figcaption>Illustrative pipeline. <strong>Pick each node's model for that node's job</strong>; the graph only sees the updates they return.</figcaption>
+</figure>
+
+<h2>Retries and timeouts</h2>
+<p>Model calls go over the network. They can be slow, hit a rate limit, or fail with a server error. You can protect a node at two levels.</p>
+<h3>On the model client</h3>
+<p><code>ChatOpenAI</code> accepts <code>timeout</code> (seconds; stored as <code>request_timeout</code>) and <code>max_retries</code> (verified in langchain-openai 1.6.0): <code>ChatOpenAI(model="gpt-4o", timeout=30, max_retries=2)</code>. These retry the HTTP request itself inside the OpenAI client.</p>
+<h3>On the node: <code>RetryPolicy</code></h3>
+<p><code>add_node</code> takes a <code>retry_policy=</code> argument with a <code>RetryPolicy</code> from <code>langgraph.types</code>. If the node raises, LangGraph waits and runs the <em>whole node</em> again. The defaults in 1.2.11 (printed from the class): <code>max_attempts=3</code>, <code>initial_interval=0.5</code> seconds, <code>backoff_factor=2.0</code> (each wait doubles), <code>max_interval=128.0</code>, <code>jitter=True</code> (adds a little randomness so many clients don't retry at the same moment).</p>
+<p>Which errors are retried is decided by <code>retry_on</code>. The default function retries <code>ConnectionError</code> and HTTP 5xx errors, does <strong>not</strong> retry programming errors (<code>ValueError</code>, <code>TypeError</code>, <code>KeyError</code> and similar, which would just fail again), and retries most other exceptions. We tested a node that raised <code>ConnectionError</code> twice: with <code>RetryPolicy(max_attempts=3)</code> it succeeded on the third attempt; without a policy the first error ended the run.</p>
+<pre data-lang="py" data-tag="illustrative"><code>from langgraph.types import RetryPolicy
+
+builder.add_node(
+    "chat_with_tools",
+    chat_with_tools,
+    retry_policy=RetryPolicy(max_attempts=4, initial_interval=1.0),
+)
+</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Timeline of retries: attempt 1 fails, wait 0.5 seconds, attempt 2 fails, wait 1 second, attempt 3 succeeds and the run continues">
+  <path class="line" d="M20,90 H740"/>
+  <rect class="box-bad" x="20" y="65" width="120" height="50" rx="8"/>
+  <text x="80" y="88" text-anchor="middle" class="label">attempt 1</text>
+  <text x="80" y="105" text-anchor="middle" class="small">ConnectionError</text>
+  <rect class="box-bad" x="250" y="65" width="120" height="50" rx="8"/>
+  <text x="310" y="88" text-anchor="middle" class="label">attempt 2</text>
+  <text x="310" y="105" text-anchor="middle" class="small">ConnectionError</text>
+  <rect class="box-ok" x="520" y="65" width="120" height="50" rx="8"/>
+  <text x="580" y="88" text-anchor="middle" class="label">attempt 3</text>
+  <text x="580" y="105" text-anchor="middle" class="small">success</text>
+  <text x="195" y="55" text-anchor="middle" class="small">wait ~0.5 s</text>
+  <text x="445" y="55" text-anchor="middle" class="small">wait ~1 s (x2)</text>
+  <path class="arrow-accent" d="M640,90 H736"/>
+  <text x="690" y="80" text-anchor="middle" class="small">next node</text>
+  <text x="380" y="150" text-anchor="middle" class="small">default RetryPolicy timing: initial_interval 0.5 s, backoff_factor 2.0, plus jitter</text>
+</svg>
+<figcaption>Verified behaviour with a node that fails twice. <strong>Only use node retries for errors that might go away</strong>; a bug fails the same way every time.</figcaption>
+</figure>
+
+<h3>Node timeouts</h3>
+<p>LangGraph 1.2.11 also gives <code>add_node</code> a <code>timeout=</code> argument (seconds, a <code>timedelta</code>, or a <code>TimeoutPolicy</code>). It only works on <strong>async</strong> nodes (<code>async def</code>). On a normal function, <code>compile()</code> itself fails with <code>ValueError: Node timeouts are only supported for async nodes because sync Python execution cannot be safely cancelled in-process</code>. On an async node that runs too long, the run raises <code>NodeTimeoutError</code> (both verified). The course's nodes are all synchronous, so for them the client <code>timeout</code> is the practical choice.</p>
+
+<div class="callout warn"><strong>Pitfalls</strong>
+<ul>
+<li>Creating the model inside the node on every call, or storing it in state. Create it once at module level.</li>
+<li>Putting the system message last, or saving it into <code>messages</code> each turn, so it piles up in the history.</li>
+<li>Calling the unbound model in a tool graph. Only the object returned by <code>bind_tools</code> knows about the tools.</li>
+<li>Naming the tool node anything but <code>"tools"</code> while using <code>tools_condition</code>.</li>
+<li>Parsing free text with <code>int()</code> or string checks to make a routing decision. Use structured output.</li>
+<li>Retrying a node whose model call has side effects (sending an email) without making the action safe to repeat.</li>
+</ul></div>
+
+<div class="callout"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"The model remembers the conversation."</em> It's stateless; the graph sends the history on every call.</li>
+<li><em>"<code>bind_tools</code> runs the tools."</em> It only describes them to the model. <code>ToolNode</code> runs them.</li>
+<li><em>"Structured output means the model can't be wrong."</em> The <em>shape</em> is guaranteed; the decision can still be a poor one.</li>
+<li><em>"Retries fix everything."</em> They help with network blips and server errors, not with wrong code or a bad prompt.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A model node is a normal function: messages in, one <code>AIMessage</code> out, returned as <code>{"messages": [reply]}</code>.</li>
+<li>Four message types: System (instructions, first), Human, AI (may contain <code>tool_calls</code>), Tool (answers a call by <code>tool_call_id</code>).</li>
+<li><code>bind_tools</code> returns a new model that may request tools; your graph runs them with <code>ToolNode</code> and loops back.</li>
+<li><code>with_structured_output(Schema)</code> returns validated objects: the safe way to route on a model's decision.</li>
+<li>Each node can use its own model and settings.</li>
+<li>Protect model calls with client <code>timeout</code>/<code>max_retries</code> and node <code>RetryPolicy</code>; node <code>timeout=</code> needs async nodes.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langchain/models">LangChain docs: Models</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/messages">LangChain docs: Messages</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/tools">LangChain docs: Tools</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/structured-output">LangChain docs: Structured output</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/use-graph-api">LangGraph docs: Use the Graph API (retry policies)</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lg-03-control-flow.html"><small>← Chapter 3</small>Control Flow: Edges, Routing, Loops &amp; Parallelism</a>
+<a class="next" href="lg-05-agent-architectures.html"><small>Chapter 5 →</small>Agent Architectures</a>
+</nav>
+</main>
+</body>
+</html>

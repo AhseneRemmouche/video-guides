@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How State Flows Through a Graph</title>
+<meta name="description" content="Node updates, overwrite vs append (reducers), supersteps, routing, and what the checkpointer saves — traced step by step.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Concept</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concept · read with steps 5–14</div>
+  <h1>How State Flows Through a Graph</h1>
+  <p class="lead">Node updates, overwrite vs append (reducers), supersteps, routing, and what the checkpointer saves — traced step by step.</p>
+</section>
+<p>Every course file ends with <code>graph = builder.compile()</code>, and every run starts with <code>graph.invoke(...)</code>. What happens in between? This page opens the box. It follows the <a class="term" href="glossary.html#state">state</a> through five of the course's graphs (0, 2, 4, 8 and 9), one step at a time: what goes in, what each <a class="term" href="glossary.html#node">node</a> gives back, how LangGraph merges that into the state, who decides which node runs next, why the agent loop stops, and what memory actually saves.</p>
+<p>Read it alongside <a href="05-graph-fundamentals.html">step 05</a> (the road-trip analogy) and the graph steps <a href="06-graph-0-string-state.html">06</a> to <a href="14-graph-9-memory.html">14</a>. Every output shown here was produced by running the repo's files against its locked versions (langgraph 1.2.11). Graphs 0 to 2 need no model. For graphs 8 and 9, a fake chat model stood in for GPT-4o, so the message <em>types</em> and <em>counts</em> are real, but the wording of the final answers is the fake model's.</p>
+
+<h2>The one rule: a node returns an update, not the state</h2>
+<p>In the presenter's analogy (from 20:05), the state is a car driving along roads (edges) between cities (nodes), picking up and dropping off cargo. In code, the car is a value that LangGraph keeps for you. A node is a plain Python <a class="term" href="glossary.html#function">function</a>:</p>
+<ol class="steps">
+<li><strong>LangGraph calls the node with the current state.</strong> The node can read anything in it.</li>
+<li><strong>The node returns an update.</strong> For a <a class="term" href="glossary.html#dict">dictionary</a> state, that is a smaller dict containing only the keys it wants to change.</li>
+<li><strong>LangGraph merges the update into the state.</strong> How it merges depends on the key's <a class="term" href="glossary.html#reducer">reducer</a>: by default the new value overwrites the old one; for a messages list it appends.</li>
+<li><strong>An edge decides which node runs next</strong>, either a fixed one or one picked by a <a class="term" href="glossary.html#routing-function">routing function</a>. When the next stop is <code>END</code>, the run is over and <code>invoke</code> returns the final state.</li>
+</ol>
+<p>The node never "owns" the state and never calls the next node itself. It does its one job and hands back what changed. Keep these four steps in mind; every trace below is just them, repeated.</p>
+
+<details class="primer"><summary>New to "returning an update"? Why not just change the state directly?</summary>
+<p>You could imagine a node writing <code>state["graph_str"] = "..."</code>. LangGraph is designed the other way round: the node gives back a description of the change, and LangGraph applies it. That one design choice makes three things possible later in the course:</p>
+<ul>
+<li><strong>Different merge rules per key.</strong> A message list can grow while a counter is replaced, without the node having to know which.</li>
+<li><strong>Snapshots.</strong> Because LangGraph applies every change itself, it knows exactly what the state looked like after each step, so a <a class="term" href="glossary.html#checkpointer">checkpointer</a> can save it (graph 9).</li>
+<li><strong>Streaming.</strong> <code>graph.stream(..., stream_mode="updates")</code> can show you each node's update as it happens (<a href="19-streaming-and-drawing.html">step 19</a>).</li>
+</ul>
+<p>Verified edge cases with a two-key state: a node that returns only <code>{"b": "new"}</code> leaves key <code>a</code> unchanged; a node that returns <code>None</code> changes nothing; a node that returns a plain string fails with <code>InvalidUpdateError: Expected dict, got oops</code>; and a key that isn't in the state (a typo) is silently ignored.</p>
+</details>
+
+<h2>Trace 1: graph 0, where the state is a single string</h2>
+<p>Graph 0 (<a href="06-graph-0-string-state.html">step 06</a>) is the smallest possible graph. Its state type is <code>str</code>, so the whole state is one piece of text:</p>
+<pre data-lang="py" data-tag="excerpt"><code>def greeting(state: str) -&gt; str:
+    return state + "welcome to AI Career Lab!"
+
+builder = StateGraph(str)
+builder.add_node("greeting", greeting)
+builder.add_edge(START, "greeting")
+builder.add_edge("greeting", END)
+graph = builder.compile()</code></pre>
+<p>With a string state there are no keys, so the node's return value <em>is</em> the new state: it replaces the old string completely. That's why the node must include the old text (<code>state + ...</code>). Running <code>graph.invoke("hey am new!")</code> takes one node step:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 214" role="img" aria-label="Graph 0 trace: the input string hey am new! enters at START, the greeting node returns the input plus welcome to AI Career Lab!, and that string is the state at END">
+  <rect class="box2" x="20" y="30" width="100" height="40" rx="8"/>
+  <text x="70" y="55" text-anchor="middle" class="mono">START</text>
+  <rect class="box-solid" x="300" y="26" width="160" height="48" rx="8"/>
+  <text x="380" y="55" text-anchor="middle" class="on-solid">greeting</text>
+  <rect class="box-ok" x="640" y="30" width="100" height="40" rx="8"/>
+  <text x="690" y="55" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M120,50 H298"/>
+  <path class="arrow" d="M460,50 H638"/>
+  <rect class="box-info" x="130" y="96" width="160" height="34" rx="8"/>
+  <text x="210" y="118" text-anchor="middle" class="mono">"hey am new!"</text>
+  <rect class="box-info" x="446" y="96" width="304" height="34" rx="8"/>
+  <text x="598" y="118" text-anchor="middle" class="mono">"hey am new!welcome to AI Career Lab!"</text>
+  <text x="210" y="148" text-anchor="middle" class="small">state going in</text>
+  <text x="598" y="148" text-anchor="middle" class="small">state coming out = what greeting returned</text>
+  <path class="line dashed" d="M380,74 V164"/>
+  <text x="380" y="182" text-anchor="middle" class="mono">return state + "welcome to AI Career Lab!"</text>
+  <text x="380" y="202" text-anchor="middle" class="small">the return value replaces the whole string state</text>
+</svg>
+<figcaption>Graph 0, verified output. The state is one string, so the node's return value becomes the whole new state. Note the missing space: <code>+</code> glues the two strings together exactly as written. <strong>One node ran, so the run took one superstep.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><p><strong>What you should see.</strong> <code>print(graph.invoke("hey am new!"))</code> prints <code>hey am new!welcome to AI Career Lab!</code>. In Studio, type the input as a JSON string (<code>"hey am new!"</code> with the quotes), not as <code>{"hey"}</code>, which gives <code>SyntaxError: Expected ':' after property name in JSON</code>.</p></div>
+
+<h2>Overwrite versus append: reducers</h2>
+<p>From graph 1 on, the state is a <a class="term" href="glossary.html#typeddict">TypedDict</a> with named keys, and a node returns a dict with only the keys it changes. For each key, a <strong>reducer</strong> decides how the returned value is combined with the current one. There are two you meet in this course:</p>
+<div class="table-wrap"><table>
+<tr><th>Key declared as</th><th>Reducer</th><th>What an update does</th><th>Used in</th></tr>
+<tr><td><code>graph_str: str</code></td><td>none (the default)</td><td><strong>Overwrites</strong>: the new value replaces the old one</td><td>Graphs 1, 2, 3</td></tr>
+<tr><td><code>messages: Annotated[list[AnyMessage], add_messages]</code></td><td><a class="term" href="glossary.html#add-messages">add_messages</a></td><td><strong>Appends</strong>: the new messages are added to the end of the list</td><td>Graphs 4 to 9, via <a class="term" href="glossary.html#messages-state">MessagesState</a></td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Overwrite versus append: on the left a plain graph_str key, where the node's returned value replaces the old string, so the node must repeat the old text; on the right a messages key with add_messages, where the returned AIMessage is added after the existing HumanMessage">
+  <rect class="zone" x="10" y="10" width="360" height="270" rx="10"/>
+  <text x="190" y="32" text-anchor="middle" class="title">Plain key: overwrite</text>
+  <text x="30" y="54" class="small">state before</text>
+  <rect class="box2" x="30" y="60" width="320" height="34" rx="8"/>
+  <text x="190" y="82" text-anchor="middle" class="mono">graph_str = "hello"</text>
+  <path class="arrow" d="M190,94 V114"/>
+  <text x="30" y="110" class="small">node returns</text>
+  <rect class="box" x="30" y="116" width="320" height="34" rx="8"/>
+  <text x="190" y="138" text-anchor="middle" class="mono">{"graph_str": "hello welcome…"}</text>
+  <path class="arrow" d="M190,150 V176"/>
+  <text x="200" y="168" class="small">reducer: replace</text>
+  <rect class="box-ok" x="30" y="178" width="320" height="34" rx="8"/>
+  <text x="190" y="200" text-anchor="middle" class="mono">graph_str = "hello welcome…"</text>
+  <text x="190" y="240" text-anchor="middle" class="small warn">Leave out the old text and it is gone:</text>
+  <text x="190" y="258" text-anchor="middle" class="small">the node must return state["graph_str"] + "…"</text>
+  <rect class="zone" x="390" y="10" width="360" height="270" rx="10"/>
+  <text x="570" y="32" text-anchor="middle" class="title">messages key: append</text>
+  <text x="410" y="54" class="small">state before</text>
+  <rect class="box2" x="410" y="60" width="320" height="34" rx="8"/>
+  <text x="570" y="82" text-anchor="middle" class="mono">messages = [Human]</text>
+  <path class="arrow" d="M570,94 V114"/>
+  <text x="410" y="110" class="small">node returns</text>
+  <rect class="box" x="410" y="116" width="320" height="34" rx="8"/>
+  <text x="570" y="138" text-anchor="middle" class="mono">{"messages": [AI]}</text>
+  <path class="arrow" d="M570,150 V176"/>
+  <text x="580" y="168" class="small">reducer: add_messages</text>
+  <rect class="box-ok" x="410" y="178" width="320" height="34" rx="8"/>
+  <text x="570" y="200" text-anchor="middle" class="mono">messages = [Human, AI]</text>
+  <text x="570" y="240" text-anchor="middle" class="small ok">Old messages are kept automatically:</text>
+  <text x="570" y="258" text-anchor="middle" class="small">the node returns only the new message</text>
+</svg>
+<figcaption>The same node pattern, two merge rules. On the left, graph 1's node has to rebuild the whole string. On the right, graph 4's node returns a one-item list and <code>add_messages</code> keeps everything that was already there. <strong>The reducer belongs to the key, not to the node.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to <code>Annotated</code>? How a reducer is attached to a key</summary>
+<p><code>Annotated[X, extra]</code> (from Python's <code>typing</code> module) means "a value of type X, plus some extra information for whoever reads the hint". Python ignores the extra part; LangGraph reads it. So <code>messages: Annotated[list[AnyMessage], add_messages]</code> says: this key holds a list of messages, and when a node returns new messages, merge them with the function <code>add_messages</code>.</p>
+<p>Graph 4's docstring shows this exact class, and <code>MessagesState</code> is the same thing ready-made. The presenter hovers over <code>add_messages</code> at about 89:04 to show that it "merges two lists". It does three things (verified):</p>
+<ul>
+<li>it appends new messages to the end of the existing list;</li>
+<li>it gives every message an <code>id</code>, and a new message with the same <code>id</code> as an existing one <em>replaces</em> it instead of being added;</li>
+<li>it turns plain input into messages: <code>{"messages": "hi"}</code> becomes a <code>HumanMessage</code>.</li>
+</ul>
+</details>
+
+<h2>Trace 2: graph 2 and the routing function</h2>
+<p>Graph 2 (<a href="08-graph-2-conditional-edges.html">step 08</a>) adds a choice. After <code>node1</code>, the <a class="term" href="glossary.html#conditional-edge">conditional edge</a> calls <code>next_step(state)</code>, which looks at the first word of <code>graph_str</code>:</p>
+<pre data-lang="py" data-tag="excerpt"><code>def next_step(state: State) -&gt; Literal["node2", "node3"]:
+    state_str = state["graph_str"]
+    array_state_str = state_str.split(" ")
+    if array_state_str[0] == "hello":
+        return "node2"
+    return "node3"
+
+builder.add_conditional_edges("node1", next_step)</code></pre>
+<p>A routing function is not a node. It reads the state, returns the <em>name</em> of the next node, and changes nothing. Its <a class="term" href="glossary.html#literal">Literal</a> return hint tells LangGraph which names are possible, which is how Studio knows to draw two dotted branches.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 280" role="img" aria-label="Graph 2 routing: START goes to node1; after node1 the routing function next_step checks whether the first word is exactly hello; if so it returns node2, otherwise node3; both node2 and node3 go to END">
+  <rect class="box2" x="10" y="120" width="80" height="40" rx="8"/>
+  <text x="50" y="145" text-anchor="middle" class="mono">START</text>
+  <rect class="box-solid" x="120" y="112" width="120" height="56" rx="8"/>
+  <text x="180" y="145" text-anchor="middle" class="on-solid">node1</text>
+  <rect class="box-info" x="280" y="112" width="160" height="56" rx="8"/>
+  <text x="360" y="136" text-anchor="middle" class="mono">next_step(state)</text>
+  <text x="360" y="154" text-anchor="middle" class="small">first word == "hello"?</text>
+  <rect class="box-solid" x="500" y="40" width="130" height="50" rx="8"/>
+  <text x="565" y="70" text-anchor="middle" class="on-solid">node2</text>
+  <rect class="box-solid" x="500" y="190" width="130" height="50" rx="8"/>
+  <text x="565" y="220" text-anchor="middle" class="on-solid">node3</text>
+  <rect class="box-ok" x="670" y="120" width="80" height="40" rx="8"/>
+  <text x="710" y="145" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M90,140 H118"/>
+  <path class="line dashed" d="M240,140 H278"/>
+  <path class="arrow-ok" d="M440,128 H465 V65 H498"/>
+  <path class="arrow" d="M440,152 H465 V215 H498"/>
+  <text x="458" y="100" text-anchor="end" class="small ok">"node2"</text>
+  <text x="458" y="188" text-anchor="end" class="small">"node3"</text>
+  <path class="arrow" d="M630,65 H710 V118"/>
+  <path class="arrow" d="M630,215 H710 V162"/>
+  <text x="360" y="196" text-anchor="middle" class="small">reads the state,</text>
+  <text x="360" y="212" text-anchor="middle" class="small">returns a node name</text>
+  <text x="565" y="28" text-anchor="middle" class="small">"hello there"</text>
+  <text x="565" y="262" text-anchor="middle" class="small">"Hello there", "hi"</text>
+</svg>
+<figcaption>Graph 2's shape, as <code>get_graph()</code> reports it: <code>node1 -.-&gt; node2</code> and <code>node1 -.-&gt; node3</code> (dotted = conditional). The comparison is case-sensitive: "Hello there" goes to node 3 (verified). <strong>Exactly one branch runs per invocation.</strong></figcaption>
+</figure>
+
+<p>Here is what <code>graph.stream({"graph_str": "hello "}, stream_mode="values")</code> printed, one state per step (verified; the typo "Carrer" is in the repo):</p>
+<div class="table-wrap"><table>
+<tr><th>After</th><th>Node's update</th><th>Full state</th></tr>
+<tr><td>input</td><td>(your input)</td><td><code>{'graph_str': 'hello '}</code></td></tr>
+<tr><td><code>node1</code></td><td><code>{'graph_str': 'hello welcome to AI Carrer Lab'}</code></td><td><code>{'graph_str': 'hello welcome to AI Carrer Lab'}</code></td></tr>
+<tr><td><code>next_step</code></td><td>none: returns <code>"node2"</code></td><td>unchanged</td></tr>
+<tr><td><code>node2</code></td><td><code>{'graph_str': 'hello welcome to AI Carrer LabI am in Node 2'}</code></td><td><code>{'graph_str': 'hello welcome to AI Carrer LabI am in Node 2'}</code></td></tr>
+</table></div>
+<p>With a single key and the overwrite reducer, the update and the full state look identical. That's a coincidence of this tiny state. With two keys, the update would contain only the key the node changed.</p>
+
+<h2>Supersteps: how LangGraph counts the run</h2>
+<p>LangGraph runs a graph in ticks called <a class="term" href="glossary.html#superstep">supersteps</a>. In one superstep, every node that is due runs, their updates are merged, then the edges decide what is due next. In all of this course's graphs only one node is due at a time, so you can read "superstep" as "one node ran". LangGraph numbers them: step −1 receives your input, step 0 passes it through <code>START</code>, and steps 1, 2, 3… are your nodes. The routing function runs at the end of a step; it doesn't get a step of its own.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Graph 2 as a timeline of supersteps: step minus one input, step zero START, step one node1, step two node2; under each the state at that point and the node that is due next">
+  <rect class="box2" x="10" y="20" width="176" height="36" rx="8"/>
+  <text x="98" y="43" text-anchor="middle">step −1 · input</text>
+  <rect class="box2" x="198" y="20" width="176" height="36" rx="8"/>
+  <text x="286" y="43" text-anchor="middle">step 0 · START</text>
+  <rect class="box-solid" x="386" y="20" width="176" height="36" rx="8"/>
+  <text x="474" y="43" text-anchor="middle" class="on-solid">step 1 · node1</text>
+  <rect class="box-solid" x="574" y="20" width="176" height="36" rx="8"/>
+  <text x="662" y="43" text-anchor="middle" class="on-solid">step 2 · node2</text>
+  <rect class="box-info" x="10" y="74" width="176" height="50" rx="8"/>
+  <text x="98" y="103" text-anchor="middle" class="small">(empty: input not merged yet)</text>
+  <rect class="box-info" x="198" y="74" width="176" height="50" rx="8"/>
+  <text x="286" y="103" text-anchor="middle" class="small">"hello "</text>
+  <rect class="box-info" x="386" y="74" width="176" height="50" rx="8"/>
+  <text x="474" y="95" text-anchor="middle" class="small">"hello welcome to</text>
+  <text x="474" y="111" text-anchor="middle" class="small">AI Carrer Lab"</text>
+  <rect class="box-info" x="574" y="74" width="176" height="50" rx="8"/>
+  <text x="662" y="95" text-anchor="middle" class="small">"hello welcome to AI</text>
+  <text x="662" y="111" text-anchor="middle" class="small">Carrer LabI am in Node 2"</text>
+  <path class="line" d="M20,160 H740"/>
+  <circle class="dot" cx="98" cy="160" r="6"/>
+  <circle class="dot" cx="286" cy="160" r="6"/>
+  <circle class="dot" cx="474" cy="160" r="6"/>
+  <circle class="dot-ok" cx="662" cy="160" r="6"/>
+  <text x="98" y="186" text-anchor="middle" class="small">next: __start__</text>
+  <text x="286" y="186" text-anchor="middle" class="small">next: node1</text>
+  <text x="474" y="186" text-anchor="middle" class="small">next: node2 (from next_step)</text>
+  <text x="662" y="186" text-anchor="middle" class="small">next: nothing, run is over</text>
+  <text x="380" y="222" text-anchor="middle" class="small">each dot = one snapshot a checkpointer would save (verified with get_state_history)</text>
+</svg>
+<figcaption>Graph 2 with input <code>"hello "</code>, step by step. The values and "next" entries come from <code>get_state_history()</code> on graph 2 compiled with a <code>MemorySaver</code>. <strong>Two nodes ran, so the run had two node supersteps (1 and 2).</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>Why "superstep" and not just "step"?</summary>
+<p>LangGraph can run several nodes <em>in the same tick</em>, for example when one node has fixed edges to two others. Those nodes run side by side, and only after all of them finish are their updates merged and the next tick starts. "Superstep" is the name for that whole tick, however many nodes it contains. The course never branches into parallel nodes, but you meet a close cousin in graph 8: one <code>tools</code> superstep can run <em>several</em> tool calls and add several ToolMessages at once. The handbook chapter <a href="lg-03-control-flow.html">Control Flow</a> covers parallel branches.</p>
+</details>
+
+<h2>Trace 3: graph 4, a list of messages</h2>
+<p>Graph 4 (<a href="10-graph-4-messages-state.html">step 10</a>) switches to <code>MessagesState</code>. The input is a dict with a list of messages, and the only node calls the model with that list:</p>
+<pre data-lang="py" data-tag="excerpt"><code>def chat(state: MessagesState) -&gt; MessagesState:
+    return {"messages": [model_llm.invoke(state["messages"])]}</code></pre>
+<p>Notice the square brackets around <code>model_llm.invoke(...)</code>. The model returns one <a class="term" href="glossary.html#ai-message">AIMessage</a>, and the node wraps it in a one-item list. <code>add_messages</code> then appends it after your <a class="term" href="glossary.html#human-message">HumanMessage</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Graph 4: the state going in holds one HumanMessage; the chat node sends it to gpt-4o and returns a list with one AIMessage; add_messages appends it so the state coming out holds the HumanMessage and the AIMessage">
+  <rect class="zone" x="10" y="10" width="220" height="150" rx="10"/>
+  <text x="120" y="32" text-anchor="middle" class="title">state in</text>
+  <rect class="box2" x="20" y="64" width="200" height="34" rx="8"/>
+  <text x="120" y="86" text-anchor="middle" class="label">Human: Why is the sky blue?</text>
+  <rect class="box-solid" x="280" y="56" width="180" height="50" rx="8"/>
+  <text x="370" y="78" text-anchor="middle" class="on-solid">chat</text>
+  <text x="370" y="96" text-anchor="middle" class="on-solid">calls gpt-4o</text>
+  <rect class="zone" x="510" y="10" width="240" height="150" rx="10"/>
+  <text x="630" y="32" text-anchor="middle" class="title">state out</text>
+  <rect class="box2" x="520" y="50" width="220" height="34" rx="8"/>
+  <text x="630" y="72" text-anchor="middle" class="label">Human: Why is the sky blue?</text>
+  <rect class="box-ok" x="520" y="96" width="220" height="34" rx="8"/>
+  <text x="630" y="118" text-anchor="middle" class="label">AI: the model's answer</text>
+  <path class="arrow" d="M230,81 H278"/>
+  <path class="arrow-accent" d="M460,113 H518"/>
+  <text x="630" y="148" text-anchor="middle" class="small accent">appended by add_messages</text>
+  <text x="370" y="184" text-anchor="middle" class="mono">return {"messages": [AIMessage]}</text>
+  <path class="line dashed" d="M370,106 V170"/>
+</svg>
+<figcaption>Graph 4, one superstep. The node returns only the new message; <code>add_messages</code> keeps the question. Verified with a fake model: the result's message types are <code>["human", "ai"]</code>. <strong>Read the answer with <code>result["messages"][-1].content</code>.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>Common mistake: returning the message without the list.</strong> If you forget the square brackets you hand <code>add_messages</code> a single message instead of a list. It happens to accept that, but every example in LangGraph's docs and in this course uses a list, and a list is what lets one node add several messages at once (as <code>ToolNode</code> does). Keep the brackets.</p></div>
+
+<h2>Trace 4: graph 8, the agent loop</h2>
+<p>Graph 8 (<a href="13-graph-8-agent-loop.html">step 13</a>) has two nodes and the most important edge in the course:</p>
+<pre data-lang="py" data-tag="excerpt"><code>builder.add_node("chat_with_tools", chat_with_tools)
+builder.add_node("tools", ToolNode([multiply,addition,subtraction]))
+
+builder.add_edge(START, "chat_with_tools")
+builder.add_conditional_edges("chat_with_tools", tools_condition)
+builder.add_edge("tools", "chat_with_tools")</code></pre>
+<p>Graph 6 had <code>tools → END</code>, so the tool ran once and the model never saw the result. Graph 8 replaces that with <code>tools → chat_with_tools</code>: after the tools run, the model is called again with the results in its message list. That single edge turns a one-way pipeline into a loop, and the model into an <a class="term" href="glossary.html#agent">agent</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="Graph 8 loop: START goes to chat_with_tools; tools_condition checks the last message; if it has tool_calls it goes to the tools node, which runs them and goes back to chat_with_tools; if not it goes to END">
+  <rect class="box2" x="20" y="100" width="90" height="44" rx="8"/>
+  <text x="65" y="127" text-anchor="middle" class="mono">START</text>
+  <rect class="box-solid" x="160" y="92" width="180" height="60" rx="8"/>
+  <text x="250" y="116" text-anchor="middle" class="on-solid">chat_with_tools</text>
+  <text x="250" y="136" text-anchor="middle" class="on-solid">calls the model</text>
+  <rect class="box-info" x="400" y="92" width="180" height="60" rx="8"/>
+  <text x="490" y="116" text-anchor="middle" class="mono">tools_condition</text>
+  <text x="490" y="136" text-anchor="middle" class="small">tool_calls in last message?</text>
+  <rect class="box-ok" x="640" y="100" width="110" height="44" rx="8"/>
+  <text x="695" y="127" text-anchor="middle" class="mono">END</text>
+  <rect class="box" x="160" y="196" width="180" height="54" rx="8"/>
+  <text x="250" y="218" text-anchor="middle" class="mono">tools</text>
+  <text x="250" y="236" text-anchor="middle" class="small">ToolNode runs each call</text>
+  <path class="arrow" d="M110,122 H158"/>
+  <path class="line dashed" d="M340,122 H398"/>
+  <path class="arrow-ok" d="M580,122 H638"/>
+  <text x="610" y="112" text-anchor="middle" class="small ok">no</text>
+  <path class="arrow-accent" d="M490,152 V223 H342"/>
+  <text x="502" y="190" class="small accent">yes: "tools"</text>
+  <path class="arrow-accent" d="M250,196 V154"/>
+  <text x="142" y="182" text-anchor="end" class="small">adds ToolMessages,</text>
+  <text x="142" y="198" text-anchor="end" class="small">then back to the model</text>
+  <text x="250" y="40" text-anchor="middle" class="small">adds one AIMessage per visit</text>
+  <path class="line dashed" d="M250,46 V90"/>
+  <text x="490" y="40" text-anchor="middle" class="small">returns "tools" or END</text>
+  <path class="line dashed" d="M490,46 V90"/>
+</svg>
+<figcaption>Graph 8's shape, as <code>get_graph()</code> reports it: <code>chat_with_tools -.-&gt; tools</code>, <code>chat_with_tools -.-&gt; __end__</code>, <code>tools --&gt; chat_with_tools</code>. <code>tools_condition</code> returns the string <code>"tools"</code>, which is why the ToolNode must be registered under that exact name. <strong>The model decides when the loop ends.</strong></figcaption>
+</figure>
+
+<p>Now follow the message list for the question "What is 12 multiplied by 7?". The run takes three node supersteps. <code>stream_mode="updates"</code> printed one update per step (verified; the fake model asks for <code>multiply</code> and then writes "The result is 84"):</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 268" role="img" aria-label="The messages list in graph 8 across four moments: the input holds the human question; after step one chat_with_tools adds an AI message with a multiply tool call; after step two the tools node adds a ToolMessage with 84; after step three chat_with_tools adds the final AI answer and tools_condition routes to END">
+  <rect class="zone" x="10" y="10" width="176" height="210" rx="10"/>
+  <text x="98" y="32" text-anchor="middle" class="title">input</text>
+  <rect class="box2" x="20" y="48" width="156" height="28" rx="6"/>
+  <text x="98" y="66" text-anchor="middle" class="small">Human: 12 × 7?</text>
+  <rect class="zone" x="198" y="10" width="176" height="210" rx="10"/>
+  <text x="286" y="32" text-anchor="middle" class="title">after step 1</text>
+  <rect class="box2" x="208" y="48" width="156" height="28" rx="6"/>
+  <text x="286" y="66" text-anchor="middle" class="small">Human: 12 × 7?</text>
+  <rect class="box" x="208" y="84" width="156" height="28" rx="6"/>
+  <text x="286" y="102" text-anchor="middle" class="small">AI: call multiply(12, 7)</text>
+  <rect class="zone" x="386" y="10" width="176" height="210" rx="10"/>
+  <text x="474" y="32" text-anchor="middle" class="title">after step 2</text>
+  <rect class="box2" x="396" y="48" width="156" height="28" rx="6"/>
+  <text x="474" y="66" text-anchor="middle" class="small">Human: 12 × 7?</text>
+  <rect class="box2" x="396" y="84" width="156" height="28" rx="6"/>
+  <text x="474" y="102" text-anchor="middle" class="small">AI: call multiply(12, 7)</text>
+  <rect class="box-info" x="396" y="120" width="156" height="28" rx="6"/>
+  <text x="474" y="138" text-anchor="middle" class="small">Tool: 84</text>
+  <rect class="zone" x="574" y="10" width="176" height="210" rx="10"/>
+  <text x="662" y="32" text-anchor="middle" class="title">after step 3</text>
+  <rect class="box2" x="584" y="48" width="156" height="28" rx="6"/>
+  <text x="662" y="66" text-anchor="middle" class="small">Human: 12 × 7?</text>
+  <rect class="box2" x="584" y="84" width="156" height="28" rx="6"/>
+  <text x="662" y="102" text-anchor="middle" class="small">AI: call multiply(12, 7)</text>
+  <rect class="box2" x="584" y="120" width="156" height="28" rx="6"/>
+  <text x="662" y="138" text-anchor="middle" class="small">Tool: 84</text>
+  <rect class="box-ok" x="584" y="156" width="156" height="28" rx="6"/>
+  <text x="662" y="174" text-anchor="middle" class="small">AI: The result is 84</text>
+  <text x="98" y="208" text-anchor="middle" class="small">1 message</text>
+  <text x="286" y="208" text-anchor="middle" class="small">2 messages</text>
+  <text x="474" y="208" text-anchor="middle" class="small">3 messages</text>
+  <text x="662" y="208" text-anchor="middle" class="small">4 messages</text>
+  <text x="286" y="246" text-anchor="middle" class="small accent">tools_condition → tools</text>
+  <text x="474" y="246" text-anchor="middle" class="small">fixed edge → model</text>
+  <text x="662" y="246" text-anchor="middle" class="small ok">tools_condition → END</text>
+</svg>
+<figcaption>Each column is the state after one superstep; the highlighted message is that step's update. The first AIMessage has empty text and one tool call; the ToolMessage answers it by its <code>tool_call_id</code>. <strong>The list only grows, and the final answer is always item <code>[-1]</code>.</strong></figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<tr><th>Superstep</th><th>Node</th><th>Its update (verified)</th><th>Then</th></tr>
+<tr><td>1</td><td><code>chat_with_tools</code></td><td><code>AIMessage('', tool_calls=[{'name': 'multiply', 'args': {'nb1': 12, 'nb2': 7}, ...}])</code></td><td><code>tools_condition</code> sees a tool call → <code>"tools"</code></td></tr>
+<tr><td>2</td><td><code>tools</code></td><td><code>ToolMessage('84')</code></td><td>fixed edge → <code>chat_with_tools</code></td></tr>
+<tr><td>3</td><td><code>chat_with_tools</code></td><td><code>AIMessage('The result is 84')</code> (fake model's wording)</td><td>no tool calls → <code>END</code></td></tr>
+</table></div>
+
+<h3>Why the loop stops</h3>
+<p>Nothing in the graph counts laps. The loop ends because <code>tools_condition</code> looks at the newest message after every model call: if it contains <code>tool_calls</code>, go to <code>"tools"</code>; if it doesn't, go to <code>END</code>. So the loop stops when <strong>the model answers in plain text</strong>. It decides that by itself, when it judges that the tool results are enough. In the video's Studio run (around 129:38), "what is 10- 5, 20 * 3, 3 + 2" made the model ask for three tools in one AIMessage. The <code>tools</code> node ran all three in a single superstep (verified: one update holding three ToolMessages: 5, 60 and 5), and the model's next reply had no tool calls, so the run ended.</p>
+
+<div class="callout"><p><strong>Where is the system message?</strong> Graph 8's node sends <code>state["messages"] + [system_message]</code> to the model, but returns only the model's reply. The system message is added to every model call and <em>never stored</em> in the state, so you won't see it in the result or in Studio's message list. (It is also placed last; <a href="15-fix-and-harden.html">step 15</a> moves it to the front, the usual convention.)</p></div>
+
+<h3>The recursion limit: the safety net</h3>
+<p>If a model kept asking for tools forever, the loop would never reach <code>END</code>. LangGraph guards against this with the <a class="term" href="glossary.html#recursion-limit">recursion limit</a>: the maximum number of supersteps one run may take. Exceed it and the run stops with <code>GraphRecursionError: Recursion limit of N reached without hitting a stop condition</code>. You set it per call:</p>
+<pre data-lang="py" data-tag="illustrative"><code>graph.invoke({"messages": [HumanMessage(content="What is 12 multiplied by 7?")]},
+             {"recursion_limit": 10})</code></pre>
+<p>Verified with the course graphs: the limit counts your node supersteps <em>plus one</em>. Graph 0 (one node step) needs at least 2, graph 2 (two node steps) needs 3, and graph 8 with one tool round (three node steps) fails at 3 and succeeds at 4. Each extra tool round adds two steps. In langgraph 1.2.11 the default limit is 10007 (read from the installed source), which is effectively "no limit" for a small project; older versions and many tutorials use 25. For a real agent, pass your own sensible limit.</p>
+
+<h2>Trace 5: graph 9, what the checkpointer saves</h2>
+<p>Without memory, every <code>invoke</code> starts from your input alone, so a follow-up question like "now multiply that by 10" has nothing to refer to. Graph 9 (<a href="14-graph-9-memory.html">step 14</a>) compiles the same agent with a checkpointer:</p>
+<pre data-lang="py" data-tag="excerpt"><code>memory = MemorySaver()
+graph = builder.compile(checkpointer=memory)
+config = {"configurable": {"thread_id": "1"}}
+response = graph.invoke({"messages": messages}, config)</code></pre>
+<p>The repo's file stops with <code>NameError: name 'HumanMessage' is not defined</code> before it gets this far (it never imports <code>HumanMessage</code>), so the traces below use the fixed version from <a href="15-fix-and-harden.html">step 15</a>, which has the same graph.</p>
+<p>A <a class="term" href="glossary.html#checkpointer">checkpointer</a> saves a snapshot of the state after <strong>every superstep</strong>, filed under the <a class="term" href="glossary.html#thread-id">thread ID</a> in the config. When you invoke again with the same thread ID, the graph loads the latest snapshot first, then merges your new input into it, using the same reducers as any node update.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 178" role="img" aria-label="Checkpoints saved for one invoke of graph 9 on thread 1: five snapshots, at step minus one with no messages, step zero with one, step one with two, step two with three and step three with four messages">
+  <path class="line" d="M40,64 H720"/>
+  <circle class="dot" cx="80" cy="64" r="7"/>
+  <circle class="dot" cx="230" cy="64" r="7"/>
+  <circle class="dot" cx="380" cy="64" r="7"/>
+  <circle class="dot" cx="530" cy="64" r="7"/>
+  <circle class="dot-ok" cx="680" cy="64" r="7"/>
+  <text x="80" y="36" text-anchor="middle" class="label">step −1 · input</text>
+  <text x="230" y="36" text-anchor="middle" class="label">step 0 · START</text>
+  <text x="380" y="36" text-anchor="middle" class="label">step 1 · model</text>
+  <text x="530" y="36" text-anchor="middle" class="label">step 2 · tools</text>
+  <text x="680" y="36" text-anchor="middle" class="label">step 3 · model</text>
+  <text x="80" y="96" text-anchor="middle">0 messages</text>
+  <text x="230" y="96" text-anchor="middle">1 message</text>
+  <text x="380" y="96" text-anchor="middle">2 messages</text>
+  <text x="530" y="96" text-anchor="middle">3 messages</text>
+  <text x="680" y="96" text-anchor="middle">4 messages</text>
+  <text x="80" y="116" text-anchor="middle" class="small">next: __start__</text>
+  <text x="230" y="116" text-anchor="middle" class="small">next: chat_with_tools</text>
+  <text x="380" y="116" text-anchor="middle" class="small">next: tools</text>
+  <text x="530" y="116" text-anchor="middle" class="small">next: chat_with_tools</text>
+  <text x="680" y="116" text-anchor="middle" class="small">next: nothing</text>
+  <text x="380" y="156" text-anchor="middle" class="small">graph.get_state(config) returns the last snapshot; graph.get_state_history(config) lists all five</text>
+</svg>
+<figcaption>One <code>invoke</code> of graph 9 on thread "1" ("Add 3 and 4."), verified with <code>get_state_history</code>: five snapshots, one per superstep including the input step. The last one has <code>next</code> empty, meaning the run finished. <strong>Memory is these snapshots; the newest one is where the next invoke starts.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 248" role="img" aria-label="Threads in MemorySaver: on thread 1 the first invoke saves four messages and the second invoke loads them, adds four more and saves eight; thread 2 starts empty and saves four messages">
+  <text x="380" y="22" text-anchor="middle" class="title">One MemorySaver, a separate history per thread_id</text>
+  <rect class="zone" x="10" y="36" width="470" height="200" rx="10"/>
+  <text x="245" y="58" text-anchor="middle" class="title">thread_id "1"</text>
+  <rect class="box2" x="25" y="76" width="220" height="44" rx="8"/>
+  <text x="135" y="94" text-anchor="middle" class="label">invoke 1:</text>
+  <text x="135" y="110" text-anchor="middle" class="label">Add 3 and 4.</text>
+  <rect class="box-ok" x="285" y="76" width="180" height="44" rx="8"/>
+  <text x="375" y="103" text-anchor="middle" class="label">saved: 4 messages</text>
+  <rect class="box2" x="25" y="170" width="220" height="44" rx="8"/>
+  <text x="135" y="188" text-anchor="middle" class="label">invoke 2:</text>
+  <text x="135" y="204" text-anchor="middle" class="label">Now multiply that by 10.</text>
+  <rect class="box-ok" x="285" y="170" width="180" height="44" rx="8"/>
+  <text x="375" y="188" text-anchor="middle" class="label">loads 4, adds 4</text>
+  <text x="375" y="204" text-anchor="middle" class="label">saved: 8 messages</text>
+  <path class="arrow" d="M245,98 H283"/>
+  <path class="arrow" d="M245,192 H283"/>
+  <path class="arrow-accent" d="M375,120 V168"/>
+  <text x="385" y="149" class="small accent">reloaded</text>
+  <rect class="zone" x="500" y="36" width="250" height="200" rx="10"/>
+  <text x="625" y="58" text-anchor="middle" class="title">thread_id "2"</text>
+  <rect class="box2" x="515" y="76" width="220" height="44" rx="8"/>
+  <text x="625" y="94" text-anchor="middle" class="label">invoke:</text>
+  <text x="625" y="110" text-anchor="middle" class="label">What was my last result?</text>
+  <rect class="box-warn" x="515" y="170" width="220" height="44" rx="8"/>
+  <text x="625" y="188" text-anchor="middle" class="label">starts empty</text>
+  <text x="625" y="204" text-anchor="middle" class="label">saved: 4 messages</text>
+  <path class="arrow" d="M625,120 V168"/>
+</svg>
+<figcaption>The step 15 demo, verified with the fake model. Thread "1" ends turn 2 with 8 messages in the order Human, AI, Tool, AI, Human, AI, Tool, AI, so a real model would see "that" refers to 7. Thread "2" knows nothing about thread "1". <strong>Same thread ID = same conversation; new ID = blank slate.</strong></figcaption>
+</figure>
+
+<p>Two consequences surprise beginners:</p>
+<ul>
+<li><strong>Memory follows the reducer.</strong> The messages "accumulate" only because <code>add_messages</code> appends. Compile graph 2 with a <code>MemorySaver</code>, invoke <code>"hello "</code> and then <code>"hi "</code> on the same thread, and the second run simply overwrites <code>graph_str</code>: the saved state ends as <code>'hi welcome to AI Carrer LabI am in Node 3'</code> with no trace of "hello" (verified).</li>
+<li><strong>The config is required.</strong> Invoke a graph that has a checkpointer without a thread ID and you get <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id</code> (verified).</li>
+</ul>
+
+<details class="primer"><summary>And in Studio? Threads without a checkpointer</summary>
+<p>Studio remembered earlier messages long before graph 9, even for graph 8 which has no checkpointer. That's because the <code>langgraph dev</code> server adds its own persistence to every graph it serves: each conversation you start with "New Thread" gets a thread ID, which the presenter points out in the Studio panel at about 133:19. The server even refuses a graph that brings its own checkpointer: registering graph 9 in <code>langgraph.json</code> makes startup fail with <code>ValueError: Heads up! Your graph 'graph' ... includes a custom checkpointer</code> (verified). So graph 9 is for plain Python runs. <a href="17-persistent-memory-sqlite.html">Step 17</a> shows a checkpointer that survives a restart, <code>SqliteSaver</code>.</p>
+</details>
+
+<div class="callout warn"><p><strong>Common mistakes when reasoning about state</strong></p>
+<ul>
+<li><strong>Returning only the new text from a plain key.</strong> With the overwrite reducer, <code>return {"graph_str": " welcome"}</code> throws the old text away. Include it: <code>state["graph_str"] + " welcome"</code>.</li>
+<li><strong>Returning the whole message list from a messages node.</strong> <code>return {"messages": state["messages"] + [reply]}</code> works only because <code>add_messages</code> recognises the old messages by ID. Return just the new message: <code>{"messages": [reply]}</code>.</li>
+<li><strong>Misspelling a state key in an update.</strong> An unknown key is ignored without an error, so the state silently doesn't change (verified).</li>
+<li><strong>Passing a function to <code>add_edge</code>.</strong> Edges take node <em>names</em>. <code>add_edge(START, greeting)</code> fails with <code>TypeError: 'function' object is not iterable</code>.</li>
+<li><strong>Wiring a routing function with <code>add_edge</code>.</strong> <code>add_edge("chat_with_tool", tools_condition)</code> fails with "Found edge ending at unknown node". Routing functions go in <code>add_conditional_edges</code>.</li>
+<li><strong>Expecting memory without the same thread ID.</strong> Build the config once and reuse the variable; a new ID starts empty.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A node receives the state and returns an <strong>update</strong>; LangGraph merges it. A routing function returns a <strong>node name</strong> and changes nothing.</li>
+<li>Each key has a reducer: plain keys are <strong>overwritten</strong>, <code>messages</code> (with <code>add_messages</code>) is <strong>appended to</strong>. A <code>str</code> state is replaced by whatever the node returns.</li>
+<li>A run is a series of supersteps, one per node in this course: graph 0 has 1, graph 2 has 2, graph 8 with one tool round has 3.</li>
+<li>The agent loop ends when the model replies without <code>tool_calls</code>; <code>tools_condition</code> then routes to <code>END</code>. The recursion limit (node steps + 1 needed) is the safety net.</li>
+<li>A checkpointer saves a snapshot after every superstep, per <code>thread_id</code>, and the next invoke on that thread starts from the newest one. <code>langgraph dev</code> does this for you in Studio.</li>
+</ul></div>
+
+<nav class="pager"><a class="prev" href="06-graph-0-string-state.html"><small>← Related</small>Step 06 · Graph 0</a><a class="next" href="10-graph-4-messages-state.html"><small>Related →</small>Step 10 · MessagesState</a></nav>
+</main>
+</body>
+</html>

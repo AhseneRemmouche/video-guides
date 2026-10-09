@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 5 · Designing Good Tools</title>
+<meta name="description" content="Schemas from type hints and docstrings, return values, errors, safety, and when models skip tools.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 5/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangChain &amp; Agents Handbook · Chapter 5 of 10</div>
+  <h1>Designing Good Tools</h1>
+  <p class="lead">Schemas from type hints and docstrings, return values, errors, safety, and when models skip tools.</p>
+</section>
+<h2>What you will learn</h2>
+<p>A <a class="term" href="glossary.html#tool">tool</a> is how an agent reaches beyond text: searching the web, reading a file, calling an API. In <a href="08-first-tool.html">step 8</a> and <a href="09-web-search-tavily.html">step 9</a> the presenter creates two tools in a few lines each. This chapter is about making tools the model uses <em>correctly</em>: what the model actually sees, how to describe a tool, what to return, how to handle failures, and how to keep tools safe and cheap.</p>
+<p>You will learn:</p>
+<ul>
+<li>how <code>@tool</code> builds a schema from the function name, <a class="term" href="glossary.html#type-hint">type hints</a> and <a class="term" href="glossary.html#docstring">docstring</a>, and how to inspect it;</li>
+<li>how to write docstrings and arguments the model understands;</li>
+<li>why small, focused tools beat do-everything tools;</li>
+<li>what to return, and what happens to it (it becomes a <code>ToolMessage</code>);</li>
+<li>what happens when a tool fails: bad arguments versus exceptions (verified behaviour);</li>
+<li>side effects and safety;</li>
+<li>why the model skipped <code>print_document</code> in step 8;</li>
+<li>why Tavily results can blow up your token count, and how to trim them.</li>
+</ul>
+<div class="callout ok"><strong>Why this matters for your project.</strong> The chef's only tool is <code>web_search</code>. Its docstring decides when the model searches, and its arguments decide what queries look like. Its return value is the biggest chunk of text in every chef run. Its error handling decides whether one network hiccup crashes the whole program. <a href="16-fix-and-harden.html">Step 16</a>'s improved <code>tools.py</code> applies most of this chapter in seven lines.</div>
+
+<h2>What the model actually sees</h2>
+<p>When an agent has tools, every model request carries a list of <strong>tool definitions</strong> next to the messages. A definition has three parts: a name, a description and a JSON Schema for the arguments. The model never sees your function's body. It chooses tools and writes arguments based only on those three parts.</p>
+<p>The <code>@tool</code> decorator builds them from your function:</p>
+<div class="table-wrap"><table>
+<tr><th>Tool part</th><th>Comes from</th><th>Attribute on the tool object</th></tr>
+<tr><td>name</td><td>The function name</td><td><code>web_search.name</code></td></tr>
+<tr><td>description</td><td>The docstring</td><td><code>web_search.description</code></td></tr>
+<tr><td>argument schema</td><td>The parameters and their type hints (and default values)</td><td><code>web_search.args</code> (and <code>web_search.args_schema</code>, a Pydantic model)</td></tr>
+</table></div>
+<p>You can inspect all of this without calling any model. Here is the repo's tool, inspected with the locked versions (output shown as comments):</p>
+<pre data-lang="py" data-tag="illustrative · output verified with langchain-core 1.4.9"><code>from tools import web_search
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
+type(web_search).__name__   # 'StructuredTool'
+web_search.name             # 'web_search'
+web_search.description      # 'tool to search the web for information'
+web_search.args             # {'query': {'title': 'Query', 'type': 'string'}}
+
+convert_to_openai_tool(web_search)
+# {'type': 'function',
+#  'function': {'name': 'web_search',
+#               'description': 'tool to search the web for information',
+#               'parameters': {'properties': {'query': {'type': 'string'}},
+#                              'required': ['query'], 'type': 'object'}}}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="The repo's web_search function: its name, docstring and query parameter become the name, description and parameters of the tool definition sent to OpenAI; the body and return type are not sent">
+  <rect class="box2" x="10" y="20" width="330" height="200" rx="10"/>
+  <text x="24" y="44" class="label">tools.py (repo)</text>
+  <text x="24" y="72" class="mono accent">@tool</text>
+  <text x="24" y="94" class="mono">def web_search(query: str)</text>
+  <text x="80" y="114" class="mono">-&gt; Dict[str,Any]:</text>
+  <text x="38" y="136" class="mono">"""tool to search the web</text>
+  <text x="59" y="156" class="mono">for information"""</text>
+  <rect class="box-bad" x="20" y="168" width="310" height="44" rx="6"/>
+  <text x="48" y="187" class="mono">logging.info(…)</text>
+  <text x="48" y="205" class="mono">return tavily_client.search(query)</text>
+  <rect class="box-info" x="420" y="20" width="330" height="200" rx="10"/>
+  <text x="434" y="44" class="label">tool definition sent with each request</text>
+  <text x="434" y="78" class="mono">"name": "web_search"</text>
+  <text x="434" y="112" class="mono">"description": "tool to search</text>
+  <text x="455" y="130" class="mono">the web for information"</text>
+  <text x="434" y="164" class="mono">"parameters": {"query":</text>
+  <text x="455" y="182" class="mono">{"type": "string"}}</text>
+  <path class="arrow-accent" d="M342,86 C380,86 390,74 418,74"/>
+  <path class="arrow-accent" d="M342,146 C380,146 390,121 418,121"/>
+  <path class="arrow-accent" d="M342,100 C380,100 390,170 418,170"/>
+  <text x="175" y="244" text-anchor="middle" class="small">red: body and return type stay on your machine</text>
+  <text x="585" y="244" text-anchor="middle" class="small">all the model knows about the tool</text>
+</svg>
+<figcaption>Where each part of the tool definition comes from. <strong>The docstring is a prompt</strong>; it's the only explanation the model gets. The return type hint (<code>Dict[str, Any]</code>) isn't part of the schema, and the body is never sent.</figcaption>
+</figure>
+
+<p>You can override the defaults when the function name isn't a good tool name, or you want the description somewhere other than the docstring: <code>@tool("search_recipes", description="Find recipes online.")</code> (verified). The tool definitions are sent on <em>every</em> model call and count as input <a class="term" href="glossary.html#token">tokens</a>, so ten tools with long descriptions cost something on every turn.</p>
+
+<h2>Writing descriptions and arguments the model understands</h2>
+<p>Think of the description as instructions for a new colleague who can't see your code. It should say <strong>what the tool does</strong>, <strong>when to use it</strong> (and when not), and <strong>what good input looks like</strong>. Compare the three docstrings in this project:</p>
+<div class="table-wrap"><table>
+<tr><th>Docstring</th><th>Where</th><th>Assessment</th></tr>
+<tr><td><code>"use this tool to generate the propre document for your student"</code></td><td>step 8</td><td>Says what, vaguely. Doesn't say what a "document" is or why the model can't just write one itself. The model skipped it (see below).</td></tr>
+<tr><td><code>"tool to search the web for information"</code></td><td>repo <code>tools.py</code></td><td>Generic: true of any search tool. Gives no hint about the chef's use or the kind of query.</td></tr>
+<tr><td><code>"Search the web for recipes and cooking information. Use short, specific queries."</code></td><td><code>ext/tools.py</code> (step 16)</td><td>Says what it's for <em>and</em> how to call it well. The logs in the video show queries like "garlic fried…" (100:24), and this nudges every query that way.</td></tr>
+</table></div>
+
+<h3>Describing each argument</h3>
+<p>Argument names and types already help: <code>query: str</code> tells the model to send one string called <code>query</code>. When an argument needs more explanation, write a Google-style <code>Args:</code> section and pass <code>parse_docstring=True</code>. LangChain then puts each line into the schema as that argument's description (verified):</p>
+<pre data-lang="py" data-tag="illustrative · schema output verified"><code>@tool(parse_docstring=True)
+def search_recipes(query: str, max_results: int = 5) -&gt; str:
+    """Search the web for recipes.
+
+    Args:
+        query: Short search query, e.g. "garlic fried rice".
+        max_results: How many results to return (1-10).
+    """
+    ...
+
+# parameters sent to the model:
+# {"query":       {"type": "string",  "description": "Short search query, e.g. \"garlic fried rice\"."},
+#  "max_results": {"type": "integer", "description": "How many results to return (1-10).", "default": 5}}
+# required: ["query"]   (max_results has a default, so it is optional)</code></pre>
+<p>Notice that a parameter with a default value becomes <em>optional</em> for the model. For full control (enums, numeric limits, nested objects), you can pass a Pydantic model as <code>args_schema=…</code>. <a class="term" href="glossary.html#pydantic">Pydantic</a> appears in <a href="17-structured-recipe.html">step 17</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Comparison of a vague tool definition and a clear one: name, description, argument descriptions and examples">
+  <rect class="box-bad" x="10" y="10" width="360" height="230" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Vague (repo)</text>
+  <rect class="box2" x="22" y="50" width="336" height="30" rx="6"/>
+  <text x="32" y="70" class="small">name</text>
+  <text x="122" y="70" class="mono">web_search</text>
+  <rect class="box2" x="22" y="88" width="336" height="44" rx="6"/>
+  <text x="32" y="108" class="small">description</text>
+  <text x="122" y="108" class="mono">"tool to search the web</text>
+  <text x="129" y="124" class="mono">for information"</text>
+  <rect class="box2" x="22" y="140" width="336" height="30" rx="6"/>
+  <text x="32" y="160" class="small">args</text>
+  <text x="122" y="160" class="mono">query: string</text>
+  <text x="190" y="200" text-anchor="middle" class="small">when? what kind of query? the model guesses</text>
+  <rect class="box-ok" x="390" y="10" width="360" height="230" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">Clear (illustrative)</text>
+  <rect class="box2" x="402" y="50" width="336" height="30" rx="6"/>
+  <text x="412" y="70" class="small">name</text>
+  <text x="502" y="70" class="mono">search_recipes</text>
+  <rect class="box2" x="402" y="88" width="336" height="44" rx="6"/>
+  <text x="412" y="108" class="small">description</text>
+  <text x="502" y="108" class="mono">"Search the web for</text>
+  <text x="509" y="124" class="mono">recipes. Short queries."</text>
+  <rect class="box2" x="402" y="140" width="336" height="58" rx="6"/>
+  <text x="412" y="160" class="small">args</text>
+  <text x="502" y="160" class="mono">query: string</text>
+  <text x="502" y="176" class="small">e.g. "garlic fried rice"</text>
+  <text x="502" y="192" class="mono">max_results: int = 5</text>
+  <text x="570" y="222" text-anchor="middle" class="small">purpose, usage hint, example input</text>
+</svg>
+<figcaption>Same function, two definitions. <strong>A specific name, a "what and when" description and an example input</strong> are the cheapest improvements you can make to an agent.</figcaption>
+</figure>
+
+<h2>Small, focused tools</h2>
+<p>One tool should do one job. A tool called <code>kitchen_helper(action: str, data: str)</code> that searches, converts units or saves favourites depending on <code>action</code> forces the model to learn a mini-language from a docstring. Three tools, <code>search_recipes(query)</code>, <code>convert_units(amount, from_unit, to_unit)</code> and <code>save_favourite(title, url)</code>, each have an obvious purpose and obvious arguments. Some guidelines:</p>
+<ul>
+<li><strong>Verb plus object names</strong>: <code>search_recipes</code>, <code>get_weather</code>, <code>save_favourite</code>. Avoid <code>tool1</code>, <code>helper</code>, <code>do_it</code>.</li>
+<li><strong>Few, simple arguments.</strong> Strings, numbers and booleans with clear names. Every extra argument is another chance for the model to get something wrong.</li>
+<li><strong>Don't give the model work your code can do.</strong> If the tool always needs the user's ID, get it in code, not as an argument the model fills in.</li>
+<li><strong>Few tools overall.</strong> Every tool adds tokens to each request and one more option to confuse. Add tools when testing shows a need, not "just in case".</li>
+<li><strong>Idempotent where possible</strong> ("calling twice has the same effect as once"). Models sometimes repeat calls. Searching twice is harmless; ordering twice isn't.</li>
+</ul>
+
+<h2>Return values: what happens to them</h2>
+<p>Whatever your function returns becomes the <code>content</code> of a <a class="term" href="glossary.html#tool-message"><code>ToolMessage</code></a>, which is appended to the conversation and read by the model on its next call. Strings are used as they are. Other values are converted: the repo's <code>web_search</code> returns Tavily's response <code>dict</code>, and the <code>ToolMessage</code> content becomes that dict as a JSON string (verified). So:</p>
+<ul>
+<li><strong>Return text or JSON-friendly data</strong> (dicts, lists, strings, numbers). The model reads it as text.</li>
+<li><strong>Return what the model needs, not everything you have.</strong> The model doesn't need relevance scores, image lists or response timings to write a recipe. This matters a lot, as the token section below shows.</li>
+<li><strong>Make results self-explanatory.</strong> <code>{"query": "garlic rice", "results": [...]}</code> tells the model what was searched. A bare list of 20 URLs doesn't.</li>
+<li><strong>Need to keep the full data for your code?</strong> Use <code>@tool(response_format="content_and_artifact")</code> and return a pair <code>(content, artifact)</code>. The model only sees <code>content</code>, while the full <code>artifact</code> is stored on <code>ToolMessage.artifact</code> for your program (verified, sketch below).</li>
+</ul>
+<p>One special option: <code>@tool(return_direct=True)</code> makes the agent stop right after that tool and use the tool's result as the final message, with no further model call (verified: the run ends with the <code>ToolMessage</code>). It's useful when the tool's output <em>is</em> the answer. For <code>print_document</code>, that would have guaranteed the exact document text.</p>
+
+<h2>Errors: what happens when a tool fails</h2>
+<p>Tools talk to the outside world, so they fail: the network drops, the API key is wrong, the free credits run out. Using a fake model with the project's locked versions, there are three distinct cases:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Three failure cases: bad arguments become an error ToolMessage and the model can retry; an uncaught exception in the tool crashes the whole agent.invoke; an exception caught in the tool becomes a normal result the model can explain">
+  <rect class="box" x="10" y="20" width="140" height="70" rx="8"/>
+  <text x="80" y="48" text-anchor="middle" class="label">model sends</text>
+  <text x="80" y="66" text-anchor="middle" class="mono">{"qury": "a"}</text>
+  <rect class="box-warn" x="190" y="20" width="300" height="70" rx="8"/>
+  <text x="340" y="44" text-anchor="middle" class="label">arguments fail the schema</text>
+  <text x="340" y="64" text-anchor="middle" class="small">ToolMessage: "Error invoking tool 'web_search' …</text>
+  <text x="340" y="80" text-anchor="middle" class="small">query: Field required. Please fix the error and try again."</text>
+  <rect class="box-ok" x="530" y="20" width="220" height="70" rx="8"/>
+  <text x="640" y="50" text-anchor="middle" class="label">model reads it, retries</text>
+  <text x="640" y="68" text-anchor="middle" class="small">run continues</text>
+  <path class="arrow" d="M150,55 H188"/>
+  <path class="arrow-ok" d="M490,55 H528"/>
+  <rect class="box" x="10" y="130" width="140" height="70" rx="8"/>
+  <text x="80" y="158" text-anchor="middle" class="label">tool raises</text>
+  <text x="80" y="176" text-anchor="middle" class="mono">RuntimeError</text>
+  <rect class="box-bad" x="190" y="130" width="300" height="70" rx="8"/>
+  <text x="340" y="156" text-anchor="middle" class="label">not caught (repo tools.py)</text>
+  <text x="340" y="176" text-anchor="middle" class="small">the exception leaves the graph</text>
+  <rect class="box-bad" x="530" y="130" width="220" height="70" rx="8"/>
+  <text x="640" y="160" text-anchor="middle" class="label">agent.invoke crashes</text>
+  <text x="640" y="178" text-anchor="middle" class="small">traceback, no answer</text>
+  <path class="arrow" d="M150,165 H188"/>
+  <path class="arrow-bad" d="M490,165 H528"/>
+  <rect class="box" x="10" y="240" width="140" height="70" rx="8"/>
+  <text x="80" y="268" text-anchor="middle" class="label">tool raises</text>
+  <text x="80" y="286" text-anchor="middle" class="mono">RuntimeError</text>
+  <rect class="box-info" x="190" y="240" width="300" height="70" rx="8"/>
+  <text x="340" y="264" text-anchor="middle" class="label">caught in try/except (step 16)</text>
+  <text x="340" y="284" text-anchor="middle" class="small">returns {"error": "Search failed: … Answer</text>
+  <text x="340" y="300" text-anchor="middle" class="small">from what you already know."}</text>
+  <rect class="box-ok" x="530" y="240" width="220" height="70" rx="8"/>
+  <text x="640" y="270" text-anchor="middle" class="label">model answers anyway</text>
+  <text x="640" y="288" text-anchor="middle" class="small">run continues</text>
+  <path class="arrow" d="M150,275 H188"/>
+  <path class="arrow-ok" d="M490,275 H528"/>
+</svg>
+<figcaption>Verified behaviour with the locked versions. <strong>Invalid arguments are reported back to the model automatically; exceptions inside your tool are not</strong>: they crash the run unless you catch them and return an error the model can read.</figcaption>
+</figure>
+
+<p>That's why <a href="16-fix-and-harden.html">step 16</a>'s tool wraps the search:</p>
+<pre data-file="tools.py" data-lang="py" data-tag="from code/ext/tools.py · lines 12–20"><code>@tool
+def web_search(query: str) -&gt; Dict[str, Any]:
+    """Search the web for recipes and cooking information. Use short, specific queries."""
+    logging.info(f"searching for {query}")
+    try:
+        return tavily_client.search(query, max_results=5)
+    except Exception as error:
+        logging.warning(f"search failed: {error}")
+        return {"error": f"Search failed: {error}. Answer from what you already know."}</code></pre>
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>@tool</code></td><td>Turns the function into a <code>StructuredTool</code>, so the agent can describe it to the model and run it.</td></tr>
+<tr><td>2</td><td><code>def web_search(query: str) -&gt; Dict[str, Any]:</code></td><td>One string argument, so the schema is <code>{"query": string}</code>. The return hint documents the result for humans; it isn't sent to the model.</td></tr>
+<tr><td>3</td><td><code>"""Search the web for recipes … Use short, specific queries."""</code></td><td>The description the model reads: purpose (recipes) plus a usage hint (short queries).</td></tr>
+<tr><td>4</td><td><code>logging.info(f"searching for {query}")</code></td><td>Records each query in the terminal, which shows you how the model is using the tool (<a href="14-chef-agent-and-logging.html">step 14</a>).</td></tr>
+<tr><td>5–6</td><td><code>try: return tavily_client.search(query, max_results=5)</code></td><td>The real work. <code>max_results=5</code> caps how many results come back, which also caps the tokens the model must read.</td></tr>
+<tr><td>7–8</td><td><code>except Exception as error: logging.warning(…)</code></td><td>Catches any failure (network, bad key, no credits) and logs it as a warning, so you see the real cause.</td></tr>
+<tr><td>9</td><td><code>return {"error": f"Search failed: {error}. Answer from what you already know."}</code></td><td>Turns the failure into a result. The model reads it and can still suggest a recipe, instead of the whole program crashing. The message also tells the model what to do next.</td></tr>
+</table></div>
+<p>Rule of thumb: <strong>return</strong> errors the model can do something about ("nothing found", "search failed, answer without it", "date must be YYYY-MM-DD"). <strong>Let real bugs raise</strong> so you see them during development. Be careful what an error message contains, too. It goes to the model and may end up in the answer, so never include keys or internal details.</p>
+
+<h2>Side effects and safety</h2>
+<p>A tool runs real code on your machine because a model asked it to, and the model's request can be influenced by the user and by any text it has read, including web pages (<a class="term" href="glossary.html#prompt-injection">prompt injection</a>, <a href="lc-03-messages-and-prompts.html">chapter 3</a>). Treat every tool argument as <strong>untrusted input</strong>, the same way you'd treat a form field on a website.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 258" role="img" aria-label="Risk ladder of tool side effects: read-only tools like web_search are low risk; writing reversible data is medium; irreversible actions and spending money are high risk and need limits, logging and human approval">
+  <rect class="box-ok" x="10" y="160" width="175" height="60" rx="8"/>
+  <text x="97" y="184" text-anchor="middle" class="label">read only</text>
+  <text x="97" y="202" text-anchor="middle" class="small">web_search, get_weather</text>
+  <rect class="box-info" x="195" y="115" width="175" height="105" rx="8"/>
+  <text x="282" y="139" text-anchor="middle" class="label">reversible writes</text>
+  <text x="282" y="157" text-anchor="middle" class="small">save_favourite,</text>
+  <text x="282" y="171" text-anchor="middle" class="small">add to shopping list</text>
+  <rect class="box-warn" x="380" y="70" width="175" height="150" rx="8"/>
+  <text x="467" y="94" text-anchor="middle" class="label">irreversible</text>
+  <text x="467" y="112" text-anchor="middle" class="small">send email, delete file,</text>
+  <text x="467" y="126" text-anchor="middle" class="small">post to social media</text>
+  <rect class="box-bad" x="565" y="25" width="185" height="195" rx="8"/>
+  <text x="657" y="49" text-anchor="middle" class="label">money / security</text>
+  <text x="657" y="67" text-anchor="middle" class="small">place an order, run code,</text>
+  <text x="657" y="81" text-anchor="middle" class="small">change permissions</text>
+  <text x="97" y="148" text-anchor="middle" class="small">validate input</text>
+  <text x="282" y="103" text-anchor="middle" class="small">+ log every call</text>
+  <text x="467" y="58" text-anchor="middle" class="small">+ limits, confirm</text>
+  <text x="657" y="140" text-anchor="middle" class="small">+ human approval,</text>
+  <text x="657" y="156" text-anchor="middle" class="small">least privilege</text>
+  <path class="arrow" d="M10,232 H748"/>
+  <text x="748" y="250" text-anchor="end" class="small">more damage if misused</text>
+</svg>
+<figcaption>Safeguards should grow with what a tool can do. <strong>The chef's <code>web_search</code> is read-only, the safest kind</strong>; the moment a tool can write, send or spend, add checks in code and consider <a class="term" href="glossary.html#human-in-the-loop">human approval</a>.</figcaption>
+</figure>
+<ul>
+<li><strong>Never execute model-written code or shell commands</strong> with <code>eval</code>, <code>exec</code> or <code>subprocess</code> on raw arguments.</li>
+<li><strong>Validate in code.</strong> The schema checks types, not intent. Check ranges, lengths and allowed values inside the tool. For file tools, make sure a path stays inside an allowed folder.</li>
+<li><strong>Enforce permissions in code, not in the prompt.</strong> "Only delete the user's own files" in a docstring is a suggestion. An <code>if</code> in the tool is a rule.</li>
+<li><strong>Least privilege.</strong> Give tools API keys and database users with only the rights they need.</li>
+<li><strong>Bound the loop.</strong> A <code>recursion_limit</code> (<a href="lc-04-agents-under-the-hood.html">chapter 4</a>) caps how many tool calls one request can trigger. That also caps cost: each Tavily search uses credits.</li>
+<li><strong>Use human approval for risky actions.</strong> LangChain supports pausing an agent before a tool runs, a topic from the video's advanced roadmap (<a href="lc-10-roadmap.html">chapter 10</a>).</li>
+</ul>
+
+<h2>Why the model skipped <code>print_document</code></h2>
+<p>In <a href="08-first-tool.html">step 8</a> the agent first answered "tell me what you want included…" and never called the tool (43:19). With the default settings, <strong>the model decides</strong> whether to use a tool. It does so by comparing the request with the tool descriptions and with what it could do on its own. Here, everything pointed towards "no tool":</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Why the model answered directly: the request was simple, the docstring was vague, and the system prompt allowed chatting; the fixes were a strict system prompt, and could also be a clearer docstring or return_direct">
+  <rect class="box2" x="10" y="20" width="230" height="46" rx="8"/>
+  <text x="125" y="40" text-anchor="middle" class="label">"Hello I am a student</text>
+  <text x="125" y="56" text-anchor="middle" class="label">and my name is Luca"</text>
+  <rect class="box-warn" x="10" y="80" width="230" height="40" rx="8"/>
+  <text x="125" y="105" text-anchor="middle" class="small">docstring: "generate the propre document"</text>
+  <rect class="box-warn" x="10" y="134" width="230" height="40" rx="8"/>
+  <text x="125" y="159" text-anchor="middle" class="small">prompt: teacher who uses tools</text>
+  <rect class="box-solid" x="290" y="76" width="160" height="56" rx="8"/>
+  <text x="370" y="100" text-anchor="middle" class="on-solid">model decides</text>
+  <text x="370" y="118" text-anchor="middle" class="on-solid">tool or text?</text>
+  <path class="arrow" d="M240,43 L288,90"/>
+  <path class="arrow" d="M240,100 H288"/>
+  <path class="arrow" d="M240,154 L288,116"/>
+  <rect class="box-bad" x="500" y="20" width="250" height="56" rx="8"/>
+  <text x="625" y="44" text-anchor="middle" class="label">text: "tell me what you want</text>
+  <text x="625" y="62" text-anchor="middle" class="label">included…" (43:19)</text>
+  <path class="arrow-bad" d="M450,92 L498,56"/>
+  <rect class="box-ok" x="500" y="130" width="250" height="110" rx="8"/>
+  <text x="625" y="152" text-anchor="middle" class="title">Fixes</text>
+  <text x="514" y="176" class="small">1 · strict system prompt (the video's fix)</text>
+  <text x="514" y="196" class="small">2 · docstring: what it returns, when to use</text>
+  <text x="514" y="216" class="small">3 · return_direct=True for exact output</text>
+  <text x="514" y="232" class="small">4 · a plain function call, no agent</text>
+  <path class="arrow-ok" d="M450,116 L498,160"/>
+</svg>
+<figcaption>The model weighed a simple request, a vague tool and a permissive prompt, and chose to chat. <strong>A tool only gets used when the model believes it's needed</strong>, so tell it clearly what the tool provides that it can't produce itself.</figcaption>
+</figure>
+<ul>
+<li><strong>The task looked trivial.</strong> Writing "a document for Luca" is something the model can do in text. The presenter says so: "this task is so simple that our agent doesn't even think it needs to rely on a tool" (43:19).</li>
+<li><strong>The docstring didn't say why the tool is needed.</strong> "Generate the propre document" doesn't tell the model that the tool produces the <em>official</em>, always-identical document, which was the presenter's actual reason for using it (40:30: "we don't want difference in our students documents").</li>
+<li><strong>The system prompt allowed alternatives.</strong> The final prompt removes them: "use your tools … DO Not say anything else".</li>
+</ul>
+<p>A better docstring would be: <code>"Create the official enrollment document for a student. Always use this when a student introduces themselves; never write the document yourself."</code> If the tool <em>must</em> run every time, that's a sign you don't need the model to decide at all. Call the function in code, or use <code>return_direct=True</code> so the tool's exact output is the reply.</p>
+
+<h2>Tools that return too much text</h2>
+<p>A Tavily search returns a dictionary with the query, a list of results (each with a title, URL, a text snippet and a relevance score) and some extra fields, depending on the options you pass. The repo returns <em>all of it</em> to the model. That whole dictionary becomes a <code>ToolMessage</code>, and then:</p>
+<ul>
+<li>it is read as <strong>input tokens</strong> on the next model call;</li>
+<li>it is <strong>re-sent on every later call</strong> in the same run, and in every later turn if you use memory (<a href="18-chat-with-your-chef.html">step 18</a>);</li>
+<li>each extra search adds another block of the same size.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Token budget comparison: returning the full Tavily response makes a large tool message that is re-sent on every later call; returning only titles, URLs and short snippets keeps it small">
+  <text x="10" y="24" class="label">What one search adds to every later model call (illustrative sizes)</text>
+  <text x="10" y="66" class="small">full response</text>
+  <rect class="box-warn" x="120" y="48" width="560" height="28" rx="6"/>
+  <text x="400" y="67" text-anchor="middle" class="small">query + all results (title, url, content, score…) + extra fields</text>
+  <text x="10" y="116" class="small">max_results=5</text>
+  <rect class="box-info" x="120" y="98" width="320" height="28" rx="6"/>
+  <text x="280" y="117" text-anchor="middle" class="small">fewer results (step 16)</text>
+  <text x="10" y="166" class="small">trimmed text</text>
+  <rect class="box-ok" x="120" y="148" width="150" height="28" rx="6"/>
+  <text x="195" y="167" text-anchor="middle" class="small">title · url · snippet</text>
+  <text x="380" y="210" text-anchor="middle" class="small">smaller tool results = fewer input tokens, faster replies, less to distract the model</text>
+</svg>
+<figcaption>Bar lengths are illustrative, not measured. <strong>Tool results usually dominate an agent's context</strong>; trimming them is one of the most effective cost and speed optimisations.</figcaption>
+</figure>
+<p>Three ways to shrink it, from simplest to most flexible:</p>
+<ol class="steps">
+<li><strong>Ask for less.</strong> <code>tavily_client.search(query, max_results=5)</code>, as in step 16. Tavily's search has more options (search depth, topic, included domains). Check the Tavily docs for what each costs in credits.</li>
+<li><strong>Return only what the model needs</strong>, as text:
+<pre data-lang="py" data-tag="illustrative"><code>@tool
+def web_search(query: str) -&gt; str:
+    """Search the web for recipes and cooking information. Use short, specific queries."""
+    response = tavily_client.search(query, max_results=5)
+    lines = [f"- {r['title']} ({r['url']}): {r['content'][:300]}" for r in response["results"]]
+    return "\n".join(lines) or "No results found."</code></pre></li>
+<li><strong>Split model view and program view</strong> with <code>content_and_artifact</code>: the model gets the short text, your code keeps the full response (for example to show sources or log them).
+<pre data-lang="py" data-tag="illustrative · behaviour verified"><code>@tool(response_format="content_and_artifact")
+def web_search(query: str):
+    """Search the web for recipes and cooking information. Use short, specific queries."""
+    response = tavily_client.search(query, max_results=5)
+    summary = "\n".join(f"- {r['title']} ({r['url']})" for r in response["results"])
+    return summary, response      # model sees summary; ToolMessage.artifact holds response</code></pre></li>
+</ol>
+<p>Trimming has a second benefit beyond cost. Less text means less room for injected instructions hidden in a web page, and less irrelevant detail to distract the model.</p>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+<li>No docstring at all. <code>@tool</code> raises <code>ValueError: Function must have a docstring if description not provided.</code> (verified). Always write one.</li>
+<li>Calling the tool like a function: <code>web_search("garlic")</code>. A tool object is invoked with <code>web_search.invoke({"query": "garlic"})</code> (38:57).</li>
+<li>Forgetting to pass the tool to the agent: defining <code>@tool</code> isn't enough; it must be in <code>tools=[...]</code>.</li>
+<li>Missing type hints. Without <code>query: str</code> the schema is vague and the model guesses the argument type.</li>
+<li>Letting exceptions escape. One failed search crashes the whole run (verified). Catch and return a helpful error.</li>
+<li>Returning huge raw API responses. Trim to what the model needs.</li>
+<li>Two tools with the same name in one agent. The model can't tell them apart; give every tool a unique name.</li>
+</ul></div>
+
+<div class="callout"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"The model reads my tool's code."</em> It only sees the name, description and argument schema.</li>
+<li><em>"If I give the agent a tool, it will use it."</em> It uses it when it believes it should. Descriptions and prompts drive that.</li>
+<li><em>"Schema validation makes a tool safe."</em> It checks types. Safety comes from what the tool is allowed to do and what you check inside it.</li>
+<li><em>"The return type hint tells the model what comes back."</em> It doesn't appear in the schema. Describe the result in the docstring if it matters.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>@tool</code> builds a <code>StructuredTool</code>: <code>.name</code> from the function, <code>.description</code> from the docstring, <code>.args</code> from the type hints. Only these reach the model.</li>
+<li>Good descriptions say what, when and how. <code>parse_docstring=True</code> adds per-argument descriptions. Defaults make arguments optional.</li>
+<li>One job per tool, few simple arguments, few tools, idempotent where possible.</li>
+<li>Return values become <code>ToolMessage</code> content (dicts as JSON). <code>content_and_artifact</code> separates what the model sees from what your code keeps. <code>return_direct</code> ends the run with the tool's output.</li>
+<li>Invalid arguments are reported back to the model automatically. Uncaught exceptions crash the run, so catch expected failures and return a helpful message (step 16).</li>
+<li>Treat tool arguments as untrusted. Add safeguards in code as tools gain the power to write, send or spend.</li>
+<li>Models skip tools that look unnecessary. Explain what the tool provides, tighten the prompt, or don't use an agent for it.</li>
+<li>Tool results dominate token usage. Ask for less, and return less.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langchain/tools">LangChain docs: Tools</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/agents">LangChain docs: Agents (tools and tool errors)</a></li>
+<li><a href="https://platform.openai.com/docs/guides/function-calling">OpenAI: Function calling</a></li>
+<li><a href="https://docs.tavily.com/documentation/api-reference/endpoint/search">Tavily docs: Search endpoint</a></li>
+<li><a href="https://owasp.org/www-project-top-10-for-large-language-model-applications/">OWASP Top 10 for LLM Applications</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lc-04-agents-under-the-hood.html"><small>← Chapter 4</small>Agents Under the Hood</a>
+<a class="next" href="lc-06-memory-and-state.html"><small>Chapter 6 →</small>Memory, State &amp; Checkpointers</a>
+</nav>
+</main>
+</body>
+</html>

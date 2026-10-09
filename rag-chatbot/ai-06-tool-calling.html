@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 6 · Tool Calling in Depth</title>
+<meta name="description" content="How function calling works under the hood and how to design good tools.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 6/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">AI &amp; Agents Handbook · Chapter 6 of 16</div>
+  <h1>Tool Calling in Depth</h1>
+  <p class="lead">How function calling works under the hood and how to design good tools.</p>
+</section>
+<h2>What you will learn</h2>
+<p>A language model can only produce text. It cannot query your database, read the clock or do exact arithmetic. <strong><a class="term" href="glossary.html#tool-calling">Tool calling</a></strong> (also called <em>function calling</em>) is how you get around that: you describe functions to the model, the model asks for one to be run, <em>your</em> code runs it, and the result goes back to the model. You met this in <a href="15-search-tool.html">step 15</a> (one search tool) and extended it in <a href="22-build-an-agent.html">step 22</a> (three tools and up to six steps). This chapter opens the box.</p>
+<p>You will learn:</p>
+<ul>
+<li>exactly what is sent back and forth during a tool call, with a sequence diagram;</li>
+<li>the AI SDK <code>tool()</code> helper: <code>description</code>, <code>inputSchema</code> and <code>execute</code>;</li>
+<li>tools <em>without</em> <code>execute</code>, for client-side actions and human approval;</li>
+<li>multi-step runs with <code>stopWhen</code>, the <code>toolChoice</code> options and parallel tool calls;</li>
+<li>how to handle errors inside tools (return a message or throw?);</li>
+<li>how to design good, safe tools, using the project's calculator as a case study;</li>
+<li>how tool calls appear in <code>useChat</code> messages (<code>tool-NAME</code> parts and their states), as rendered in <a href="23-show-agent-steps.html">step 23</a>.</li>
+</ul>
+
+<div class="callout ok"><strong>Why this matters for your chatbot.</strong> Tools are what turned a chat model into a RAG system (search) and then into an <a class="term" href="glossary.html#agent">agent</a> (search + date + calculator, several steps). Every new capability you add, such as looking up a colleague, filing a ticket or reading a calendar, will be a tool. Designing tools well decides whether the model uses them correctly; securing them decides whether a clever prompt can make your app do something harmful.</div>
+
+<h2>What happens under the hood</h2>
+<p>The key idea: <strong>the model never runs anything.</strong> It only writes a structured request. Here is the full round trip for "How many vacation days do I get?":</p>
+<ol class="steps">
+<li><strong>You send tool definitions.</strong> Along with the messages, the AI SDK sends each tool's name, description and input shape (converted from your <a class="term" href="glossary.html#zod">Zod</a> schema into <a class="term" href="glossary.html#json-schema">JSON Schema</a>).</li>
+<li><strong>The model returns a tool call.</strong> Instead of (or before) normal text, it replies with "call <code>searchKnowledgeBase</code> with <code>{"query":"vacation days entitlement"}</code>", plus an ID for this call. The step ends with the finish reason <code>tool-calls</code>.</li>
+<li><strong>Your code executes.</strong> The AI SDK validates the input against your schema and runs your <code>execute</code> function on your server.</li>
+<li><strong>The result goes back.</strong> The SDK adds the tool call and its result to the conversation and calls the model again. This is a new <em>step</em>.</li>
+<li><strong>The model continues.</strong> It reads the result and either writes the answer or calls another tool, until it finishes or your <code>stopWhen</code> condition stops it.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 400" role="img" aria-label="Sequence diagram of a tool call between browser, route, model API and execute function">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="20" y="10" width="150" height="36" rx="6"/><text x="95" y="33" text-anchor="middle">Browser · useChat</text>
+  <rect class="box" x="225" y="10" width="150" height="36" rx="6"/><text x="300" y="33" text-anchor="middle">Route · streamText</text>
+  <rect class="box2" x="425" y="10" width="150" height="36" rx="6"/><text x="500" y="33" text-anchor="middle">Model API</text>
+  <rect class="box" x="605" y="10" width="150" height="36" rx="6"/><text x="680" y="33" text-anchor="middle">execute()</text>
+  <rect class="box2" x="94" y="46" width="2" height="340"/><rect class="box2" x="299" y="46" width="2" height="340"/><rect class="box2" x="499" y="46" width="2" height="340"/><rect class="box2" x="679" y="46" width="2" height="340"/>
+  <text x="197" y="74" text-anchor="middle" class="small">1 · POST messages</text><path class="arrow" d="M96,80 H297"/>
+  <text x="400" y="114" text-anchor="middle" class="small">2 · messages + tool schemas</text><path class="arrow" d="M301,120 H497"/>
+  <text x="400" y="154" text-anchor="middle" class="small">3 · tool call + JSON input</text><path class="arrow" d="M499,160 H303"/>
+  <text x="590" y="194" text-anchor="middle" class="small">4 · run with validated input</text><path class="arrow" d="M301,200 H677"/>
+  <text x="590" y="234" text-anchor="middle" class="small">5 · result</text><path class="arrow" d="M679,240 H303"/>
+  <text x="400" y="274" text-anchor="middle" class="small">6 · history + result (step 2)</text><path class="arrow" d="M301,280 H497"/>
+  <text x="400" y="314" text-anchor="middle" class="small">7 · final answer text</text><path class="arrow" d="M499,320 H303"/>
+  <text x="197" y="354" text-anchor="middle" class="small">8 · streamed tool + text parts</text><path class="arrow" d="M299,360 H98"/>
+</svg>
+<figcaption>Steps 2–3 are model step 1; steps 6–7 are model step 2. The browser receives the tool call and its result as message parts, which is how step 23 can show them.</figcaption>
+</figure>
+
+<p>What travels over the wire looks roughly like this (simplified: each provider uses its own format, and the AI SDK translates for you):</p>
+<pre data-lang="json" data-tag="illustrative · simplified"><code>// Sent with the request: one tool definition
+{
+  "name": "searchKnowledgeBase",
+  "description": "Search the knowledge base for relevant information",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string", "description": "The search query to find relevant documents" }
+    },
+    "required": ["query"]
+  }
+}
+
+// Returned by the model: a tool call instead of text
+{ "toolCallId": "call_abc123", "toolName": "searchKnowledgeBase", "input": { "query": "vacation days entitlement" } }</code></pre>
+<p>Two things follow from this. First, the description and the <code>.describe()</code> texts are literally the only information the model has about your tool, so they are <a href="ai-04-prompt-engineering.html">prompts</a> and deserve the same care. Second, the tool definitions are sent on every request and count as input <a class="term" href="glossary.html#token">tokens</a>, so dozens of tools with long descriptions have a real cost.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Four messages of one tool round trip: user question, assistant tool call, tool result, assistant answer; step 1 sends message 1, step 2 sends messages 1 to 3">
+  <rect class="box2" x="150" y="20" width="450" height="46" rx="8"/>
+  <text x="164" y="37" class="small">user</text>
+  <text x="164" y="56" class="label">How many vacation days do I get?</text>
+  <text x="614" y="48" class="small">from useChat</text>
+  <rect class="box" x="150" y="80" width="450" height="46" rx="8"/>
+  <text x="164" y="97" class="small">assistant · tool call</text>
+  <text x="164" y="116" class="mono">searchKnowledgeBase({ query: "vacation days…" })</text>
+  <text x="614" y="108" class="small">model output, step 1</text>
+  <rect class="box-ok" x="150" y="140" width="450" height="46" rx="8"/>
+  <text x="164" y="157" class="small">tool · result (same toolCallId)</text>
+  <text x="164" y="176" class="mono">"[1] … [2] … [3] …"</text>
+  <text x="614" y="168" class="small">added by the SDK</text>
+  <rect class="box" x="150" y="200" width="450" height="46" rx="8"/>
+  <text x="164" y="217" class="small">assistant · text</text>
+  <text x="164" y="236" class="label">The answer, written from the results</text>
+  <text x="614" y="228" class="small">model output, step 2</text>
+  <text x="614" y="182" class="small">after execute()</text>
+  <line class="line" x1="136" y1="22" x2="136" y2="64"/>
+  <line class="line" x1="136" y1="22" x2="142" y2="22"/>
+  <line class="line" x1="136" y1="64" x2="142" y2="64"/>
+  <text x="128" y="40" text-anchor="end" class="small">step 1</text>
+  <text x="128" y="55" text-anchor="end" class="small">input</text>
+  <line class="line" x1="112" y1="22" x2="112" y2="184"/>
+  <line class="line" x1="112" y1="22" x2="118" y2="22"/>
+  <line class="line" x1="112" y1="184" x2="118" y2="184"/>
+  <text x="104" y="100" text-anchor="end" class="small">step 2</text>
+  <text x="104" y="115" text-anchor="end" class="small">input</text>
+  <text x="380" y="274" text-anchor="middle" class="small">every step re-sends the whole history; the toolCallId links a call to its result</text>
+</svg>
+<figcaption>The conversation <strong>grows by one message at a time</strong>. Step 1 sends only the question; the model returns a tool call. After <code>execute()</code>, the SDK appends the result and step 2 sends all three messages, so the model can write the answer. Contents abbreviated.</figcaption>
+</figure>
+
+<h2>The AI SDK <code>tool()</code> helper</h2>
+<p>In AI SDK v5 a tool is created with <code>tool({ description, inputSchema, execute })</code> and passed to <code>streamText</code> or <code>generateText</code> in a <code>tools</code> object. The object's <strong>key</strong> becomes the tool's name (that is why the project's tools are called <code>searchKnowledgeBase</code>, <code>getCurrentDate</code> and <code>calculator</code>).</p>
+<div class="table-wrap"><table>
+<tr><th>Property</th><th>What it is</th></tr>
+<tr><td><code>description</code></td><td>Plain-language explanation of what the tool does and when to use it. Read by the model.</td></tr>
+<tr><td><code>inputSchema</code></td><td>A Zod schema for the input. Converted to JSON Schema for the model, and used to validate the model's input before <code>execute</code> runs. It also gives <code>execute</code> its TypeScript types.</td></tr>
+<tr><td><code>execute</code></td><td>An <a class="term" href="glossary.html#async">async</a> function <code>(input, options) =&gt; result</code> that runs on your server. <code>options</code> includes the <code>toolCallId</code>, the conversation <code>messages</code> and an <code>abortSignal</code>. Optional: without it, the tool call is handed to the client (see below).</td></tr>
+<tr><td><code>outputSchema</code>, <code>toModelOutput</code></td><td>Optional, more advanced: describe the output type, or control exactly what the model sees from the result (for example, sending a short text version of a big object).</td></tr>
+</table></div>
+<p>The return value of <code>execute</code> can be a string (sent to the model as text) or any JSON-serialisable object (sent as JSON). The project uses both: the search tool returns a formatted string, <code>getCurrentDate</code> and <code>calculator</code> return objects.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 266" role="img" aria-label="Parts of the calculator tool: the key is its name, description and input schema are read by the model, execute runs on the server, output options are optional">
+  <rect class="box" x="10" y="20" width="390" height="36" rx="8"/>
+  <text x="24" y="43" class="mono">calculator:</text>
+  <path class="arrow" d="M430,38 H402"/>
+  <text x="438" y="42" class="label">Name the model sees (the object key)</text>
+  <rect class="box" x="10" y="66" width="390" height="36" rx="8"/>
+  <text x="24" y="89" class="mono">description: "Evaluate a math expression…"</text>
+  <path class="arrow" d="M430,84 H402"/>
+  <text x="438" y="88" class="label">Read by the model: what it does, when</text>
+  <rect class="box" x="10" y="112" width="390" height="36" rx="8"/>
+  <text x="24" y="135" class="mono">inputSchema: z.object({ expression })</text>
+  <path class="arrow" d="M430,130 H402"/>
+  <text x="438" y="134" class="label">Sent as JSON Schema; checks the input</text>
+  <rect class="box-ok" x="10" y="158" width="390" height="36" rx="8"/>
+  <text x="24" y="181" class="mono">execute: async ({ expression }) =&gt; { … }</text>
+  <path class="arrow" d="M430,176 H402"/>
+  <text x="438" y="180" class="label">Runs on your server; returns the result</text>
+  <rect class="box2" x="10" y="204" width="390" height="36" rx="8"/>
+  <text x="24" y="227" class="mono">outputSchema / toModelOutput</text>
+  <path class="arrow" d="M430,222 H402"/>
+  <text x="438" y="226" class="label">Optional: shape what the model sees back</text>
+  <text x="744" y="255" text-anchor="end" class="small">model reads: name, description, input schema</text>
+</svg>
+<figcaption>Anatomy of the project's <code>calculator</code> tool. The <strong>name, description and inputSchema are all the model knows</strong> about the tool; <code>execute</code> is ordinary server code the model never sees.</figcaption>
+</figure>
+
+<h3>Case study: the calculator tool</h3>
+<pre data-file="src/app/api/chat/route.ts" data-lang="ts" data-tag="from code/22-route.ts · lines 56–76"><code>calculator: tool({
+  description:
+    "Evaluate a math expression and return the exact result. Always use this for arithmetic instead of calculating yourself. Supports + - * / ^, parentheses, and percentages written as decimals (15% of 2000 is 0.15 * 2000).",
+  inputSchema: z.object({
+    expression: z
+      .string()
+      .describe(
+        'A math expression, for example "2000 * 0.15" or "(20 - 3) * 8"',
+      ),
+  }),
+  execute: async ({ expression }) =&gt; {
+    try {
+      return { expression, result: calculate(expression) };
+    } catch (error) {
+      return {
+        expression,
+        error: error instanceof Error ? error.message : "Invalid expression",
+      };
+    }
+  },
+}),</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>calculator: tool({</code></td><td>The key <code>calculator</code> is the name the model sees and the name of the UI part (<code>tool-calculator</code>).</td></tr>
+<tr><td>2–3</td><td><code>description: "Evaluate a math expression … (15% of 2000 is 0.15 * 2000)."</code></td><td>Says what it does, <em>when</em> to use it ("always… instead of calculating yourself", because models make arithmetic slips), the supported syntax, and how to write percentages, a case the model would otherwise get wrong.</td></tr>
+<tr><td>4–10</td><td><code>inputSchema: z.object({ expression: z.string().describe(…) })</code></td><td>One narrow input: a string. The <code>.describe()</code> gives two concrete examples, which helps the model produce the expected format.</td></tr>
+<tr><td>11</td><td><code>execute: async ({ expression }) =&gt; {</code></td><td>Runs on the server after the SDK has validated that <code>expression</code> is a string. <a class="term" href="glossary.html#destructuring">Destructuring</a> pulls the field out of the input object.</td></tr>
+<tr><td>12–13</td><td><code>try { return { expression, result: calculate(expression) }; }</code></td><td>Calls the safe evaluator from <code>src/lib/calculator.ts</code>. Returning the expression alongside the result lets the model (and the user, via the tool card) check what was actually computed.</td></tr>
+<tr><td>14–18</td><td><code>catch (error) { return { expression, error: … }; }</code></td><td>If the expression is invalid or too long, return the error as data instead of crashing. The model reads it and can fix the expression and try again.</td></tr>
+<tr><td>19–21</td><td><code>}, }, }),</code></td><td>Closes the <code>catch</code>, <code>execute</code> and <code>tool()</code> call.</td></tr>
+</table></div>
+
+<h2>Tools without <code>execute</code>: client-side tools and human approval</h2>
+<p>If you leave out <code>execute</code>, the SDK cannot run the tool on the server. Instead, the tool call is streamed to the browser and the run pauses there, waiting for a result. The browser can then supply one. This enables two useful patterns:</p>
+<ul>
+<li><strong>Client-side tools</strong>: things only the browser can do, such as reading the user's location or local time. You handle them in <code>useChat</code>'s <code>onToolCall</code> callback and send the result with <code>addToolResult</code>.</li>
+<li><strong><a class="term" href="glossary.html#human-in-the-loop">Human approval</a></strong>: before a risky action (submitting a leave request, sending an email), the model calls a tool that has no <code>execute</code>. Your UI renders the request with Approve / Deny buttons, and the user's click becomes the tool result.</li>
+</ul>
+<pre data-lang="tsx" data-tag="illustrative · high-level sketch"><code>// Server: a tool with no execute
+askForConfirmation: tool({
+  description: "Ask the user to confirm before submitting a leave request.",
+  inputSchema: z.object({ message: z.string() }),
+}),
+
+// Client: resend automatically once every tool call has a result
+const { messages, sendMessage, addToolResult } = useChat&lt;ChatMessage&gt;({
+  sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
+});
+
+// While rendering a part of type "tool-askForConfirmation" in state "input-available":
+&lt;button
+  onClick={() =&gt;
+    addToolResult({ tool: "askForConfirmation", toolCallId: part.toolCallId, output: "Approved" })
+  }
+&gt;
+  Approve
+&lt;/button&gt;</code></pre>
+<p>Here <code>lastAssistantMessageIsCompleteWithToolCalls</code> is a helper exported from <code>ai</code>. The project does not use these patterns yet; <a href="ai-10-agent-patterns.html">chapter 10</a> discusses when human-in-the-loop is worth it. The important principle: for actions with real-world side effects, a person (or code you wrote) should decide, not the model alone.</p>
+
+<h2>Multi-step runs with <code>stopWhen</code></h2>
+<p>Each model call is a <strong>step</strong>. By default <code>streamText</code> and <code>generateText</code> stop after one step, so if the model calls a tool, you would get the tool call but no answer. <code>stopWhen</code> tells the SDK when to stop looping:</p>
+<div class="table-wrap"><table>
+<tr><th>Condition</th><th>Meaning</th><th>In this project</th></tr>
+<tr><td><code>stepCountIs(n)</code></td><td>Stop after at most <code>n</code> steps.</td><td><code>stepCountIs(2)</code> in step 15 (search, then answer); <code>stepCountIs(6)</code> in step 22 (several searches, date, calculator, answer).</td></tr>
+<tr><td><code>hasToolCall("name")</code></td><td>Stop right after a specific tool is called.</td><td>Not used. Handy for a "finalAnswer" tool pattern.</td></tr>
+<tr><td>An array, e.g. <code>[stepCountIs(10), hasToolCall("finalAnswer")]</code></td><td>Stop when <em>any</em> condition is met.</td><td>Not used.</td></tr>
+</table></div>
+<p>The run also stops naturally whenever the model replies with text and no tool calls. So <code>stepCountIs(6)</code> is a <em>ceiling</em>, a safety limit on cost and loops, not a target. If the ceiling is hit while the model still wants tools, the user gets no final answer, so log it (step 22's <code>onStepFinish</code> prints each step's <code>finishReason</code>) and adjust.</p>
+<p>Two related options let you change things between steps: <code>prepareStep</code> (a function called before each step that can return a different <code>model</code>, <code>toolChoice</code>, <code>activeTools</code>, <code>system</code> or <code>messages</code>) and <code>activeTools</code> (limit which tools are available). <code>onStepFinish</code> runs after each step, which is where step 22 logs tool calls.</p>
+
+<h2><code>toolChoice</code>: who decides whether a tool is called</h2>
+<div class="table-wrap"><table>
+<tr><th>Value</th><th>Effect</th><th>When to use</th></tr>
+<tr><td><code>"auto"</code> (default)</td><td>The model decides whether to call a tool, and which.</td><td>Almost always, including this project.</td></tr>
+<tr><td><code>"required"</code></td><td>The model must call some tool.</td><td>When an answer without a tool would be wrong. Careful: if it applies to every step of a multi-step run, the model can never write a plain final answer.</td></tr>
+<tr><td><code>"none"</code></td><td>The model must not call tools.</td><td>For a step where you want only text, e.g. a final summarising step.</td></tr>
+<tr><td><code>{ type: "tool", toolName: "searchKnowledgeBase" }</code></td><td>The model must call this specific tool.</td><td>To force a search on the first step, then go back to <code>"auto"</code>.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 242" role="img" aria-label="Four toolChoice settings: auto lets the model choose, required forces some tool, none forbids tools, a specific tool forces that one">
+  <rect class="zone" x="10" y="10" width="176" height="222" rx="10"/>
+  <text x="98" y="34" text-anchor="middle" class="mono">"auto"</text>
+  <rect class="box" x="48" y="46" width="100" height="30" rx="8"/>
+  <text x="98" y="65.5" text-anchor="middle" class="label">model</text>
+  <rect class="box2" x="21" y="92" width="154" height="26" rx="13"/>
+  <text x="98" y="109.5" text-anchor="middle" class="label">searchKnowledgeBase</text>
+  <rect class="box2" x="21" y="126" width="154" height="26" rx="13"/>
+  <text x="98" y="143.5" text-anchor="middle" class="label">getCurrentDate</text>
+  <rect class="box2" x="21" y="160" width="154" height="26" rx="13"/>
+  <text x="98" y="177.5" text-anchor="middle" class="label">calculator</text>
+  <text x="98" y="214" text-anchor="middle" class="small">may call any, or none</text>
+  <rect class="zone" x="196" y="10" width="176" height="222" rx="10"/>
+  <text x="284" y="34" text-anchor="middle" class="mono">"required"</text>
+  <rect class="box" x="234" y="46" width="100" height="30" rx="8"/>
+  <text x="284" y="65.5" text-anchor="middle" class="label">model</text>
+  <rect class="box-ok" x="207" y="92" width="154" height="26" rx="13"/>
+  <text x="284" y="109.5" text-anchor="middle" class="label">searchKnowledgeBase</text>
+  <rect class="box-ok" x="207" y="126" width="154" height="26" rx="13"/>
+  <text x="284" y="143.5" text-anchor="middle" class="label">getCurrentDate</text>
+  <rect class="box-ok" x="207" y="160" width="154" height="26" rx="13"/>
+  <text x="284" y="177.5" text-anchor="middle" class="label">calculator</text>
+  <text x="284" y="214" text-anchor="middle" class="small">must call at least one</text>
+  <rect class="zone" x="382" y="10" width="176" height="222" rx="10"/>
+  <text x="470" y="34" text-anchor="middle" class="mono">"none"</text>
+  <rect class="box" x="420" y="46" width="100" height="30" rx="8"/>
+  <text x="470" y="65.5" text-anchor="middle" class="label">model</text>
+  <rect class="box-bad" x="393" y="92" width="154" height="26" rx="13"/>
+  <text x="470" y="109.5" text-anchor="middle" class="label">searchKnowledgeBase</text>
+  <rect class="box-bad" x="393" y="126" width="154" height="26" rx="13"/>
+  <text x="470" y="143.5" text-anchor="middle" class="label">getCurrentDate</text>
+  <rect class="box-bad" x="393" y="160" width="154" height="26" rx="13"/>
+  <text x="470" y="177.5" text-anchor="middle" class="label">calculator</text>
+  <text x="470" y="214" text-anchor="middle" class="small">text only, no tools</text>
+  <rect class="zone" x="568" y="10" width="176" height="222" rx="10"/>
+  <text x="656" y="34" text-anchor="middle" class="mono">{ type: "tool", … }</text>
+  <rect class="box" x="606" y="46" width="100" height="30" rx="8"/>
+  <text x="656" y="65.5" text-anchor="middle" class="label">model</text>
+  <rect class="box-ok" x="579" y="92" width="154" height="26" rx="13"/>
+  <text x="656" y="109.5" text-anchor="middle" class="label">searchKnowledgeBase</text>
+  <rect class="box2" x="579" y="126" width="154" height="26" rx="13"/>
+  <text x="656" y="143.5" text-anchor="middle" class="label">getCurrentDate</text>
+  <rect class="box2" x="579" y="160" width="154" height="26" rx="13"/>
+  <text x="656" y="177.5" text-anchor="middle" class="label">calculator</text>
+  <text x="656" y="214" text-anchor="middle" class="small">must call this one</text>
+</svg>
+<figcaption>The same three tools under each <code>toolChoice</code>. Green = a call is forced (for <code>"required"</code>, any one of the green tools), red = not allowed, neutral = the model decides. <strong>This project uses the default, <code>"auto"</code>.</strong></figcaption>
+</figure>
+<p>A safe way to "always search first" is to force it only on step 0:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>const result = streamText({
+  model: openai("gpt-5-mini"),
+  messages: convertToModelMessages(messages),
+  tools,
+  stopWhen: stepCountIs(6),
+  prepareStep: ({ stepNumber }) =&gt;
+    stepNumber === 0
+      ? { toolChoice: { type: "tool", toolName: "searchKnowledgeBase" } }
+      : undefined,
+});</code></pre>
+<p>Returning <code>undefined</code> from <code>prepareStep</code> keeps the normal settings for that step. The trade-off: even "hi" now triggers a search. Prompt instructions (<code>"Always search before answering…"</code>) are softer but cheaper.</p>
+
+<h2>Parallel tool calls</h2>
+<p>A model may request <strong>several tool calls in one step</strong>. Ask "How do vacation and sick leave differ?" and it may call <code>searchKnowledgeBase</code> twice at once, once per topic. The AI SDK runs all the <code>execute</code> functions of a step concurrently (with <code>Promise.all</code>) and sends all results back together in the next step. All of this counts as one step for <code>stopWhen</code>.</p>
+<p>Consequences for you:</p>
+<ul>
+<li>Tools that may run at the same time should not interfere with each other (for example, two calls updating the same database row).</li>
+<li>Each result is matched to its call by <code>toolCallId</code>, so the order doesn't matter.</li>
+<li>Some providers let you turn parallel calls off (OpenAI has a <code>parallelToolCalls</code> provider option), which can help when tools must run in sequence.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 258" role="img" aria-label="Timeline: sequential tool calls need three model steps; two parallel calls in one step run together and need only two">
+  <text x="10" y="24" class="label">Sequential: one tool call per step</text>
+  <rect class="box2" x="10" y="36" width="110" height="34" rx="6"/>
+  <text x="65" y="57.5" text-anchor="middle" class="label">model</text>
+  <rect class="box-ok" x="124" y="36" width="130" height="34" rx="6"/>
+  <text x="189" y="57.5" text-anchor="middle" class="label">search: vacation</text>
+  <rect class="box2" x="258" y="36" width="110" height="34" rx="6"/>
+  <text x="313" y="57.5" text-anchor="middle" class="label">model</text>
+  <rect class="box-ok" x="372" y="36" width="140" height="34" rx="6"/>
+  <text x="442" y="57.5" text-anchor="middle" class="label">search: sick leave</text>
+  <rect class="box2" x="516" y="36" width="110" height="34" rx="6"/>
+  <text x="571" y="57.5" text-anchor="middle" class="label">model → answer</text>
+  <text x="636" y="57" class="small">3 steps</text>
+  <text x="10" y="110" class="label">Parallel: two tool calls in one step</text>
+  <rect class="box2" x="10" y="120" width="110" height="66" rx="6"/>
+  <text x="65" y="157.5" text-anchor="middle" class="label">model</text>
+  <rect class="box-ok" x="124" y="120" width="140" height="30" rx="6"/>
+  <text x="194" y="139.5" text-anchor="middle" class="label">search: vacation</text>
+  <rect class="box-ok" x="124" y="156" width="140" height="30" rx="6"/>
+  <text x="194" y="175.5" text-anchor="middle" class="label">search: sick leave</text>
+  <rect class="box2" x="268" y="120" width="110" height="66" rx="6"/>
+  <text x="323" y="157.5" text-anchor="middle" class="label">model → answer</text>
+  <text x="194" y="204" text-anchor="middle" class="small">run together (Promise.all)</text>
+  <text x="390" y="157" class="small">2 steps, less waiting</text>
+  <path class="arrow" d="M10,232 H740"/>
+  <text x="740" y="250" text-anchor="end" class="small">time</text>
+</svg>
+<figcaption>"How do vacation and sick leave differ?" When the model asks for <strong>both searches in one step</strong>, the SDK runs them at the same time and the run needs one model call fewer. Bar lengths are illustrative, not measured.</figcaption>
+</figure>
+
+<h2>Errors inside tools: return or throw?</h2>
+<p>Things go wrong: the database is unreachable, the expression is invalid, the search finds nothing. You have two options.</p>
+<p><strong>Return an error message as the result</strong> (what this project does). The search tool returns <code>"Error searching the knowledge base."</code> and <code>"No relevant information found in the knowledge base."</code>; the calculator returns <code>{ expression, error }</code>. The model reads the message like any result and can react: rephrase the search, fix the expression, or tell the user honestly. The UI shows the part as <code>output-available</code>, because from the SDK's point of view the tool succeeded.</p>
+<p><strong>Throw an error.</strong> The AI SDK catches it and records a <em>tool error</em>. In a multi-step run, the error's message is sent to the model as the tool result in the next step, so it can still react, and in the UI the part ends in the <code>output-error</code> state with an <code>errorText</code>. Invalid input from the model (wrong types) and calls to unknown tool names also end up as tool errors that the model sees and can correct.</p>
+
+<div class="callout warn"><strong>Watch what your error messages reveal.</strong> In the AI SDK version this project uses, the default for <code>toUIMessageStreamResponse()</code> sends a thrown error's <code>message</code> to the browser as <code>errorText</code>. If an error message contains a connection string, SQL or a stack detail, the user may see it. Either catch errors inside <code>execute</code> and return a safe message (as the project does, while logging details with <code>console.error</code>), or pass an <code>onError</code> function to <code>toUIMessageStreamResponse</code> that returns a generic message.</div>
+
+<p>Rule of thumb: <strong>return</strong> expected failures the model can do something about ("nothing found", "invalid expression"); <strong>throw</strong> (or let errors bubble) for genuine bugs and outages, with a safe message.</p>
+
+<h2>Designing good tools</h2>
+<div class="table-wrap"><table>
+<tr><th>Principle</th><th>Why</th><th>Example</th></tr>
+<tr><td><strong>Clear, specific names</strong></td><td>The name is the first hint. Verb + object reads best.</td><td><code>searchKnowledgeBase</code>, <code>getCurrentDate</code>, not <code>tool1</code> or <code>helper</code>.</td></tr>
+<tr><td><strong>Descriptions that say when</strong></td><td>The model picks tools by description.</td><td><code>getCurrentDate</code>: "Use it whenever a question depends on the current date…"</td></tr>
+<tr><td><strong>Narrow inputs</strong></td><td>Fewer, simpler fields mean fewer mistakes and less room for abuse.</td><td>One <code>expression</code> string, not "any JavaScript". Use <code>z.enum</code> for fixed choices and limits like length.</td></tr>
+<tr><td><strong>One job per tool</strong></td><td>A do-everything tool with a <code>mode</code> field confuses the model.</td><td>Separate <code>getCurrentDate</code> and <code>calculator</code> instead of a "utilities" tool.</td></tr>
+<tr><td><strong>Concise results</strong></td><td>Results become input tokens for the next step: big results cost money, add latency and bury the useful part.</td><td>The search tool returns the top 3 chunks, numbered, not whole documents or raw database rows with embeddings.</td></tr>
+<tr><td><strong>Idempotent where possible</strong></td><td>"Idempotent" means calling it twice has the same effect as once. Models sometimes repeat calls.</td><td>Search, date and calculator are naturally safe to repeat. A "create ticket" tool should detect duplicates.</td></tr>
+<tr><td><strong>Safe side effects</strong></td><td>Reading is low risk; writing, sending and deleting are not.</td><td>Require human approval (a tool without <code>execute</code>) before irreversible actions.</td></tr>
+<tr><td><strong>Helpful errors</strong></td><td>The model can only recover if it knows what went wrong.</td><td><code>{ expression, error: "Expression is too long" }</code></td></tr>
+<tr><td><strong>Few tools</strong></td><td>Every tool adds tokens and choices. Many similar tools increase wrong picks.</td><td>Start small, add tools when tests show a need; use <code>activeTools</code> to expose only relevant ones.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 246" role="img" aria-label="Comparison: a vague helper tool with any input and raw results versus the project's narrow calculator tool">
+  <rect class="box-bad" x="10" y="10" width="360" height="226" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Vague tool (made-up example)</text>
+  <rect class="box2" x="22" y="52" width="336" height="28" rx="6"/>
+  <text x="32" y="70" class="small">name</text>
+  <text x="122" y="70" class="mono">helper</text>
+  <rect class="box2" x="22" y="88" width="336" height="28" rx="6"/>
+  <text x="32" y="106" class="small">description</text>
+  <text x="122" y="106" class="mono">"Does useful things"</text>
+  <rect class="box2" x="22" y="124" width="336" height="28" rx="6"/>
+  <text x="32" y="142" class="small">input</text>
+  <text x="122" y="142" class="mono">{ mode, code } (any JS)</text>
+  <rect class="box2" x="22" y="160" width="336" height="28" rx="6"/>
+  <text x="32" y="178" class="small">result</text>
+  <text x="122" y="178" class="mono">raw rows + embeddings</text>
+  <rect class="box2" x="22" y="196" width="336" height="28" rx="6"/>
+  <text x="32" y="214" class="small">side effects</text>
+  <text x="122" y="214" class="mono">anything</text>
+  <rect class="box-ok" x="390" y="10" width="360" height="226" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">The project's calculator</text>
+  <rect class="box2" x="402" y="52" width="336" height="28" rx="6"/>
+  <text x="412" y="70" class="small">name</text>
+  <text x="502" y="70" class="mono">calculator</text>
+  <rect class="box2" x="402" y="88" width="336" height="28" rx="6"/>
+  <text x="412" y="106" class="small">description</text>
+  <text x="502" y="106" class="mono">what + when + syntax</text>
+  <rect class="box2" x="402" y="124" width="336" height="28" rx="6"/>
+  <text x="412" y="142" class="small">input</text>
+  <text x="502" y="142" class="mono">{ expression } ≤ 200 chars</text>
+  <rect class="box2" x="402" y="160" width="336" height="28" rx="6"/>
+  <text x="412" y="178" class="small">result</text>
+  <text x="502" y="178" class="mono">{ expression, result }</text>
+  <rect class="box2" x="402" y="196" width="336" height="28" rx="6"/>
+  <text x="412" y="214" class="small">side effects</text>
+  <text x="502" y="214" class="mono">none (locked mathjs)</text>
+</svg>
+<figcaption>Same questions, two designs. The made-up <code>helper</code> leaves the model guessing and accepts anything; the project's <code>calculator</code> has a <strong>clear name, a 'when to use' description, one narrow input and a small result</strong>.</figcaption>
+</figure>
+
+<h2>Security of tools</h2>
+<p>A tool is code that runs on your server because a model asked. The model's request can be influenced by the user and by any text the model has read, including uploaded documents (<a class="term" href="glossary.html#prompt-injection">prompt injection</a>). So treat every tool input as <strong>untrusted user input</strong>.</p>
+<ul>
+<li><strong>Never let the model run arbitrary code.</strong> The tempting shortcut for a calculator is JavaScript's <code>eval(expression)</code>. That would let a crafted "expression" run any code on your server. The project instead uses <code>src/lib/calculator.ts</code>, a private <code>mathjs</code> instance with risky functions (<code>import</code>, <code>createUnit</code>, <code>evaluate</code>, <code>parse</code>, <code>simplify</code>, <code>derivative</code>) disabled, following the mathjs security guidance for untrusted input.</li>
+<li><strong>Validate inputs.</strong> Zod checks types before <code>execute</code> runs; add business limits in code too. <code>calculate()</code> rejects expressions longer than 200 characters (<code>throw new Error("Expression is too long")</code>), which caps how much work a single call can cause.</li>
+<li><strong>Enforce permissions in code, not in the prompt.</strong> If a tool reads or changes per-user data, get the user's identity from your auth system (Clerk's <code>auth()</code> on the server), never from a model-supplied field like <code>userId</code>. Upload permission in <a href="16-rbac.html">step 16</a> is enforced the same way: in code.</li>
+<li><strong>Least privilege.</strong> Give the database user behind a read-only tool read-only rights. Don't expose a generic "run SQL" tool.</li>
+<li><strong>Bound the loop.</strong> <code>stopWhen: stepCountIs(n)</code> limits how many tool calls one request can trigger.</li>
+<li><strong>Treat tool <em>results</em> as untrusted too.</strong> Search results contain document text that might include injected instructions. <a href="ai-13-security-safety.html">Chapter 13</a> covers defences.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Untrusted text steers the model, which only proposes a tool call; server checks for shape, limits and identity decide whether execute runs or the call is refused">
+  <rect class="box-warn" x="10" y="30" width="130" height="44" rx="8"/>
+  <text x="75" y="56.5" text-anchor="middle" class="label">user message</text>
+  <rect class="box-warn" x="10" y="90" width="130" height="44" rx="8"/>
+  <text x="75" y="116.5" text-anchor="middle" class="label">document text</text>
+  <rect class="box2" x="170" y="60" width="100" height="44" rx="8"/>
+  <text x="220" y="86.5" text-anchor="middle" class="label">model</text>
+  <path class="arrow" d="M140,52 L168,72"/>
+  <path class="arrow" d="M140,112 L168,94"/>
+  <rect class="box-info" x="300" y="56" width="120" height="52" rx="8"/>
+  <text x="360" y="79.0" text-anchor="middle">tool call</text>
+  <text x="360" y="95.0" text-anchor="middle" class="small">a proposal</text>
+  <path class="arrow" d="M270,82 H298"/>
+  <rect class="zone" x="440" y="14" width="310" height="176" rx="10"/>
+  <text x="595" y="32" text-anchor="middle" class="small">your server decides</text>
+  <rect class="box" x="456" y="42" width="150" height="32" rx="6"/>
+  <text x="531" y="62.5" text-anchor="middle" class="label">Zod: shape ok?</text>
+  <rect class="box" x="456" y="86" width="150" height="32" rx="6"/>
+  <text x="531" y="106.5" text-anchor="middle" class="label">limits: ≤ 200 chars</text>
+  <path class="arrow-ok" d="M531,74 V84"/>
+  <rect class="box" x="456" y="130" width="150" height="32" rx="6"/>
+  <text x="531" y="150.5" text-anchor="middle" class="label">auth(): who is it?</text>
+  <path class="arrow-ok" d="M531,118 V128"/>
+  <path class="arrow" d="M420,82 L454,60"/>
+  <rect class="box-bad" x="626" y="42" width="114" height="56" rx="8"/>
+  <text x="683" y="67.0" text-anchor="middle">refuse</text>
+  <text x="683" y="83.0" text-anchor="middle" class="small">return an error</text>
+  <path class="arrow-bad" d="M606,58 H624"/>
+  <path class="arrow-bad" d="M606,102 L624,88"/>
+  <rect class="box-ok" x="626" y="128" width="114" height="32" rx="6"/>
+  <text x="683" y="148.5" text-anchor="middle" class="label">execute()</text>
+  <path class="arrow-ok" d="M606,146 H624"/>
+  <path class="arrow" d="M683,160 V218 H220 V106"/>
+  <text x="450" y="236" text-anchor="middle" class="small">the result goes back to the model: treat it as untrusted too</text>
+</svg>
+<figcaption><strong>The model proposes, your code decides.</strong> Anything the model read can influence its tool call, so the server checks shape (Zod), business limits (like the calculator's 200-character cap) and identity (from <code>auth()</code>, never from the model) before <code>execute()</code> runs.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to <code>eval</code>? Why it's dangerous</summary>
+<p><code>eval("2 + 2")</code> runs a string as JavaScript code and returns <code>4</code>. That seems perfect for a calculator, but it runs <em>any</em> code, for example code that reads your environment variables (including your <a class="term" href="glossary.html#api-key">API keys</a>) or deletes files. If the string comes from a model, which may be steered by a user or a document, you have handed control of your server to whoever writes the most persuasive text. A dedicated expression parser that only understands math, with dangerous features switched off, is the safe alternative.</p>
+</details>
+
+<h2>How tool calls appear in <code>useChat</code> messages</h2>
+<p>On the browser side, each assistant message from <code>useChat</code> has a <code>parts</code> array. Text arrives as parts with <code>type: "text"</code>; each tool call arrives as a part whose type is <strong><code>tool-</code> plus the tool's name</strong>: <code>tool-searchKnowledgeBase</code>, <code>tool-getCurrentDate</code>, <code>tool-calculator</code>. Because the route exports <code>ChatMessage = UIMessage&lt;never, UIDataTypes, ChatTools&gt;</code> (from <code>InferUITools&lt;typeof tools&gt;</code>), TypeScript knows each tool's <code>input</code> and <code>output</code> types.</p>
+<p>A tool part moves through these <strong>states</strong>:</p>
+<div class="table-wrap"><table>
+<tr><th><code>state</code></th><th>Meaning</th><th>Fields available</th></tr>
+<tr><td><code>input-streaming</code></td><td>The model is still writing the tool's input.</td><td><code>input</code> may be partial or undefined.</td></tr>
+<tr><td><code>input-available</code></td><td>Input is complete; the tool is running (or, without <code>execute</code>, waiting for the client).</td><td><code>input</code></td></tr>
+<tr><td><code>output-available</code></td><td>The tool finished and returned a result.</td><td><code>input</code>, <code>output</code></td></tr>
+<tr><td><code>output-error</code></td><td>The tool threw an error, or the call could not be completed.</td><td><code>input</code> (may be undefined), <code>errorText</code></td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="State machine of a tool part: input-streaming, then input-available, then output-available or output-error; without execute it waits for addToolResult">
+  <rect class="box2" x="10" y="90" width="150" height="50" rx="8"/>
+  <text x="85" y="112.0" text-anchor="middle" class="mono">input-streaming</text>
+  <text x="85" y="128.0" text-anchor="middle" class="small">model writing input</text>
+  <rect class="box" x="200" y="90" width="150" height="50" rx="8"/>
+  <text x="275" y="112.0" text-anchor="middle" class="mono">input-available</text>
+  <text x="275" y="128.0" text-anchor="middle" class="small">execute() running</text>
+  <rect class="box-bad" x="420" y="10" width="160" height="50" rx="8"/>
+  <text x="500" y="32.0" text-anchor="middle" class="mono">output-error</text>
+  <text x="500" y="48.0" text-anchor="middle" class="small">errorText set</text>
+  <rect class="box-ok" x="420" y="90" width="160" height="50" rx="8"/>
+  <text x="500" y="112.0" text-anchor="middle" class="mono">output-available</text>
+  <text x="500" y="128.0" text-anchor="middle" class="small">output set</text>
+  <rect class="box2" x="200" y="170" width="150" height="50" rx="8"/>
+  <text x="275" y="192.0" text-anchor="middle" class="label">no execute?</text>
+  <text x="275" y="208.0" text-anchor="middle" class="small">waits for addToolResult</text>
+  <path class="arrow" d="M160,115 H198"/>
+  <path class="arrow-ok" d="M350,115 H418"/>
+  <path class="arrow-bad" d="M350,100 L418,42"/>
+  <path class="line dashed" d="M275,140 V168"/>
+  <path class="arrow dashed" d="M350,195 L418,132"/>
+  <text x="275" y="82" text-anchor="middle" class="small">badge: “Running”</text>
+  <text x="594" y="39" class="small">badge: “Error”</text>
+  <text x="594" y="119" class="small">badge: “Completed”</text>
+  <text x="594" y="200" class="small">every part also has</text>
+  <text x="594" y="215" class="small">a toolCallId</text>
+</svg>
+<figcaption>How one <code>tool-NAME</code> part changes while you watch. <code>ToolHeader</code> turns the state into a badge. The dashed path only happens for tools <strong>without</strong> <code>execute</code> (client-side tools, approval).</figcaption>
+</figure>
+<p>Every part also has a <code>toolCallId</code>. <a href="23-show-agent-steps.html">Step 23</a> renders these parts with the AI Elements <code>Tool</code> components:</p>
+<pre data-file="src/app/chat/page.tsx" data-lang="tsx" data-tag="from code/23-chat-page.tsx · lines 123–137"><code>case "tool-searchKnowledgeBase":
+case "tool-getCurrentDate":
+case "tool-calculator":
+  return (
+    &lt;Tool key={`${message.id}-${i}`}&gt;
+      &lt;ToolHeader type={part.type} state={part.state} /&gt;
+      &lt;ToolContent&gt;
+        &lt;ToolInput input={part.input} /&gt;
+        &lt;ToolOutput
+          output={part.output}
+          errorText={part.errorText}
+        /&gt;
+      &lt;/ToolContent&gt;
+    &lt;/Tool&gt;
+  );</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–3</td><td><code>case "tool-searchKnowledgeBase": case "tool-getCurrentDate": case "tool-calculator":</code></td><td>Three <code>case</code> labels share one body: all tool parts are rendered the same way. The part type names follow the <code>tool-NAME</code> rule.</td></tr>
+<tr><td>4–5</td><td><code>return ( &lt;Tool key={`${message.id}-${i}`}&gt;</code></td><td>A collapsible card. The <a class="term" href="glossary.html#key">key</a> combines the message ID and part index so React can track it.</td></tr>
+<tr><td>6</td><td><code>&lt;ToolHeader type={part.type} state={part.state} /&gt;</code></td><td>Shows the tool name and a status badge based on the four states above: “Pending” (input-streaming), “Running” (input-available), “Completed” (output-available) and “Error” (output-error).</td></tr>
+<tr><td>7–8</td><td><code>&lt;ToolContent&gt; &lt;ToolInput input={part.input} /&gt;</code></td><td>The card body, starting with the input the model chose, e.g. the search query. Great for debugging prompts.</td></tr>
+<tr><td>9–12</td><td><code>&lt;ToolOutput output={part.output} errorText={part.errorText} /&gt;</code></td><td>Shows the result, or the error text if the part is in <code>output-error</code>. Only one of the two is set at a time.</td></tr>
+<tr><td>13–15</td><td><code>&lt;/ToolContent&gt; &lt;/Tool&gt; );</code></td><td>Closes the card and the returned JSX.</td></tr>
+</table></div>
+<p>Tools that are not known when you write the code (for example tools discovered at runtime from an MCP server, <a href="ai-11-mcp.html">chapter 11</a>) appear as parts with type <code>dynamic-tool</code> and a <code>toolName</code> field instead.</p>
+
+<div class="callout"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"The model runs my function."</em> It only asks. Your server runs it, after validation, and you can refuse.</li>
+<li><em>"If I describe a tool, the model will always use it."</em> With <code>toolChoice: "auto"</code> the model decides. Improve descriptions and the system prompt, or force it with <code>toolChoice</code>/<code>prepareStep</code>.</li>
+<li><em>"More steps means smarter answers."</em> More steps means more cost and latency. Raise <code>stepCountIs</code> only when the task needs it.</li>
+<li><em>"Zod validation makes a tool safe."</em> It checks shape, not intent. A valid string can still be malicious; the tool's own logic must be safe.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Tool calling: you send tool definitions (JSON Schema), the model returns a tool call, your code executes it, the result goes back, the model continues.</li>
+<li><code>tool({ description, inputSchema, execute })</code>; the key in the <code>tools</code> object is the tool name. Descriptions are prompts.</li>
+<li>Tools without <code>execute</code> pause for the client: use them for browser-only actions and human approval (<code>addToolResult</code>).</li>
+<li><code>stopWhen</code> (<code>stepCountIs</code>, <code>hasToolCall</code>) bounds the loop; <code>toolChoice</code> and <code>prepareStep</code> control when tools are called.</li>
+<li>Several tool calls can happen in one step; the SDK runs them concurrently.</li>
+<li>Return expected failures as messages; thrown errors become <code>output-error</code> parts and their message can reach the browser.</li>
+<li>Good tools: clear names, "when to use" descriptions, narrow inputs, concise results, idempotent, safe side effects.</li>
+<li>Never let the model run arbitrary code; validate inputs and enforce permissions in code, as the project's calculator does.</li>
+<li>In the UI, tool calls are <code>tool-NAME</code> parts that move through <code>input-streaming</code> → <code>input-available</code> → <code>output-available</code> or <code>output-error</code>.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://ai-sdk.dev/docs/ai-sdk-core/tools-and-tool-calling">AI SDK: Tools and tool calling</a></li>
+<li><a href="https://ai-sdk.dev/docs/ai-sdk-ui/chatbot-tool-usage">AI SDK UI: Chatbot tool usage</a></li>
+<li><a href="https://ai-sdk.dev/docs/agents/loop-control">AI SDK: Loop control (stopWhen, prepareStep)</a></li>
+<li><a href="https://platform.openai.com/docs/guides/function-calling">OpenAI: Function calling</a></li>
+<li><a href="https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview">Anthropic: Tool use overview</a></li>
+<li><a href="https://mathjs.org/docs/expressions/security.html">mathjs: Security of expression evaluation</a></li>
+<li><a href="https://owasp.org/www-project-top-10-for-large-language-model-applications/">OWASP Top 10 for LLM Applications</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="ai-05-structured-output.html"><small>← Chapter 5</small>Structured Output</a>
+<a class="next" href="ai-07-embeddings-vector-databases.html"><small>Chapter 7 →</small>Embeddings &amp; Vector Databases</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Data Flows Through the App</title>
+<meta name="description" content="From a dropdown click to a rendered card: state, query keys, fetch, Zod, the cache, Suspense and re-renders.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Concept</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concept · read with steps 5–19</div>
+  <h1>How Data Flows Through the App</h1>
+  <p class="lead">From a dropdown click to a rendered card: state, query keys, fetch, Zod, the cache, Suspense and re-renders.</p>
+</section>
+<p>You pick "London" in the dropdown, and a moment later every card shows London's weather. Between those two moments a lot happens: a piece of <a class="term" href="glossary.html#state">state</a> changes, React re-renders, a <a class="term" href="glossary.html#geocoding">geocoding</a> request turns the name into coordinates, four cards ask <a class="term" href="glossary.html#tanstack-query">TanStack Query</a> for the same data, a <a class="term" href="glossary.html#fetch">fetch</a> goes out, <a class="term" href="glossary.html#zod">Zod</a> checks the answer, and <a class="term" href="glossary.html#suspense">Suspense</a> swaps skeletons for real cards. This page follows that one click from start to finish.</p>
+<p>Read it alongside <a href="06-usequery.html">step 06</a> (useQuery), <a href="14-geocoding.html">step 14</a> (geocoding) and <a href="19-skeletons-suspense.html">step 19</a> (Suspense). Code references are to the repo's final files (<code>src/App.tsx</code>, <code>src/api.ts</code>, the cards in <code>src/components/cards/</code>). The request orders and error messages quoted here were recorded in a real browser running the production build with test data (see <a href="index.html">How the code was verified</a>). Where something is reasoned from the code instead, the text says so.</p>
+
+<h2>The cast: who holds what</h2>
+<p>Only one component owns the data that drives everything: <code>App</code>. It keeps four pieces of state with <a class="term" href="glossary.html#usestate"><code>useState</code></a>, and passes what each child needs down as <a class="term" href="glossary.html#props">props</a>. The children never talk to each other. When the dropdown wants a new city, it calls the <code>setLocation</code> function it was handed.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 352" role="img" aria-label="Component tree: main.tsx wraps App in QueryClientProvider and ThemeProvider. App holds location, coordinates and mapType, runs the geocode query and derives coords. It passes location and setLocation to LocationDropdown, coords, onMapClick and mapType to Map, coords to SidePanel, and coords to the four weather cards, each wrapped in Suspense">
+  <rect class="box2" x="230" y="10" width="300" height="44" rx="8"/>
+  <text x="380" y="29" text-anchor="middle" class="title">main.tsx</text>
+  <text x="380" y="46" text-anchor="middle" class="small">QueryClientProvider › ThemeProvider › App</text>
+  <rect class="box-solid" x="200" y="70" width="360" height="62" rx="8"/>
+  <text x="380" y="94" text-anchor="middle" class="on-solid">App: location · coordinates · mapType</text>
+  <text x="380" y="116" text-anchor="middle" class="on-solid">useQuery geocode → derives coords</text>
+  <path class="arrow" d="M380,54 V68"/>
+  <path class="line" d="M380,132 V150 H635"/>
+  <path class="line" d="M380,150 H125"/>
+  <path class="arrow" d="M125,150 V166"/>
+  <path class="arrow" d="M380,150 V166"/>
+  <path class="arrow" d="M635,150 V166"/>
+  <rect class="box" x="10" y="168" width="230" height="48" rx="8"/>
+  <text x="125" y="188" text-anchor="middle" class="mono">LocationDropdown</text>
+  <text x="125" y="206" text-anchor="middle" class="small">props: location, setLocation</text>
+  <rect class="box" x="265" y="168" width="230" height="48" rx="8"/>
+  <text x="380" y="188" text-anchor="middle" class="mono">Map</text>
+  <text x="380" y="206" text-anchor="middle" class="small">props: coords, onMapClick, mapType</text>
+  <rect class="box" x="520" y="168" width="230" height="48" rx="8"/>
+  <text x="635" y="188" text-anchor="middle" class="mono">SidePanel</text>
+  <text x="635" y="206" text-anchor="middle" class="small">coords → key ["pollution", coords]</text>
+  <path class="arrow-accent" d="M60,168 V101 H198"/>
+  <text x="66" y="140" class="small accent">setLocation</text>
+  <path class="arrow" d="M252,150 V240"/>
+  <text x="258" y="236" class="small">coords</text>
+  <rect class="zone" x="10" y="244" width="740" height="98" rx="10"/>
+  <text x="380" y="264" text-anchor="middle" class="label">four weather cards, each inside its own &lt;Suspense fallback={skeleton}&gt;</text>
+  <rect class="box" x="22" y="276" width="172" height="52" rx="8"/>
+  <text x="108" y="297" text-anchor="middle" class="mono">CurrentWeather</text>
+  <text x="108" y="316" text-anchor="middle" class="small">["weather", coords]</text>
+  <rect class="box" x="202" y="276" width="172" height="52" rx="8"/>
+  <text x="288" y="297" text-anchor="middle" class="mono">HourlyForecast</text>
+  <text x="288" y="316" text-anchor="middle" class="small">["weather", coords]</text>
+  <rect class="box" x="382" y="276" width="172" height="52" rx="8"/>
+  <text x="468" y="297" text-anchor="middle" class="mono">DailyForecast</text>
+  <text x="468" y="316" text-anchor="middle" class="small">["weather", coords]</text>
+  <rect class="box" x="562" y="276" width="172" height="52" rx="8"/>
+  <text x="648" y="297" text-anchor="middle" class="mono">AdditionalInfo</text>
+  <text x="648" y="316" text-anchor="middle" class="small">["weather", coords]</text>
+</svg>
+<figcaption>Data flows down as props (grey arrows); requests to change it flow up through functions (accent arrow). <code>Map</code> works the same way: a click calls <code>onMapClick(lat, lon)</code>, which sets <code>coordinates</code> and <code>location = "custom"</code> in <code>App</code>. <strong>One owner, many readers: every card receives the same <code>coords</code>.</strong></figcaption>
+</figure>
+
+<figure class="shot">
+<img src="img/app-as-committed-dark.webp" alt="The repo's dashboard in dark mode: Location Tokyo and Map Type clouds at the top, a map with a broken marker image, the Current Weather, Hourly Forecast, Daily Forecast and Additional Weather Info cards, and the Air Pollution side panel on the right" width="1200" height="840" loading="lazy">
+<figcaption>The repo app as committed, after the data has arrived. Every number on screen came through the path traced on this page. Test data, not real weather; base map tiles were blocked in the test (the broken marker is a separate bug, fixed in <a href="25-fix-the-bugs.html">step 25</a>).</figcaption>
+</figure>
+
+<h2>The whole journey at a glance</h2>
+<p>Here is the click on "London", message by message. Time flows down. The numbers match the stops described in the sections below.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 402" role="img" aria-label="Sequence diagram of picking London: you pick London, App asks the cache for geocode London, the cache fetches the geocoding API, the answer goes back to App, App passes the new coords to the cards, the cards ask the cache for weather at those coords, the cache fetches One Call, the JSON is parsed by Zod, and the cards render">
+  <rect class="box2" x="10" y="10" width="120" height="34" rx="8"/>
+  <text x="70" y="32" text-anchor="middle" class="title">You</text>
+  <rect class="box-solid" x="160" y="10" width="120" height="34" rx="8"/>
+  <text x="220" y="32" text-anchor="middle" class="on-solid">App</text>
+  <rect class="box" x="310" y="10" width="120" height="34" rx="8"/>
+  <text x="370" y="32" text-anchor="middle" class="title">Cards</text>
+  <rect class="box-info" x="470" y="10" width="120" height="34" rx="8"/>
+  <text x="530" y="32" text-anchor="middle" class="title">Query cache</text>
+  <rect class="box2" x="630" y="10" width="120" height="34" rx="8"/>
+  <text x="690" y="32" text-anchor="middle" class="title">OpenWeather</text>
+  <path class="line dashed" d="M70,44 V392"/>
+  <path class="line dashed" d="M220,44 V392"/>
+  <path class="line dashed" d="M370,44 V392"/>
+  <path class="line dashed" d="M530,44 V392"/>
+  <path class="line dashed" d="M690,44 V392"/>
+  <text x="145" y="64" text-anchor="middle" class="label">1 · pick London</text>
+  <path class="arrow-accent" d="M70,72 H217"/>
+  <text x="230" y="98" class="label">2 · useQuery ["geocode", "London"]</text>
+  <path class="arrow" d="M220,106 H527"/>
+  <text x="610" y="132" text-anchor="middle" class="small">3 · GET /geo/1.0/direct</text>
+  <path class="arrow" d="M530,140 H687"/>
+  <text x="610" y="166" text-anchor="middle" class="small">4 · [{ name, lat, lon }]</text>
+  <path class="arrow" d="M690,174 H533"/>
+  <text x="230" y="200" class="label">5 · geocodeData → App re-renders</text>
+  <path class="arrow" d="M530,208 H223"/>
+  <text x="230" y="234" class="label">6 · coords prop</text>
+  <path class="arrow" d="M220,242 H367"/>
+  <text x="450" y="268" text-anchor="middle" class="small">7 · ["weather", coords]?</text>
+  <path class="arrow" d="M370,276 H527"/>
+  <text x="610" y="302" text-anchor="middle" class="small">8 · GET /data/3.0/onecall</text>
+  <path class="arrow" d="M530,310 H687"/>
+  <text x="610" y="336" text-anchor="middle" class="small">9 · JSON → Zod parse</text>
+  <path class="arrow" d="M690,344 H533"/>
+  <text x="450" y="370" text-anchor="middle" class="label">10 · data: cards render</text>
+  <path class="arrow-ok" d="M530,378 H373"/>
+</svg>
+<figcaption>One click, ten messages. Between 7 and 10 the cards have no data yet, so they <em>suspend</em> and their skeletons show. The side panel does the same as 7–10 with the Air Pollution API in parallel. This is the order after the fix in <a href="25-fix-the-bugs.html">step 25</a>; <strong>the repo sends extra requests for latitude 0, longitude 0 before message 2</strong>, explained below.</figcaption>
+</figure>
+
+<h2>Stop 1: the click changes state in App</h2>
+<p>The dropdown is a shadcn <code>Select</code>. When you choose a city, its <code>onValueChange</code> calls <code>setLocation(value)</code>, the setter from this line in <code>App.tsx</code>:</p>
+<pre data-lang="tsx" data-tag="from src/App.tsx (lines 23–26)"><code>const [coordinates, setCoords] = useState&lt;Coords&gt;({ lat: 50, lon: 45 })
+const [location, setLocation] = useState("Tokyo")
+const [mapType, setMapType] = useState("clouds_new")
+const [isSidePanelOpen, setIsSidePanelOpen] = useState(false)</code></pre>
+<p>Calling a setter does two things: it stores the new value, and it tells React to <a class="term" href="glossary.html#rendering">re-render</a> <code>App</code>. Re-rendering means React calls the <code>App</code> function again from the top. This time <code>useState("Tokyo")</code> ignores its starting value and returns <code>"London"</code>. Every child <code>App</code> returns is rendered again too, with whatever new props it now gets.</p>
+<p>Note the two location-like states. <code>location</code> is the city name (or the word <code>"custom"</code>). <code>coordinates</code> holds the last place you clicked on the map; its starting value <code>{ lat: 50, lon: 45 }</code> is only used for those "custom" clicks.</p>
+
+<details class="primer"><summary>New to re-rendering? What it is and why it matters</summary>
+<p>A React component is a function that returns a description of the screen. React calls it, compares the result with what's on the page, and changes only the differences. A component runs again ("re-renders") when its own state changes, when its parent re-renders, or when something it subscribes to (a <a class="term" href="glossary.html#context">context</a>, a query) changes.</p>
+<p>Two consequences matter on this page. First, every local variable in the component is recalculated on each render, which is how <code>coords</code> stays in sync without being state. Second, rendering should only calculate. Anything that reaches outside React (a network request you start by hand, a map listener) belongs in an effect or in a library like TanStack Query that handles it for you.</p>
+</details>
+
+<h2>Stop 2: the geocode query</h2>
+<p>The OpenWeather weather APIs want coordinates, not names. So right after its state, <code>App</code> asks TanStack Query for the coordinates of the current city:</p>
+<pre data-lang="tsx" data-tag="from src/App.tsx (lines 28–31)"><code>const { data: geocodeData } = useQuery({
+  queryKey: ["geocode", location],
+  queryFn: () =&gt; getGeocode(location),
+})</code></pre>
+<p>The <a class="term" href="glossary.html#query-key">query key</a> <code>["geocode", "London"]</code> is the name of this piece of data. TanStack Query looks it up in its <a class="term" href="glossary.html#cache">cache</a>. If it has never seen that key, it calls the <a class="term" href="glossary.html#query-function">query function</a>, <code>getGeocode("London")</code>, and meanwhile returns <code>data: undefined</code>. When the answer arrives, it stores it under the key and re-renders <code>App</code>, and this time <code>geocodeData</code> is an array like <code>[{ name: "London", lat: ..., lon: ..., country: "GB", ... }]</code>. If you switch back to a city you've already picked, the data is in the cache and comes back on the very first render, with no waiting.</p>
+<p>This is plain <code>useQuery</code>, not the Suspense version: <code>App</code> must keep rendering the header and dropdown while the city is being looked up, so it can't pause.</p>
+
+<h2>Stop 3: deriving <code>coords</code></h2>
+<p><code>coords</code>, the value every card and the map receive, is not state. It's a plain variable recalculated on every render of <code>App</code>:</p>
+<pre data-lang="tsx" data-tag="from src/App.tsx (lines 38–41)"><code>const coords =
+  location === "custom"
+    ? coordinates
+    : { lat: geocodeData?.[0].lat ?? 0, lon: geocodeData?.[0].lon ?? 0 }</code></pre>
+<p>Deriving it like this is good React practice: storing it in a second <code>useState</code> would mean keeping two copies in sync by hand. The question is what to do while there is no answer yet. The repo falls back to <code>0</code> with <a class="term" href="glossary.html#nullish-coalescing"><code>??</code></a>, and that has consequences.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Decision tree for coords: if location is custom, use coordinates from the last map click; otherwise, if the geocode answer has a first place, use its lat and lon; otherwise the repo uses lat 0 lon 0 and asks for the ocean's weather, while step 25 uses null and shows skeletons">
+  <rect class="box2" x="250" y="10" width="260" height="44" rx="8"/>
+  <text x="380" y="37" text-anchor="middle" class="mono">location === "custom"?</text>
+  <path class="arrow-ok" d="M330,54 V74 H120 V94"/>
+  <text x="222" y="68" text-anchor="middle" class="small ok">yes</text>
+  <path class="arrow" d="M430,54 V74 H550 V94"/>
+  <text x="496" y="68" text-anchor="middle" class="small">no</text>
+  <rect class="box-ok" x="10" y="96" width="220" height="50" rx="8"/>
+  <text x="120" y="117" text-anchor="middle" class="mono">coordinates</text>
+  <text x="120" y="135" text-anchor="middle" class="small">the last map click</text>
+  <rect class="box2" x="400" y="96" width="300" height="44" rx="8"/>
+  <text x="550" y="123" text-anchor="middle" class="mono">geocodeData?.[0] exists?</text>
+  <path class="arrow-ok" d="M500,140 V164 H395 V188"/>
+  <text x="445" y="158" text-anchor="middle" class="small ok">yes</text>
+  <path class="arrow-bad" d="M600,140 V164 H630 V188"/>
+  <text x="648" y="158" text-anchor="middle" class="small bad">no</text>
+  <rect class="box-ok" x="300" y="190" width="190" height="56" rx="8"/>
+  <text x="395" y="213" text-anchor="middle">the city's lat, lon</text>
+  <text x="395" y="232" text-anchor="middle" class="small">from geocodeData[0]</text>
+  <rect class="box-bad" x="510" y="190" width="240" height="56" rx="8"/>
+  <text x="630" y="213" text-anchor="middle" class="mono">{ lat: 0, lon: 0 }</text>
+  <text x="630" y="232" text-anchor="middle" class="small">repo: asks for the ocean</text>
+  <path class="arrow-ok" d="M630,246 V264"/>
+  <text x="640" y="259" class="small ok">step 25</text>
+  <rect class="box-ok" x="510" y="266" width="240" height="52" rx="8"/>
+  <text x="630" y="288" text-anchor="middle" class="mono">null</text>
+  <text x="630" y="306" text-anchor="middle" class="small">wait, show skeletons</text>
+</svg>
+<figcaption>How <code>App</code> picks the coordinates on each render. The "no" branch on the right is taken while the geocode request is loading, when it failed, and when it found nothing. <strong>The repo answers "0, 0" there; step 25 answers "nothing yet" (<code>null</code>).</strong></figcaption>
+</figure>
+
+<p>The "no" branch hides three different situations, and the repo handles each one badly:</p>
+<ul>
+<li><strong>Still loading.</strong> <code>geocodeData</code> is <code>undefined</code>, so <code>coords</code> becomes <code>{ lat: 0, lon: 0 }</code>, a point in the Gulf of Guinea. The cards immediately ask for that point's weather (next section).</li>
+<li><strong>Found nothing.</strong> OpenWeather answers an unknown name with an empty array <code>[]</code>. Then <code>geocodeData?.[0]</code> is <code>undefined</code>, and <code>.lat</code> on it throws <code>TypeError: Cannot read properties of undefined (reading 'lat')</code>. The <code>?.</code> only guards <code>geocodeData</code> itself, not the <code>[0]</code> after it. The whole page goes blank (verified with a mocked <code>[]</code>).</li>
+<li><strong>Failed.</strong> If the geocode request throws, for example because the answer has no <code>local_names</code> (required by the repo's <code>GeocodeSchema</code>, but missing for many real places), the query ends in an error and <code>App</code> never reads it. The app then silently shows the weather for 0, 0 while the dropdown still says the city (verified).</li>
+</ul>
+<p><a href="25-fix-the-bugs.html">Step 25</a> makes <code>coords</code> <code>null</code> until a place is known, renders skeletons instead of the cards while it is <code>null</code>, makes <code>local_names</code> optional, and shows a message for the other two cases:</p>
+
+<figure class="shot">
+<img src="img/fixed-city-not-found.webp" alt="The fixed dashboard with the red message: Could not find &quot;Tokyo&quot;. Pick another city or click the map. Below it, the map area is empty and the cards show their skeletons" width="1200" height="525" loading="lazy">
+<figcaption>After step 25, with a mocked empty geocode answer: a readable message instead of a blank page. Test data, not real weather.</figcaption>
+</figure>
+
+<h2>Why the repo asks for latitude 0, longitude 0 first</h2>
+<p>In the browser test of the repo, the very first page load sent these requests, in this order: One Call for 0, 0; Air Pollution for 0, 0; geocode Tokyo; One Call for Tokyo (35.68, 139.69); Air Pollution for Tokyo. The presenter notices the symptom at about 2:28:00 in <a href="15-map-follows-dropdown.html">step 15</a> ("it flickers to looks like the middle of the ocean first") and first puts it down to the key approach used for the map. At about 2:30:40 they trace it to the <code>?? 0</code> fallback while the city is still loading and leave the fix for later; it stays in the final code, and <a href="25-fix-the-bugs.html">step 25</a> fixes it.</p>
+<p>Why do the 0, 0 requests even leave <em>before</em> the geocode request? Because the two hooks start their fetches at different moments:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="The first render: App renders and registers the geocode useQuery while coords is 0,0; the cards render and useSuspenseQuery starts fetching weather for 0,0 immediately, then suspends; React commits and only then does useQuery subscribe and start the geocode fetch">
+  <text x="380" y="18" text-anchor="middle" class="small">the very first render of the page</text>
+  <rect class="box" x="10" y="30" width="230" height="74" rx="8"/>
+  <text x="125" y="54" text-anchor="middle" class="title">1 · App renders</text>
+  <text x="125" y="74" text-anchor="middle" class="small">useQuery(geocode) is set up</text>
+  <text x="125" y="92" text-anchor="middle" class="small">no data yet → coords = 0, 0</text>
+  <rect class="box-warn" x="265" y="30" width="230" height="74" rx="8"/>
+  <text x="380" y="54" text-anchor="middle" class="title">2 · Cards render</text>
+  <text x="380" y="74" text-anchor="middle" class="small">useSuspenseQuery fetches now:</text>
+  <text x="380" y="92" text-anchor="middle" class="small">weather for 0, 0, then suspends</text>
+  <rect class="box" x="520" y="30" width="230" height="74" rx="8"/>
+  <text x="635" y="54" text-anchor="middle" class="title">3 · React commits</text>
+  <text x="635" y="74" text-anchor="middle" class="small">useQuery subscribes after commit</text>
+  <text x="635" y="92" text-anchor="middle" class="small">→ geocode fetch starts</text>
+  <path class="arrow" d="M240,67 H263"/>
+  <path class="arrow" d="M495,67 H518"/>
+  <text x="380" y="134" text-anchor="middle" class="small">So the 0, 0 requests (One Call, Air Pollution) go out first and the geocode request third.</text>
+</svg>
+<figcaption><code>useSuspenseQuery</code> must have data <em>during</em> render, so it starts the fetch right there and pauses the card. Plain <code>useQuery</code> renders with <code>undefined</code> first and starts fetching once React has put the page on screen. <strong>By the time the geocode request starts, the cards have already asked for 0, 0.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 244" role="img" aria-label="Request timeline. Repo: onecall 0,0; air_pollution 0,0; geocode Tokyo; onecall Tokyo; air_pollution Tokyo. After step 25: geocode Tokyo; onecall Tokyo; air_pollution Tokyo, three requests all over HTTPS">
+  <text x="10" y="22" class="label">Repo as committed: first load (recorded in the browser test)</text>
+  <rect class="box-bad" x="10" y="34" width="140" height="50" rx="8"/>
+  <text x="80" y="55" text-anchor="middle" class="label">1 · onecall</text>
+  <text x="80" y="73" text-anchor="middle" class="small">lat 0, lon 0</text>
+  <rect class="box-bad" x="160" y="34" width="140" height="50" rx="8"/>
+  <text x="230" y="55" text-anchor="middle" class="label">2 · air_pollution</text>
+  <text x="230" y="73" text-anchor="middle" class="small">lat 0, lon 0</text>
+  <rect class="box" x="310" y="34" width="140" height="50" rx="8"/>
+  <text x="380" y="55" text-anchor="middle" class="label">3 · geocode</text>
+  <text x="380" y="73" text-anchor="middle" class="small">q=Tokyo</text>
+  <rect class="box-ok" x="460" y="34" width="140" height="50" rx="8"/>
+  <text x="530" y="55" text-anchor="middle" class="label">4 · onecall</text>
+  <text x="530" y="73" text-anchor="middle" class="small">35.68, 139.69</text>
+  <rect class="box-ok" x="610" y="34" width="140" height="50" rx="8"/>
+  <text x="680" y="55" text-anchor="middle" class="label">5 · air_pollution</text>
+  <text x="680" y="73" text-anchor="middle" class="small">35.68, 139.69</text>
+  <text x="10" y="124" class="label">After step 25: nothing is requested until the city is known</text>
+  <rect class="box" x="10" y="136" width="140" height="50" rx="8"/>
+  <text x="80" y="157" text-anchor="middle" class="label">1 · geocode</text>
+  <text x="80" y="175" text-anchor="middle" class="small">q=Tokyo</text>
+  <rect class="box-ok" x="160" y="136" width="140" height="50" rx="8"/>
+  <text x="230" y="157" text-anchor="middle" class="label">2 · onecall</text>
+  <text x="230" y="175" text-anchor="middle" class="small">35.68, 139.69</text>
+  <rect class="box-ok" x="310" y="136" width="140" height="50" rx="8"/>
+  <text x="380" y="157" text-anchor="middle" class="label">3 · air_pollution</text>
+  <text x="380" y="175" text-anchor="middle" class="small">35.68, 139.69</text>
+  <text x="470" y="157" class="small">3 requests instead of 5,</text>
+  <text x="470" y="175" class="small">all over HTTPS</text>
+  <path class="arrow" d="M10,212 H748"/>
+  <text x="380" y="234" text-anchor="middle" class="small">time</text>
+</svg>
+<figcaption>Every request the dashboard sends on first load, before and after the fix. Red boxes are wasted requests for a point in the ocean, and their answers may even reach the screen for a moment. <strong>Waiting for the city (<code>coords = null</code>) removes them.</strong></figcaption>
+</figure>
+
+<div class="callout"><p><strong>The same flicker on every city change (reasoned from the code).</strong> The browser test recorded the first load. Reading the code, the same thing happens each time you pick a city you haven't picked before: the new key <code>["geocode", "London"]</code> starts with no data, so <code>coords</code> drops back to 0, 0 for a moment. If the 0, 0 weather is still in the cache from the first load (unused entries are kept for 5 minutes), the cards can show the ocean's weather for an instant before London's arrives. Step 25's <code>null</code> fixes this too.</p></div>
+
+<h2>Stop 4: query keys and the shared cache</h2>
+<p>Each of the four weather cards calls its own hook, with the same key:</p>
+<pre data-lang="tsx" data-tag="from src/components/cards/CurrentWeather.tsx (lines 12–15)"><code>const { data } = useSuspenseQuery({
+  queryKey: ["weather", coords],
+  queryFn: () =&gt; getWeather({ lat: coords.lat, lon: coords.lon }),
+})</code></pre>
+<p>Four components, one request. TanStack Query turns the key into a string (a "hash") and keeps <em>one</em> cache entry per hash. The first card to ask starts the fetch; the other three see that a fetch for the same key is already running and simply wait for it. When it finishes, all four get the same data. Objects inside a key are compared by content, with their properties in sorted order, so the brand-new <code>coords</code> object <code>App</code> creates on every render still matches the existing entry as long as <code>lat</code> and <code>lon</code> are the same.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Cache map: App reads the geocode Tokyo entry; the four weather cards all read one weather entry for Tokyo's coordinates; SidePanel reads the pollution entry; the repo also has a stray weather entry for lat 0 lon 0. Each entry costs one request to OpenWeather">
+  <rect class="box-solid" x="10" y="44" width="180" height="36" rx="8"/>
+  <text x="100" y="67" text-anchor="middle" class="on-solid">App</text>
+  <rect class="box" x="10" y="88" width="180" height="28" rx="8"/>
+  <text x="100" y="107" text-anchor="middle" class="mono">CurrentWeather</text>
+  <rect class="box" x="10" y="120" width="180" height="28" rx="8"/>
+  <text x="100" y="139" text-anchor="middle" class="mono">HourlyForecast</text>
+  <rect class="box" x="10" y="152" width="180" height="28" rx="8"/>
+  <text x="100" y="171" text-anchor="middle" class="mono">DailyForecast</text>
+  <rect class="box" x="10" y="184" width="180" height="28" rx="8"/>
+  <text x="100" y="203" text-anchor="middle" class="mono">AdditionalInfo</text>
+  <rect class="box" x="10" y="224" width="180" height="28" rx="8"/>
+  <text x="100" y="243" text-anchor="middle" class="mono">SidePanel</text>
+  <rect class="zone" x="250" y="10" width="310" height="262" rx="10"/>
+  <text x="405" y="32" text-anchor="middle" class="title">QueryClient cache</text>
+  <rect class="box-info" x="265" y="44" width="280" height="36" rx="8"/>
+  <text x="405" y="67" text-anchor="middle" class="mono">["geocode", "Tokyo"]</text>
+  <rect class="box-ok" x="265" y="96" width="280" height="56" rx="8"/>
+  <text x="405" y="119" text-anchor="middle" class="mono">["weather", { lat, lon }]</text>
+  <text x="405" y="139" text-anchor="middle" class="small">Tokyo · one entry, four readers</text>
+  <rect class="box-info" x="265" y="168" width="280" height="36" rx="8"/>
+  <text x="405" y="191" text-anchor="middle" class="mono">["pollution", { lat, lon }]</text>
+  <rect class="box-bad" x="265" y="216" width="280" height="44" rx="8"/>
+  <text x="405" y="234" text-anchor="middle" class="mono">["weather", { lat: 0, lon: 0 }]</text>
+  <text x="405" y="251" text-anchor="middle" class="small">repo only: left from the first render</text>
+  <path class="arrow" d="M190,62 H263"/>
+  <path class="line" d="M190,102 H225"/>
+  <path class="line" d="M190,134 H225"/>
+  <path class="line" d="M190,166 H225"/>
+  <path class="line" d="M190,198 H225"/>
+  <path class="line" d="M225,102 V198"/>
+  <path class="arrow-ok" d="M225,124 H263"/>
+  <path class="arrow" d="M190,238 H240 V186 H263"/>
+  <rect class="box2" x="600" y="96" width="150" height="70" rx="8"/>
+  <text x="675" y="125" text-anchor="middle">OpenWeather</text>
+  <text x="675" y="145" text-anchor="middle" class="small">one request per key</text>
+  <path class="line" d="M545,62 H575"/>
+  <path class="line" d="M545,124 H575"/>
+  <path class="line" d="M545,186 H575"/>
+  <path class="line" d="M575,62 V186"/>
+  <path class="arrow" d="M575,131 H598"/>
+</svg>
+<figcaption>The cache after Tokyo has loaded. The four cards share one weather entry, so One Call is fetched once, not four times. A key that's already cached costs no request at all. <strong>Same key = same data; change any part of the key and you get a separate entry.</strong></figcaption>
+</figure>
+
+<p>Two settings decide how long an entry lives and when it is refreshed:</p>
+<ul>
+<li><strong><a class="term" href="glossary.html#stale-time">Stale time</a></strong> (default 0) is how long data counts as fresh. Stale data is still shown, but TanStack Query refetches it in the background, for instance when a component using it appears again or when you come back to the browser tab. <a href="26-error-boundaries.html">Step 26</a> sets it to 5 minutes, so switching between two cities doesn't refetch either one.</li>
+<li><strong><code>gcTime</code></strong> (default 5 minutes) is how long an entry no component is using stays in memory before it is thrown away.</li>
+</ul>
+<p>One more detail: when you click the map, <code>location</code> becomes <code>"custom"</code>, so the geocode key becomes <code>["geocode", "custom"]</code> and the app looks up a city called "custom". The answer is never used, because <code>coords</code> takes the <code>coordinates</code> branch. The browser test confirmed it: after a click the app sent <code>onecall</code>, <code>air_pollution</code> and <code>geo/1.0/direct?q=custom</code>. <a href="25-fix-the-bugs.html">Step 25</a> adds <code>enabled: location !== "custom"</code> to that <code>useQuery</code>, and the same test then shows only the two weather requests.</p>
+
+<h2>Stop 5: fetch, JSON, Zod</h2>
+<p>When a key isn't cached, TanStack Query calls its query function. All three functions in <code>src/api.ts</code> follow the same three lines:</p>
+<pre data-lang="ts" data-tag="from src/api.ts (lines 10–14)"><code>const res = await fetch(
+  `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&amp;lon=${lon}&amp;units=imperial&amp;exclude=minutely,alerts&amp;appid=${API_KEY}`
+)
+const data = await res.json()
+return weatherSchema.parse(data)</code></pre>
+<p><a class="term" href="glossary.html#fetch"><code>fetch</code></a> sends the request and waits for the response. <code>res.json()</code> reads the body as <a class="term" href="glossary.html#json">JSON</a>. Then <code>weatherSchema.parse(data)</code> checks every field against the <a class="term" href="glossary.html#schema">schema</a>: if the data matches, it is returned with a full TypeScript type, so the cards can write <code>data.current.temp</code> without guessing. If not, <code>parse</code> throws a <code>ZodError</code>, the <a class="term" href="glossary.html#promise">promise</a> rejects, and TanStack Query treats the query as failed.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 286" role="img" aria-label="Two pipelines. Repo: fetch, res.json, schema.parse, typed data; a 401 error body has no lat so parse throws a confusing ZodError. Step 25: fetch, check res.ok, if yes res.json and schema.parse give typed data, if no throw a readable Error with the status and OpenWeather's message">
+  <text x="10" y="20" class="label">Repo: getWeather, getGeocode, getAirPollution</text>
+  <rect class="box" x="10" y="30" width="140" height="44" rx="8"/>
+  <text x="80" y="57" text-anchor="middle" class="mono">fetch(url)</text>
+  <rect class="box" x="175" y="30" width="140" height="44" rx="8"/>
+  <text x="245" y="57" text-anchor="middle" class="mono">res.json()</text>
+  <rect class="box" x="340" y="30" width="170" height="44" rx="8"/>
+  <text x="425" y="57" text-anchor="middle" class="mono">schema.parse()</text>
+  <rect class="box-ok" x="535" y="30" width="215" height="44" rx="8"/>
+  <text x="642" y="57" text-anchor="middle">typed data</text>
+  <path class="arrow" d="M150,52 H173"/>
+  <path class="arrow" d="M315,52 H338"/>
+  <path class="arrow-ok" d="M510,52 H533"/>
+  <path class="arrow-bad" d="M425,74 V94"/>
+  <rect class="box-bad" x="340" y="96" width="410" height="36" rx="8"/>
+  <text x="545" y="119" text-anchor="middle" class="label">401 body has no lat → ZodError, path ["lat"]</text>
+  <text x="10" y="164" class="label">Step 25: one helper, fetchJson(url, schema)</text>
+  <rect class="box" x="10" y="174" width="120" height="44" rx="8"/>
+  <text x="70" y="201" text-anchor="middle" class="mono">fetch(url)</text>
+  <rect class="box-warn" x="150" y="174" width="110" height="44" rx="8"/>
+  <text x="205" y="201" text-anchor="middle" class="mono">res.ok?</text>
+  <rect class="box" x="290" y="174" width="130" height="44" rx="8"/>
+  <text x="355" y="201" text-anchor="middle" class="mono">res.json()</text>
+  <rect class="box" x="440" y="174" width="150" height="44" rx="8"/>
+  <text x="515" y="201" text-anchor="middle" class="mono">schema.parse()</text>
+  <rect class="box-ok" x="610" y="174" width="140" height="44" rx="8"/>
+  <text x="680" y="201" text-anchor="middle">typed data</text>
+  <path class="arrow" d="M130,196 H148"/>
+  <path class="arrow-ok" d="M260,196 H288"/>
+  <text x="274" y="188" text-anchor="middle" class="small ok">yes</text>
+  <path class="arrow" d="M420,196 H438"/>
+  <path class="arrow-ok" d="M590,196 H608"/>
+  <path class="arrow-bad" d="M205,218 V238"/>
+  <text x="214" y="232" class="small bad">no</text>
+  <rect class="box-ok" x="150" y="240" width="380" height="36" rx="8"/>
+  <text x="340" y="263" text-anchor="middle" class="label">Error: OpenWeather request failed (401): message</text>
+</svg>
+<figcaption><code>fetch</code> doesn't fail on an error status: a 401 arrives as a normal response whose JSON has a <code>message</code> but no weather. The repo passes it to Zod anyway, which complains about the first missing field. <strong>Checking <code>res.ok</code> first turns that into an error that says what actually went wrong.</strong></figcaption>
+</figure>
+
+<h2>Stop 6: Suspense and the skeletons</h2>
+<p>Between "fetch started" and "data arrived", what does a card show? The cards use <a class="term" href="glossary.html#usesuspensequery"><code>useSuspenseQuery</code></a>, which never returns empty data. If the data isn't in the cache, the hook <em>suspends</em> the component: it throws the pending promise, and React stops rendering that card. The nearest <code>&lt;Suspense&gt;</code> above it catches this and shows its <code>fallback</code> instead, in this app a <a class="term" href="glossary.html#skeleton">skeleton</a> shaped like the card:</p>
+<pre data-lang="tsx" data-tag="from src/App.tsx (lines 76–78)"><code>&lt;Suspense fallback={&lt;CurrentSkeleton /&gt;}&gt;
+  &lt;CurrentWeather coords={coords} /&gt;
+&lt;/Suspense&gt;</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 310" role="img" aria-label="Suspense lifecycle: the card renders with useSuspenseQuery; if the data is in the cache it returns the data and the card is shown; if not, the card suspends by throwing a promise and Suspense shows the skeleton; when the fetch finishes React renders the card again; if the query failed, the error is thrown to the nearest error boundary">
+  <rect class="box" x="10" y="90" width="150" height="50" rx="8"/>
+  <text x="85" y="111" text-anchor="middle">card renders</text>
+  <text x="85" y="129" text-anchor="middle" class="small">useSuspenseQuery</text>
+  <rect class="box2" x="200" y="90" width="150" height="50" rx="8"/>
+  <text x="275" y="111" text-anchor="middle">data in cache?</text>
+  <text x="275" y="129" text-anchor="middle" class="small">key lookup</text>
+  <path class="arrow" d="M160,115 H198"/>
+  <path class="arrow-ok" d="M275,90 V45 H558"/>
+  <text x="420" y="38" text-anchor="middle" class="small ok">yes</text>
+  <rect class="box-ok" x="560" y="20" width="190" height="50" rx="8"/>
+  <text x="655" y="41" text-anchor="middle">returns data</text>
+  <text x="655" y="59" text-anchor="middle" class="small">the real card is shown</text>
+  <path class="arrow" d="M350,115 H388"/>
+  <text x="369" y="108" text-anchor="middle" class="small">no</text>
+  <rect class="box-warn" x="390" y="90" width="150" height="50" rx="8"/>
+  <text x="465" y="111" text-anchor="middle">card suspends</text>
+  <text x="465" y="129" text-anchor="middle" class="small">throws the promise</text>
+  <path class="arrow" d="M540,115 H578"/>
+  <rect class="box-info" x="580" y="90" width="170" height="50" rx="8"/>
+  <text x="665" y="111" text-anchor="middle">Suspense fallback</text>
+  <text x="665" y="129" text-anchor="middle" class="small">skeleton on screen</text>
+  <path class="arrow" d="M665,140 V168"/>
+  <rect class="box2" x="580" y="170" width="170" height="50" rx="8"/>
+  <text x="665" y="191" text-anchor="middle">fetch finishes</text>
+  <text x="665" y="209" text-anchor="middle" class="small">cache updated</text>
+  <path class="arrow-accent" d="M580,195 H85 V142"/>
+  <text x="330" y="187" text-anchor="middle" class="small accent">success: React renders the card again</text>
+  <path class="arrow-bad" d="M665,220 V248"/>
+  <rect class="box-bad" x="480" y="250" width="270" height="50" rx="8"/>
+  <text x="615" y="271" text-anchor="middle">query failed (after retries)</text>
+  <text x="615" y="289" text-anchor="middle" class="small">error thrown to the nearest error boundary</text>
+</svg>
+<figcaption>The life of one card. The card's own code only ever deals with the "returns data" case; waiting is handled by <code>Suspense</code>, failing by an error boundary. <strong>Each card has its own <code>Suspense</code>, so cards appear one by one as their data arrives</strong> (here they all share one request, so they appear together).</figcaption>
+</figure>
+
+<p>The side panel works the same way with its own <code>Suspense</code> and <code>SidePanelSkeleton</code> around the <code>AirPollution</code> part (<a href="22-side-panel-skeletons.html">step 22</a>). <code>App</code> itself is not inside any <code>Suspense</code>, which is another reason it uses plain <code>useQuery</code>: if <code>App</code> suspended, there would be nothing above it to show a fallback.</p>
+
+<h2>Stop 7: what re-renders, frame by frame</h2>
+<p>Put together, here is what you see on screen in the fixed app (after step 25) when you change the city:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 206" role="img" aria-label="Four frames: Tokyo cards on screen; you pick London and the geocode request is loading, cards show skeletons; the coords are known and the new weather key is not cached, cards still show skeletons; the weather data arrives and London's cards render">
+  <rect class="ui-window" x="10" y="20" width="172" height="124" rx="8"/>
+  <rect class="ui-chrome" x="11" y="21" width="170" height="20" rx="7"/>
+  <text x="20" y="35" class="small">Location: Tokyo</text>
+  <rect class="box2" x="18" y="50" width="74" height="86" rx="6"/>
+  <text x="55" y="90" text-anchor="middle" class="label">61°F</text>
+  <rect class="box2" x="100" y="50" width="74" height="86" rx="6"/>
+  <text x="137" y="90" text-anchor="middle" class="small">Tokyo</text>
+  <rect class="ui-window" x="199" y="20" width="172" height="124" rx="8"/>
+  <rect class="ui-chrome" x="200" y="21" width="170" height="20" rx="7"/>
+  <text x="209" y="35" class="small">Location: London</text>
+  <rect class="ui-skeleton" x="207" y="50" width="74" height="86" rx="6"/>
+  <rect class="ui-skeleton" x="289" y="50" width="74" height="86" rx="6"/>
+  <rect class="ui-window" x="388" y="20" width="172" height="124" rx="8"/>
+  <rect class="ui-chrome" x="389" y="21" width="170" height="20" rx="7"/>
+  <text x="398" y="35" class="small">Location: London</text>
+  <rect class="ui-skeleton" x="396" y="50" width="74" height="86" rx="6"/>
+  <rect class="ui-skeleton" x="478" y="50" width="74" height="86" rx="6"/>
+  <rect class="ui-window" x="577" y="20" width="172" height="124" rx="8"/>
+  <rect class="ui-chrome" x="578" y="21" width="170" height="20" rx="7"/>
+  <text x="587" y="35" class="small">Location: London</text>
+  <rect class="box-ok" x="585" y="50" width="74" height="86" rx="6"/>
+  <text x="622" y="90" text-anchor="middle" class="label">52°F</text>
+  <rect class="box-ok" x="667" y="50" width="74" height="86" rx="6"/>
+  <text x="704" y="90" text-anchor="middle" class="small">London</text>
+  <path class="arrow" d="M182,82 H197"/>
+  <path class="arrow" d="M371,82 H386"/>
+  <path class="arrow" d="M560,82 H575"/>
+  <text x="96" y="166" text-anchor="middle" class="label">1 · Tokyo on screen</text>
+  <text x="96" y="184" text-anchor="middle" class="small">everything cached</text>
+  <text x="285" y="166" text-anchor="middle" class="label">2 · you pick London</text>
+  <text x="285" y="184" text-anchor="middle" class="small">geocode loading, coords null</text>
+  <text x="474" y="166" text-anchor="middle" class="label">3 · coords known</text>
+  <text x="474" y="184" text-anchor="middle" class="small">new key → cards suspend</text>
+  <text x="663" y="166" text-anchor="middle" class="label">4 · weather arrives</text>
+  <text x="663" y="184" text-anchor="middle" class="small">London's cards render</text>
+</svg>
+<figcaption>Illustration (simplified), two cards standing for all four. Frames 2 and 3 look the same but have different causes: in 2, <code>App</code> renders the skeletons itself because <code>coords</code> is <code>null</code>; in 3, <code>Suspense</code> shows them because the cards suspended. <strong>In the repo, frame 2 shows the cached weather for 0, 0 instead of skeletons.</strong></figcaption>
+</figure>
+
+<ol class="steps">
+<li><strong>Render 1 (the click).</strong> <code>setLocation("London")</code> re-renders <code>App</code>. The geocode key changes, its data is <code>undefined</code>, so <code>coords</code> is the fallback. Every child re-renders with the new props.</li>
+<li><strong>Render 2 (geocode arrives).</strong> TanStack Query re-renders <code>App</code> because the query it subscribed to has data. <code>coords</code> now holds London's latitude and longitude. The cards get a new key, find nothing cached, and suspend.</li>
+<li><strong>Render 3 (weather arrives).</strong> The cache entry is filled and React renders the suspended cards again. This time <code>useSuspenseQuery</code> returns the data and the real cards replace the skeletons. The map receives the same <code>coords</code> and pans there (<a href="15-map-follows-dropdown.html">step 15</a>).</li>
+</ol>
+
+<h2>When something goes wrong</h2>
+<p>So far everything worked. Now imagine the API refuses: the key is wrong, or your OpenWeather account doesn't have the separate "One Call by Call" subscription that One Call 3.0 requires. OpenWeather answers with <a class="term" href="glossary.html#http-status">status</a> 401 and a JSON body containing a <code>message</code>. In the repo, this happens next (all verified in the browser):</p>
+<ol class="steps">
+<li><strong>Zod gets the error body.</strong> The repo doesn't check <code>res.ok</code>, so the error JSON is parsed as weather and fails with a <code>ZodError</code> about <code>"path": ["lat"]</code>, "expected number, received undefined". True, but it hides the real reason.</li>
+<li><strong>TanStack Query retries.</strong> The default is 3 <a class="term" href="glossary.html#retry">retries</a> with growing pauses, for every failing key. With an invalid key the test recorded 28 requests in 20 seconds. Retrying can't fix a wrong key.</li>
+<li><strong>The error is thrown during render.</strong> After the last retry, <code>useSuspenseQuery</code> throws the error out of the card. Nothing catches it, because the repo has no <a class="term" href="glossary.html#error-boundary">error boundary</a>.</li>
+<li><strong>The page goes blank.</strong> When an error escapes all components, React removes the whole app from the page. The map, the dropdown and the side panel vanish with the broken card.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Error path. Repo: 401 response, ZodError, retry three times, no boundary, blank page. After steps 25 and 26: 401 response, readable Error, retry once, WeatherErrorBoundary per card, the card shows the error and a Try again button">
+  <text x="10" y="20" class="label">Repo: wrong key, or no One Call subscription</text>
+  <rect class="box2" x="10" y="30" width="140" height="50" rx="8"/>
+  <text x="80" y="51" text-anchor="middle" class="label">401 response</text>
+  <text x="80" y="69" text-anchor="middle" class="small">JSON with message</text>
+  <rect class="box-warn" x="160" y="30" width="140" height="50" rx="8"/>
+  <text x="230" y="51" text-anchor="middle" class="label">ZodError</text>
+  <text x="230" y="69" text-anchor="middle" class="small">path ["lat"]</text>
+  <rect class="box-warn" x="310" y="30" width="140" height="50" rx="8"/>
+  <text x="380" y="51" text-anchor="middle" class="label">retry × 3</text>
+  <text x="380" y="69" text-anchor="middle" class="small">per failing key</text>
+  <rect class="box-warn" x="460" y="30" width="140" height="50" rx="8"/>
+  <text x="530" y="51" text-anchor="middle" class="label">no boundary</text>
+  <text x="530" y="69" text-anchor="middle" class="small">error leaves React</text>
+  <rect class="box-bad" x="610" y="30" width="140" height="50" rx="8"/>
+  <text x="680" y="51" text-anchor="middle" class="label">blank page</text>
+  <text x="680" y="69" text-anchor="middle" class="small">whole app gone</text>
+  <path class="arrow" d="M150,55 H158"/>
+  <path class="arrow" d="M300,55 H308"/>
+  <path class="arrow" d="M450,55 H458"/>
+  <path class="arrow-bad" d="M600,55 H608"/>
+  <text x="10" y="120" class="label">After steps 25 and 26</text>
+  <rect class="box2" x="10" y="130" width="140" height="50" rx="8"/>
+  <text x="80" y="151" text-anchor="middle" class="label">401 response</text>
+  <text x="80" y="169" text-anchor="middle" class="small">same answer</text>
+  <rect class="box" x="160" y="130" width="140" height="50" rx="8"/>
+  <text x="230" y="151" text-anchor="middle" class="label">readable Error</text>
+  <text x="230" y="169" text-anchor="middle" class="small">status + message</text>
+  <rect class="box" x="310" y="130" width="140" height="50" rx="8"/>
+  <text x="380" y="151" text-anchor="middle" class="label">retry × 1</text>
+  <text x="380" y="169" text-anchor="middle" class="small">then give up</text>
+  <rect class="box" x="460" y="130" width="140" height="50" rx="8"/>
+  <text x="530" y="151" text-anchor="middle" class="small">WeatherErrorBoundary</text>
+  <text x="530" y="169" text-anchor="middle" class="small">one per card</text>
+  <rect class="box-ok" x="610" y="130" width="140" height="50" rx="8"/>
+  <text x="680" y="151" text-anchor="middle" class="label">card shows error</text>
+  <text x="680" y="169" text-anchor="middle" class="small">+ Try again button</text>
+  <path class="arrow" d="M150,155 H158"/>
+  <path class="arrow" d="M300,155 H308"/>
+  <path class="arrow" d="M450,155 H458"/>
+  <path class="arrow-ok" d="M600,155 H608"/>
+</svg>
+<figcaption>The same 401, two outcomes. Step 25 adds the <code>res.ok</code> check, step 26 lowers the retries to one and wraps every card (and the side panel) in its own error boundary. <strong>A failure now stays inside the card that failed.</strong></figcaption>
+</figure>
+
+<p>An error boundary is to errors what <code>Suspense</code> is to waiting: a component placed above others that catches what they throw and shows a fallback. <a href="26-error-boundaries.html">Step 26</a> combines it with TanStack Query's <code>QueryErrorResetBoundary</code>, so the "Try again" button clears the failed query and fetches it again, instead of immediately re-throwing the cached error.</p>
+
+<figure class="shot">
+<img src="img/fixed-invalid-key.webp" alt="The fixed dashboard showing the red message: OpenWeather request failed (401): Invalid API key. Please see the OpenWeather FAQ for more info. The map area is empty and the cards below show skeletons" width="1200" height="525" loading="lazy">
+<figcaption>After step 25, with an invalid key: the geocode request fails first, so <code>App</code> shows OpenWeather's own message and the cards keep their skeletons (there are no coordinates to ask about). Test data, not real weather.</figcaption>
+</figure>
+
+<figure class="shot">
+<img src="img/fixed-onecall-subscription-error.webp" alt="The fixed dashboard in dark mode: each of the four weather cards shows the red message OpenWeather request failed (401): Please note that using One Call 3.0 requires a separate subscription to the One Call by Call plan, with a Try again button, while the Air Pollution side panel still shows its data" width="1200" height="840" loading="lazy">
+<figcaption>After step 26, with geocoding working but no One Call subscription (OpenWeather's documented message, mocked in the test): each weather card shows the error and a "Try again" button, and the side panel, which uses a different API, keeps working. Test data; base map tiles blocked.</figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>Common mistakes when you change this flow</strong></p>
+<ul>
+<li><strong>Leaving something out of the query key.</strong> If <code>getWeather</code> started using the map type or the units, but the key stayed <code>["weather", coords]</code>, the cache would hand out data for the old setting. Everything the query function uses belongs in the key.</li>
+<li><strong>Copying query data into <code>useState</code>.</strong> Then you have two copies that drift apart. Read <code>data</code> from the hook wherever you need it; the shared cache makes this cheap.</li>
+<li><strong>Using <code>useSuspenseQuery</code> without a <code>Suspense</code> above it.</strong> React then suspends the nearest boundary it can find, possibly the whole page. Each suspending component needs a <code>&lt;Suspense&gt;</code> close above it.</li>
+<li><strong>Using a fake fallback value for "not loaded yet".</strong> <code>?? 0</code> turns "unknown" into a real place. Prefer <code>null</code> and handle it.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li><code>App</code> owns the state (<code>location</code>, <code>coordinates</code>); the dropdown and the map change it through <code>setLocation</code> and <code>onMapClick</code>.</li>
+<li><code>coords</code> is derived on every render: the map click for "custom", otherwise the geocode answer. In the repo, "no answer yet" becomes 0, 0, which is why the first requests go to the middle of the ocean; step 25 uses <code>null</code>.</li>
+<li><code>useSuspenseQuery</code> starts fetching during render, plain <code>useQuery</code> after the commit, which explains the recorded request order.</li>
+<li>A query key names a cache entry. The four cards share <code>["weather", coords]</code>, so One Call is fetched once; a cached key costs no request.</li>
+<li>Each query function runs <code>fetch</code> → <code>res.json()</code> → <code>schema.parse</code>. Check <code>res.ok</code> first, or error answers become confusing Zod errors.</li>
+<li><code>Suspense</code> shows the skeletons while a card waits; an error boundary (step 26) catches a failed card so the rest of the dashboard survives.</li>
+</ul></div>
+
+<nav class="pager"><a class="prev" href="06-usequery.html"><small>← Related</small>Step 06 · useQuery</a><a class="next" href="19-skeletons-suspense.html"><small>Related →</small>Step 19 · Suspense</a></nav>
+</main>
+</body>
+</html>

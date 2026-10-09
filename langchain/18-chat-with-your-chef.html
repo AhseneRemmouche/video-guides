@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>18 · Chat with Your Chef: Memory + Streaming</title>
+<meta name="description" content="An interactive loop that remembers the photo and streams every answer.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 18/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 18 of 19 · Extra, not in the video</div>
+  <h1>Chat with Your Chef: Memory + Streaming</h1>
+  <p class="lead">An interactive loop that remembers the photo and streams every answer.</p>
+  <span class="video-link extra">Extension · verified against LangChain 1.3.12</span>
+</section>
+<div class="callout"><p><strong>Extension, not in the video.</strong> <code>chat_chef.py</code> was run end-to-end against LangChain 1.3.12 and LangGraph 1.2.9 with the offline test harness described in step 16 (fake chat model, canned Tavily result, no file picker). The harness confirmed that the image message, the follow-up questions, the memory across turns and the streaming filter all work with these versions. The conversation shown on this page is illustrative.</p></div>
+
+<h2>Goal</h2>
+<p>The chef from step 14 answers once and exits. If you want a different recipe, or ask "can I make it without eggs?", you have to start again and pick the photo again. In this step you build <strong>a chat with your chef</strong>: you send the photo once, then keep asking follow-up questions in the terminal. The chef remembers the photo and everything said so far, and every answer appears word by word as it's generated.</p>
+<p>You already know both ingredients. This step simply combines them:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Step 7 streaming plus step 10 memory plus the chef from steps 14 and 16 combine into chat_chef.py">
+  <rect class="box" x="20" y="20" width="220" height="56" rx="8"/>
+  <text x="130" y="44" text-anchor="middle" class="title">Step 07: streaming</text>
+  <text x="130" y="64" text-anchor="middle" class="mono">stream_mode="messages"</text>
+  <rect class="box" x="270" y="20" width="220" height="56" rx="8"/>
+  <text x="380" y="44" text-anchor="middle" class="title">Step 10: memory</text>
+  <text x="380" y="64" text-anchor="middle" class="mono">InMemorySaver + thread_id</text>
+  <rect class="box" x="520" y="20" width="220" height="56" rx="8"/>
+  <text x="630" y="44" text-anchor="middle" class="title">Steps 14 + 16: chef</text>
+  <text x="630" y="64" text-anchor="middle" class="mono">photo + web_search</text>
+  <path class="arrow" d="M130,76 L330,124"/>
+  <path class="arrow" d="M380,76 V124"/>
+  <path class="arrow" d="M630,76 L430,124"/>
+  <rect class="box-solid" x="250" y="126" width="260" height="56" rx="8"/>
+  <text x="380" y="150" text-anchor="middle" class="on-solid">chat_chef.py</text>
+  <text x="380" y="170" text-anchor="middle" class="on-solid">a loop of streamed turns</text>
+</svg>
+<figcaption>Nothing in this step is new LangChain API. <strong>It's three things you've already used, put in one loop.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>Quick refresher: memory with a checkpointer</summary>
+<p>An agent by itself forgets everything between two <code>invoke</code> or <code>stream</code> calls. In step 10 you gave it a <a class="term" href="glossary.html#checkpointer">checkpointer</a>, <code>InMemorySaver()</code>, which saves the conversation state after every run. A <a class="term" href="glossary.html#thread-id">thread ID</a> in the <code>config</code> tells the checkpointer <em>which</em> conversation to load and extend. Same thread ID: same conversation. New thread ID: a fresh start.</p>
+<p><code>InMemorySaver</code> keeps everything in your computer's memory (RAM), so all conversations disappear when the program exits. That's fine for a chat session. For memory that survives a restart you'd use a database-backed checkpointer; the handbook chapter <a href="lc-06-memory-and-state.html">Memory, State &amp; Checkpointers</a> explains the options.</p>
+</details>
+
+<details class="primer"><summary>Quick refresher: streaming</summary>
+<p><a class="term" href="glossary.html#stream">Streaming</a> means receiving the answer in small pieces while the model is still writing it, instead of waiting for the whole text. With <code>stream_mode="messages"</code>, <code>agent.stream(…)</code> gives you pairs of <code>(token, metadata)</code>: <code>token</code> is a small piece of a message, and <code>metadata</code> says which part of the agent produced it. You print each piece immediately, so the user sees the answer "typing" itself, as in step 7.</p>
+</details>
+
+<h2>What you will do</h2>
+<ol class="steps">
+<li><strong>Finish step 16 first</strong>
+<p>This file reuses the fixed <code>photo_decoder.py</code>, <code>prompt.py</code> and <code>tools.py</code>.</p></li>
+<li><strong>Create <code>chat_chef.py</code></strong>
+<p>In the project folder, next to <code>main.py</code>, create <code>chat_chef.py</code> and paste the code below. No new packages: <code>langgraph</code> (for <code>InMemorySaver</code>) came with <code>langchain</code>.</p></li>
+<li><strong>Run it</strong>
+<pre data-lang="sh" data-tag="terminal"><code>python chat_chef.py images/fridge.jpg</code></pre>
+<p>Or leave out the path to pick a photo. Wait for the first recipe, then type follow-up questions. Type <code>q</code>, <code>quit</code> or <code>exit</code> to stop.</p></li>
+</ol>
+
+<pre class="tree">ACL_FastEat_Agent/
+├── main.py
+├── photo_decoder.py
+├── prompt.py
+├── tools.py
+├── structured_chef.py
+├── <span class="new">chat_chef.py   ← new</span>
+└── .env</pre>
+
+<pre data-file="chat_chef.py" data-lang="py" data-tag="extension"><code>import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+from langchain.agents import create_agent
+from langchain.messages import AIMessageChunk, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+
+from photo_decoder import build_image_message, choose_image_file
+from prompt import CHEF_PROMPT, SYSTEM_CHEF_PROMPT
+from tools import web_search
+
+load_dotenv()
+
+agent = create_agent(model="gpt-5-nano",
+                     tools=[web_search],
+                     system_prompt=SYSTEM_CHEF_PROMPT,
+                     checkpointer=InMemorySaver())
+
+config = {"configurable": {"thread_id": "kitchen-1"}}
+
+
+def ask(message):
+    """Send one message to the chef and print the answer as it streams in."""
+    for token, metadata in agent.stream({"messages": [message]}, config, stream_mode="messages"):
+        if isinstance(token, AIMessageChunk) and token.text:
+            print(token.text, end="", flush=True)
+    print("\n")
+
+
+path = Path(sys.argv[1]) if len(sys.argv) &gt; 1 else choose_image_file()
+ask(build_image_message(path, CHEF_PROMPT))
+
+while True:
+    question = input("You (q to quit): ").strip()
+    if question.lower() in {"q", "quit", "exit"}:
+        break
+    if question:
+        ask(HumanMessage(content=question))</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>import sys</code> / <code>from pathlib import Path</code></td><td>For the optional image path on the command line (see step 16).</td></tr>
+<tr><td>4</td><td><code>from dotenv import load_dotenv</code></td><td>Loads the API keys from <code>.env</code>.</td></tr>
+<tr><td>5</td><td><code>from langchain.agents import create_agent</code></td><td>The agent builder you've used since step 5.</td></tr>
+<tr><td>6</td><td><code>from langchain.messages import AIMessageChunk, HumanMessage</code></td><td><code>AIMessageChunk</code> is the type of each streamed piece of the model's answer; we use it to filter on line 26. <code>HumanMessage</code> wraps your typed follow-up questions.</td></tr>
+<tr><td>7</td><td><code>from langgraph.checkpoint.memory import InMemorySaver</code></td><td>The in-memory checkpointer from step 10. It comes from <a class="term" href="glossary.html#langgraph">LangGraph</a>, the engine underneath LangChain agents.</td></tr>
+<tr><td>9–11</td><td><code>from photo_decoder import …</code> / <code>from prompt import …</code> / <code>from tools import web_search</code></td><td>Your project's helpers, unchanged.</td></tr>
+<tr><td>13</td><td><code>load_dotenv()</code></td><td>Reads <code>.env</code> before the agent needs the OpenAI key.</td></tr>
+<tr><td>15–17</td><td><code>agent = create_agent(model="gpt-5-nano", tools=[web_search], system_prompt=SYSTEM_CHEF_PROMPT,</code></td><td>The same chef as in <code>main.py</code>.</td></tr>
+<tr><td>18</td><td><code>checkpointer=InMemorySaver())</code></td><td><strong>Adds memory.</strong> After each turn the agent saves the full list of messages here, and loads it again at the start of the next turn.</td></tr>
+<tr><td>20</td><td><code>config = {"configurable": {"thread_id": "kitchen-1"}}</code></td><td>Names this conversation <code>"kitchen-1"</code>. The name is arbitrary; what matters is that every turn uses the <em>same</em> config. LangGraph looks for <code>thread_id</code> under the <code>"configurable"</code> key.</td></tr>
+<tr><td>23</td><td><code>def ask(message):</code></td><td>A helper <a class="term" href="glossary.html#function">function</a> for one turn, so the photo turn (line 32) and the text turns (line 39) share the same code.</td></tr>
+<tr><td>24</td><td><code>"""Send one message to the chef and print the answer as it streams in."""</code></td><td>Docstring: says what the helper does.</td></tr>
+<tr><td>25</td><td><code>for token, metadata in agent.stream({"messages": [message]}, config, stream_mode="messages"):</code></td><td>Runs one turn and loops over the pieces as they arrive. Note: you send <strong>only the new message</strong>; the checkpointer adds the history. <code>config</code> is the second argument, exactly where <code>invoke</code> takes it in step 10. Without it you'd get <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys…</code>.</td></tr>
+<tr><td>26</td><td><code>if isinstance(token, AIMessageChunk) and token.text:</code></td><td><strong>The filter.</strong> Print only pieces of the model's own answer (<code>AIMessageChunk</code>) that actually contain text. This skips the <a class="term" href="glossary.html#tool-message">tool messages</a> (the raw search results) and the empty chunks that carry a tool call.</td></tr>
+<tr><td>27</td><td><code>print(token.text, end="", flush=True)</code></td><td><code>end=""</code> stops <code>print</code> adding a line break after each piece, so they join into flowing text. <code>flush=True</code> pushes each piece to the screen immediately instead of waiting for a full line.</td></tr>
+<tr><td>28</td><td><code>print("\n")</code></td><td>After the answer, prints a line break plus an empty line, so the next prompt starts cleanly.</td></tr>
+<tr><td>31</td><td><code>path = Path(sys.argv[1]) if len(sys.argv) &gt; 1 else choose_image_file()</code></td><td>Uses the path from the command line, or opens the picker.</td></tr>
+<tr><td>32</td><td><code>ask(build_image_message(path, CHEF_PROMPT))</code></td><td><strong>Turn 1</strong>: sends the photo with "please find me a good recipe to cook" and streams the first recipe. This is the only time the photo is <em>sent by you</em>.</td></tr>
+<tr><td>34</td><td><code>while True:</code></td><td>Repeats forever, until a <code>break</code> (line 37) stops it.</td></tr>
+<tr><td>35</td><td><code>question = input("You (q to quit): ").strip()</code></td><td><code>input</code> shows the prompt text and waits until you press <kbd>Enter</kbd>. <code>.strip()</code> removes spaces at both ends, so <code>" q "</code> still counts as <code>q</code>.</td></tr>
+<tr><td>36</td><td><code>if question.lower() in {"q", "quit", "exit"}:</code></td><td><code>.lower()</code> makes <code>Quit</code> and <code>EXIT</code> work too. The curly brackets make a <em>set</em>: a collection made for fast "is it in here?" checks.</td></tr>
+<tr><td>37</td><td><code>break</code></td><td>Leaves the <code>while</code> loop. There's no code after the loop, so the program ends.</td></tr>
+<tr><td>38–39</td><td><code>if question:</code> / <code>ask(HumanMessage(content=question))</code></td><td>Skips empty lines (just pressing <kbd>Enter</kbd> gives <code>""</code>, which counts as false), so you don't pay for a model call with no question. Otherwise wraps the text in a <a class="term" href="glossary.html#human-message">HumanMessage</a> and runs the next turn.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Program flow: pick the photo, ask with the photo, then loop: read input; if it is a quit word stop; if empty read again; otherwise ask and loop">
+  <rect class="box" x="20" y="20" width="160" height="44" rx="8"/>
+  <text x="100" y="40" text-anchor="middle">photo path</text>
+  <text x="100" y="56" text-anchor="middle" class="small">argv or picker (line 31)</text>
+  <path class="arrow" d="M180,42 H218"/>
+  <rect class="box-solid" x="220" y="20" width="200" height="44" rx="8"/>
+  <text x="320" y="40" text-anchor="middle" class="on-solid">ask(photo message)</text>
+  <text x="320" y="56" text-anchor="middle" class="on-solid">line 32</text>
+  <path class="arrow" d="M320,64 V98"/>
+  <rect class="zone" x="200" y="88" width="540" height="190" rx="10"/>
+  <text x="596" y="274" class="small">while True: (lines 34–39)</text>
+  <rect class="box2" x="220" y="100" width="200" height="44" rx="8"/>
+  <text x="320" y="120" text-anchor="middle">input("You (q to quit): ")</text>
+  <text x="320" y="136" text-anchor="middle" class="small">.strip()</text>
+  <path class="arrow" d="M320,144 V170"/>
+  <rect class="box-info" x="220" y="172" width="200" height="40" rx="8"/>
+  <text x="320" y="197" text-anchor="middle">q / quit / exit ?</text>
+  <path class="arrow-bad" d="M220,192 H120 V232"/>
+  <text x="170" y="185" text-anchor="middle" class="small">yes</text>
+  <rect class="box-bad" x="40" y="234" width="140" height="36" rx="8"/>
+  <text x="110" y="257" text-anchor="middle" class="bad">break → end</text>
+  <path class="arrow" d="M420,192 H468"/>
+  <text x="444" y="185" text-anchor="middle" class="small">no</text>
+  <rect class="box-info" x="470" y="172" width="120" height="40" rx="8"/>
+  <text x="530" y="197" text-anchor="middle">empty?</text>
+  <path class="arrow" d="M530,172 V122 H424"/>
+  <text x="540" y="150" class="small">yes: ask again</text>
+  <path class="arrow-ok" d="M530,212 V230"/>
+  <text x="544" y="226" class="small">no</text>
+  <rect class="box-ok" x="430" y="232" width="200" height="36" rx="8"/>
+  <text x="530" y="255" text-anchor="middle">ask(HumanMessage)</text>
+  <path class="arrow" d="M630,250 H720 V112 H424"/>
+</svg>
+<figcaption>The control flow of <code>chat_chef.py</code>. The photo is sent once, before the loop; <strong>every pass through the loop is one question and one streamed answer</strong>.</figcaption>
+</figure>
+
+<h2>Why the filter on line 26 matters</h2>
+<p>In step 7 the agent had no tools, so every streamed piece was part of the answer and the lesson printed everything that had <code>.content</code>. The chef <em>does</em> have a tool. With <code>stream_mode="messages"</code> the stream also yields:</p>
+<ul>
+<li><strong>AI chunks that carry a tool call</strong>: the model deciding to call <code>web_search</code>. Their text is empty; the call is in <code>tool_call_chunks</code>.</li>
+<li><strong>ToolMessages</strong>: the complete search result, a long JSON-like text with titles, URLs and page snippets.</li>
+</ul>
+<p>Printed as-is, the second kind would dump a wall of raw search data in the middle of your chat. Checking <code>isinstance(token, AIMessageChunk)</code> keeps only the model's own words. Using <code>.text</code> instead of <code>.content</code> is also safer: <code>.content</code> may be a string <em>or</em> a list of content blocks depending on the model, while <code>.text</code> always gives you just the plain text (an empty string if there's none).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Items coming out of agent.stream pass through the filter: AIMessageChunk with text is printed, AIMessageChunk carrying a tool call has empty text and is skipped, ToolMessage with search results is skipped">
+  <text x="20" y="26" class="title">What agent.stream yields during one turn (in order)</text>
+  <rect class="box2" x="20" y="44" width="300" height="40" rx="8"/>
+  <text x="34" y="62" class="mono">AIMessageChunk  text=""</text>
+  <text x="34" y="77" class="small">carries the web_search tool call</text>
+  <rect class="box2" x="20" y="96" width="300" height="40" rx="8"/>
+  <text x="34" y="114" class="mono">ToolMessage</text>
+  <text x="34" y="129" class="small">{"results": [{"title": …, "url": …}, …]}</text>
+  <rect class="box2" x="20" y="148" width="300" height="40" rx="8"/>
+  <text x="34" y="166" class="mono">AIMessageChunk  text="Here"</text>
+  <text x="34" y="181" class="small">first piece of the answer</text>
+  <rect class="box2" x="20" y="200" width="300" height="40" rx="8"/>
+  <text x="34" y="218" class="mono">AIMessageChunk  text=" is a"</text>
+  <text x="34" y="233" class="small">…and so on, many small pieces</text>
+  <rect class="box-info" x="370" y="96" width="150" height="92" rx="8"/>
+  <text x="445" y="126" text-anchor="middle" class="title">line 26</text>
+  <text x="445" y="146" text-anchor="middle" class="small">AIMessageChunk</text>
+  <text x="445" y="162" text-anchor="middle" class="small">and .text?</text>
+  <path class="arrow" d="M320,64 L368,110"/>
+  <path class="arrow" d="M320,116 H368"/>
+  <path class="arrow" d="M320,168 H368"/>
+  <path class="arrow" d="M320,220 L368,176"/>
+  <path class="arrow-bad" d="M520,118 L568,84"/>
+  <rect class="box-bad" x="570" y="56" width="170" height="44" rx="8"/>
+  <text x="655" y="76" text-anchor="middle" class="bad">skipped</text>
+  <text x="655" y="92" text-anchor="middle" class="small">tool call, tool result</text>
+  <path class="arrow-ok" d="M520,166 L568,196"/>
+  <rect class="box-ok" x="570" y="176" width="170" height="44" rx="8"/>
+  <text x="655" y="196" text-anchor="middle" class="ok">printed</text>
+  <text x="655" y="212" text-anchor="middle" class="small">"Here is a…"</text>
+</svg>
+<figcaption>The stream contains more than the answer (texts illustrative). <strong>Only chunks of the model's own text reach the screen</strong>; tool traffic is filtered out.</figcaption>
+</figure>
+
+<h2>How the photo stays in memory, and what it costs</h2>
+<p>You only send the photo in turn 1, yet in turn 3 you can ask "what else could I make with the green thing on the left?" and the chef knows what you mean. Here's why: the checkpointer saved turn 1's <a class="term" href="glossary.html#human-message">HumanMessage</a>, <strong>including its base64 image</strong>. At the start of every new turn, the agent loads the whole saved history, appends your new question, and sends <em>all of it</em> to the model. Models have no memory of their own; "memory" always means "we send the past again".</p>
+<p>That has a price. Every turn re-sends the image, the search results from earlier turns, and all previous answers. Each of those costs input <a class="term" href="glossary.html#token">tokens</a>. So turn 5 costs more than turn 1, even if your question is one word, and a very long session can eventually approach the model's <a class="term" href="glossary.html#context-window">context window</a> limit. For a short chat about one photo this is fine. For long sessions you'd trim or summarise old messages; the handbook chapter <a href="lc-06-memory-and-state.html">Memory, State &amp; Checkpointers</a> shows how.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Bars showing what is sent to the model on turns 1, 2 and 3: the image block and earlier messages are sent again every turn, so each bar is longer than the last">
+  <text x="20" y="26" class="title">What is sent to the model on each turn (illustrative sizes)</text>
+  <text x="20" y="66" class="label">Turn 1</text>
+  <rect class="box-info" x="90" y="48" width="110" height="28" rx="6"/><text x="145" y="67" text-anchor="middle" class="small">photo + request</text>
+  <rect class="box" x="200" y="48" width="90" height="28" rx="6"/><text x="245" y="67" text-anchor="middle" class="small">search results</text>
+  <text x="20" y="126" class="label">Turn 2</text>
+  <rect class="box-info" x="90" y="108" width="110" height="28" rx="6"/><text x="145" y="127" text-anchor="middle" class="small">photo + request</text>
+  <rect class="box" x="200" y="108" width="90" height="28" rx="6"/><text x="245" y="127" text-anchor="middle" class="small">search results</text>
+  <rect class="box2" x="290" y="108" width="90" height="28" rx="6"/><text x="335" y="127" text-anchor="middle" class="small">recipe 1</text>
+  <rect class="box-ok" x="380" y="108" width="80" height="28" rx="6"/><text x="420" y="127" text-anchor="middle" class="small">question 2</text>
+  <text x="20" y="186" class="label">Turn 3</text>
+  <rect class="box-info" x="90" y="168" width="110" height="28" rx="6"/><text x="145" y="187" text-anchor="middle" class="small">photo + request</text>
+  <rect class="box" x="200" y="168" width="90" height="28" rx="6"/><text x="245" y="187" text-anchor="middle" class="small">search results</text>
+  <rect class="box2" x="290" y="168" width="90" height="28" rx="6"/><text x="335" y="187" text-anchor="middle" class="small">recipe 1</text>
+  <rect class="box2" x="380" y="168" width="80" height="28" rx="6"/><text x="420" y="187" text-anchor="middle" class="small">question 2</text>
+  <rect class="box2" x="460" y="168" width="90" height="28" rx="6"/><text x="505" y="187" text-anchor="middle" class="small">answer 2</text>
+  <rect class="box-ok" x="550" y="168" width="80" height="28" rx="6"/><text x="590" y="187" text-anchor="middle" class="small">question 3</text>
+  <path class="line dashed" d="M90,214 H740"/>
+  <text x="90" y="236" class="small">The photo block (left) is in every request. New parts are green.</text>
+  <text x="90" y="254" class="small">Input tokens, and so cost, grow every turn.</text>
+</svg>
+<figcaption>Memory works by re-sending. <strong>The photo you sent once is paid for again on every turn</strong>, along with everything said since. Bar lengths are illustrative, not measured.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Sequence of a follow-up turn: you type a question, the agent loads the thread kitchen-1 from InMemorySaver, sends the full history to the model, streams the answer to the terminal, and saves the updated thread">
+  <text x="90" y="24" text-anchor="middle" class="title">Terminal</text>
+  <text x="290" y="24" text-anchor="middle" class="title">Agent</text>
+  <text x="490" y="24" text-anchor="middle" class="title">InMemorySaver</text>
+  <text x="670" y="24" text-anchor="middle" class="title">Model</text>
+  <path class="line dashed" d="M90,34 V258"/>
+  <path class="line dashed" d="M290,34 V258"/>
+  <path class="line dashed" d="M490,34 V258"/>
+  <path class="line dashed" d="M670,34 V258"/>
+  <path class="arrow" d="M90,58 H286"/><text x="190" y="52" text-anchor="middle" class="label">1. "without eggs?"</text>
+  <path class="arrow" d="M290,88 H486"/><text x="390" y="82" text-anchor="middle" class="label">2. load "kitchen-1"</text>
+  <path class="arrow" d="M490,118 H294"/><text x="390" y="112" text-anchor="middle" class="label">3. saved messages</text>
+  <path class="arrow-accent" d="M290,148 H666"/><text x="580" y="142" text-anchor="middle" class="label">4. full history</text>
+  <path class="arrow" d="M670,178 H294"/><text x="580" y="172" text-anchor="middle" class="label">5. answer chunks</text>
+  <path class="arrow-ok" d="M290,208 H94"/><text x="190" y="202" text-anchor="middle" class="label">6. printed live</text>
+  <path class="arrow" d="M290,238 H486"/><text x="390" y="232" text-anchor="middle" class="label">7. save updated thread</text>
+</svg>
+<figcaption>One follow-up turn, time flowing down. <strong>Step 4 is where the old messages, including the photo, travel again.</strong> Steps 5 and 6 overlap in time: that's streaming.</figcaption>
+</figure>
+
+<h2>What you should see</h2>
+<div class="callout ok"><p><strong>What you should see</strong></p>
+<p>The first recipe appears word by word. Then a <code>You (q to quit):</code> prompt. Follow-up answers also stream in and clearly refer to the earlier recipe and the photo. Typing <code>q</code> ends the program silently. The conversation below is <strong>illustrative</strong>; your answers will differ.</p></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Illustration of a terminal session: the chef's first recipe, a follow-up question about eggs, the chef's streamed answer, and the quit command">
+  <rect class="ui-window" x="20" y="14" width="720" height="272" rx="8"/>
+  <rect class="ui-chrome" x="20" y="14" width="720" height="28" rx="8"/>
+  <text x="40" y="33" class="small">Terminal · python chat_chef.py images/fridge.jpg</text>
+  <rect class="ui-bubble-ai" x="40" y="56" width="560" height="44" rx="8"/>
+  <text x="54" y="74" class="label">Garlic egg fried rice. You'll need: 2 cups rice, 2 eggs, garlic…</text>
+  <text x="54" y="91" class="label">1. Heat the oil in a pan…</text>
+  <rect class="ui-bubble-user" x="380" y="114" width="340" height="30" rx="8"/>
+  <text x="394" y="134" class="ui-on-user">You (q to quit): can I make it without eggs?</text>
+  <rect class="ui-bubble-ai" x="40" y="158" width="560" height="44" rx="8"/>
+  <text x="54" y="176" class="label">Yes. Skip step 3 and add the spring onions earlier for more</text>
+  <text x="54" y="193" class="label">flavour. The garlic from your photo does the rest…</text>
+  <rect class="ui-skeleton" x="54" y="210" width="200" height="8" rx="4"/>
+  <rect class="ui-bubble-user" x="560" y="232" width="160" height="30" rx="8"/>
+  <text x="574" y="252" class="ui-on-user">You (q to quit): q</text>
+  <text x="40" y="278" class="small">Program ends. The conversation is gone (InMemorySaver).</text>
+</svg>
+<figcaption>Illustration (simplified): a real terminal shows plain lines, not bubbles. <strong>The second answer refers to the photo without you sending it again.</strong></figcaption>
+</figure>
+
+<p>You won't see INFO log lines: this file doesn't call <code>logging.basicConfig</code>, to keep the chat clean. A failed search still prints a <code>search failed: …</code> warning, because Python shows warnings by default. If you'd like a start-up key check, copy lines 20–22 of the fixed <code>main.py</code> (step 16) after <code>load_dotenv()</code>.</p>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Forgetting <code>config</code></strong> in <code>agent.stream(…)</code>: <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id</code>.</li>
+<li><strong>Creating a new config inside the loop with a new thread ID</strong> (for example from a counter): every turn starts a fresh conversation and the chef "forgets" the photo.</li>
+<li><strong>Creating the agent inside <code>ask</code></strong>: each call would get a new, empty <code>InMemorySaver</code>, so memory is lost. Create the agent and checkpointer once, at the top.</li>
+<li><strong>Dropping <code>flush=True</code></strong>: on some terminals the text then appears in bursts instead of word by word.</li>
+<li><strong>Printing <code>token.content</code> without the type check</strong>: raw search results fill the screen after the first question.</li>
+<li><strong>Stopping with <kbd>Ctrl</kbd>+<kbd>C</kbd></strong> prints a <code>KeyboardInterrupt</code> traceback. It's harmless; use <code>q</code> for a clean exit.</li>
+<li><strong>Sending a second photo in the same thread</strong>: it works (call <code>ask(build_image_message(…))</code> again), but now <em>two</em> images are re-sent every turn. Start a new thread ID for a new photo.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>chat_chef.py</code> = streaming (step 7) + checkpointer memory (step 10) + the chef, inside a <code>while True</code> loop.</li>
+<li><code>input()</code> reads a question; <code>q</code>, <code>quit</code> or <code>exit</code> breaks the loop; empty lines are skipped.</li>
+<li>All turns share <code>{"configurable": {"thread_id": "kitchen-1"}}</code>, passed to <code>agent.stream</code> as the second argument.</li>
+<li>Print only <code>AIMessageChunk</code> pieces with <code>.text</code>; that hides tool calls and raw search results.</li>
+<li>Memory means re-sending: the photo and the whole history go to the model every turn, so cost grows as the chat gets longer.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="17-structured-recipe.html"><small>← Previous · Step 17</small>A Typed Recipe with Structured Output</a>
+<a class="next" href="19-switch-providers.html"><small>Next · Step 19 →</small>Switch Model Providers</a>
+</nav>
+</main>
+</body>
+</html>

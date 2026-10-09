@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 7 · Multimodal Input &amp; Structured Output</title>
+<meta name="description" content="Images and files as content blocks, and getting typed data back with response_format.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 7/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangChain &amp; Agents Handbook · Chapter 7 of 10</div>
+  <h1>Multimodal Input &amp; Structured Output</h1>
+  <p class="lead">Images and files as content blocks, and getting typed data back with response_format.</p>
+</section>
+<p>The chef project does two things that go beyond "send text, get text": it sends a <strong>photo</strong> to the model (<a href="11-multimodal-images.html">step 11</a> and <a href="13-chef-setup-and-decoder.html">step 13</a>), and in the extension <a href="17-structured-recipe.html">step 17</a> it gets back a <strong>typed recipe</strong> instead of a paragraph. This chapter explains both sides. First the input side: how images (and other files) travel inside a message as content blocks, what a data URL is, why file size matters and which models can see. Then the output side: <a class="term" href="glossary.html#structured-output">structured output</a> with <code>response_format</code> and a <a class="term" href="glossary.html#pydantic">Pydantic</a> model, the two strategies LangChain can use, what happens when the model returns invalid data, and when structured output is the right choice.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> The chef's whole idea is "photo in, recipe out". If you understand content blocks you can send several photos, a photo by URL, or switch providers (<a href="19-switch-providers.html">step 19</a>) without guessing. If you understand structured output you can save recipes to a database, show them in an app, or make a shopping list, because your code receives fields, not prose.</div>
+
+<h2>Part 1: Multimodal input</h2>
+<p><a class="term" href="glossary.html#multimodal">Multimodal</a> means "more than one kind of data": text plus images, audio, video or documents. A <strong>multimodal model</strong> (also called a vision model when it accepts images) can take those as input. LangChain does not do the "seeing"; it only packages the image in the format the provider expects.</p>
+
+<h3>Content: a string or a list of blocks</h3>
+<p>So far, every <a class="term" href="glossary.html#message">message</a> had a plain string as its content: <code>HumanMessage(content="My favorite color is green")</code>. For mixed input, <code>content</code> becomes a <a class="term" href="glossary.html#list">list</a> of <strong>content blocks</strong>. Each block is a <a class="term" href="glossary.html#dict">dictionary</a> with a <code>"type"</code> key saying what it carries. Here is the message builder from the lesson in step 11 (transcribed from the video):</p>
+<pre data-lang="py" data-file="multi_model_messages.py"><code>def build_image_message(image_path: Path) -&gt; HumanMessage:
+    return HumanMessage(
+        content=[
+            {"type": "text", "text": "tell me what is the image about"},
+            {"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}},
+        ]
+    )</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Anatomy of a HumanMessage whose content is a list with a text block and an image_url block">
+  <rect class="zone" x="10" y="10" width="740" height="200" rx="10"/>
+  <text x="30" y="34" class="mono">HumanMessage(content=[ ... ])</text>
+  <rect class="box" x="30" y="50" width="330" height="140" rx="8"/>
+  <text x="195" y="74" text-anchor="middle" class="title">Block 1: text</text>
+  <text x="195" y="100" text-anchor="middle" class="mono">"type": "text"</text>
+  <text x="195" y="124" text-anchor="middle" class="mono">"text": "tell me what..."</text>
+  <text x="195" y="160" text-anchor="middle" class="small">the instruction for the model</text>
+  <rect class="box-info" x="400" y="50" width="330" height="140" rx="8"/>
+  <text x="565" y="74" text-anchor="middle" class="title">Block 2: image</text>
+  <text x="565" y="100" text-anchor="middle" class="mono">"type": "image_url"</text>
+  <text x="565" y="124" text-anchor="middle" class="mono">"image_url": {"url": ...}</text>
+  <text x="565" y="160" text-anchor="middle" class="small">a data URL or an https:// link</text>
+</svg>
+<figcaption>One message, two blocks. The model reads them in order, as if you had typed a question and pasted a photo underneath. <strong>The text block is where your instructions go</strong>.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>The repo's text block sends the word "prompt".</strong> In the chef repo, <code>photo_decoder.py</code> line 52 is <code>{"type": "text", "text": "prompt"}</code>: the string <code>"prompt"</code>, not the variable <code>prompt</code>. The offline harness confirmed the model receives the literal word. It still seemed to work in the video because the system prompt tells the model what to do. <a href="16-fix-and-harden.html">Step 16</a> fixes it to <code>"text": prompt</code>. This is a good reminder to check what your blocks really contain (see <a href="lc-08-debugging-observability.html">chapter 8</a>).</div>
+
+<h3>Data URLs: an image as text</h3>
+<p>A request to the model is JSON text, so a photo's raw bytes cannot be pasted in directly. The lesson converts the file into a <a class="term" href="glossary.html#data-url">data URL</a>: a string that contains the file itself, encoded as <a class="term" href="glossary.html#base64">base64</a>. Lines 42–47 of the lesson file do it:</p>
+<pre data-lang="py" data-file="multi_model_messages.py"><code>    mime_type, _ = mimetypes.guess_type(str(image_path))
+    if not mime_type or not mime_type.startswith("image/"):
+        raise ValueError(f"Not an image file: {image_path}")
+
+    image_b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    return f"data:{mime_type};base64,{image_b64}"</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="The parts of a data URL: the data scheme, the MIME type, the base64 marker, and the encoded bytes">
+  <rect class="box2" x="20" y="30" width="80" height="44" rx="8"/><text x="60" y="57" text-anchor="middle" class="mono">data:</text>
+  <rect class="box-info" x="110" y="30" width="130" height="44" rx="8"/><text x="175" y="57" text-anchor="middle" class="mono">image/jpeg</text>
+  <rect class="box2" x="250" y="30" width="100" height="44" rx="8"/><text x="300" y="57" text-anchor="middle" class="mono">;base64,</text>
+  <rect class="box-warn" x="360" y="30" width="380" height="44" rx="8"/><text x="550" y="57" text-anchor="middle" class="mono">/9j/4AAQSkZJRgABAQ... (very long)</text>
+  <text x="60" y="100" text-anchor="middle" class="small">scheme</text>
+  <text x="175" y="100" text-anchor="middle" class="small">MIME type</text>
+  <text x="175" y="116" text-anchor="middle" class="small">from mimetypes</text>
+  <text x="300" y="100" text-anchor="middle" class="small">encoding marker</text>
+  <text x="550" y="100" text-anchor="middle" class="small">the file's bytes as base64 text</text>
+  <text x="550" y="116" text-anchor="middle" class="small">about 33% larger than the file</text>
+  <text x="380" y="152" text-anchor="middle" class="label">f"data:{mime_type};base64,{image_b64}"</text>
+</svg>
+<figcaption>A data URL is <strong>the whole file written as text</strong>, with a label saying what kind of file it is. The <a class="term" href="glossary.html#mime-type">MIME type</a> must match the real format, or the provider may refuse it.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to base64? Why the image gets bigger</summary>
+<p>Base64 rewrites any bytes using only 64 "safe" characters (A–Z, a–z, 0–9, <code>+</code> and <code>/</code>), so binary data can travel inside text formats like JSON. Every 3 bytes become 4 characters, which is why the encoded image is about a third larger than the file on disk. It is an <strong>encoding</strong>, not encryption: anyone can decode it, so a base64 photo is exactly as private as the photo itself.</p>
+</details>
+
+<h3>Three ways to hand over an image</h3>
+<div class="table-wrap"><table>
+<tr><th>Way</th><th>What goes in the block</th><th>Good for</th><th>Watch out for</th></tr>
+<tr><td><strong>Data URL</strong> (the video's way)</td><td><code>data:image/jpeg;base64,...</code></td><td>Local files and private photos; works offline from the provider's point of view</td><td>Large requests; the image is stored in memory threads (<a href="lc-06-memory-and-state.html">chapter 6</a>)</td></tr>
+<tr><td><strong>https URL</strong></td><td><code>https://example.com/fridge.jpg</code></td><td>Images already on the public web; tiny requests</td><td>The provider must be able to download it; private links fail; the content can change</td></tr>
+<tr><td><strong>Provider file id</strong></td><td>An id returned by the provider's file upload API</td><td>Reusing the same large file in many requests</td><td>Provider-specific; not portable between providers</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Data URL path: local file is read, encoded and sent inside the request. URL path: only the link is sent and the provider downloads the image">
+  <text x="20" y="28" class="title">Data URL</text>
+  <rect class="box2" x="20" y="40" width="120" height="44" rx="8"/><text x="80" y="67" text-anchor="middle" class="label">fridge.jpg</text>
+  <rect class="box" x="175" y="40" width="140" height="44" rx="8"/><text x="245" y="60" text-anchor="middle" class="label">read_bytes()</text><text x="245" y="76" text-anchor="middle" class="small">+ b64encode</text>
+  <rect class="box-warn" x="350" y="40" width="200" height="44" rx="8"/><text x="450" y="60" text-anchor="middle" class="label">big request</text><text x="450" y="76" text-anchor="middle" class="small">text + whole image</text>
+  <rect class="box-solid" x="590" y="40" width="150" height="44" rx="8"/><text x="665" y="67" text-anchor="middle" class="on-solid">Model provider</text>
+  <path class="arrow" d="M140,62 H173"/><path class="arrow" d="M315,62 H348"/><path class="arrow" d="M550,62 H588"/>
+  <text x="20" y="138" class="title">https URL</text>
+  <rect class="box2" x="20" y="150" width="120" height="44" rx="8"/><text x="80" y="170" text-anchor="middle" class="label">image on</text><text x="80" y="186" text-anchor="middle" class="label">a website</text>
+  <rect class="box-ok" x="350" y="150" width="200" height="44" rx="8"/><text x="450" y="170" text-anchor="middle" class="label">small request</text><text x="450" y="186" text-anchor="middle" class="small">text + the link only</text>
+  <rect class="box-solid" x="590" y="150" width="150" height="44" rx="8"/><text x="665" y="177" text-anchor="middle" class="on-solid">Model provider</text>
+  <path class="arrow" d="M140,172 H348"/><path class="arrow" d="M550,172 H588"/>
+  <path class="arrow-accent dashed" d="M630,150 C600,110 200,110 120,148"/>
+  <text x="380" y="112" text-anchor="middle" class="small">provider downloads the image itself</text>
+</svg>
+<figcaption>With a data URL <strong>your program</strong> carries the image; with an https URL <strong>the provider</strong> fetches it. Use data URLs for private photos, like the chef does.</figcaption>
+</figure>
+
+<h3>The provider-neutral image block</h3>
+<p>The chef uses OpenAI's own block shape (<code>"type": "image_url"</code>). LangChain 1.x also defines a <strong>standard</strong> image block that each provider package translates for you, which helps when you switch models as in step 19. This was checked with <code>langchain-openai</code> 1.3.4: both blocks below are converted into OpenAI's <code>image_url</code> format before sending.</p>
+<pre data-lang="py" data-tag="illustrative"><code>HumanMessage(content=[
+    {"type": "text", "text": "Which ingredients do you see?"},
+    {"type": "image", "base64": image_b64, "mime_type": "image/jpeg"},
+])
+
+HumanMessage(content=[
+    {"type": "text", "text": "Which ingredients do you see?"},
+    {"type": "image", "url": "https://example.com/fridge.jpg"},
+])</code></pre>
+<p>Notice that the standard block takes the raw base64 string and the MIME type as <strong>separate</strong> keys, instead of one combined data URL.</p>
+
+<h3>File size, cost and quality</h3>
+<ul>
+<li><strong>Images use tokens.</strong> Providers turn an image into tokens, and larger or higher-detail images generally cost more and take longer. The exact rule differs by provider and model, so check its vision documentation.</li>
+<li><strong>Size limits exist.</strong> Providers limit the size and number of images per request and the accepted formats. The lesson's file picker allows <code>*.png *.jpg *.jpeg *.webp</code>; a format the provider does not support produces an error from the API, not from LangChain.</li>
+<li><strong>Phone photos are large.</strong> Resizing a photo before encoding it (with an image library) usually keeps enough detail to recognise ingredients while making the request much smaller. That is an optional improvement; the project does not do it.</li>
+<li><strong>Memory multiplies it.</strong> With a checkpointer (step 18), the image block stays in the thread and is resent on every follow-up question.</li>
+</ul>
+
+<h3>Which models can see?</h3>
+<p>Only models that accept image input can read the photo. The video uses <code>gpt-5-nano</code>, which accepted the image in the presenter's runs. Many current models from OpenAI, Anthropic and Google accept images; many small local models do not. Model lists change often, so check the provider's model page "at the time of writing" for your model. If you send an image to a text-only model, expect an error from the provider or a model that ignores the picture. Some providers also accept audio, video or PDF files as content blocks; support varies widely, so treat it as provider-specific.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Mistake, symptom, fix table for common image problems">
+  <text x="130" y="24" text-anchor="middle" class="title">Mistake</text><text x="380" y="24" text-anchor="middle" class="title">Symptom</text><text x="630" y="24" text-anchor="middle" class="title">Fix</text>
+  <rect class="box-bad" x="10" y="36" width="240" height="38" rx="8"/><text x="130" y="60" text-anchor="middle" class="label">model has no vision</text>
+  <rect class="box-warn" x="260" y="36" width="240" height="38" rx="8"/><text x="380" y="60" text-anchor="middle" class="label">API error or ignores photo</text>
+  <rect class="box-ok" x="510" y="36" width="240" height="38" rx="8"/><text x="630" y="60" text-anchor="middle" class="label">pick a vision model</text>
+  <rect class="box-bad" x="10" y="84" width="240" height="38" rx="8"/><text x="130" y="108" text-anchor="middle" class="label">wrong MIME type</text>
+  <rect class="box-warn" x="260" y="84" width="240" height="38" rx="8"/><text x="380" y="108" text-anchor="middle" class="label">"invalid image" error</text>
+  <rect class="box-ok" x="510" y="84" width="240" height="38" rx="8"/><text x="630" y="108" text-anchor="middle" class="label">guess it from the file</text>
+  <rect class="box-bad" x="10" y="132" width="240" height="38" rx="8"/><text x="130" y="156" text-anchor="middle" class="label">"text": "prompt"</text>
+  <rect class="box-warn" x="260" y="132" width="240" height="38" rx="8"/><text x="380" y="156" text-anchor="middle" class="label">instruction never arrives</text>
+  <rect class="box-ok" x="510" y="132" width="240" height="38" rx="8"/><text x="630" y="156" text-anchor="middle" class="label">"text": prompt (step 16)</text>
+  <path class="arrow" d="M250,55 H258"/><path class="arrow" d="M500,55 H508"/><path class="arrow" d="M250,103 H258"/><path class="arrow" d="M500,103 H508"/><path class="arrow" d="M250,151 H258"/><path class="arrow" d="M500,151 H508"/>
+</svg>
+<figcaption>Read each row left to right. The last row is the real bug in the repo: <strong>the hardest image bugs are often in the text block</strong>.</figcaption>
+</figure>
+
+<h2>Part 2: Structured output</h2>
+<p>A normal agent answer is free text: <code>response["messages"][-1].content</code>. That is great for a human to read and awkward for a program. If you want to save the recipe, count its steps or list its ingredients in an app, you would have to parse prose, and the prose changes every time. <strong>Structured output</strong> asks the model to answer in a fixed shape that your code can rely on.</p>
+
+<h3>Describe the shape with Pydantic</h3>
+<p>In LangChain you describe the shape with a <a class="term" href="glossary.html#pydantic">Pydantic</a> class. This is the <code>Recipe</code> model from step 17 (<code>structured_chef.py</code>, lines 15–23):</p>
+<pre data-lang="py" data-file="structured_chef.py"><code>class Recipe(BaseModel):
+    """A recipe that uses the ingredients found in the photo."""
+
+    title: str = Field(description="Name of the dish")
+    ingredients_seen: list[str] = Field(description="Ingredients you recognised in the photo")
+    ingredients: list[str] = Field(description="Everything the recipe needs, with quantities")
+    steps: list[str] = Field(description="Cooking steps, in order")
+    minutes: int = Field(description="Total cooking time in minutes")
+    source_url: str | None = Field(default=None, description="Web page the recipe came from, if any")</code></pre>
+<p>Each attribute is a field with a <a class="term" href="glossary.html#type-hint">type hint</a> (<code>str</code>, <code>list[str]</code>, <code>int</code>, <code>str | None</code>) and a description. LangChain turns this class into a JSON Schema, a machine-readable description of the shape. The <a class="term" href="glossary.html#docstring">docstring</a> and the descriptions are sent to the model, so they work like small prompts: write them for the model.</p>
+<p>Then you pass the class to <code>create_agent</code> and read the result from a new key (lines 26–29 and 34):</p>
+<pre data-lang="py" data-file="structured_chef.py"><code>agent = create_agent(model="gpt-5-nano",
+                     tools=[web_search],
+                     system_prompt=SYSTEM_CHEF_PROMPT,
+                     response_format=Recipe)</code></pre>
+<pre data-lang="py" data-file="structured_chef.py"><code>recipe: Recipe = response["structured_response"]</code></pre>
+<p><code>recipe</code> is a real <code>Recipe</code> object: <code>recipe.title</code> is a string, <code>recipe.minutes</code> is an integer, <code>recipe.steps</code> is a list you can loop over. The agent still keeps its normal <code>messages</code> list as well.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Flow: the Recipe class becomes a JSON schema, the model answers in that shape, Pydantic validates it, and the program receives a Recipe object">
+  <rect class="box2" x="10" y="70" width="120" height="56" rx="8"/><text x="70" y="94" text-anchor="middle" class="mono">Recipe</text><text x="70" y="112" text-anchor="middle" class="small">Pydantic class</text>
+  <rect class="box" x="160" y="70" width="120" height="56" rx="8"/><text x="220" y="94" text-anchor="middle" class="label">JSON Schema</text><text x="220" y="112" text-anchor="middle" class="small">sent to model</text>
+  <rect class="box-solid" x="310" y="70" width="130" height="56" rx="8"/><text x="375" y="94" text-anchor="middle" class="on-solid">Model</text><text x="375" y="112" text-anchor="middle" class="on-solid">answers as JSON</text>
+  <rect class="box-info" x="470" y="70" width="120" height="56" rx="8"/><text x="530" y="94" text-anchor="middle" class="label">validate</text><text x="530" y="112" text-anchor="middle" class="small">types checked</text>
+  <rect class="box-ok" x="620" y="70" width="130" height="56" rx="8"/><text x="685" y="94" text-anchor="middle" class="mono">recipe.minutes</text><text x="685" y="112" text-anchor="middle" class="small">an int: 20</text>
+  <path class="arrow" d="M130,98 H158"/><path class="arrow" d="M280,98 H308"/><path class="arrow" d="M440,98 H468"/><path class="arrow" d="M590,98 H618"/>
+  <text x="530" y="160" text-anchor="middle" class="small">response["structured_response"]</text>
+  <path class="line dashed" d="M530,126 V146"/>
+  <text x="380" y="30" text-anchor="middle" class="label">response_format=Recipe</text>
+</svg>
+<figcaption>Your class goes in, an object of your class comes out. The <strong>validation step</strong> in the middle is what makes it safe to write <code>recipe.minutes + 5</code>.</figcaption>
+</figure>
+
+<h3>Two strategies: provider-native or tool calling</h3>
+<p>How does LangChain get the model to answer in that shape? In LangChain 1.3.12 (<code>langchain/agents/structured_output.py</code>) there are two strategies:</p>
+<div class="table-wrap"><table>
+<tr><th></th><th><code>ProviderStrategy</code></th><th><code>ToolStrategy</code></th></tr>
+<tr><td><strong>How it works</strong></td><td>Uses the provider's built-in structured output mode: the schema is sent as a JSON-schema response format and the provider constrains the answer.</td><td>Adds an extra, artificial <a class="term" href="glossary.html#tool">tool</a> named after your schema (here <code>Recipe</code>). The model "calls" it with the fields as arguments; LangChain catches that call.</td></tr>
+<tr><td><strong>Works with</strong></td><td>Models whose provider supports native structured output</td><td>Any model that supports <a class="term" href="glossary.html#tool-call">tool calling</a></td></tr>
+<tr><td><strong>If the data is invalid</strong></td><td>Raises <code>StructuredOutputValidationError</code></td><td>By default (<code>handle_errors=True</code>) sends the error back to the model and lets it try again</td></tr>
+</table></div>
+<p>If you pass the bare class, as step 17 does, LangChain chooses automatically: it uses <code>ProviderStrategy</code> when it detects the model supports native structured output, otherwise <code>ToolStrategy</code>. With <code>gpt-5-nano</code> it picks the provider-native mode (verified in the harness). You can also choose explicitly:</p>
+<pre data-lang="py" data-tag="illustrative"><code>from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+
+agent = create_agent(model="gpt-5-nano", tools=[web_search], response_format=ToolStrategy(Recipe))
+agent = create_agent(model="gpt-5-nano", tools=[web_search], response_format=ProviderStrategy(Recipe))</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Automatic strategy choice: if the model supports native structured output use ProviderStrategy, otherwise ToolStrategy">
+  <rect class="box2" x="10" y="90" width="170" height="50" rx="8"/><text x="95" y="112" text-anchor="middle" class="mono">response_format</text><text x="95" y="129" text-anchor="middle" class="mono">=Recipe</text>
+  <rect class="box-solid" x="230" y="85" width="210" height="60" rx="8"/><text x="335" y="110" text-anchor="middle" class="on-solid">native structured</text><text x="335" y="128" text-anchor="middle" class="on-solid">output supported?</text>
+  <rect class="box-ok" x="500" y="20" width="250" height="70" rx="8"/><text x="625" y="44" text-anchor="middle" class="mono">ProviderStrategy</text><text x="625" y="64" text-anchor="middle" class="small">provider's JSON-schema mode</text><text x="625" y="80" text-anchor="middle" class="small">e.g. gpt-5-nano</text>
+  <rect class="box-info" x="500" y="140" width="250" height="70" rx="8"/><text x="625" y="164" text-anchor="middle" class="mono">ToolStrategy</text><text x="625" y="184" text-anchor="middle" class="small">extra "Recipe" tool</text><text x="625" y="200" text-anchor="middle" class="small">retries on bad data</text>
+  <path class="arrow" d="M180,115 H228"/>
+  <path class="arrow-ok" d="M440,100 L498,60"/><text x="468" y="70" text-anchor="middle" class="ok">yes</text>
+  <path class="arrow" d="M440,130 L498,170"/><text x="468" y="168" text-anchor="middle" class="small">no</text>
+</svg>
+<figcaption>Passing the bare class lets LangChain pick. <strong>The result lands in the same place either way</strong>: <code>response["structured_response"]</code>.</figcaption>
+</figure>
+
+<h3>When the model returns invalid data</h3>
+<p>Models make mistakes. A model might write <code>"minutes": "twenty"</code> when the schema says <code>int</code>. Pydantic refuses it. What happens next depends on the strategy. The harness reproduced this with <code>ToolStrategy</code> and a fake model that first sent <code>"twenty"</code> and then <code>20</code>; the messages list looked like this:</p>
+<pre data-lang="text" data-tag="illustrative"><code>human  recipe
+ai     (calls the Recipe tool with minutes="twenty")
+tool   Error: Failed to parse structured output for tool 'Recipe': ... 1 validation error for Recipe
+       minutes
+         Input should be a valid integer ...
+ai     (calls the Recipe tool again with minutes=20)
+tool   Returning structured response: title='Fried rice' minutes=20</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="ToolStrategy retry loop: the model calls the Recipe tool, validation fails, the error is sent back as a ToolMessage, the model retries and succeeds">
+  <rect class="box-solid" x="10" y="80" width="130" height="50" rx="8"/><text x="75" y="110" text-anchor="middle" class="on-solid">Model</text>
+  <rect class="box" x="200" y="80" width="170" height="50" rx="8"/><text x="285" y="101" text-anchor="middle" class="label">Recipe tool call</text><text x="285" y="119" text-anchor="middle" class="small">minutes="twenty"</text>
+  <rect class="box-info" x="430" y="80" width="130" height="50" rx="8"/><text x="495" y="110" text-anchor="middle" class="label">Pydantic check</text>
+  <rect class="box-ok" x="620" y="80" width="130" height="50" rx="8"/><text x="685" y="101" text-anchor="middle" class="label">valid</text><text x="685" y="119" text-anchor="middle" class="small">structured_response</text>
+  <path class="arrow" d="M140,105 H198"/><path class="arrow" d="M370,105 H428"/><path class="arrow-ok" d="M560,105 H618"/>
+  <path class="arrow-bad" d="M495,130 V170 H75 V132"/>
+  <text x="285" y="192" text-anchor="middle" class="bad">invalid: error sent back as a ToolMessage, model tries again</text>
+  <text x="590" y="96" text-anchor="middle" class="small">ok</text>
+</svg>
+<figcaption>With <code>ToolStrategy</code>, a validation error becomes <strong>feedback for the model</strong> instead of a crash. Each retry is one more model call, so it costs tokens.</figcaption>
+</figure>
+
+<p>With <code>ProviderStrategy</code> there is no retry loop: invalid data raises <code>StructuredOutputValidationError</code>, which you can catch like any other <a class="term" href="glossary.html#exception">exception</a>. Native modes make invalid output much rarer, but you should still handle the error in a program that must not crash:</p>
+<pre data-lang="py" data-tag="illustrative"><code>from langchain.agents.structured_output import StructuredOutputValidationError
+
+try:
+    response = agent.invoke({"messages": [build_image_message(path, CHEF_PROMPT)]})
+except StructuredOutputValidationError as error:
+    raise SystemExit(f"The chef returned a recipe in the wrong shape: {error}")</code></pre>
+<p><code>ToolStrategy</code> lets you control retries with <code>handle_errors</code>: <code>True</code> (the default), <code>False</code> (raise immediately), a custom message string, an exception type, or a function that builds the message.</p>
+
+<h3>Tips for good schemas</h3>
+<ul>
+<li><strong>Describe every field.</strong> <code>Field(description=...)</code> is read by the model. "Total cooking time in minutes" is far better than nothing.</li>
+<li><strong>Make optional things optional.</strong> <code>source_url: str | None = None</code> lets the model say "no source" instead of inventing a URL. Required fields push the model to fill them, even with made-up values (a <a class="term" href="glossary.html#hallucination">hallucination</a>).</li>
+<li><strong>Keep it small and flat.</strong> A few clear fields work better than a deep tree of nested objects.</li>
+<li><strong>Validation is about shape, not truth.</strong> Pydantic checks that <code>minutes</code> is an integer, not that the recipe really takes 20 minutes.</li>
+</ul>
+
+<h3>When to use structured output</h3>
+<div class="table-wrap"><table>
+<tr><th>Use structured output when...</th><th>Plain text is fine when...</th></tr>
+<tr><td>Code will read the answer: save to a database, show fields in a UI, call another function</td><td>A person reads the answer directly, as in the original chef</td></tr>
+<tr><td>You need the same fields every time (title, steps, time)</td><td>The answer is open-ended conversation</td></tr>
+<tr><td>You want to validate (an <code>int</code> must be an int)</td><td>You want to stream text word by word (step 18); a structured result arrives at the end</td></tr>
+</table></div>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"LangChain looks at the image."</em> The model does. LangChain only packages it.</li>
+<li><em>"Base64 hides the image."</em> It is an encoding anyone can reverse, not encryption.</li>
+<li><em>"Any model can read photos."</em> Only vision-capable models; check the model page.</li>
+<li><em>"Structured output means the answer is correct."</em> It means the answer has the right <strong>shape</strong>. Content can still be wrong.</li>
+<li><em>"I must parse JSON myself."</em> No: <code>response["structured_response"]</code> is already a validated Pydantic object.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Mixed input uses a list of content blocks in one message: a text block plus image blocks.</li>
+<li>A data URL is <code>data:&lt;mime&gt;;base64,&lt;bytes&gt;</code>; base64 makes files about 33% larger.</li>
+<li>Images can go as a data URL, an https URL or a provider file id; LangChain's standard <code>{"type": "image", ...}</code> block is translated per provider.</li>
+<li>Images cost tokens; only vision-capable models can read them; memory resends them.</li>
+<li><code>response_format=Recipe</code> returns a validated object in <code>response["structured_response"]</code>.</li>
+<li><code>ProviderStrategy</code> uses the provider's native mode and raises on bad data; <code>ToolStrategy</code> uses an extra tool and retries by default.</li>
+<li>Describe every field, make optional fields optional, and remember validation checks shape, not truth.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langchain/messages">LangChain docs: Messages and content blocks</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/structured-output">LangChain docs: Structured output</a></li>
+<li><a href="https://platform.openai.com/docs/guides/images-vision">OpenAI docs: Images and vision</a></li>
+<li><a href="https://platform.openai.com/docs/guides/structured-outputs">OpenAI docs: Structured outputs</a></li>
+<li><a href="https://docs.pydantic.dev/latest/">Pydantic documentation</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lc-06-memory-and-state.html"><small>← Chapter 6</small>Memory, State &amp; Checkpointers</a>
+<a class="next" href="lc-08-debugging-observability.html"><small>Chapter 8 →</small>Debugging, Logging &amp; LangSmith</a>
+</nav>
+</main>
+</body>
+</html>

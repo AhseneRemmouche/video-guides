@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 7 · Embeddings &amp; Vector Databases</title>
+<meta name="description" content="Embedding models, distance metrics, vector stores and approximate search.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 7/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">AI &amp; Agents Handbook · Chapter 7 of 16</div>
+  <h1>Embeddings &amp; Vector Databases</h1>
+  <p class="lead">Embedding models, distance metrics, vector stores and approximate search.</p>
+</section>
+<p>Your chatbot finds the right paragraph of the employee handbook without matching a single keyword. "How much PTO do I get?" finds a chunk that talks about "vacation days". That works because of two things: <strong><a class="term" href="glossary.html#embedding">embeddings</a></strong>, which turn text into lists of numbers that capture meaning, and a <strong>vector database</strong>, which stores those lists and quickly finds the ones closest to a question.</p>
+<p>In this chapter you will learn:</p>
+<ul>
+<li>what an embedding captures, and just as important, what it <em>doesn't</em>;</li>
+<li>what an embedding model is, what "1,536 dimensions" means, and how to pick a model;</li>
+<li>the three common ways to measure "closeness" (cosine, dot product, Euclidean) and why they often give the same answer;</li>
+<li>which vector databases exist, and how to choose between Postgres + pgvector (used here) and dedicated vector stores;</li>
+<li>exact vs approximate search, and the two pgvector index types (HNSW and IVFFlat) at a high level;</li>
+<li>filtering by <a class="term" href="glossary.html#metadata">metadata</a>, multilingual and multimodal embeddings, and the storage and cost maths.</li>
+</ul>
+<div class="callout"><p><strong>Why this matters for your chatbot.</strong> Every answer the bot gives is only as good as the chunks the search returns. If you understand what the vectors in your <code>documents</code> table really represent, you can predict when search will work, notice when it won't, and make good decisions when the knowledge base grows from one PDF to thousands.</p></div>
+<p>This chapter builds on pages you have already seen. It links to them instead of repeating them: <a href="09-vector-database.html">step 9</a> (creating the pgvector table), <a href="10-embedding-utility.html">step 10</a> (the embedding functions), <a href="14-semantic-search.html">step 14</a> (the similarity search) and <a href="indexing-explained.html">Indexing Explained</a> (the HNSW index in depth).</p>
+
+<h2>Embeddings, a quick recap</h2>
+<p>An embedding is a fixed-length list of numbers (a <strong>vector</strong>) that a model produces from a piece of input, usually text. In this project, every chunk of every uploaded document becomes a list of <strong>1,536</strong> numbers, and every question becomes one too. Texts with similar meaning get vectors that point in similar directions. If you have never seen this idea before, read the 2-number primer in <a href="10-embedding-utility.html">step 10</a> first; it is the best picture to keep in your head.</p>
+<p>The project code that creates them is short. This is from <code>src/lib/embeddings.ts</code>:</p>
+<pre data-lang="ts" data-file="src/lib/embeddings.ts (excerpt)"><code>const { embedding } = await embed({
+  model: openai.textEmbeddingModel("text-embedding-3-small"),
+  value: input,
+});</code></pre>
+<p><code>embed</code> turns one text into one vector (used for the question). Its sibling <code>embedMany</code> turns an array of texts into an array of vectors in one request (used for all chunks of an upload). Both come from the <a class="term" href="glossary.html#ai-sdk">AI SDK</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Illustrative 2-D map: time-off, IT support and expenses texts form separate clusters; a PTO question lands in the time-off cluster">
+  <path class="arrow" d="M30,272 H744"/>
+  <path class="arrow" d="M30,272 V16"/>
+  <ellipse class="zone" cx="190" cy="105" rx="115" ry="62"/>
+  <text x="190" y="34" text-anchor="middle" class="label">Time off</text>
+  <circle class="dot-ok" cx="140" cy="90" r="5"/>
+  <text x="149" y="94" class="small">vacation days</text>
+  <circle class="dot-ok" cx="215" cy="76" r="5"/>
+  <text x="224" y="80" class="small">PTO allowance</text>
+  <circle class="dot-ok" cx="165" cy="132" r="5"/>
+  <text x="156" y="136" text-anchor="end" class="small">paid leave</text>
+  <ellipse class="zone" cx="505" cy="95" rx="125" ry="55"/>
+  <text x="505" y="30" text-anchor="middle" class="label">IT support</text>
+  <circle class="dot-info" cx="455" cy="82" r="5"/>
+  <text x="464" y="86" class="small">reset password</text>
+  <circle class="dot-info" cx="515" cy="114" r="5"/>
+  <text x="524" y="118" class="small">laptop won't turn on</text>
+  <ellipse class="zone" cx="625" cy="222" rx="110" ry="36"/>
+  <text x="625" y="178" text-anchor="middle" class="label">Expenses</text>
+  <circle class="dot-warn" cx="570" cy="214" r="5"/>
+  <text x="579" y="218" class="small">travel claim</text>
+  <circle class="dot-warn" cx="640" cy="236" r="5"/>
+  <text x="649" y="240" class="small">receipts</text>
+  <line class="line dashed" x1="252" y1="212" x2="140" y2="90"/>
+  <line class="line dashed" x1="252" y1="212" x2="215" y2="76"/>
+  <line class="line dashed" x1="252" y1="212" x2="165" y2="132"/>
+  <circle class="dot" cx="252" cy="212" r="7"/>
+  <text x="264" y="216" class="label">“How much PTO do I get?”</text>
+  <text x="264" y="233" class="small">question: its 3 nearest dots win</text>
+  <text x="744" y="290" text-anchor="end" class="small">illustrative 2-D map; real vectors have 1,536 dimensions</text>
+</svg>
+<figcaption>An <strong>illustrative</strong> 2-D picture of embedding space (positions are made up). Texts about the same topic cluster together, so the question about PTO lands next to "vacation days" even though it shares no keyword with it. The search keeps its <strong>3 nearest</strong> neighbours, like the project's top 3.</figcaption>
+</figure>
+
+<h2>What embeddings capture, and what they don't</h2>
+<p>An embedding model was trained so that texts people would consider "about the same thing" land near each other. That gives it some impressive abilities, and some blind spots that surprise beginners.</p>
+<div class="table-wrap"><table>
+<tr><th>Embeddings are good at</th><th>Example</th></tr>
+<tr><td>Synonyms and paraphrases</td><td>"PTO" ≈ "vacation days" ≈ "time off"</td></tr>
+<tr><td>Topic and intent</td><td>"My laptop won't turn on" lands near IT support text, not near holiday policy</td></tr>
+<tr><td>Different phrasing of the same question</td><td>"Can I work from home?" ≈ "remote work policy"</td></tr>
+<tr><td>Some cross-language matching (model-dependent)</td><td>"congés payés" may land near "paid leave"</td></tr>
+</table></div>
+<div class="table-wrap"><table>
+<tr><th>Embeddings are weak at</th><th>Why it happens</th><th>What it means for you</th></tr>
+<tr><td>Exact codes, IDs and rare names (e.g. "form HR-104B", an employee number)</td><td>The vector stores the gist, not each character. Two different codes look almost identical in meaning.</td><td>Combine with keyword search (<a class="term" href="glossary.html#hybrid-search">hybrid search</a>, see <a href="ai-08-advanced-rag.html">Advanced RAG</a>).</td></tr>
+<tr><td>Numbers and comparisons ("more than 5 years")</td><td>"15 days" and "20 days" are about the same topic, so they are close.</td><td>Retrieve the topic, then let the model read the numbers. Use the calculator tool for maths.</td></tr>
+<tr><td>Negation ("not eligible" vs "eligible")</td><td>Both sentences are about eligibility, so they often end up close.</td><td>Retrieval finds the topic; the model must read carefully.</td></tr>
+<tr><td>Truth and freshness</td><td>An embedding knows nothing about whether a text is correct or out of date.</td><td>Remove old versions of documents (see <a href="ai-08-advanced-rag.html">Advanced RAG</a>).</td></tr>
+<tr><td>Very long texts</td><td>One vector for a 50-page PDF is a blur of every topic in it.</td><td>That's why we <a class="term" href="glossary.html#chunk">chunk</a> (<a href="11-chunking-utility.html">step 11</a>).</td></tr>
+</table></div>
+<div class="callout warn"><p><strong>Common misconception:</strong> "Similar vectors mean the chunk <em>answers</em> the question." Not quite. Similar vectors mean the chunk is <em>about the same thing</em> as the question. A chunk saying "Vacation requests must be filed two weeks ahead" is very similar to "How many vacation days do I get?" but doesn't answer it. This is why the bot retrieves 3 chunks, not 1, and why advanced systems add a reranking step.</p></div>
+
+<h2>Embedding models and dimensions</h2>
+<p>An <strong>embedding model</strong> is a neural network (see <a class="term" href="glossary.html#neural-network">neural network</a>) whose output is a vector instead of text. It is a different model from the chat model: this project uses <code>gpt-5-mini</code> to <em>write</em> answers and <code>text-embedding-3-small</code> to <em>embed</em> text. Embedding models are much cheaper per <a class="term" href="glossary.html#token">token</a> than chat models, because they do one pass over the input and never generate text.</p>
+<details class="primer"><summary>New to "dimensions"? What 1,536 actually means</summary>
+<p>A <strong>dimension</strong> is one slot in the list. A point on a flat map has 2 dimensions (x, y). A point in a room has 3 (x, y, height). An embedding from <code>text-embedding-3-small</code> has 1,536: it's a point in a space with 1,536 directions.</p>
+<p>You can't picture 1,536 directions, and you don't need to. All the maths you use (angles, distances) works the same way as on a 2-D map, just with more numbers to add up.</p>
+<p>No single number means anything readable like "is about holidays". The meaning is spread across all of them. That's why you can't "edit" a vector by hand, only compare it with others.</p>
+</details>
+<p>Facts about the model this project uses (check the <a href="https://platform.openai.com/docs/guides/embeddings">OpenAI embeddings guide</a> for current details):</p>
+<ul>
+<li><code>text-embedding-3-small</code> returns <strong>1,536</strong> numbers by default. That's why <a href="09-vector-database.html">step 9</a> declares <code>vector("embedding", { dimensions: 1536 })</code> and the migration creates <code>vector(1536)</code>.</li>
+<li>Its larger sibling, <code>text-embedding-3-large</code>, returns 3,072 by default.</li>
+<li>Both accept a <code>dimensions</code> option that returns a shorter vector (for example 512) in exchange for a little quality. Shorter vectors are cheaper to store and faster to compare.</li>
+<li>OpenAI's embeddings come back already <strong>normalized</strong> (length 1). This matters for the distance section below.</li>
+<li>Each input has a maximum length (roughly 8,000 tokens for these models at the time of writing). A 900-character chunk is far below that.</li>
+</ul>
+<p>In the AI SDK, provider-specific options like <code>dimensions</code> go in <code>providerOptions</code>:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { embed } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const { embedding } = await embed({
+  model: openai.textEmbeddingModel("text-embedding-3-small"),
+  value: "How many vacation days do I get?",
+  providerOptions: { openai: { dimensions: 512 } },
+});
+
+console.log(embedding.length); // 512</code></pre>
+<div class="callout warn"><p><strong>If you change dimensions, you change the schema.</strong> The column type <code>vector(1536)</code> only accepts 1,536 numbers. A 512-number vector would be rejected on insert. Changing the model or its dimensions means: update <code>db-schema.ts</code>, run a new <a class="term" href="glossary.html#migration">migration</a>, and re-embed every chunk. See "When you must re-index" in <a href="indexing-explained.html">Indexing Explained</a>.</p></div>
+
+<h3>Other providers (examples, at the time of writing in 2025)</h3>
+<p>OpenAI is one of many embedding providers. Examples include Cohere, Google (Gemini embedding models), Voyage AI and Mistral, plus <a class="term" href="glossary.html#open-weights">open-weight</a> models you can run yourself as a <a class="term" href="glossary.html#local-model">local model</a> (for example through Ollama or the sentence-transformers library). Their dimensions range from a few hundred to several thousand. The AI SDK has providers for several of them, so swapping is mostly a one-line change to the <code>model</code>, plus the schema change and re-embedding above. Model lists change often; always check each provider's current documentation.</p>
+<p>When comparing embedding models, look at these <em>properties</em> rather than at "which one is best":</p>
+<div class="table-wrap"><table>
+<tr><th>Property</th><th>Why it matters</th></tr>
+<tr><td>Quality on <em>your</em> data</td><td>Public leaderboards measure general tasks. Your HR handbooks may behave differently. Test with 20–50 real questions (see <a href="ai-12-evaluation.html">Evaluating AI Applications</a>).</td></tr>
+<tr><td>Dimensions</td><td>More dimensions = more storage and slower comparisons. Not automatically better.</td></tr>
+<tr><td>Languages</td><td>If your documents or users aren't English-only, check multilingual support.</td></tr>
+<tr><td>Max input length</td><td>Limits how big a chunk can be.</td></tr>
+<tr><td>Hosting and privacy</td><td>A hosted API sends your text to the provider. A local model keeps it on your servers.</td></tr>
+<tr><td>Cost and rate limits</td><td>You pay to embed every chunk once, and every question once.</td></tr>
+</table></div>
+<div class="callout warn"><p><strong>The golden rule:</strong> vectors from different models (or the same model with different <code>dimensions</code>) <strong>cannot be compared</strong>. Each model has its own private "map". The chunks and the question must always be embedded by the same model with the same settings. Mixing them produces meaningless scores without any error message.</p></div>
+
+<h2>Distance metrics: how "close" is measured</h2>
+<p>Search needs a number that says how similar two vectors are. There are three common choices. Picture each vector as an arrow starting at the origin of the map.</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Cosine compares the angle between arrows; Euclidean measures the straight-line gap between their tips">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <text x="190" y="22" text-anchor="middle">Cosine: the angle</text>
+  <path class="arrow" d="M60,220 L300,120"/><path class="arrow" d="M60,220 L280,70"/><path class="arrow" d="M60,220 L110,50"/>
+  <text x="306" y="124" class="small">"PTO allowance"</text>
+  <text x="286" y="66" class="small">"vacation days?"</text>
+  <text x="116" y="46" class="small">"reset password"</text>
+  <path d="M150,183 Q158,170 152,160" fill="none" stroke="var(--accent)" stroke-width="2"/>
+  <text x="165" y="182" class="small">small angle = similar</text>
+  <text x="570" y="22" text-anchor="middle">Euclidean: the gap between tips</text>
+  <path class="arrow" d="M440,220 L680,120"/><path class="arrow" d="M440,220 L660,70"/>
+  <line x1="680" y1="120" x2="660" y2="70" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"/>
+  <text x="690" y="98" class="small">short gap</text>
+  <text x="570" y="244" text-anchor="middle" class="small">Dot product mixes both: angle × lengths</text>
+</svg>
+<figcaption>Cosine ignores how long the arrows are and only looks at their direction. Euclidean measures the straight-line distance between the arrow tips. When every arrow has length 1, both give the same ranking.</figcaption>
+</figure>
+<div class="table-wrap"><table>
+<tr><th>Metric</th><th>Intuition</th><th>Range</th><th>"More similar" means</th><th>pgvector operator</th></tr>
+<tr><td><a class="term" href="glossary.html#cosine">Cosine similarity</a></td><td>Do the arrows point the same way? Length ignored.</td><td>−1 to 1 (similarity); 0 to 2 as <em>cosine distance</em> = 1 − similarity</td><td>Higher similarity / lower distance</td><td><code>&lt;=&gt;</code> (cosine distance) ✓ this project</td></tr>
+<tr><td>Dot product (inner product)</td><td>Multiply matching numbers and add them up. Rewards same direction <em>and</em> long arrows.</td><td>Unbounded</td><td>Higher</td><td><code>&lt;#&gt;</code> (returns the <em>negative</em> inner product, so smaller = more similar)</td></tr>
+<tr><td>Euclidean (L2) distance</td><td>Straight-line distance between the arrow tips, like a ruler.</td><td>0 to ∞</td><td>Lower</td><td><code>&lt;-&gt;</code></td></tr>
+</table></div>
+<details class="primer"><summary>New to the maths? A worked example with 2 numbers</summary>
+<p>Take a = [0.6, 0.8] and b = [0.8, 0.6]. Both have length 1 (because 0.6² + 0.8² = 0.36 + 0.64 = 1).</p>
+<ul>
+<li><strong>Dot product:</strong> 0.6×0.8 + 0.8×0.6 = 0.48 + 0.48 = <strong>0.96</strong>.</li>
+<li><strong>Cosine similarity:</strong> dot product ÷ (length a × length b) = 0.96 ÷ (1 × 1) = <strong>0.96</strong>. So the cosine distance is 1 − 0.96 = <strong>0.04</strong>.</li>
+<li><strong>Euclidean distance:</strong> the differences are −0.2 and 0.2, so √(0.04 + 0.04) = √0.08 ≈ <strong>0.283</strong>.</li>
+</ul>
+<p>Notice that for length-1 vectors, the dot product <em>is</em> the cosine similarity, and squared Euclidean distance = 2 − 2 × cosine similarity (here 2 − 1.92 = 0.08 ✓). That's the maths behind the next section.</p>
+</details>
+<h3>When all three agree</h3>
+<p>If every vector is <strong>normalized</strong> (scaled to length 1), the three metrics always produce the <strong>same ranking</strong>. Sorting by highest cosine similarity, highest dot product, or lowest Euclidean distance gives the same top 3. OpenAI's embeddings are normalized, so for this project the choice only affects the numbers you see, not which chunks are returned.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Left: with arrows of different lengths, cosine and Euclidean pick B but dot product picks the long arrow A. Right: with all arrows length 1, all three metrics rank B first">
+  <text x="190" y="24" text-anchor="middle" class="label">Lengths differ: dot product can disagree</text>
+  <path class="arrow-accent" d="M40,236 L127,186"/>
+  <path class="arrow-ok" d="M40,236 L95,200"/>
+  <path class="arrow" d="M40,236 L139,110"/>
+  <text x="135" y="190" class="small">Q (question)</text>
+  <text x="91" y="216" class="small">B</text>
+  <text x="145" y="108" class="small">A (long arrow)</text>
+  <text x="218" y="150" class="small">cosine: B (same direction)</text>
+  <text x="218" y="170" class="small">Euclidean: B (tips close)</text>
+  <text x="218" y="190" class="small">dot product: A (longer)</text>
+  <line class="line dashed" x1="380" y1="20" x2="380" y2="250"/>
+  <text x="570" y="24" text-anchor="middle" class="label">All length 1 (like OpenAI's): same ranking</text>
+  <circle class="zone" cx="492" cy="160" r="100"/>
+  <path class="arrow-accent" d="M492,160 L579,110"/>
+  <path class="arrow-ok" d="M492,160 L571,98"/>
+  <path class="arrow" d="M492,160 L518,63"/>
+  <text x="587" y="118" class="small">Q</text>
+  <text x="577" y="96" class="small">B</text>
+  <text x="524" y="59" class="small">A</text>
+  <text x="612" y="150" class="small">cosine: B, then A</text>
+  <text x="612" y="170" class="small">Euclidean: B, then A</text>
+  <text x="612" y="190" class="small">dot product: B, then A</text>
+</svg>
+<figcaption>Illustrative arrows. When lengths differ (left), the dot product rewards the <strong>long</strong> arrow A even though B points the same way as the question. When every vector has length 1 (right, like OpenAI's normalized embeddings), <strong>all three metrics give the same ranking</strong>. (Euclidean agrees with cosine on the left only because these particular arrows happen to be close; in general it depends on both.)</figcaption>
+</figure>
+<p>Rules of thumb:</p>
+<ul>
+<li>Use the metric the embedding model's documentation recommends. For most text models that's cosine.</li>
+<li>If vectors are normalized, the dot product is slightly cheaper to compute and gives identical rankings, so some systems use it for speed.</li>
+<li>The metric your index is built with must match the operator your query sorts by. This project builds with <code>vector_cosine_ops</code> and sorts with <code>&lt;=&gt;</code>. See the operator-class table in <a href="indexing-explained.html">Indexing Explained, Part 2</a>.</li>
+</ul>
+<p>The AI SDK also ships a small helper, <code>cosineSimilarity</code>, handy for experiments in plain TypeScript without a database:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { cosineSimilarity, embedMany } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const { embeddings } = await embedMany({
+  model: openai.textEmbeddingModel("text-embedding-3-small"),
+  values: ["How many vacation days do I get?", "PTO allowance per year", "Reset my laptop password"],
+});
+
+console.log(cosineSimilarity(embeddings[0], embeddings[1])); // relatively high
+console.log(cosineSimilarity(embeddings[0], embeddings[2])); // noticeably lower</code></pre>
+<p>Try it with your own sentences. It is the fastest way to build intuition, and to sanity-check the <code>0.5</code> threshold used in <a href="15-search-tool.html">step 15</a>. Absolute scores differ between models: one model's "0.5" isn't another model's "0.5".</p>
+
+<h2>Vector databases: where the vectors live</h2>
+<p>A <strong>vector database</strong> stores vectors next to the data they describe and answers one question fast: "which stored vectors are nearest to this one?" (a <em>nearest-neighbour</em> query). There are two broad families.</p>
+<h3>1. A vector extension for a database you already use</h3>
+<p>This project uses <a class="term" href="glossary.html#postgres">Postgres</a> with the <strong>pgvector</strong> <a class="term" href="glossary.html#extension">extension</a>, hosted on <a class="term" href="glossary.html#neon">Neon</a> (<a href="09-vector-database.html">step 9</a>). pgvector adds a <code>vector</code> column type, distance operators, and two index types. Your vectors sit in the same table as the text, and you query them with normal <a class="term" href="glossary.html#sql">SQL</a>, so you can join with other tables, filter with <code>WHERE</code>, and use transactions and backups you already know. Other general-purpose databases and search engines offer similar vector features.</p>
+<h3>2. Dedicated vector stores</h3>
+<p>These are databases built mainly for vectors. Examples (in alphabetical order, not a ranking) include <strong>Chroma</strong>, <strong>Milvus</strong>, <strong>Pinecone</strong>, <strong>Qdrant</strong> and <strong>Weaviate</strong>. Some are managed cloud services, some are open source and self-hostable, some are both. They usually offer their own client SDKs, built-in metadata filtering, and features aimed at very large or very busy vector workloads. Features change quickly, so compare the current documentation of each.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 274" role="img" aria-label="Two families of vector databases: a vector extension inside Postgres next to your other tables, or a separate dedicated vector store">
+  <rect class="box2" x="300" y="10" width="160" height="44" rx="8"/>
+  <text x="380" y="29.0" text-anchor="middle">Your app</text>
+  <text x="380" y="45.0" text-anchor="middle" class="small">e.g. the chat route</text>
+  <path class="arrow" d="M330,54 L200,86"/>
+  <path class="arrow" d="M430,54 L560,86"/>
+  <text x="380" y="80" text-anchor="middle" class="small">one or the other</text>
+  <rect class="zone" x="10" y="88" width="360" height="176" rx="10"/>
+  <text x="190" y="108" text-anchor="middle" class="label">1 · Vector extension in your database</text>
+  <rect class="box2" x="26" y="120" width="328" height="104" rx="8"/>
+  <text x="190" y="140" text-anchor="middle" class="label">Postgres + pgvector (Neon here)</text>
+  <rect class="box" x="40" y="152" width="146" height="58" rx="8"/>
+  <text x="113" y="178.0" text-anchor="middle">documents</text>
+  <text x="113" y="194.0" text-anchor="middle" class="small">content + vector(1536)</text>
+  <rect class="box2" x="196" y="152" width="144" height="58" rx="8"/>
+  <text x="268" y="178.0" text-anchor="middle">other tables</text>
+  <text x="268" y="194.0" text-anchor="middle" class="small">users, orgs, …</text>
+  <text x="190" y="248" text-anchor="middle" class="small">one SQL query can filter and join</text>
+  <rect class="zone" x="390" y="88" width="360" height="176" rx="10"/>
+  <text x="570" y="108" text-anchor="middle" class="label">2 · Dedicated vector store</text>
+  <rect class="box-info" x="410" y="124" width="100" height="34" rx="17"/>
+  <text x="460" y="145.5" text-anchor="middle" class="label">Chroma</text>
+  <rect class="box-info" x="520" y="124" width="100" height="34" rx="17"/>
+  <text x="570" y="145.5" text-anchor="middle" class="label">Milvus</text>
+  <rect class="box-info" x="630" y="124" width="100" height="34" rx="17"/>
+  <text x="680" y="145.5" text-anchor="middle" class="label">Pinecone</text>
+  <rect class="box-info" x="465" y="170" width="100" height="34" rx="17"/>
+  <text x="515" y="191.5" text-anchor="middle" class="label">Qdrant</text>
+  <rect class="box-info" x="575" y="170" width="100" height="34" rx="17"/>
+  <text x="625" y="191.5" text-anchor="middle" class="label">Weaviate</text>
+  <text x="570" y="232" text-anchor="middle" class="small">own SDK; IDs kept in sync with your app data</text>
+  <text x="570" y="250" text-anchor="middle" class="small">listed alphabetically, not a ranking</text>
+</svg>
+<figcaption>The two families side by side. This project uses <strong>option 1</strong>: vectors live in the <code>documents</code> table next to the text, so ordinary SQL can join and filter. The dedicated stores are listed alphabetically; this is <strong>not a ranking</strong>.</figcaption>
+</figure>
+<h3>How to choose</h3>
+<div class="table-wrap"><table>
+<tr><th>Question to ask</th><th>Leans towards Postgres + pgvector</th><th>Leans towards a dedicated store</th></tr>
+<tr><td>Do you already run Postgres?</td><td>Yes: one less system to operate, back up and secure.</td><td>No database yet, or a different stack.</td></tr>
+<tr><td>Do vectors need to join with app data (users, orgs, permissions)?</td><td>Yes: one SQL query can filter and join.</td><td>Less so, or you're happy to keep IDs in sync between two systems.</td></tr>
+<tr><td>How many vectors, how many queries per second?</td><td>Thousands to millions is common territory.</td><td>Very large collections or very high query volume may benefit from a purpose-built system. Measure first.</td></tr>
+<tr><td>Who operates it?</td><td>Your existing database host (Neon here).</td><td>A managed service, or your team self-hosts.</td></tr>
+<tr><td>Special features needed?</td><td>Standard SQL, full-text search built in.</td><td>Check: built-in hybrid search, multi-tenancy features, specific index types.</td></tr>
+</table></div>
+<p>This is a rule of thumb, not a law. A sensible default for a new project is: <strong>start with the database you already have</strong>, measure, and move only when you hit a real limit. For a company-handbook chatbot like this one, pgvector is more than enough.</p>
+
+<h2>Exact vs approximate nearest neighbour</h2>
+<p>There are two ways to find the closest vectors:</p>
+<ul>
+<li><strong>Exact (k-NN, brute force):</strong> compare the question's vector with <em>every</em> stored vector and keep the best <em>k</em>. Always correct. Cost grows in step with the number of rows. This is what Postgres does when there is no usable <a class="term" href="glossary.html#index">index</a>.</li>
+<li><strong>Approximate (ANN):</strong> use an index to check only a small, promising part of the data. Much faster at scale. Very occasionally returns the 4th-best match instead of the 3rd-best. How often it gets the true top <em>k</em> is called <strong>recall</strong>.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 276" role="img" aria-label="Exact search draws a comparison line to every stored vector; approximate search only compares vectors in a small area around the question">
+  <rect class="zone" x="10" y="30" width="360" height="196" rx="10"/>
+  <text x="190" y="22" text-anchor="middle" class="label">Exact (k-NN): compare with every row</text>
+  <line class="line" x1="185" y1="131" x2="195" y2="86"/>
+  <line class="line" x1="185" y1="131" x2="232" y2="214"/>
+  <line class="line" x1="185" y1="131" x2="54" y2="66"/>
+  <line class="line" x1="185" y1="131" x2="304" y2="72"/>
+  <line class="line" x1="185" y1="131" x2="217" y2="197"/>
+  <line class="line" x1="185" y1="131" x2="59" y2="177"/>
+  <line class="line" x1="185" y1="131" x2="139" y2="57"/>
+  <line class="line" x1="185" y1="131" x2="74" y2="159"/>
+  <line class="line" x1="185" y1="131" x2="244" y2="65"/>
+  <line class="line" x1="185" y1="131" x2="312" y2="156"/>
+  <line class="line" x1="185" y1="131" x2="93" y2="105"/>
+  <line class="line" x1="185" y1="131" x2="328" y2="63"/>
+  <line class="line" x1="185" y1="131" x2="325" y2="197"/>
+  <line class="line" x1="185" y1="131" x2="178" y2="155"/>
+  <line class="line" x1="185" y1="131" x2="103" y2="186"/>
+  <line class="line" x1="185" y1="131" x2="187" y2="191"/>
+  <line class="line" x1="185" y1="131" x2="122" y2="74"/>
+  <line class="line" x1="185" y1="131" x2="126" y2="143"/>
+  <line class="line" x1="185" y1="131" x2="79" y2="188"/>
+  <line class="line" x1="185" y1="131" x2="60" y2="206"/>
+  <line class="line" x1="185" y1="131" x2="135" y2="175"/>
+  <line class="line" x1="185" y1="131" x2="215" y2="124"/>
+  <line class="line" x1="185" y1="131" x2="157" y2="94"/>
+  <line class="line" x1="185" y1="131" x2="324" y2="124"/>
+  <line class="line" x1="185" y1="131" x2="298" y2="174"/>
+  <line class="line" x1="185" y1="131" x2="205" y2="162"/>
+  <circle class="dot-info" cx="195" cy="86" r="4.5"/>
+  <circle class="dot-info" cx="232" cy="214" r="4.5"/>
+  <circle class="dot-info" cx="54" cy="66" r="4.5"/>
+  <circle class="dot-info" cx="304" cy="72" r="4.5"/>
+  <circle class="dot-info" cx="217" cy="197" r="4.5"/>
+  <circle class="dot-info" cx="59" cy="177" r="4.5"/>
+  <circle class="dot-info" cx="139" cy="57" r="4.5"/>
+  <circle class="dot-info" cx="74" cy="159" r="4.5"/>
+  <circle class="dot-info" cx="244" cy="65" r="4.5"/>
+  <circle class="dot-info" cx="312" cy="156" r="4.5"/>
+  <circle class="dot-info" cx="93" cy="105" r="4.5"/>
+  <circle class="dot-info" cx="328" cy="63" r="4.5"/>
+  <circle class="dot-info" cx="325" cy="197" r="4.5"/>
+  <circle class="dot-ok" cx="178" cy="155" r="4.5"/>
+  <circle class="dot-info" cx="103" cy="186" r="4.5"/>
+  <circle class="dot-info" cx="187" cy="191" r="4.5"/>
+  <circle class="dot-info" cx="122" cy="74" r="4.5"/>
+  <circle class="dot-info" cx="126" cy="143" r="4.5"/>
+  <circle class="dot-info" cx="79" cy="188" r="4.5"/>
+  <circle class="dot-info" cx="60" cy="206" r="4.5"/>
+  <circle class="dot-info" cx="135" cy="175" r="4.5"/>
+  <circle class="dot-ok" cx="215" cy="124" r="4.5"/>
+  <circle class="dot-info" cx="157" cy="94" r="4.5"/>
+  <circle class="dot-info" cx="324" cy="124" r="4.5"/>
+  <circle class="dot-info" cx="298" cy="174" r="4.5"/>
+  <circle class="dot-ok" cx="205" cy="162" r="4.5"/>
+  <circle class="dot" cx="185" cy="131" r="7"/>
+  <text x="190" y="246" text-anchor="middle" class="small">always the true top 3; work grows with every row</text>
+  <rect class="zone" x="390" y="30" width="360" height="196" rx="10"/>
+  <text x="570" y="22" text-anchor="middle" class="label">Approximate (ANN): check a small part</text>
+  <circle class="zone" cx="565" cy="131" r="70"/>
+  <line class="line" x1="565" y1="131" x2="558" y2="155"/>
+  <line class="line" x1="565" y1="131" x2="595" y2="124"/>
+  <line class="line" x1="565" y1="131" x2="585" y2="162"/>
+  <line class="line" x1="565" y1="131" x2="575" y2="86"/>
+  <line class="line" x1="565" y1="131" x2="537" y2="94"/>
+  <line class="line" x1="565" y1="131" x2="567" y2="191"/>
+  <line class="line" x1="565" y1="131" x2="506" y2="143"/>
+  <circle class="dot-info" cx="575" cy="86" r="4.5"/>
+  <circle class="dot-warn" cx="612" cy="214" r="4.5"/>
+  <circle class="dot-warn" cx="434" cy="66" r="4.5"/>
+  <circle class="dot-warn" cx="684" cy="72" r="4.5"/>
+  <circle class="dot-warn" cx="597" cy="197" r="4.5"/>
+  <circle class="dot-warn" cx="439" cy="177" r="4.5"/>
+  <circle class="dot-warn" cx="519" cy="57" r="4.5"/>
+  <circle class="dot-warn" cx="454" cy="159" r="4.5"/>
+  <circle class="dot-warn" cx="624" cy="65" r="4.5"/>
+  <circle class="dot-warn" cx="692" cy="156" r="4.5"/>
+  <circle class="dot-warn" cx="473" cy="105" r="4.5"/>
+  <circle class="dot-warn" cx="708" cy="63" r="4.5"/>
+  <circle class="dot-warn" cx="705" cy="197" r="4.5"/>
+  <circle class="dot-ok" cx="558" cy="155" r="4.5"/>
+  <circle class="dot-warn" cx="483" cy="186" r="4.5"/>
+  <circle class="dot-info" cx="567" cy="191" r="4.5"/>
+  <circle class="dot-warn" cx="502" cy="74" r="4.5"/>
+  <circle class="dot-info" cx="506" cy="143" r="4.5"/>
+  <circle class="dot-warn" cx="459" cy="188" r="4.5"/>
+  <circle class="dot-warn" cx="440" cy="206" r="4.5"/>
+  <circle class="dot-warn" cx="515" cy="175" r="4.5"/>
+  <circle class="dot-ok" cx="595" cy="124" r="4.5"/>
+  <circle class="dot-info" cx="537" cy="94" r="4.5"/>
+  <circle class="dot-warn" cx="704" cy="124" r="4.5"/>
+  <circle class="dot-warn" cx="678" cy="174" r="4.5"/>
+  <circle class="dot-ok" cx="585" cy="162" r="4.5"/>
+  <circle class="dot" cx="565" cy="131" r="7"/>
+  <text x="570" y="246" text-anchor="middle" class="small">index jumps to a promising area; much faster at scale</text>
+  <text x="380" y="266" text-anchor="middle" class="small">dots: stored chunk vectors (illustrative) · centre dot: the question · green: top 3</text>
+</svg>
+<figcaption>Exact search compares the question with <strong>every</strong> stored vector. An ANN index (like the project's HNSW) compares only a promising neighbourhood, so it does far less work and <strong>almost always</strong> finds the same top 3. Positions are illustrative.</figcaption>
+</figure>
+<p>The full explanation, including a measured comparison, the phone-book analogy and why recall rarely matters for RAG, is in <a href="indexing-explained.html">Indexing Explained, Part 2</a>. One important practical point from there: the tutorial's search in <a href="14-semantic-search.html">step 14</a> sorts by <code>desc(similarity)</code>, which prevents Postgres from using the index. The recommended version sorts by the raw distance so the index is used.</p>
+
+<h2>HNSW vs IVFFlat (high level)</h2>
+<p>pgvector offers two approximate index types. This project uses HNSW (<a href="09-vector-database.html">step 9</a>).</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>HNSW</th><th>IVFFlat</th></tr>
+<tr><td>Idea</td><td>A layered graph: each vector links to its near neighbours. A search hops through the graph towards the question (diagram in <a href="indexing-explained.html">Indexing Explained</a>).</td><td>"Inverted file": vectors are grouped into clusters (<code>lists</code>) around centre points. A search only looks inside the few clusters nearest to the question (<code>probes</code>).</td></tr>
+<tr><td>Build</td><td>Slower to build, uses more memory.</td><td>Faster to build, smaller.</td></tr>
+<tr><td>Speed vs recall</td><td>Generally a better speed/recall trade-off.</td><td>Good, but usually needs more tuning for the same recall.</td></tr>
+<tr><td>Empty table?</td><td>Can be created on an empty table; new rows are added as they arrive.</td><td>Should be created <em>after</em> loading data, because the clusters are learned from the data present at build time.</td></tr>
+<tr><td>Main knobs</td><td><code>m</code>, <code>ef_construction</code> (build), <code>hnsw.ef_search</code> (query)</td><td><code>lists</code> (build), <code>ivfflat.probes</code> (query)</td></tr>
+</table></div>
+<p>Because the tutorial's table starts empty and grows with each upload, HNSW is the natural fit. The pgvector README has current recommendations for both index types and their parameters.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="HNSW: a search hops along a sparse top layer and drops down to denser layers until it reaches the closest vector. IVFFlat: vectors are grouped into clusters and only the nearest clusters are searched">
+  <text x="190" y="22" text-anchor="middle" class="label">HNSW: layered graph</text>
+  <polygon class="box2" points="40,44 360,44 330,84 10,84"/>
+  <text x="16" y="40" class="small">layer 2</text>
+  <line class="line" x1="80" y1="64" x2="250" y2="64"/>
+  <circle class="dot-info" cx="80" cy="64" r="4.5"/>
+  <circle class="dot-info" cx="250" cy="64" r="4.5"/>
+  <polygon class="box2" points="40,116 360,116 330,156 10,156"/>
+  <text x="16" y="112" class="small">layer 1</text>
+  <line class="line" x1="60" y1="136" x2="130" y2="136"/>
+  <line class="line" x1="130" y1="136" x2="210" y2="136"/>
+  <line class="line" x1="210" y1="136" x2="300" y2="136"/>
+  <circle class="dot-info" cx="60" cy="136" r="4.5"/>
+  <circle class="dot-info" cx="130" cy="136" r="4.5"/>
+  <circle class="dot-info" cx="210" cy="136" r="4.5"/>
+  <circle class="dot-info" cx="300" cy="136" r="4.5"/>
+  <polygon class="box2" points="40,188 360,188 330,228 10,228"/>
+  <text x="16" y="184" class="small">layer 0</text>
+  <line class="line" x1="40" y1="208" x2="85" y2="208"/>
+  <line class="line" x1="85" y1="208" x2="120" y2="208"/>
+  <line class="line" x1="120" y1="208" x2="160" y2="208"/>
+  <line class="line" x1="160" y1="208" x2="200" y2="208"/>
+  <line class="line" x1="200" y1="208" x2="240" y2="208"/>
+  <line class="line" x1="240" y1="208" x2="275" y2="208"/>
+  <line class="line" x1="275" y1="208" x2="320" y2="208"/>
+  <line class="line" x1="320" y1="208" x2="345" y2="208"/>
+  <circle class="dot-info" cx="40" cy="208" r="4.5"/>
+  <circle class="dot-info" cx="85" cy="208" r="4.5"/>
+  <circle class="dot-info" cx="120" cy="208" r="4.5"/>
+  <circle class="dot-info" cx="160" cy="208" r="4.5"/>
+  <circle class="dot-info" cx="200" cy="208" r="4.5"/>
+  <circle class="dot-info" cx="240" cy="208" r="4.5"/>
+  <circle class="dot-info" cx="275" cy="208" r="4.5"/>
+  <circle class="dot-info" cx="320" cy="208" r="4.5"/>
+  <circle class="dot-info" cx="345" cy="208" r="4.5"/>
+  <path class="arrow-accent" d="M80,64 L246,64"/>
+  <path class="arrow-accent" d="M250,68 L212,130"/>
+  <path class="arrow-accent" d="M210,140 L242,202"/>
+  <circle class="dot-ok" cx="240" cy="208" r="6"/>
+  <circle class="dot" cx="80" cy="64" r="6"/>
+  <text x="80" y="50" text-anchor="middle" class="small">entry</text>
+  <text x="240" y="236" text-anchor="middle" class="small">closest</text>
+  <line class="line dashed" x1="380" y1="16" x2="380" y2="250"/>
+  <text x="570" y="22" text-anchor="middle" class="label">IVFFlat: clusters (lists)</text>
+  <ellipse class="box-ok" cx="480" cy="86" rx="68" ry="40"/>
+  <circle class="dot-info" cx="483" cy="109" r="3.5"/>
+  <circle class="dot-info" cx="454" cy="103" r="3.5"/>
+  <circle class="dot-info" cx="463" cy="75" r="3.5"/>
+  <circle class="dot-info" cx="524" cy="88" r="3.5"/>
+  <circle class="dot-info" cx="478" cy="104" r="3.5"/>
+  <circle class="dot-info" cx="514" cy="85" r="3.5"/>
+  <circle class="dot-warn" cx="480" cy="86" r="5.5"/>
+  <ellipse class="box-ok" cx="650" cy="86" rx="68" ry="40"/>
+  <circle class="dot-info" cx="668" cy="67" r="3.5"/>
+  <circle class="dot-info" cx="633" cy="73" r="3.5"/>
+  <circle class="dot-info" cx="620" cy="65" r="3.5"/>
+  <circle class="dot-info" cx="609" cy="82" r="3.5"/>
+  <circle class="dot-info" cx="639" cy="73" r="3.5"/>
+  <circle class="dot-info" cx="652" cy="63" r="3.5"/>
+  <circle class="dot-warn" cx="650" cy="86" r="5.5"/>
+  <ellipse class="zone" cx="480" cy="196" rx="68" ry="40"/>
+  <circle class="dot-info" cx="473" cy="210" r="3.5"/>
+  <circle class="dot-info" cx="503" cy="180" r="3.5"/>
+  <circle class="dot-info" cx="471" cy="168" r="3.5"/>
+  <circle class="dot-info" cx="470" cy="168" r="3.5"/>
+  <circle class="dot-info" cx="446" cy="212" r="3.5"/>
+  <circle class="dot-info" cx="436" cy="206" r="3.5"/>
+  <circle class="dot-warn" cx="480" cy="196" r="5.5"/>
+  <ellipse class="zone" cx="650" cy="196" rx="68" ry="40"/>
+  <circle class="dot-info" cx="668" cy="185" r="3.5"/>
+  <circle class="dot-info" cx="668" cy="209" r="3.5"/>
+  <circle class="dot-info" cx="683" cy="191" r="3.5"/>
+  <circle class="dot-info" cx="629" cy="183" r="3.5"/>
+  <circle class="dot-info" cx="618" cy="195" r="3.5"/>
+  <circle class="dot-info" cx="628" cy="215" r="3.5"/>
+  <circle class="dot-warn" cx="650" cy="196" r="5.5"/>
+  <circle class="dot" cx="566" cy="112" r="7"/>
+  <text x="566" y="136" text-anchor="middle" class="small">question</text>
+  <text x="480" y="248" text-anchor="middle" class="small">skipped</text>
+  <text x="650" y="248" text-anchor="middle" class="small">skipped</text>
+  <text x="565" y="40" text-anchor="middle" class="small">probes = 2: search inside these two</text>
+</svg>
+<figcaption>Illustrative sketches. <strong>HNSW</strong> (used here) starts at an entry point on the sparse top layer, hops towards the question and drops a layer at a time. <strong>IVFFlat</strong> groups vectors into <code>lists</code> around centre points (orange) and only searches the <code>probes</code> nearest lists; the rest are skipped.</figcaption>
+</figure>
+<pre data-lang="sql" data-tag="illustrative"><code>-- The project's index (from the repo's migration):
+CREATE INDEX "embeddingIndex" ON "documents" USING hnsw ("embedding" vector_cosine_ops);
+
+-- What an IVFFlat index would look like instead (not used here):
+CREATE INDEX ON documents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+SET ivfflat.probes = 10;</code></pre>
+
+<h2>Metadata filtering</h2>
+<p>Real apps rarely want "the nearest chunks in the whole database". They want "the nearest chunks <em>that this user may see</em>", or "from the 2025 handbook only". Extra columns that describe each chunk (file name, page, department, organisation, date) are <a class="term" href="glossary.html#metadata">metadata</a>, and filtering on them is <strong>metadata filtering</strong>.</p>
+<p>The current <code>documents</code> table has only <code>id</code>, <code>content</code> and <code>embedding</code>. With an extra column you'd write:</p>
+<pre data-lang="sql" data-tag="illustrative"><code>SELECT id, content, 1 - (embedding &lt;=&gt; $1) AS similarity
+FROM documents
+WHERE department = 'hr'          -- metadata filter
+ORDER BY embedding &lt;=&gt; $1       -- raw distance, so the HNSW index can be used
+LIMIT 3;</code></pre>
+<p>A subtlety worth knowing: an approximate index first finds a fixed number of candidates (for HNSW, controlled by <code>hnsw.ef_search</code>, default 40), and the <code>WHERE</code> filter is applied to those. If the filter is very selective (say only 1% of rows match), you may get fewer than 3 results back. Common remedies:</p>
+<ul>
+<li>raise <code>hnsw.ef_search</code> for that query;</li>
+<li>use pgvector's <strong>iterative index scans</strong> (added in version 0.8.0), which keep searching until enough rows pass the filter;</li>
+<li>add a normal B-tree index on the filter column, or a <em>partial index</em> per common filter value, so Postgres can choose a better plan;</li>
+<li>for strict per-customer separation, consider partitioning by customer.</li>
+</ul>
+<p>Filtering for <strong>security</strong> (only show a user their own organisation's documents) is covered in <a href="ai-08-advanced-rag.html">Advanced RAG</a> and <a href="ai-13-security-safety.html">Security &amp; Safety</a>.</p>
+
+<h2>Multilingual and multimodal embeddings</h2>
+<h3>Multilingual</h3>
+<p>A <strong>multilingual</strong> embedding model maps the same meaning in different languages to nearby vectors, so a question in Spanish can find a chunk written in English. Many modern hosted models handle several languages, but quality varies a lot by language and model. If your users ask in one language and your documents are in another, test it with real questions before relying on it. Alternatives are translating documents at indexing time or translating the question before searching.</p>
+<h3>Multimodal</h3>
+<p>A <a class="term" href="glossary.html#multimodal">multimodal</a> embedding model can embed different kinds of input, typically images and text, into the <em>same</em> space, so the text "a red fire extinguisher" lands near a photo of one. This enables "search images by description" and "find text related to this picture".</p>
+<p>This project takes a different, simpler route in <a href="21-images-as-knowledge.html">step 21</a>: a vision model <em>describes</em> each image or scanned page as text (a form of <a class="term" href="glossary.html#ocr">OCR</a>), and that text is then chunked and embedded with the same text model as everything else. One embedding model, one table, one search. The trade-off: anything the description leaves out can't be found.</p>
+
+<h2>Storage and cost maths</h2>
+<p>pgvector stores each number in a <code>vector</code> column as a 4-byte floating-point value (a "float32"), plus a small fixed header of 8 bytes per vector.</p>
+<div class="table-wrap"><table>
+<tr><th>Calculation</th><th>Result</th></tr>
+<tr><td>One vector, 1,536 dims: 1,536 × 4 bytes + 8</td><td>6,152 bytes ≈ <strong>6 KB</strong></td></tr>
+<tr><td>The chunk's text: 900 characters (mostly 1 byte each in English)</td><td>≈ 0.9 KB, so the vector is roughly <strong>7×</strong> bigger than the text it describes</td></tr>
+<tr><td>10,000 chunks × 6,152 bytes</td><td>≈ 61.5 MB of vectors</td></tr>
+<tr><td>1,000,000 chunks × 6,152 bytes</td><td>≈ 6.15 GB of vectors (≈ 5.7 GiB)</td></tr>
+<tr><td>Same, with 3,072 dims (12,296 bytes each)</td><td>≈ 12.3 GB</td></tr>
+<tr><td>Same, with 512 dims (2,056 bytes each)</td><td>≈ 2.06 GB</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 254" role="img" aria-label="Bar chart of bytes per row: 900 characters of text is about 0.9 KB, while a 1,536-dimension vector is 6,152 bytes">
+  <text x="170" y="45" text-anchor="end" class="label">900-char chunk text</text>
+  <rect class="box2" x="180" y="24" width="41" height="32" rx="4"/>
+  <text x="229" y="45" class="label">≈ 0.9 KB of text</text>
+  <text x="170" y="97" text-anchor="end" class="label">512 dims</text>
+  <rect class="box-info" x="180" y="76" width="94" height="32" rx="4"/>
+  <text x="282" y="97" class="label">2,056 bytes (≈ 2.06 GB per million)</text>
+  <text x="170" y="142" text-anchor="end" class="label">1,536 dims</text>
+  <text x="170" y="157" text-anchor="end" class="small">this project</text>
+  <rect class="box" x="180" y="128" width="280" height="32" rx="4"/>
+  <text x="468" y="149" class="label">6,152 bytes ≈ 6 KB (≈ 6.15 GB per million)</text>
+  <text x="170" y="201" text-anchor="end" class="label">3,072 dims</text>
+  <rect class="box-warn" x="180" y="180" width="560" height="32" rx="4"/>
+  <text x="192" y="201" class="label">12,296 bytes (≈ 12.3 GB per million)</text>
+  <text x="380" y="240" text-anchor="middle" class="small">4 bytes per number + 8-byte header; the HNSW index comes on top; halfvec roughly halves it</text>
+</svg>
+<figcaption>Bytes per chunk, drawn to scale. The project's 1,536-number vector is about <strong>6 KB, roughly 7× the 900-character text</strong> it describes. Fewer dimensions shrink it; more dimensions grow it.</figcaption>
+</figure>
+<p>The HNSW index is stored <em>in addition</em> to the table, and is fastest when it fits in memory, so plan for noticeably more than the raw figure. pgvector also offers a <code>halfvec</code> type that stores 2-byte numbers, roughly halving the space, usually with very little effect on search quality. That is a form of <a class="term" href="glossary.html#quantization">quantization</a>. The pgvector README lists the current limits for each type (for example, the maximum number of dimensions an HNSW index supports).</p>
+<p><strong>Embedding cost</strong> is charged per input token. A rough estimate (rule of thumb: about 4 characters per token for English text):</p>
+<pre data-lang="sh" data-tag="illustrative"><code>tokens per chunk     ≈ 900 characters ÷ 4      ≈ 225 tokens
+tokens per document  ≈ chunks × 225             (overlap makes this a bit more than the raw text)
+cost to index        ≈ total tokens × provider's price per token
+cost per question    ≈ question tokens × price  (tiny: one short embed call)</code></pre>
+<p>Look up the current price on your provider's pricing page; prices change and are not listed here. Two practical takeaways: indexing is a one-off cost per document version, and re-embedding everything (after changing model) costs that again.</p>
+
+<div class="callout warn"><p><strong>Pitfalls</strong></p>
+<ul>
+<li><strong>Different models for chunks and questions.</strong> Scores become meaningless and nothing errors.</li>
+<li><strong>Treating similarity as a probability.</strong> A similarity of 0.6 doesn't mean "60% relevant". Thresholds must be tuned per model and per dataset.</li>
+<li><strong>Index built for one metric, query sorted by another.</strong> The index silently goes unused.</li>
+<li><strong>Expecting embeddings to match exact codes or names.</strong> Use keyword or hybrid search for those.</li>
+<li><strong>Changing <code>dimensions</code> without a migration.</strong> Inserts fail with a dimension mismatch error.</li>
+<li><strong>Picking a database for scale you don't have.</strong> Start simple and measure.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>An embedding is a fixed-length vector capturing the gist of a text. It's great for synonyms and topics, weak for exact codes, numbers, negation and freshness.</li>
+<li>This project uses <code>text-embedding-3-small</code>, which returns 1,536 numbers; the schema's <code>vector(1536)</code> must match. Never mix vectors from different models.</li>
+<li>Cosine compares direction, Euclidean compares positions, dot product mixes both. For normalized vectors (like OpenAI's), all three rank results the same.</li>
+<li>pgvector keeps vectors in Postgres with your other data; dedicated stores (Chroma, Milvus, Pinecone, Qdrant, Weaviate and others) are purpose-built alternatives. Start with what you have.</li>
+<li>Exact search checks every row; ANN indexes (HNSW, IVFFlat) check a fraction and trade a tiny bit of recall for speed.</li>
+<li>Metadata filters narrow results, but very selective filters on ANN indexes need care.</li>
+<li>Each 1,536-dim vector is about 6 KB, roughly 7× the size of a 900-character chunk.</li>
+</ul></div>
+
+<h3>Learn more</h3>
+<ul>
+<li><a href="https://platform.openai.com/docs/guides/embeddings">OpenAI: Embeddings guide</a></li>
+<li><a href="https://ai-sdk.dev/docs/ai-sdk-core/embeddings">AI SDK: Embeddings</a></li>
+<li><a href="https://github.com/pgvector/pgvector">pgvector README (types, operators, HNSW, IVFFlat, filtering)</a></li>
+<li><a href="https://orm.drizzle.team/docs/guides/vector-similarity-search">Drizzle ORM: Vector similarity search</a></li>
+<li>Dedicated vector stores' official docs: <a href="https://docs.trychroma.com">Chroma</a>, <a href="https://milvus.io/docs">Milvus</a>, <a href="https://docs.pinecone.io">Pinecone</a>, <a href="https://qdrant.tech/documentation/">Qdrant</a>, <a href="https://weaviate.io/developers/weaviate">Weaviate</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="ai-06-tool-calling.html"><small>← Chapter 6</small>Tool Calling in Depth</a>
+<a class="next" href="ai-08-advanced-rag.html"><small>Chapter 8 →</small>Advanced RAG</a>
+</nav>
+</main>
+</body>
+</html>

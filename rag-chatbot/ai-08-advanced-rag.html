@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 8 · Advanced RAG</title>
+<meta name="description" content="Chunking strategies, hybrid search, reranking, query rewriting, citations and RAG failure modes.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 8/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">AI &amp; Agents Handbook · Chapter 8 of 16</div>
+  <h1>Advanced RAG</h1>
+  <p class="lead">Chunking strategies, hybrid search, reranking, query rewriting, citations and RAG failure modes.</p>
+</section>
+<p>The chatbot you built in Part 1 is a complete, working <a class="term" href="glossary.html#rag">RAG</a> system: chunk the documents, embed them, find the 3 closest chunks to a question, and let the model answer from them. For a single handbook that works surprisingly well. As the knowledge base grows, and as users ask messier questions, you'll start to see failures: the bot can't find a form by its code, quotes last year's policy, or answers from the wrong paragraph.</p>
+<p>This chapter is a toolbox of techniques that fix those failures. You'll learn:</p>
+<ul>
+<li>chunking strategies beyond fixed-size, and how to choose size and overlap;</li>
+<li>why to store <a class="term" href="glossary.html#metadata">metadata</a> (source, page, section) with every chunk;</li>
+<li><a class="term" href="glossary.html#hybrid-search">hybrid search</a>: combining keyword search with vector search in Postgres, merged with reciprocal rank fusion;</li>
+<li><a class="term" href="glossary.html#reranking">reranking</a>, query rewriting, multi-query and <a class="term" href="glossary.html#hyde">HyDE</a>;</li>
+<li>contextual retrieval, citations, updates and duplicates, and per-user access control;</li>
+<li>agentic RAG, a table of common failure modes, and how to measure improvements.</li>
+</ul>
+<div class="callout"><p><strong>Why this matters for your chatbot.</strong> Each technique here is optional. Adding all of them at once would make the app slower, more expensive and harder to debug. The skill is to <strong>notice a specific failure, pick the technique that fixes it, and measure</strong> whether it helped. The failure-modes table near the end is the best place to start when something goes wrong.</p></div>
+
+<h2>Recap: the basic pipeline you already built</h2>
+<p>RAG has two phases. Both are explained in detail in Part 1, so here is just the map:</p>
+<div class="table-wrap"><table>
+<tr><th>Phase</th><th>What happens</th><th>Where in this project</th></tr>
+<tr><td>Indexing (once per document)</td><td>Extract text → <a class="term" href="glossary.html#chunk">chunk</a> (900 characters, 150 overlap) → embed each chunk → store text + vector</td><td><a href="10-embedding-utility.html">Step 10</a>, <a href="11-chunking-utility.html">11</a>, <a href="12-server-action.html">12</a>, <a href="13-pdf-upload-ui.html">13</a>, <a href="21-images-as-knowledge.html">21</a>; overview in <a href="indexing-explained.html">Indexing Explained</a></td></tr>
+<tr><td>Retrieval (every question)</td><td>Embed the question → find the 3 nearest chunks with similarity above 0.5</td><td><a href="14-semantic-search.html">Step 14</a></td></tr>
+<tr><td>Generation</td><td>The model calls the <code>searchKnowledgeBase</code> tool, reads the chunks, writes the answer</td><td><a href="15-search-tool.html">Step 15</a>, then <a href="22-build-an-agent.html">step 22</a></td></tr>
+</table></div>
+<p>The concepts behind the vectors (dimensions, cosine, HNSW) are in <a href="ai-07-embeddings-vector-databases.html">Embeddings &amp; Vector Databases</a>.</p>
+
+<h2>An advanced pipeline at a glance</h2>
+<p>Here is where the techniques in this chapter slot into the retrieval phase. Only "Vector search" and "LLM" exist in the tutorial; every other box is an optional addition.</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Advanced RAG pipeline: rewrite, hybrid search, fusion, rerank, generate with citations">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="10" y="100" width="100" height="56" rx="8"/><text x="60" y="124" text-anchor="middle">Question</text><text x="60" y="142" text-anchor="middle" class="small">+ user's org</text>
+  <rect class="box2" x="140" y="100" width="110" height="56" rx="8"/><text x="195" y="124" text-anchor="middle">Rewrite</text><text x="195" y="142" text-anchor="middle" class="small">multi-query / HyDE</text>
+  <rect class="box" x="285" y="40" width="130" height="56" rx="8"/><text x="350" y="64" text-anchor="middle">Vector search</text><text x="350" y="82" text-anchor="middle" class="small">pgvector, top 20</text>
+  <rect class="box2" x="285" y="160" width="130" height="56" rx="8"/><text x="350" y="184" text-anchor="middle">Keyword search</text><text x="350" y="202" text-anchor="middle" class="small">tsvector, top 20</text>
+  <rect class="box2" x="450" y="100" width="90" height="56" rx="8"/><text x="495" y="124" text-anchor="middle">Fuse</text><text x="495" y="142" text-anchor="middle" class="small">RRF</text>
+  <rect class="box2" x="560" y="100" width="80" height="56" rx="8"/><text x="600" y="124" text-anchor="middle">Rerank</text><text x="600" y="142" text-anchor="middle" class="small">keep top 3</text>
+  <rect class="box" x="660" y="100" width="90" height="56" rx="8"/><text x="705" y="124" text-anchor="middle">LLM</text><text x="705" y="142" text-anchor="middle" class="small">answer + sources</text>
+  <path class="arrow" d="M110,128 H138"/>
+  <path class="arrow" d="M250,118 L283,72"/><path class="arrow" d="M250,138 L283,186"/>
+  <path class="arrow" d="M415,68 L448,116"/><path class="arrow" d="M415,188 L448,140"/>
+  <path class="arrow" d="M540,128 H558"/><path class="arrow" d="M640,128 H658"/>
+  <text x="350" y="250" text-anchor="middle" class="small">both searches filter WHERE org_id = the signed-in user's org</text>
+  <text x="380" y="20" text-anchor="middle" class="small">tutorial today: Question → Vector search → LLM</text>
+</svg>
+<figcaption>Each stage narrows the candidates: two cheap searches cast a wide net (20 each), fusion merges them, a slower reranker picks the best 3, and the model answers with references to its sources.</figcaption>
+</figure>
+
+<h2>Chunking strategies</h2>
+<p>Chunking decides <em>what a search result can be</em>. If the answer to a question is split across two chunks, or buried in a chunk that is mostly about something else, no search technique can fully fix it. That makes chunking the first thing to look at.</p>
+<div class="table-wrap"><table>
+<tr><th>Strategy</th><th>How it works</th><th>Good for</th><th>Watch out for</th></tr>
+<tr><td>Fixed-size</td><td>Cut every N characters or tokens, with some overlap.</td><td>Simple, predictable, works on any text.</td><td>Cuts mid-sentence or mid-table; ignores structure.</td></tr>
+<tr><td>Recursive</td><td>Try to split at big boundaries first (paragraphs), then smaller ones (lines, spaces) only if a piece is still too big.</td><td>A strong default for prose.</td><td>Still blind to headings and meaning.</td></tr>
+<tr><td>By document structure</td><td>Split at headings, sections, list items, table rows, Markdown/HTML elements, or pages.</td><td>Handbooks, manuals, legal text, docs with clear headings.</td><td>Sections vary wildly in length; very long ones still need splitting.</td></tr>
+<tr><td>Semantic</td><td>Embed sentences and start a new chunk where the meaning shifts (similarity between neighbouring sentences drops).</td><td>Long unstructured text that changes topic.</td><td>Extra embedding cost at indexing time; harder to predict and debug.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 304" role="img" aria-label="The same page split four ways: fixed-size cuts at equal intervals, recursive at paragraph breaks, structure at headings, semantic where the topic changes">
+  <text x="98" y="22" text-anchor="middle" class="label">Fixed-size</text>
+  <text x="98" y="38" text-anchor="middle" class="small">≈ this project</text>
+  <rect class="box2" x="10" y="48" width="176" height="210" rx="6"/>
+  <rect class="box" x="16" y="52" width="164" height="45" rx="4"/>
+  <rect class="box-ok" x="16" y="97" width="164" height="45" rx="4"/>
+  <rect class="box" x="16" y="142" width="164" height="45" rx="4"/>
+  <rect class="box-ok" x="16" y="187" width="164" height="45" rx="4"/>
+  <rect class="box" x="16" y="232" width="164" height="22" rx="4"/>
+  <rect class="box-solid" x="26" y="56" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="73" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="83" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="93" width="118" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="109" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="119" width="140" height="6" rx="2"/>
+  <rect class="box-solid" x="26" y="136" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="153" width="118" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="163" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="173" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="183" width="118" height="6" rx="2"/>
+  <rect class="box-solid" x="26" y="200" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="217" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="227" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="26" y="237" width="118" height="6" rx="2"/>
+  <text x="98" y="278" text-anchor="middle" class="small">equal sizes,</text>
+  <text x="98" y="293" text-anchor="middle" class="small">cuts mid-paragraph</text>
+  <text x="286" y="22" text-anchor="middle" class="label">Recursive</text>
+  <text x="286" y="38" text-anchor="middle" class="small">LangChain defaults</text>
+  <rect class="box2" x="198" y="48" width="176" height="210" rx="6"/>
+  <rect class="box" x="204" y="52" width="164" height="52" rx="4"/>
+  <rect class="box-ok" x="204" y="104" width="164" height="28" rx="4"/>
+  <rect class="box" x="204" y="132" width="164" height="64" rx="4"/>
+  <rect class="box-ok" x="204" y="196" width="164" height="58" rx="4"/>
+  <rect class="box-solid" x="214" y="56" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="73" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="83" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="93" width="118" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="109" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="119" width="140" height="6" rx="2"/>
+  <rect class="box-solid" x="214" y="136" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="153" width="118" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="163" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="173" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="183" width="118" height="6" rx="2"/>
+  <rect class="box-solid" x="214" y="200" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="217" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="227" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="214" y="237" width="118" height="6" rx="2"/>
+  <text x="286" y="278" text-anchor="middle" class="small">paragraphs first,</text>
+  <text x="286" y="293" text-anchor="middle" class="small">then lines, spaces</text>
+  <text x="474" y="22" text-anchor="middle" class="label">By structure</text>
+  <text x="474" y="38" text-anchor="middle" class="small">headings</text>
+  <rect class="box2" x="386" y="48" width="176" height="210" rx="6"/>
+  <rect class="box" x="392" y="52" width="164" height="80" rx="4"/>
+  <rect class="box-ok" x="392" y="132" width="164" height="64" rx="4"/>
+  <rect class="box" x="392" y="196" width="164" height="58" rx="4"/>
+  <rect class="box-solid" x="402" y="56" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="73" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="83" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="93" width="118" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="109" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="119" width="140" height="6" rx="2"/>
+  <rect class="box-solid" x="402" y="136" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="153" width="118" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="163" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="173" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="183" width="118" height="6" rx="2"/>
+  <rect class="box-solid" x="402" y="200" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="217" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="227" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="402" y="237" width="118" height="6" rx="2"/>
+  <text x="474" y="278" text-anchor="middle" class="small">one chunk</text>
+  <text x="474" y="293" text-anchor="middle" class="small">per section</text>
+  <text x="662" y="22" text-anchor="middle" class="label">Semantic</text>
+  <text x="662" y="38" text-anchor="middle" class="small">meaning shifts</text>
+  <rect class="box2" x="574" y="48" width="176" height="210" rx="6"/>
+  <rect class="box" x="580" y="52" width="164" height="52" rx="4"/>
+  <rect class="box-ok" x="580" y="104" width="164" height="77" rx="4"/>
+  <rect class="box" x="580" y="181" width="164" height="73" rx="4"/>
+  <rect class="box-solid" x="590" y="56" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="73" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="83" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="93" width="118" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="109" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="119" width="140" height="6" rx="2"/>
+  <rect class="box-solid" x="590" y="136" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="153" width="118" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="163" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="173" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="183" width="118" height="6" rx="2"/>
+  <rect class="box-solid" x="590" y="200" width="70" height="8" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="217" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="227" width="140" height="6" rx="2"/>
+  <rect class="ui-skeleton" x="590" y="237" width="118" height="6" rx="2"/>
+  <text x="662" y="278" text-anchor="middle" class="small">new chunk where</text>
+  <text x="662" y="293" text-anchor="middle" class="small">the topic changes</text>
+</svg>
+<figcaption>One illustrative page (dark bars = headings, grey bars = text lines) split by each strategy; each coloured band is one chunk. The project's 900/150 splitter on spaces behaves like the <strong>fixed-size</strong> column. Overlap is not drawn.</figcaption>
+</figure>
+<h3>What this project does</h3>
+<p><a href="11-chunking-utility.html">Step 11</a> uses LangChain's <code>RecursiveCharacterTextSplitter</code> with <code>chunkSize: 900</code>, <code>chunkOverlap: 150</code> and <code>separators: [" "]</code>. Because the only separator is a space, it behaves like a fixed-size splitter that never cuts a word in half. As step 11 notes, removing the <code>separators</code> line uses LangChain's defaults (paragraphs, then lines, then spaces, then characters), which tends to produce cleaner chunks. That is the cheapest chunking upgrade available.</p>
+<h3>Size and overlap trade-offs</h3>
+<div class="table-wrap"><table>
+<tr><th></th><th>Smaller chunks (e.g. 300–500 chars)</th><th>Larger chunks (e.g. 1,500–3,000 chars)</th></tr>
+<tr><td>Search precision</td><td>High: each vector is about one thing.</td><td>Lower: each vector is a blend of several topics.</td></tr>
+<tr><td>Context per result</td><td>Little: the answer may need the neighbouring chunk.</td><td>Plenty: surrounding explanation comes along.</td></tr>
+<tr><td>Rows and storage</td><td>More rows, more vectors.</td><td>Fewer rows.</td></tr>
+<tr><td>Tokens sent to the model</td><td>Fewer per result.</td><td>More per result.</td></tr>
+</table></div>
+<p><strong>Overlap</strong> repeats the end of one chunk at the start of the next, so a sentence near a boundary appears whole in at least one chunk. 10–20% of the chunk size is a common rule of thumb (150 of 900 is about 17%). More overlap means more duplicated text and more rows. There is no universally correct size: try two or three settings on your own documents and measure (see <a href="#measure">How to measure</a>).</p>
+<p>A popular middle ground is <strong>"small to search, big to read"</strong> (sometimes called parent-document retrieval): embed small chunks for precise search, but when one matches, hand the model the larger section it belongs to.</p>
+
+<h2>Store metadata with every chunk</h2>
+<p>Right now each row in <code>documents</code> holds <code>id</code>, <code>content</code> and <code>embedding</code>, and nothing else. The database doesn't know which file a chunk came from. Adding a few columns unlocks most of the techniques in this chapter:</p>
+<div class="table-wrap"><table>
+<tr><th>Column (example)</th><th>Enables</th></tr>
+<tr><td><code>source</code> (file name or document id)</td><td>Citations, deleting/replacing one document, removing duplicates</td></tr>
+<tr><td><code>page</code>, <code>section</code> (heading)</td><td>Precise citations ("Handbook, p. 12, Time Off"); contextual retrieval</td></tr>
+<tr><td><code>org_id</code> / <code>owner_id</code></td><td>Access control: only search what the user may see</td></tr>
+<tr><td><code>created_at</code>, <code>version</code></td><td>Prefer the newest version; audit what changed</td></tr>
+<tr><td><code>content_hash</code></td><td>Skip chunks that are already stored</td></tr>
+</table></div>
+<p>A migration for the most useful one might look like this (illustrative; in this project you'd add the column to <code>db-schema.ts</code> and let drizzle-kit generate the SQL as in <a href="09-vector-database.html">step 9</a>):</p>
+<pre data-lang="sql" data-tag="illustrative"><code>ALTER TABLE documents ADD COLUMN source text;
+CREATE INDEX documents_source_idx ON documents (source);</code></pre>
+<p>The server action in <a href="12-server-action.html">step 12</a> already has the file in hand, so filling it is one extra field per record: <code>{ content: chunk, embedding: embeddings[index], source: file.name }</code>.</p>
+
+<h2>Hybrid search: keywords + vectors</h2>
+<p>Vector search finds <em>meaning</em> but is weak at exact strings: form codes ("HR-104B"), product names, error codes, people's names. Classic <strong>keyword search</strong> is the opposite: it is excellent at exact words and knows nothing about synonyms. <a class="term" href="glossary.html#hybrid-search">Hybrid search</a> runs both and merges the results, so each covers the other's blind spot.</p>
+<details class="primer"><summary>New to keyword search? What BM25 and full-text search are</summary>
+<p>Keyword search engines split text into words, normalise them (lower-case, "requests" → "request"), and build an index from each word to the rows that contain it, like the index at the back of a book.</p>
+<p>To rank results, they score how well each row matches. The best-known scoring formula is <a class="term" href="glossary.html#bm25">BM25</a>. Roughly, it rewards rows that contain the query's words often, gives more weight to <em>rare</em> words (a match on "HR-104B" counts far more than a match on "the"), and avoids favouring a row just because it is long.</p>
+<p>Postgres has built-in <strong>full-text search</strong>. Its <code>ts_rank</code> function is a similar idea but not the same formula as BM25. For hybrid search in RAG, that difference rarely matters. Some Postgres extensions and dedicated search engines provide true BM25 if you need it.</p>
+</details>
+<h3>Full-text search in Postgres</h3>
+<p>Three building blocks:</p>
+<ul>
+<li><code>tsvector</code>: a processed version of a text, a sorted list of normalised words ("lexemes"). <code>to_tsvector('english', content)</code> creates one.</li>
+<li><code>tsquery</code>: a processed search query. <code>websearch_to_tsquery('english', 'vacation days')</code> turns ordinary user input into one.</li>
+<li><code>@@</code>: "does this tsvector match this tsquery?" and <code>ts_rank(tsvector, tsquery)</code>: "how well?"</li>
+</ul>
+<p>You can store the <code>tsvector</code> as a generated column, so Postgres keeps it up to date on every insert, and index it with a GIN index (the right index type for "which rows contain this word"):</p>
+<pre data-lang="sql" data-tag="illustrative"><code>ALTER TABLE documents
+  ADD COLUMN content_tsv tsvector
+  GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;
+
+CREATE INDEX documents_content_tsv_idx ON documents USING gin (content_tsv);
+
+-- Keyword search on its own:
+SELECT id, content, ts_rank(content_tsv, query) AS rank
+FROM documents, websearch_to_tsquery('english', 'HR-104B form') AS query
+WHERE content_tsv @@ query
+ORDER BY rank DESC
+LIMIT 5;</code></pre>
+<h3>Reciprocal rank fusion (RRF), simply</h3>
+<p>Now you have two ranked lists, and their scores are on different scales: cosine similarity is between −1 and 1, <code>ts_rank</code> is some small positive number. You can't just add them. <strong>Reciprocal rank fusion</strong> ignores the scores and uses only the <em>positions</em>:</p>
+<p><strong>RRF score of a chunk = sum over each list of 1 ÷ (k + its rank in that list)</strong></p>
+<p><code>k</code> is a constant, commonly 60, that stops the #1 spot from dominating. A chunk missing from a list gets nothing from that list. Example with k = 60:</p>
+<div class="table-wrap"><table>
+<tr><th>Chunk</th><th>Vector rank</th><th>Keyword rank</th><th>RRF score</th></tr>
+<tr><td>A</td><td>1</td><td>4</td><td>1/61 + 1/64 ≈ 0.0164 + 0.0156 = <strong>0.0320</strong></td></tr>
+<tr><td>B</td><td>2</td><td>(not found)</td><td>1/62 ≈ <strong>0.0161</strong></td></tr>
+<tr><td>C</td><td>(not found)</td><td>1</td><td>1/61 ≈ <strong>0.0164</strong></td></tr>
+</table></div>
+<p>A wins because both methods liked it. C (the exact keyword hit) edges past B. That's the behaviour you want: agreement is rewarded, and a strong result from either method still makes the cut.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 274" role="img" aria-label="Two ranked lists, vector and keyword, merge by reciprocal rank fusion: A found by both wins, C and B follow">
+  <text x="80" y="24" text-anchor="middle" class="label">Vector search</text>
+  <text x="380" y="24" text-anchor="middle" class="label">RRF fusion (k = 60)</text>
+  <text x="680" y="24" text-anchor="middle" class="label">Keyword search</text>
+  <rect class="box-ok" x="10" y="40" width="140" height="32" rx="6"/>
+  <text x="80" y="60.5" text-anchor="middle" class="label">1 · A</text>
+  <rect class="box-info" x="10" y="82" width="140" height="32" rx="6"/>
+  <text x="80" y="102.5" text-anchor="middle" class="label">2 · B</text>
+  <rect class="box2" x="10" y="124" width="140" height="32" rx="6"/>
+  <text x="80" y="144.5" text-anchor="middle" class="label">3 · D</text>
+  <rect class="box2" x="10" y="166" width="140" height="32" rx="6"/>
+  <text x="80" y="186.5" text-anchor="middle" class="label">4 · E</text>
+  <rect class="box-info" x="610" y="40" width="140" height="32" rx="6"/>
+  <text x="680" y="60.5" text-anchor="middle" class="label">1 · C</text>
+  <rect class="box2" x="610" y="82" width="140" height="32" rx="6"/>
+  <text x="680" y="102.5" text-anchor="middle" class="label">2 · F</text>
+  <rect class="box2" x="610" y="124" width="140" height="32" rx="6"/>
+  <text x="680" y="144.5" text-anchor="middle" class="label">3 · G</text>
+  <rect class="box-ok" x="610" y="166" width="140" height="32" rx="6"/>
+  <text x="680" y="186.5" text-anchor="middle" class="label">4 · A</text>
+  <rect class="box-ok" x="290" y="46" width="180" height="36" rx="6"/>
+  <text x="380" y="68.5" text-anchor="middle" class="label">1st  A · 0.0320</text>
+  <rect class="box-info" x="290" y="96" width="180" height="36" rx="6"/>
+  <text x="380" y="118.5" text-anchor="middle" class="label">2nd  C · 0.0164</text>
+  <rect class="box-info" x="290" y="146" width="180" height="36" rx="6"/>
+  <text x="380" y="168.5" text-anchor="middle" class="label">3rd  B · 0.0161</text>
+  <path class="arrow-ok" d="M150,56 L288,62"/>
+  <path class="arrow-ok" d="M610,182 L472,66"/>
+  <path class="arrow" d="M610,56 L472,112"/>
+  <path class="arrow" d="M150,98 L288,162"/>
+  <text x="380" y="222" text-anchor="middle" class="small">D, E, F, G get lower scores</text>
+  <text x="380" y="244" text-anchor="middle" class="small">score = sum over lists of 1 ÷ (60 + rank); only the positions count</text>
+  <text x="380" y="262" text-anchor="middle" class="small">illustrative ranks, the same as in the table above</text>
+</svg>
+<figcaption>Each search returns its own ranked list; RRF looks only at <strong>positions</strong>. A is in both lists, so it collects points twice and comes first; C (keyword #1) just beats B (vector #2).</figcaption>
+</figure>
+<p>Here is the whole thing in one illustrative SQL query. <code>$1</code> is the question's embedding and <code>$2</code> is the question text:</p>
+<pre data-lang="sql" data-tag="illustrative"><code>WITH semantic AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY distance) AS rank
+  FROM (
+    SELECT id, embedding &lt;=&gt; $1::vector AS distance
+    FROM documents
+    ORDER BY distance          -- raw distance, so the HNSW index is used
+    LIMIT 20
+  ) AS nearest
+),
+keyword AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY score DESC) AS rank
+  FROM (
+    SELECT id, ts_rank(content_tsv, query) AS score
+    FROM documents, websearch_to_tsquery('english', $2) AS query
+    WHERE content_tsv @@ query
+    ORDER BY score DESC
+    LIMIT 20
+  ) AS matches
+)
+SELECT d.id, d.content,
+       COALESCE(1.0 / (60 + s.rank), 0) + COALESCE(1.0 / (60 + k.rank), 0) AS rrf_score
+FROM semantic s
+FULL OUTER JOIN keyword k ON s.id = k.id
+JOIN documents d ON d.id = COALESCE(s.id, k.id)
+ORDER BY rrf_score DESC
+LIMIT 3;</code></pre>
+<p>Reading it top to bottom: <code>semantic</code> takes the 20 nearest chunks by vector distance and numbers them 1–20. <code>keyword</code> does the same for the 20 best keyword matches. The <code>FULL OUTER JOIN</code> keeps chunks that appear in either list (or both); <code>COALESCE(…, 0)</code> gives 0 points for a list a chunk isn't in. The final <code>ORDER BY</code> keeps the 3 best fused scores. In this project you would run it with Drizzle's <code>db.execute(sql`…`)</code>.</p>
+<p>If you prefer to fuse in TypeScript (for example when the two searches come from different systems), RRF is a few lines:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>// Each list holds chunk ids, best first.
+function reciprocalRankFusion(lists: number[][], k = 60): number[] {
+  const scores = new Map&lt;number, number&gt;();
+  for (const list of lists) {
+    list.forEach((id, index) =&gt; {
+      const rank = index + 1;
+      scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank));
+    });
+  }
+  return [...scores.entries()].sort((a, b) =&gt; b[1] - a[1]).map(([id]) =&gt; id);
+}
+
+reciprocalRankFusion([[7, 3, 9], [12, 7]]); // [7, 12, 3, 9]: 7 is in both lists, so it wins</code></pre>
+<p>Note that hybrid results have no single "similarity", so the tutorial's <code>0.5</code> threshold no longer applies directly. You can keep a threshold on the vector side only, or rely on reranking to drop weak candidates.</p>
+
+<h2>Reranking</h2>
+<p>Vector search is fast because the question and each chunk are embedded <em>separately</em>; the chunk vectors were computed long before the question existed. That speed costs some accuracy: the model never looked at the question and the chunk together.</p>
+<p>A <a class="term" href="glossary.html#reranking">reranker</a> does a second pass. It takes the question and each candidate chunk <em>as a pair</em> and outputs a relevance score. Models built for this are called <strong>cross-encoders</strong>. They are much more accurate at judging "does this passage answer this question?", and much slower, so you only run them on a short list:</p>
+<ol class="steps">
+<li>Retrieve a wide net cheaply: 20–50 candidates from vector or hybrid search.</li>
+<li>Rerank those candidates with the cross-encoder.</li>
+<li>Send only the top 3–5 to the chat model.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 256" role="img" aria-label="Funnel: 20 to 50 cheap candidates go into a cross-encoder reranker, which keeps the top 3 to 5 for the chat model">
+  <polygon class="box2" points="20,20 440,20 390,92 70,92"/>
+  <text x="230" y="50" text-anchor="middle" class="label">20–50 candidates</text>
+  <text x="230" y="70" text-anchor="middle" class="small">vector or hybrid search · fast</text>
+  <polygon class="box" points="72,100 388,100 330,172 130,172"/>
+  <text x="230" y="130" text-anchor="middle" class="label">Reranker (cross-encoder)</text>
+  <text x="230" y="150" text-anchor="middle" class="small">scores each question + chunk pair</text>
+  <polygon class="box-ok" points="132,180 328,180 288,244 172,244"/>
+  <text x="230" y="208" text-anchor="middle" class="label">top 3–5</text>
+  <text x="230" y="226" text-anchor="middle" class="small">→ chat model</text>
+  <rect class="box2" x="480" y="20" width="270" height="104" rx="8"/>
+  <text x="615" y="42" text-anchor="middle" class="label">Embedding search</text>
+  <text x="615" y="64" text-anchor="middle" class="small">question and chunk embedded separately</text>
+  <text x="615" y="82" text-anchor="middle" class="small">chunk vectors computed in advance</text>
+  <text x="615" y="100" text-anchor="middle" class="small">→ fast, less precise</text>
+  <rect class="box" x="480" y="140" width="270" height="104" rx="8"/>
+  <text x="615" y="162" text-anchor="middle" class="label">Cross-encoder</text>
+  <text x="615" y="184" text-anchor="middle" class="small">reads question + chunk together</text>
+  <text x="615" y="202" text-anchor="middle" class="small">one scoring pass per pair</text>
+  <text x="615" y="220" text-anchor="middle" class="small">→ slow, more accurate</text>
+</svg>
+<figcaption>Cast a wide net cheaply, then judge carefully. The reranker reads the <strong>question and each chunk together</strong>, which is more accurate but too slow to run on the whole table, so it only sees the shortlist.</figcaption>
+</figure>
+<p>Options: hosted rerank APIs (several embedding providers also offer one), open-weight cross-encoder models you run yourself, or, as a simple fallback, asking a cheap chat model to score each candidate with <code>generateObject</code>. The AI SDK version used in this project (v5) has no built-in rerank helper, so you would call the reranking provider's own SDK or HTTP API from inside the tool's <code>execute</code> function. Reranking adds <a class="term" href="glossary.html#latency">latency</a> (another network call per question), so measure whether the quality gain is worth it.</p>
+
+<h2>Better queries: rewriting, multi-query and HyDE</h2>
+<p>Users ask short, vague or conversational questions: "and what about part-timers?" only makes sense next to the previous message. Searching for that literal text finds nothing useful. These techniques improve the <em>query</em> before searching.</p>
+<h3>Query rewriting</h3>
+<p>Ask a model to turn the user's latest message (plus the conversation) into a standalone search query: "and what about part-timers?" → "vacation days for part-time employees". In this project the chat model already does this for free: when it calls <code>searchKnowledgeBase</code>, it writes the <code>query</code> argument itself, and the tool's <code>.describe("The search query to find relevant documents")</code> guides it. Good tool descriptions are a cheap form of query rewriting (see <a href="ai-06-tool-calling.html">Tool Calling in Depth</a>).</p>
+<h3>Multi-query</h3>
+<p>Generate several differently worded queries, search with each, and fuse the results with RRF. This helps when the documents use vocabulary the user didn't.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { generateObject } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+
+const { object } = await generateObject({
+  model: openai("gpt-5-mini"),
+  schema: z.object({
+    queries: z.array(z.string()).describe("2 to 3 short search queries"),
+  }),
+  prompt: `Write 2 to 3 different search queries that would find company policy text answering this question.
+Question: ${question}`,
+});
+
+const resultLists = await Promise.all(
+  object.queries.map((q) =&gt; searchDocuments(q, 10, 0.3)),
+);
+// then fuse resultLists (by id) with reciprocalRankFusion</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 292" role="img" aria-label="Query rewriting turns a follow-up into a standalone query; multi-query generates several queries, searches each in parallel and fuses the lists">
+  <text x="10" y="20" class="small">Query rewriting</text>
+  <rect class="box2" x="10" y="28" width="210" height="46" rx="8"/>
+  <text x="115" y="55.5" text-anchor="middle" class="label">and what about part-timers?</text>
+  <rect class="box" x="250" y="28" width="120" height="46" rx="8"/>
+  <text x="310" y="48.0" text-anchor="middle">model rewrites</text>
+  <text x="310" y="64.0" text-anchor="middle" class="small">the tool's query</text>
+  <rect class="box-ok" x="400" y="28" width="300" height="46" rx="8"/>
+  <text x="550" y="55.5" text-anchor="middle" class="label">vacation days for part-time employees</text>
+  <path class="arrow" d="M220,51 H248"/>
+  <path class="arrow" d="M370,51 H398"/>
+  <text x="10" y="106" class="small">Multi-query</text>
+  <rect class="box2" x="10" y="150" width="130" height="56" rx="8"/>
+  <text x="75" y="182.5" text-anchor="middle">question</text>
+  <rect class="box" x="170" y="150" width="140" height="56" rx="8"/>
+  <text x="240" y="175.0" text-anchor="middle">generateObject</text>
+  <text x="240" y="191.0" text-anchor="middle" class="small">2–3 queries</text>
+  <path class="arrow" d="M140,178 H168"/>
+  <rect class="box-info" x="340" y="112" width="120" height="36" rx="6"/>
+  <text x="400" y="134.5" text-anchor="middle" class="label">query 1</text>
+  <rect class="box2" x="490" y="112" width="120" height="36" rx="6"/>
+  <text x="550" y="134.5" text-anchor="middle" class="label">searchDocuments</text>
+  <path class="arrow" d="M310,178 L338,130"/>
+  <path class="arrow" d="M460,130 H488"/>
+  <path class="arrow" d="M610,130 L638,166"/>
+  <rect class="box-info" x="340" y="162" width="120" height="36" rx="6"/>
+  <text x="400" y="184.5" text-anchor="middle" class="label">query 2</text>
+  <rect class="box2" x="490" y="162" width="120" height="36" rx="6"/>
+  <text x="550" y="184.5" text-anchor="middle" class="label">searchDocuments</text>
+  <path class="arrow" d="M310,178 L338,180"/>
+  <path class="arrow" d="M460,180 H488"/>
+  <path class="arrow" d="M610,180 L638,178"/>
+  <rect class="box-info" x="340" y="212" width="120" height="36" rx="6"/>
+  <text x="400" y="234.5" text-anchor="middle" class="label">query 3</text>
+  <rect class="box2" x="490" y="212" width="120" height="36" rx="6"/>
+  <text x="550" y="234.5" text-anchor="middle" class="label">searchDocuments</text>
+  <path class="arrow" d="M310,178 L338,230"/>
+  <path class="arrow" d="M460,230 H488"/>
+  <path class="arrow" d="M610,230 L638,190"/>
+  <rect class="box-ok" x="640" y="150" width="110" height="56" rx="8"/>
+  <text x="695" y="175.0" text-anchor="middle">RRF fusion</text>
+  <text x="695" y="191.0" text-anchor="middle" class="small">one list</text>
+  <text x="550" y="280" text-anchor="middle" class="small">Promise.all: the searches run in parallel</text>
+</svg>
+<figcaption>Top: <strong>rewriting</strong> turns a follow-up that only makes sense in context into a standalone query (this project's model already does it when it writes the tool's <code>query</code>). Bottom: <strong>multi-query</strong> fans out into several searches and merges them with RRF.</figcaption>
+</figure>
+<p><code>generateObject</code> with a <a class="term" href="glossary.html#zod">zod</a> schema returns typed data instead of prose; see <a href="ai-05-structured-output.html">Structured Output</a>.</p>
+<h3>HyDE (hypothetical document embeddings)</h3>
+<p>A question and its answer are phrased very differently. "How many vacation days do I get?" looks nothing like "Employees with 0–2 years of service receive 15 days of PTO annually." <a class="term" href="glossary.html#hyde">HyDE</a> asks a model to <em>write a plausible answer first</em> (which may be factually wrong), embeds that fake answer, and searches with its vector. Because the fake answer is shaped like a policy paragraph, it often lands closer to the real one. The fake answer is only used for searching; it is never shown to the user.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="Plain search embeds the question; HyDE has a model write a fake answer, embeds that, and finds the real policy paragraph">
+  <text x="10" y="22" class="small">Plain search</text>
+  <rect class="box2" x="10" y="30" width="240" height="46" rx="8"/>
+  <text x="130" y="57.5" text-anchor="middle" class="label">“How many vacation days do I get?”</text>
+  <rect class="box" x="280" y="30" width="100" height="46" rx="8"/>
+  <text x="330" y="57.5" text-anchor="middle" class="label">embed</text>
+  <rect class="box" x="410" y="30" width="100" height="46" rx="8"/>
+  <text x="460" y="57.5" text-anchor="middle" class="label">search</text>
+  <rect class="box-warn" x="540" y="30" width="210" height="46" rx="8"/>
+  <text x="645" y="50.0" text-anchor="middle">weaker match</text>
+  <text x="645" y="66.0" text-anchor="middle" class="small">question-shaped vector</text>
+  <path class="arrow" d="M250,53 H278"/>
+  <path class="arrow" d="M380,53 H408"/>
+  <path class="arrow" d="M510,53 H538"/>
+  <text x="10" y="122" class="small">HyDE</text>
+  <rect class="box2" x="10" y="130" width="240" height="46" rx="8"/>
+  <text x="130" y="157.5" text-anchor="middle" class="label">“How many vacation days do I get?”</text>
+  <rect class="box" x="280" y="130" width="110" height="46" rx="8"/>
+  <text x="335" y="150.0" text-anchor="middle">model</text>
+  <text x="335" y="166.0" text-anchor="middle" class="small">writes an answer</text>
+  <rect class="box" x="420" y="130" width="90" height="46" rx="8"/>
+  <text x="465" y="157.5" text-anchor="middle" class="label">embed</text>
+  <rect class="box" x="530" y="130" width="80" height="46" rx="8"/>
+  <text x="570" y="157.5" text-anchor="middle" class="label">search</text>
+  <rect class="box-ok" x="630" y="130" width="120" height="46" rx="8"/>
+  <text x="690" y="150.0" text-anchor="middle">real policy</text>
+  <text x="690" y="166.0" text-anchor="middle" class="small">chunk found</text>
+  <path class="arrow" d="M250,153 H278"/>
+  <path class="arrow" d="M510,153 H528"/>
+  <path class="arrow-ok" d="M610,153 H628"/>
+  <path class="arrow" d="M335,176 V194"/>
+  <rect class="box-warn" x="220" y="196" width="330" height="36" rx="8"/>
+  <text x="385" y="218.5" text-anchor="middle" class="small">“Employees receive N days of PTO…” (fake)</text>
+  <path class="arrow" d="M465,196 V178"/>
+  <text x="380" y="252" text-anchor="middle" class="small">the fake answer is only used for searching; it is never shown to the user</text>
+</svg>
+<figcaption>HyDE searches with an <strong>answer-shaped</strong> vector. The fake answer may contain wrong facts, which does not matter: it is thrown away once the real chunk is found. Illustrative example text.</figcaption>
+</figure>
+<div class="callout warn"><p><strong>Trade-off.</strong> Each of these adds at least one extra model call before searching, which means more latency and cost on every question. Try them when you see "the answer is in the documents but search can't find it" failures, not by default.</p></div>
+
+<h2>Contextual retrieval</h2>
+<p>A chunk taken out of its document often loses information that made it understandable. Imagine a chunk that reads: "Employees in this category receive 20 days." Which category? Which document? Which year? Its embedding knows nothing about "part-time staff in the 2025 Germany handbook", so a question mentioning those things won't find it.</p>
+<p><strong>Contextual retrieval</strong> fixes this at indexing time: before embedding, prepend a short piece of context to each chunk. That can be as simple as the document title and section heading ("Employee Handbook 2025 › Time Off › Part-time staff:"), or a one or two sentence summary that a model writes for each chunk by reading it alongside the whole document. The extra text is embedded (and can be included in the keyword index) along with the chunk. Anthropic has published a description of this technique; see Learn more. The cost is one model call per chunk at indexing time, which <a class="term" href="glossary.html#caching">prompt caching</a> can reduce because the same document is sent repeatedly.</p>
+
+<h2>Citations and grounding</h2>
+<p>An answer is <strong>grounded</strong> when it is based on retrieved sources rather than the model's general knowledge. Showing those sources lets users check the answer and builds trust. It also makes debugging much easier for you.</p>
+<p>Today the tool returns one string, numbering each chunk: <code>[1] …</code>, <code>[2] …</code>. The model sees the numbers, but the user can't tell where they came from. With a <code>source</code> column you can return structured data instead:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>execute: async ({ query }) =&gt; {
+  // assumes searchDocuments now also selects documents.source
+  const results = await searchDocuments(query, 3, 0.5);
+  if (results.length === 0) {
+    return { results: [], note: "No relevant information found in the knowledge base." };
+  }
+  return {
+    results: results.map((r, i) =&gt; ({
+      ref: i + 1,
+      source: r.source,
+      text: r.content,
+    })),
+  };
+},</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 312" role="img" aria-label="The search tool returns numbered results with a source; the model cites [1] in its answer and the chat page lists the sources under it">
+  <rect class="box" x="10" y="30" width="150" height="50" rx="8"/>
+  <text x="85" y="52.0" text-anchor="middle">searchDocuments</text>
+  <text x="85" y="68.0" text-anchor="middle" class="small">selects source too</text>
+  <path class="arrow" d="M160,55 H188"/>
+  <rect class="box-info" x="190" y="20" width="230" height="116" rx="8"/>
+  <text x="202" y="42" class="mono">{ results: [{</text>
+  <text x="216" y="62" class="mono">ref: 1,</text>
+  <text x="216" y="82" class="mono">source: "handbook.pdf",</text>
+  <text x="216" y="102" class="mono">text: "…"</text>
+  <text x="202" y="122" class="mono">}] }</text>
+  <path class="arrow" d="M420,45 H458"/>
+  <rect class="box2" x="460" y="20" width="120" height="50" rx="8"/>
+  <text x="520" y="42.0" text-anchor="middle">model</text>
+  <text x="520" y="58.0" text-anchor="middle" class="small">reads [1], [2] …</text>
+  <rect class="ui-window" x="440" y="100" width="310" height="184" rx="10"/>
+  <rect class="ui-chrome" x="441" y="101" width="308" height="24" rx="9"/>
+  <text x="456" y="117" class="small">Chat</text>
+  <rect class="ui-bubble-ai" x="456" y="136" width="278" height="62" rx="10"/>
+  <text x="468" y="158" class="label">Answer text … as stated in [1].</text>
+  <rect class="ui-skeleton" x="468" y="172" width="200" height="8" rx="3"/>
+  <text x="456" y="226" class="title">Sources</text>
+  <text x="456" y="248" class="mono">[1] handbook.pdf</text>
+  <path class="arrow" d="M560,70 V134"/>
+  <path class="arrow-accent" d="M305,136 V244 H450"/>
+  <text x="313" y="226" class="small">UI reads source</text>
+  <text x="10" y="300" class="small">Illustration (simplified): a Sources list is a suggested addition, not in the project yet; "handbook.pdf" is an example name.</text>
+</svg>
+<figcaption>One tool result, two readers: the <strong>model</strong> sees the <code>ref</code> numbers and cites them, and the <strong>chat page</strong> reads <code>source</code> from the same <code>searchKnowledgeBase</code> output to list where the answer came from.</figcaption>
+</figure>
+<p>Tool results are part of the message stream, so the chat page can read them. <a href="23-show-agent-steps.html">Step 23</a> renders tool parts in the UI; a "Sources" list under the answer is the same idea, reading <code>source</code> from the <code>searchKnowledgeBase</code> output. Then tell the model in the system prompt to cite like "[1]". The step-22 prompt already says "Say which document facts you used". Citations don't guarantee correctness (a model can cite a source and still misread it), but they make errors visible.</p>
+
+<h2>Updates, deletes and duplicates</h2>
+<p>Documents change. The current project can only <em>add</em> chunks, which leads to two problems described in <a href="indexing-explained.html">Indexing Explained</a> ("When you must re-index"): an updated handbook leaves the old version's chunks behind, so the bot may quote outdated rules, and uploading the same PDF twice stores every chunk twice, filling the 3 result slots with copies.</p>
+<p>With a <code>source</code> column, a "replace" becomes delete-then-insert in one transaction:</p>
+<pre data-lang="sql" data-tag="illustrative"><code>BEGIN;
+DELETE FROM documents WHERE source = 'employee-handbook.pdf';
+-- INSERT the new version's chunks here
+COMMIT;</code></pre>
+<p>A transaction makes the two steps all-or-nothing, so a failed upload never leaves the knowledge base with <em>neither</em> version. For duplicates, you can check for an existing <code>source</code> before inserting, or store a hash of each chunk's text with a unique constraint. A cleaner long-term design is the separate <code>sources</code> table with a foreign key, described under "Document management" in <a href="17-next-steps.html">step 17</a>.</p>
+
+<h2>Access control: multi-tenant retrieval</h2>
+<p>If several companies or departments share one database, each user must only ever retrieve chunks they are allowed to see. A model can't be trusted to "ignore" chunks it shouldn't use: once text is in its context, it may repeat it. The filter must happen <strong>in the database query</strong>, using an identity the server trusts.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { auth } from "@clerk/nextjs/server";
+import { and, eq, gt } from "drizzle-orm";
+
+const { orgId } = await auth();   // from the signed-in session, never from the model
+// ...
+.where(and(gt(similarity, threshold), eq(documents.orgId, orgId)))</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The server adds a filter on the user's orgId from the session, so only that organisation's chunks are returned to the model; an orgId supplied by the model is never used">
+  <rect class="box2" x="10" y="20" width="160" height="50" rx="8"/>
+  <text x="90" y="42.0" text-anchor="middle">Signed-in user</text>
+  <text x="90" y="58.0" text-anchor="middle" class="small">orgId from auth()</text>
+  <rect class="box" x="200" y="20" width="240" height="50" rx="8"/>
+  <text x="320" y="41" text-anchor="middle" class="mono">eq(documents.orgId, orgId)</text>
+  <text x="320" y="59" text-anchor="middle" class="small">added by your server code</text>
+  <path class="arrow" d="M170,45 H198"/>
+  <path class="arrow" d="M440,45 H468"/>
+  <rect class="box2" x="470" y="10" width="280" height="26" rx="6"/>
+  <text x="610" y="28" text-anchor="middle" class="label">documents table</text>
+  <rect class="box-ok" x="470" y="42" width="280" height="26" rx="6"/>
+  <text x="484" y="59" class="mono">chunk 1 · org_a</text>
+  <text x="738" y="59" text-anchor="end" class="small">kept</text>
+  <rect class="box2" x="470" y="74" width="280" height="26" rx="6"/>
+  <text x="484" y="91" class="mono">chunk 2 · org_b</text>
+  <text x="738" y="91" text-anchor="end" class="small">filtered out</text>
+  <rect class="box-ok" x="470" y="106" width="280" height="26" rx="6"/>
+  <text x="484" y="123" class="mono">chunk 3 · org_a</text>
+  <text x="738" y="123" text-anchor="end" class="small">kept</text>
+  <rect class="box2" x="470" y="138" width="280" height="26" rx="6"/>
+  <text x="484" y="155" class="mono">chunk 4 · org_b</text>
+  <text x="738" y="155" text-anchor="end" class="small">filtered out</text>
+  <rect class="box2" x="470" y="170" width="280" height="26" rx="6"/>
+  <text x="484" y="187" class="mono">chunk 5 · org_b</text>
+  <text x="738" y="187" text-anchor="end" class="small">filtered out</text>
+  <rect class="box-ok" x="470" y="202" width="280" height="26" rx="6"/>
+  <text x="484" y="219" class="mono">chunk 6 · org_a</text>
+  <text x="738" y="219" text-anchor="end" class="small">kept</text>
+  <rect class="box-bad" x="10" y="110" width="170" height="50" rx="8"/>
+  <text x="95" y="132.0" text-anchor="middle">orgId from the model</text>
+  <text x="95" y="148.0" text-anchor="middle" class="small">never: prompt injection</text>
+  <path class="arrow-bad dashed" d="M180,128 L216,96"/>
+  <text x="222" y="112" class="small">not allowed</text>
+  <rect class="box-ok" x="200" y="196" width="240" height="40" rx="8"/>
+  <text x="320" y="220.5" text-anchor="middle" class="label">model sees org_a chunks only</text>
+  <path class="arrow-ok" d="M468,215 H442"/>
+</svg>
+<figcaption>The tenant filter is <strong>part of the SQL query</strong>, built from the session on the server. Rows from other organisations never reach the model, so no prompt can make it reveal them. Rows and org names are illustrative.</figcaption>
+</figure>
+<div class="callout warn"><p><strong>Never let the model choose the filter.</strong> Don't add <code>orgId</code> to the tool's <code>inputSchema</code>. A user could say "search organisation 42's documents" (a form of <a class="term" href="glossary.html#prompt-injection">prompt injection</a>) and the model might comply. Read the identity from the <a class="term" href="glossary.html#session">session</a> on the server, as <a href="16-rbac.html">step 16</a> does for roles. More in <a href="ai-13-security-safety.html">Security &amp; Safety</a>.</p></div>
+
+<h2>Agentic RAG</h2>
+<p>In classic RAG, the code always searches exactly once, before the model runs. In <strong>agentic RAG</strong>, the model decides <em>whether</em> to search, <em>what</em> to search for, and <em>how many times</em>. This project has been agentic from the start: search is a tool the model can call (<a href="15-search-tool.html">step 15</a>, with <code>stopWhen: stepCountIs(2)</code>, enough for one search and an answer). <a href="22-build-an-agent.html">Step 22</a> goes further: <code>stepCountIs(6)</code> and a system prompt that says "You may search more than once with different wording", so the model can search, see that the results don't cover the question, and search again with a better query. It can also combine search with the <code>getCurrentDate</code> and <code>calculator</code> tools.</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>Fixed pipeline</th><th>Agentic</th></tr>
+<tr><td>Predictability</td><td>High: same steps every time</td><td>Lower: the model chooses</td></tr>
+<tr><td>Cost/latency</td><td>Fixed</td><td>Varies; more steps = more tokens</td></tr>
+<tr><td>Handles small talk ("hi")</td><td>Searches anyway</td><td>Skips the search</td></tr>
+<tr><td>Handles multi-part questions</td><td>One search may miss parts</td><td>Can search once per part</td></tr>
+</table></div>
+<p>Always cap the number of steps (that's what <code>stopWhen</code> does). Agents and their patterns are covered in <a href="ai-09-what-are-agents.html">What Are AI Agents?</a> and <a href="ai-10-agent-patterns.html">Agent Patterns</a>.</p>
+
+<h2>Common failure modes and fixes</h2>
+<p>When the bot gives a bad answer, first find out <em>which stage</em> failed: look at what the tool returned (the <code>onStepFinish</code> logging from step 22 prints every tool call). If the right chunk was retrieved, the problem is generation. If it wasn't, the problem is retrieval or indexing.</p>
+<div class="table-wrap"><table>
+<tr><th>Symptom</th><th>Likely cause</th><th>Fixes to try</th></tr>
+<tr><td><strong>No retrieval:</strong> the model answers from general knowledge without calling the tool</td><td>Prompt or tool description doesn't push it to search</td><td>Strengthen the system prompt ("Always search before answering…"); improve the tool <code>description</code>; for strict apps, always search in code</td></tr>
+<tr><td><strong>Nothing found</strong> for questions that are covered</td><td>Threshold too high; vocabulary mismatch; the text never got extracted (scanned PDF)</td><td>Lower the threshold (e.g. 0.5 → 0.3, as step 14 suggests); add hybrid search, multi-query or HyDE; check the rows exist; use vision extraction (<a href="21-images-as-knowledge.html">step 21</a>)</td></tr>
+<tr><td><strong>Wrong chunk:</strong> related but not answering</td><td>Chunks too large/mixed; exact terms needed; only 3 slots</td><td>Smaller or structure-aware chunks; hybrid search; retrieve more and rerank</td></tr>
+<tr><td><strong>Lost context:</strong> the chunk says "this category" or "the above"</td><td>Boundaries cut the explanation; chunk lacks document context</td><td>More overlap; split by headings; contextual retrieval; "small to search, big to read"</td></tr>
+<tr><td><strong>Outdated answer</strong></td><td>Old and new versions both stored</td><td><code>source</code> column; delete-then-insert on update; store a version or date</td></tr>
+<tr><td><strong>Duplicate results</strong></td><td>Same file uploaded twice</td><td>Dedupe by <code>source</code> or content hash</td></tr>
+<tr><td><strong>Right chunk retrieved, wrong answer</strong></td><td>Model misread it or mixed in its own knowledge</td><td>Prompt: "answer only from the search results; say if they don't contain the answer"; require citations; try a stronger model</td></tr>
+<tr><td><strong>Slow search</strong> as data grows</td><td>Index not used</td><td>Sort by raw distance (recommended version in <a href="14-semantic-search.html">step 14</a>); check with <a class="term" href="glossary.html#explain">EXPLAIN</a></td></tr>
+<tr><td><strong>Another user's data appears</strong></td><td>No tenant filter</td><td>Filter by org/user in SQL from the session (above)</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 410" role="img" aria-label="Diagnosis question followed by six cards, each with a symptom, its cause and a fix">
+  <rect class="box-info" x="10" y="34" width="280" height="44" rx="8"/>
+  <text x="150" y="60.5" text-anchor="middle" class="label">Was the right chunk retrieved?</text>
+  <rect class="box-warn" x="360" y="8" width="390" height="36" rx="8"/>
+  <text x="555" y="30.5" text-anchor="middle" class="label">No → indexing or retrieval problem</text>
+  <rect class="box-ok" x="360" y="62" width="390" height="36" rx="8"/>
+  <text x="555" y="84.5" text-anchor="middle" class="label">Yes → generation problem (prompt or model)</text>
+  <path class="arrow-bad" d="M290,48 L358,28"/>
+  <path class="arrow-ok" d="M290,64 L358,80"/>
+  <rect class="box2" x="10" y="116" width="240" height="136" rx="10"/>
+  <rect class="box-bad" x="10" y="116" width="240" height="30" rx="10"/>
+  <text x="130" y="136" text-anchor="middle" class="label">Nothing found</text>
+  <text x="24" y="166" class="small">Cause: threshold too high,</text>
+  <text x="24" y="181" class="small">or vocabulary mismatch</text>
+  <rect class="box-ok" x="18" y="194" width="224" height="48" rx="8"/>
+  <text x="26" y="213" class="small">Fix: lower threshold (0.5 → 0.3);</text>
+  <text x="26" y="229" class="small">hybrid, multi-query, HyDE</text>
+  <rect class="box2" x="260" y="116" width="240" height="136" rx="10"/>
+  <rect class="box-bad" x="260" y="116" width="240" height="30" rx="10"/>
+  <text x="380" y="136" text-anchor="middle" class="label">Wrong chunk</text>
+  <text x="274" y="166" class="small">Cause: chunks too big or mixed;</text>
+  <text x="274" y="181" class="small">exact terms needed</text>
+  <rect class="box-ok" x="268" y="194" width="224" height="48" rx="8"/>
+  <text x="276" y="213" class="small">Fix: smaller / structured chunks;</text>
+  <text x="276" y="229" class="small">hybrid search; rerank</text>
+  <rect class="box2" x="510" y="116" width="240" height="136" rx="10"/>
+  <rect class="box-bad" x="510" y="116" width="240" height="30" rx="10"/>
+  <text x="630" y="136" text-anchor="middle" class="label">Lost context</text>
+  <text x="524" y="166" class="small">Cause: boundary cut the text;</text>
+  <text x="524" y="181" class="small">chunk lacks document context</text>
+  <rect class="box-ok" x="518" y="194" width="224" height="48" rx="8"/>
+  <text x="526" y="213" class="small">Fix: more overlap; heading splits;</text>
+  <text x="526" y="229" class="small">contextual retrieval</text>
+  <rect class="box2" x="10" y="262" width="240" height="136" rx="10"/>
+  <rect class="box-bad" x="10" y="262" width="240" height="30" rx="10"/>
+  <text x="130" y="282" text-anchor="middle" class="label">Outdated answer</text>
+  <text x="24" y="312" class="small">Cause: old and new versions</text>
+  <text x="24" y="327" class="small">are both stored</text>
+  <rect class="box-ok" x="18" y="340" width="224" height="48" rx="8"/>
+  <text x="26" y="359" class="small">Fix: source column;</text>
+  <text x="26" y="375" class="small">delete-then-insert on update</text>
+  <rect class="box2" x="260" y="262" width="240" height="136" rx="10"/>
+  <rect class="box-bad" x="260" y="262" width="240" height="30" rx="10"/>
+  <text x="380" y="282" text-anchor="middle" class="label">Duplicate results</text>
+  <text x="274" y="312" class="small">Cause: same file</text>
+  <text x="274" y="327" class="small">uploaded twice</text>
+  <rect class="box-ok" x="268" y="340" width="224" height="48" rx="8"/>
+  <text x="276" y="359" class="small">Fix: dedupe by source</text>
+  <text x="276" y="375" class="small">or by content hash</text>
+  <rect class="box2" x="510" y="262" width="240" height="136" rx="10"/>
+  <rect class="box-bad" x="510" y="262" width="240" height="30" rx="10"/>
+  <text x="630" y="282" text-anchor="middle" class="label">Another user's data</text>
+  <text x="524" y="312" class="small">Cause: no tenant filter</text>
+  <rect class="box-ok" x="518" y="340" width="224" height="48" rx="8"/>
+  <text x="526" y="359" class="small">Fix: filter by org in SQL,</text>
+  <text x="526" y="375" class="small">from the session</text>
+</svg>
+<figcaption>Start with one question, then match the <strong>symptom</strong> (red) to its likely <strong>cause</strong> and <strong>fix</strong> (green). Six of the rows from the table above as cards; "Right chunk, wrong answer" is the generation branch.</figcaption>
+</figure>
+
+<h2 id="measure">How to measure</h2>
+<p>Every technique in this chapter is a trade: more quality for more latency, cost or complexity. The only way to know if a change helped is to <strong>measure before and after</strong> on the same set of questions. In short:</p>
+<ul>
+<li>Build a small test set: 20–50 real questions, each with the chunk (or document section) that contains the answer and a reference answer. That's your <a class="term" href="glossary.html#ground-truth">ground truth</a>.</li>
+<li><strong>Retrieval metrics:</strong> did the right chunk appear in the top <em>k</em> (hit rate, also called recall@k)? How high was it ranked (for example, mean reciprocal rank)? These need no model to judge and are cheap to run.</li>
+<li><strong>Answer metrics:</strong> is the answer correct, and is it <em>faithful</em> (supported by the retrieved chunks, not invented)? Often judged by a model (<a class="term" href="glossary.html#llm-as-judge">LLM-as-judge</a>) plus spot checks by a human.</li>
+<li>Change one thing at a time (chunk size, hybrid on/off, reranker on/off), rerun, compare.</li>
+</ul>
+<p>The full method, with code, is in <a href="ai-12-evaluation.html">Evaluating AI Applications</a>. Cost and latency monitoring is in <a href="ai-14-production.html">Running AI in Production</a>.</p>
+
+<div class="callout warn"><p><strong>Common misconceptions</strong></p>
+<ul>
+<li><strong>"A bigger context window means I don't need good retrieval."</strong> Stuffing in more chunks costs more, is slower, and models can still miss the one relevant sentence. Precise retrieval still matters.</li>
+<li><strong>"More techniques = better RAG."</strong> Each stage adds latency and new ways to fail. Add techniques in response to measured failures.</li>
+<li><strong>"Retrieval makes hallucinations impossible."</strong> It reduces them. The model can still misread or ignore sources, which is why citations and evaluation matter.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Diagnose first: was the right chunk retrieved? If not, fix indexing/retrieval; if yes, fix the prompt or model.</li>
+<li>Chunking sets what can be found. This project uses 900/150 split on spaces; recursive defaults or heading-based splitting are easy upgrades.</li>
+<li>Store metadata (<code>source</code>, page, section, org) with each chunk. It enables citations, updates, deduplication and access control.</li>
+<li>Hybrid search adds keyword matching (Postgres <code>tsvector</code> + <code>ts_rank</code>) to vector search; reciprocal rank fusion merges the two lists by rank.</li>
+<li>Reranking uses a slower, more accurate cross-encoder on a shortlist. Query rewriting, multi-query and HyDE improve the query.</li>
+<li>Contextual retrieval prepends document context to each chunk before embedding.</li>
+<li>Filter by tenant in SQL using the session, never via the model. Agentic RAG lets the model search multiple times, within a step cap.</li>
+<li>Measure every change against a fixed test set.</li>
+</ul></div>
+
+<h3>Learn more</h3>
+<ul>
+<li><a href="https://ai-sdk.dev/docs/guides/rag-chatbot">AI SDK: RAG chatbot guide</a> and <a href="https://ai-sdk.dev/docs/ai-sdk-core/embeddings">Embeddings</a></li>
+<li><a href="https://www.postgresql.org/docs/current/textsearch.html">PostgreSQL: Full Text Search</a></li>
+<li><a href="https://github.com/pgvector/pgvector">pgvector README (including hybrid search and filtering)</a></li>
+<li><a href="https://www.anthropic.com/news/contextual-retrieval">Anthropic: Introducing Contextual Retrieval</a></li>
+<li><a href="https://platform.openai.com/docs/guides/embeddings">OpenAI: Embeddings guide</a></li>
+<li><a href="https://www.anthropic.com/engineering/building-effective-agents">Anthropic: Building effective agents</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="ai-07-embeddings-vector-databases.html"><small>← Chapter 7</small>Embeddings &amp; Vector Databases</a>
+<a class="next" href="ai-09-what-are-agents.html"><small>Chapter 9 →</small>What Are AI Agents?</a>
+</nav>
+</main>
+</body>
+</html>

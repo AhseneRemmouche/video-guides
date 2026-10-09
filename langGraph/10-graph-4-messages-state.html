@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10 · Graph 4: MessagesState</title>
+<meta name="description" content="The built-in chat state, add_messages, and why new messages are appended.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 10/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 10 of 19 · 01:24:19</div>
+  <h1>Graph 4: MessagesState</h1>
+  <p class="lead">The built-in chat state, add_messages, and why new messages are appended.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=jbDkfh7XYFA&amp;t=5059s" target="_blank" rel="noopener">▶ Watch this part (01:24:19)</a>
+</section>
+<h2>Goal</h2>
+<p>Graph 3 sent the model one fixed sentence. A chatbot needs more: it must send the whole conversation so far, and every new reply must be <em>added</em> to that conversation, not replace it. In this step you meet the state LangGraph provides for exactly that, <a class="term" href="glossary.html#messages-state">MessagesState</a>, and the small function that makes it work, <a class="term" href="glossary.html#add-messages">add_messages</a>.</p>
+<p>Graph 4 is tiny (one node called <code>chat</code>), but every graph after it (tools, agents, memory) uses <code>MessagesState</code>. Understanding "append, don't overwrite" here makes steps 11 to 14 much easier.</p>
+
+<h2>The four kinds of messages</h2>
+<p>Before any code, the presenter explains the message types an LLM works with (84:19–85:53): a <a class="term" href="glossary.html#system-message">system message</a>, a <a class="term" href="glossary.html#human-message">human message</a>, an <a class="term" href="glossary.html#ai-message">AI message</a> and a <a class="term" href="glossary.html#tool-message">tool message</a>. "When we invoke an LLM … it actually takes a list, a list of messages", and each <a class="term" href="glossary.html#message">message</a> carries its origin "so we can give it the right context, so it gives us the right answer back."</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="A conversation as a list of four message types: a system message with instructions, a human message asking what is 2 plus 2, an AI message answering 4, and a tool message carrying the result of a tool run">
+  <text x="20" y="36" class="label">SystemMessage</text>
+  <rect class="box-info" x="180" y="14" width="400" height="36" rx="8"/><text x="380" y="37" text-anchor="middle">"You are a helpful Python assistant"</text>
+  <text x="600" y="36" class="small">rules for the model</text>
+  <text x="20" y="98" class="label">HumanMessage</text>
+  <rect class="ui-bubble-user" x="330" y="76" width="250" height="36" rx="8"/><text x="455" y="99" text-anchor="middle" class="ui-on-user">"What is 2 + 2?"</text>
+  <text x="600" y="98" class="small">what the user typed</text>
+  <text x="20" y="160" class="label">AIMessage</text>
+  <rect class="ui-bubble-ai" x="180" y="138" width="250" height="36" rx="8"/><text x="305" y="161" text-anchor="middle">"4"</text>
+  <text x="600" y="160" class="small">the model's reply</text>
+  <text x="20" y="222" class="label">ToolMessage</text>
+  <rect class="box2" x="180" y="200" width="400" height="36" rx="8"/><text x="380" y="223" text-anchor="middle">result of running a tool (step 12)</text>
+  <text x="600" y="222" class="small">what a tool returned</text>
+  <path class="line dashed" d="M160,14 V236"/>
+  <text x="380" y="276" text-anchor="middle" class="small">the whole list is sent to the model on every call, oldest first</text>
+</svg>
+<figcaption>The examples are the presenter's (85:29). <strong>A conversation is just a list of labelled messages.</strong> The label tells the model who said what.</figcaption>
+</figure>
+
+<h2>Why "append" matters</h2>
+<p>The presenter then goes back to <a href="07-graph-1-typeddict-state.html">Graph 1</a> (86:17): "notice how … I'm adding the state of the before … because in a normal state when we are returning it it is actually being replaced." When a node returns <code>{"graph_str": ...}</code>, the new value <strong>overwrites</strong> the old one, so graphs 1 to 3 had to rebuild the string by hand (<code>state["graph_str"] + "..."</code>). For a conversation that would be painful. With <code>MessagesState</code>, "whenever we're adding a message or returning a message in a node it's not replacing the state itself but actually it's being added" (87:05).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Comparison: with a plain list field, a node returning one AI message replaces the list so the human message is lost; with add_messages, the AI message is appended after the human message">
+  <rect class="box-bad" x="10" y="14" width="360" height="222" rx="10"/>
+  <text x="190" y="38" text-anchor="middle" class="title">messages: list</text>
+  <text x="190" y="56" text-anchor="middle" class="small">no reducer → overwrite</text>
+  <rect class="box2" x="30" y="70" width="320" height="30" rx="6"/><text x="190" y="90" text-anchor="middle" class="small">before: [human "what colour is the sky?"]</text>
+  <rect class="box2" x="30" y="112" width="320" height="30" rx="6"/><text x="190" y="132" text-anchor="middle" class="small">node returns: [ai "the sky is blue"]</text>
+  <path class="arrow-bad" d="M190,142 V160"/>
+  <rect class="box-bad" x="30" y="162" width="320" height="30" rx="6"/><text x="190" y="182" text-anchor="middle" class="small">after: [ai "the sky is blue"]</text>
+  <text x="190" y="220" text-anchor="middle" class="small bad">the question is gone</text>
+  <rect class="box-ok" x="390" y="14" width="360" height="222" rx="10"/>
+  <text x="570" y="38" text-anchor="middle" class="title">Annotated[list, add_messages]</text>
+  <text x="570" y="56" text-anchor="middle" class="small">reducer → append</text>
+  <rect class="box2" x="410" y="70" width="320" height="30" rx="6"/><text x="570" y="90" text-anchor="middle" class="small">before: [human "what colour is the sky?"]</text>
+  <rect class="box2" x="410" y="112" width="320" height="30" rx="6"/><text x="570" y="132" text-anchor="middle" class="small">node returns: [ai "the sky is blue"]</text>
+  <path class="arrow-ok" d="M570,142 V160"/>
+  <rect class="box-ok" x="410" y="162" width="320" height="44" rx="6"/>
+  <text x="570" y="180" text-anchor="middle" class="small">after: [human "what colour is the sky?",</text>
+  <text x="570" y="197" text-anchor="middle" class="small">ai "the sky is blue"]</text>
+  <text x="570" y="226" text-anchor="middle" class="small ok">the conversation grows</text>
+</svg>
+<figcaption>Both results are real output from the snippet below. <strong>Same node, same return value; only the state declaration differs.</strong> The full story is in <a href="how-state-flows.html">How State Flows Through a Graph</a>.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to reducers? The rule that merges a node's update into the state</summary>
+<p>When a node returns <code>{"key": value}</code>, LangGraph has to combine that value with what's already in the state. The rule it uses is called a <a class="term" href="glossary.html#reducer">reducer</a>: a function <code>reducer(old_value, new_value) → merged_value</code>.</p>
+<ul>
+<li>No reducer declared: the default rule is "new replaces old". That's what graphs 0 to 3 used.</li>
+<li><code>add_messages</code> declared: the rule is "add the new messages to the end of the list". There is one extra feature: if a new message has the same <code>id</code> as an existing one, it replaces it instead of being added (verified: merging a message with id 7 "draft" and one with id 7 "final" leaves only "final").</li>
+</ul>
+<p>You attach a reducer to one key of the state with <code>Annotated[type, reducer]</code>. Different keys can have different rules.</p>
+</details>
+
+<p>You can see this for yourself without any model or API key. These two small scripts were run in the locked environment, and the outputs below are real:</p>
+<pre data-lang="py" data-tag="verified snippet: add_messages on its own"><code>from langgraph.graph.message import add_messages
+from langchain.messages import HumanMessage, AIMessage
+
+old = [HumanMessage(content="why is the sky blue", id="1")]
+new = [AIMessage(content="Because of Rayleigh scattering.", id="2")]
+
+merged = add_messages(old, new)
+print([(m.type, m.content) for m in merged])</code></pre>
+<pre data-lang="text" data-tag="output"><code>[('human', 'why is the sky blue'), ('ai', 'Because of Rayleigh scattering.')]</code></pre>
+
+<pre data-lang="py" data-tag="verified snippet: overwrite vs append in a graph"><code>from typing_extensions import TypedDict
+from typing import Annotated
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+
+class Plain(TypedDict):
+    messages: list                                   # no reducer: overwrite
+
+class Appending(TypedDict):
+    messages: Annotated[list, add_messages]          # reducer: append
+
+def reply(state):
+    return {"messages": [("ai", "the sky is blue")]}
+
+for State in (Plain, Appending):
+    builder = StateGraph(State)
+    builder.add_node("reply", reply)
+    builder.add_edge(START, "reply")
+    builder.add_edge("reply", END)
+    out = builder.compile().invoke({"messages": [("human", "what colour is the sky?")]})
+    print(State.__name__, "-&gt;", [m if isinstance(m, tuple) else (m.type, m.content) for m in out["messages"]])</code></pre>
+<pre data-lang="text" data-tag="output"><code>Plain -&gt; [('ai', 'the sky is blue')]
+Appending -&gt; [('human', 'what colour is the sky?'), ('ai', 'the sky is blue')]</code></pre>
+<p>Notice the second line: <code>add_messages</code> also turned the <code>("human", "...")</code> pairs into real message objects. That's why the code can read <code>m.type</code> on them, while the plain list kept the raw tuple.</p>
+
+<h2>Step by step</h2>
+<ol class="steps">
+<li><strong>Create <code>module1/4_graph_messages_state.py</code></strong> (87:32). The presenter pasted the usual imports to speed things up (87:57).</li>
+<li><strong>Write your own <code>MessagesState</code> first</strong> (88:19–89:28): a <code>TypedDict</code> with one key, <code>messages: Annotated[List[AnyMessage], add_messages]</code>. Hover over <code>add_messages</code> in VS Code to read that it merges two lists of messages.</li>
+<li><strong>Switch to the built-in one</strong> (89:28): "instead of doing this, we can simply use message state that comes from the package". Import <code>MessagesState</code> from <code>langgraph.graph</code> and keep your class inside a triple-quoted string "so you know where … messages state is coming from".</li>
+<li><strong>Create the model</strong> exactly as in graph 3.</li>
+<li><strong>Write the <code>chat</code> node</strong> (90:37–91:57): send the whole message list to the model and return its reply inside a list.</li>
+<li><strong>Build the graph</strong>: one node, <code>START → chat → END</code>, then compile (92:44–93:35). No conditional edges this time.</li>
+<li><strong>Register it</strong> in <code>langgraph.json</code> (93:35):
+<pre data-lang="json" data-tag="line to add"><code>"4_graph": "./module1/4_graph_messages_state.py:graph"</code></pre>
+<p>Copying the line above? Change the path as well as the name: the video briefly shows <code>"4_graph"</code> still pointing at <code>3_graph_introduction_model.py</code> (frame at 94:00). Add the comma at the end of the line before it.</p></li>
+<li><strong>Restart <code>langgraph dev</code></strong> and pick <strong>4_graph</strong> in Studio (94:03).</li>
+</ol>
+
+<h2>Try the video's version: your own MessagesState</h2>
+<p>This is the class the presenter typed first (88:19–89:28, and still visible inside a string at 91:20), made runnable. It behaves exactly like the repo file (verified: same graph, same result).</p>
+<pre data-file="module1/4_graph_messages_state.py" data-lang="py" data-tag="video version: your own MessagesState"><code>from langgraph.graph import StateGraph, START, END
+from typing_extensions import TypedDict
+from langchain_core.messages import AnyMessage
+from typing import List, Annotated
+from langgraph.graph.message import add_messages
+from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# state: what MessagesState looks like inside (the version kept in the repo's docstring)
+class MessagesState(TypedDict):
+    messages: Annotated[List[AnyMessage], add_messages]
+
+model_llm = ChatOpenAI(model="gpt-4o")
+
+# nodes
+def chat(state: MessagesState) -&gt; MessagesState:
+    return {"messages": [model_llm.invoke(state["messages"])]}
+
+# create our graph
+builder = StateGraph(MessagesState)
+
+builder.add_node("chat", chat)
+
+builder.add_edge(START, "chat")
+builder.add_edge("chat", END)
+
+graph = builder.compile()</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>from langgraph.graph import StateGraph, START, END</code></td><td>The usual builder and entry/exit points. <code>MessagesState</code> isn't imported here because this version defines its own.</td></tr>
+<tr><td>2</td><td><code>from typing_extensions import TypedDict</code></td><td>To declare the state as a dictionary with a typed key.</td></tr>
+<tr><td>3</td><td><code>from langchain_core.messages import AnyMessage</code></td><td><strong>New.</strong> A type meaning "any kind of LangChain message": human, AI, system, tool and a few rarer ones. "Any messages, it means any of the four messages that I've shown you before" (88:42).</td></tr>
+<tr><td>4</td><td><code>from typing import List, Annotated</code></td><td><code>List[...]</code> means "a list of …". <code>Annotated[type, extra]</code> attaches extra information to a type. Here the extra information is the reducer.</td></tr>
+<tr><td>5</td><td><code>from langgraph.graph.message import add_messages</code></td><td><strong>New.</strong> The reducer that appends new messages to the existing list (89:04).</td></tr>
+<tr><td>6</td><td><code>from langchain_openai import ChatOpenAI</code></td><td>The chat model class, as in graph 3.</td></tr>
+<tr><td>7</td><td><code>from dotenv import load_dotenv</code></td><td>To read <code>.env</code>. The repo file doesn't have this line, see "Missing <code>load_dotenv</code>" below.</td></tr>
+<tr><td>8</td><td></td><td>Blank line.</td></tr>
+<tr><td>9</td><td><code>load_dotenv()</code></td><td>Puts <code>OPENAI_API_KEY</code> in the environment before line 15 needs it.</td></tr>
+<tr><td>10</td><td></td><td>Blank line.</td></tr>
+<tr><td>11</td><td><code># state: what MessagesState looks like inside …</code></td><td>Comment.</td></tr>
+<tr><td>12</td><td><code>class MessagesState(TypedDict):</code></td><td>Your own state class. The name is a free choice ("obviously it can take any word", 88:19). Using the same name as the built-in one shows they're the same thing.</td></tr>
+<tr><td>13</td><td><code>messages: Annotated[List[AnyMessage], add_messages]</code></td><td><strong>The key line.</strong> One key, <code>messages</code>, holding a list of messages. The <code>Annotated[..., add_messages]</code> part tells LangGraph: when a node returns <code>{"messages": [...]}</code>, <em>append</em> those messages instead of replacing the list. Remove <code>add_messages</code> and each reply would wipe out the conversation (see the snippet above).</td></tr>
+<tr><td>14</td><td></td><td>Blank line.</td></tr>
+<tr><td>15</td><td><code>model_llm = ChatOpenAI(model="gpt-4o")</code></td><td>The model, created once when the file loads.</td></tr>
+<tr><td>16</td><td></td><td>Blank line.</td></tr>
+<tr><td>17</td><td><code># nodes</code></td><td>Comment.</td></tr>
+<tr><td>18</td><td><code>def chat(state: MessagesState) -&gt; MessagesState:</code></td><td>The only node. It receives the state (the conversation so far) and returns an update.</td></tr>
+<tr><td>19</td><td><code>return {"messages": [model_llm.invoke(state["messages"])]}</code></td><td>Read from the inside out: <code>state["messages"]</code> is the whole list of messages. <code>model_llm.invoke(...)</code> sends that list to the model and returns one <code>AIMessage</code>. The square brackets wrap it in a list, because <code>add_messages</code> merges a list into a list. The node returns <em>only the new message</em>, never the whole history: the reducer adds it to the end. This one line is the heart of every chat graph.</td></tr>
+<tr><td>20</td><td></td><td>Blank line.</td></tr>
+<tr><td>21</td><td><code># create our graph</code></td><td>Comment.</td></tr>
+<tr><td>22</td><td><code>builder = StateGraph(MessagesState)</code></td><td>A builder whose state is your class. LangGraph reads the <code>Annotated</code> reducer from it.</td></tr>
+<tr><td>23</td><td></td><td>Blank line.</td></tr>
+<tr><td>24</td><td><code>builder.add_node("chat", chat)</code></td><td>Registers the node under the name <code>chat</code> (93:10).</td></tr>
+<tr><td>25</td><td></td><td>Blank line.</td></tr>
+<tr><td>26–27</td><td><code>builder.add_edge(START, "chat")</code><br/><code>builder.add_edge("chat", END)</code></td><td>A straight line: start, chat once, end.</td></tr>
+<tr><td>28</td><td></td><td>Blank line.</td></tr>
+<tr><td>29</td><td><code>graph = builder.compile()</code></td><td>The runnable graph, named <code>graph</code> for <code>langgraph.json</code>.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to <code>Annotated</code> and <code>AnyMessage</code>? Reading the type on line 13</summary>
+<p>Read <code>Annotated[List[AnyMessage], add_messages]</code> as two parts:</p>
+<ul>
+<li><strong>The type</strong>, <code>List[AnyMessage]</code>: "a list whose items are messages of any kind". <code>AnyMessage</code> covers <code>HumanMessage</code>, <code>AIMessage</code>, <code>SystemMessage</code>, <code>ToolMessage</code> and some rarer types.</li>
+<li><strong>The extra information</strong>, <code>add_messages</code>: Python ignores it, but LangGraph looks for it and uses it as the reducer for this key.</li>
+</ul>
+<p><code>Annotated</code> is a standard Python feature (<code>typing.Annotated</code>) for attaching metadata to a type. LangGraph is simply one library that reads that metadata.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Anatomy of the type on line 13: messages is the key; Annotated wraps the type List of AnyMessage, which says what is stored, and the reducer add_messages, which says how updates merge">
+  <text x="135" y="40" text-anchor="middle" class="mono">messages:</text>
+  <text x="250" y="40" text-anchor="middle" class="mono">Annotated[</text>
+  <text x="370" y="40" text-anchor="middle" class="mono">List[AnyMessage]</text>
+  <text x="480" y="40" text-anchor="middle" class="mono">,</text>
+  <text x="605" y="40" text-anchor="middle" class="mono">add_messages</text>
+  <text x="700" y="40" text-anchor="middle" class="mono">]</text>
+  <path class="line" d="M135,50 V76"/>
+  <path class="line" d="M370,50 V76"/>
+  <path class="line" d="M605,50 V76"/>
+  <rect class="box2" x="40" y="78" width="190" height="60" rx="8"/>
+  <text x="135" y="102" text-anchor="middle" class="label">the key</text>
+  <text x="135" y="122" text-anchor="middle" class="small">state["messages"]</text>
+  <rect class="box" x="270" y="78" width="200" height="60" rx="8"/>
+  <text x="370" y="102" text-anchor="middle" class="label">what is stored</text>
+  <text x="370" y="122" text-anchor="middle" class="small">a list of any messages</text>
+  <rect class="box-ok" x="490" y="78" width="230" height="60" rx="8"/>
+  <text x="605" y="102" text-anchor="middle" class="label">how updates merge</text>
+  <text x="605" y="122" text-anchor="middle" class="small">append (reducer)</text>
+  <text x="380" y="160" text-anchor="middle" class="small">this is exactly how LangGraph's built-in MessagesState is defined</text>
+</svg>
+<figcaption>Annotated = type + metadata. <strong>The metadata (<code>add_messages</code>) is what turns "replace" into "append".</strong></figcaption>
+</figure>
+
+<h2>The repo file</h2>
+<p>The final file imports the built-in <code>MessagesState</code> and keeps the hand-written class inside a string, for reference. The graph is identical.</p>
+<pre data-file="module1/4_graph_messages_state.py" data-lang="py" data-tag="repo"><code># check Mural for Messages state explenation
+from langgraph.graph import StateGraph, START, END, MessagesState
+from typing_extensions import TypedDict
+from langchain_core.messages import AnyMessage
+from typing import List, Annotated
+from langgraph.graph.message import add_messages #hover over to see it merges 2 arrays
+from langchain_openai import ChatOpenAI
+
+"""
+# state 
+class MessagesState(TypedDict):
+    messages: Annotated[List[AnyMessage], add_messages]
+"""
+model_llm = ChatOpenAI(model="gpt-4o")
+
+# nodes
+def chat(state: MessagesState) -&gt; MessagesState:
+    return {"messages": [model_llm.invoke(state["messages"])]}
+
+# edges
+
+# create our graph
+builder = StateGraph(MessagesState)
+
+builder.add_node("chat", chat)
+
+builder.add_edge(START, "chat")
+builder.add_edge("chat", END)
+
+graph = builder.compile()</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code># check Mural for Messages state explenation</code></td><td>A note pointing to the presenter's whiteboard ("explenation" is their typo). Python ignores it.</td></tr>
+<tr><td>2</td><td><code>from langgraph.graph import StateGraph, START, END, MessagesState</code></td><td>Now <code>MessagesState</code> comes from LangGraph itself. Inside the library it is defined as <code>messages: Annotated[list[AnyMessage], add_messages]</code>, the same as your own class.</td></tr>
+<tr><td>3–6</td><td><code>from typing_extensions import TypedDict</code> … <code>from langgraph.graph.message import add_messages</code></td><td>Imports left over from the own-class version. Since that class now lives inside a string (lines 9–13), <strong>none of these four lines is used</strong>. They do no harm, and your editor shows them greyed out. The comment on line 6 repeats the hover tip: <code>add_messages</code> "merges 2 arrays".</td></tr>
+<tr><td>7</td><td><code>from langchain_openai import ChatOpenAI</code></td><td>The chat model class.</td></tr>
+<tr><td>8</td><td></td><td>Blank line. Note what's missing: no <code>from dotenv import load_dotenv</code> and no <code>load_dotenv()</code>.</td></tr>
+<tr><td>9–13</td><td><code>"""</code> … <code>class MessagesState(TypedDict):</code> … <code>"""</code></td><td>A triple-quoted string used as a block comment. Python creates the string and throws it away, so the class inside is <em>not</em> defined. The presenter kept it "so you know where … messages state is coming from" (89:28).</td></tr>
+<tr><td>14</td><td><code>model_llm = ChatOpenAI(model="gpt-4o")</code></td><td>The model. Without a key in the environment this line raises an error, see below.</td></tr>
+<tr><td>15</td><td></td><td>Blank line.</td></tr>
+<tr><td>16</td><td><code># nodes</code></td><td>Comment.</td></tr>
+<tr><td>17–18</td><td><code>def chat(state: MessagesState) -&gt; MessagesState:</code><br/><code>return {"messages": [model_llm.invoke(state["messages"])]}</code></td><td>The same node as lines 18–19 of the video version. The <code>MessagesState</code> here is the imported one.</td></tr>
+<tr><td>19</td><td></td><td>Blank line.</td></tr>
+<tr><td>20</td><td><code># edges</code></td><td>An empty section. This graph has no routing function: "for the edges, we're not going to do anything" (90:14).</td></tr>
+<tr><td>21</td><td></td><td>Blank line.</td></tr>
+<tr><td>22</td><td><code># create our graph</code></td><td>Comment.</td></tr>
+<tr><td>23</td><td><code>builder = StateGraph(MessagesState)</code></td><td>"message state is the state type that we would like" (93:10).</td></tr>
+<tr><td>24</td><td></td><td>Blank line.</td></tr>
+<tr><td>25</td><td><code>builder.add_node("chat", chat)</code></td><td>The single node.</td></tr>
+<tr><td>26</td><td></td><td>Blank line.</td></tr>
+<tr><td>27–28</td><td><code>builder.add_edge(START, "chat")</code><br/><code>builder.add_edge("chat", END)</code></td><td>Start → chat → end.</td></tr>
+<tr><td>29</td><td></td><td>Blank line.</td></tr>
+<tr><td>30</td><td><code>graph = builder.compile()</code></td><td>The runnable graph.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Code map: the video version defines its own MessagesState class with Annotated, AnyMessage and add_messages; the repo version imports MessagesState from langgraph.graph and keeps the class in a string; both feed the same chat node and the same StateGraph">
+  <rect class="zone" x="10" y="10" width="340" height="120" rx="10"/>
+  <text x="180" y="32" text-anchor="middle" class="label">video version (lessons file)</text>
+  <rect class="box" x="30" y="44" width="300" height="70" rx="8"/>
+  <text x="180" y="68" text-anchor="middle" class="mono small">class MessagesState(TypedDict):</text>
+  <text x="180" y="88" text-anchor="middle" class="mono small">messages: Annotated[List[AnyMessage],</text>
+  <text x="180" y="104" text-anchor="middle" class="mono small">add_messages]</text>
+  <rect class="zone" x="410" y="10" width="340" height="120" rx="10"/>
+  <text x="580" y="32" text-anchor="middle" class="label">repo version</text>
+  <rect class="box" x="430" y="44" width="300" height="34" rx="8"/>
+  <text x="580" y="66" text-anchor="middle" class="mono small">from langgraph.graph import MessagesState</text>
+  <rect class="box2" x="430" y="86" width="300" height="30" rx="8"/>
+  <text x="580" y="106" text-anchor="middle" class="small">own class kept in a """string""" (unused)</text>
+  <path class="arrow" d="M180,130 L330,160"/>
+  <path class="arrow" d="M580,130 L430,160"/>
+  <rect class="box-solid" x="230" y="162" width="300" height="38" rx="8"/>
+  <text x="380" y="186" text-anchor="middle" class="on-solid mono">StateGraph(MessagesState) → chat</text>
+</svg>
+<figcaption>Two ways to get the same state shape. <strong>Prefer the import in real code</strong>; write the class yourself once so you know what's inside it.</figcaption>
+</figure>
+
+<h2>What happens in one run</h2>
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="One run of graph 4: the input state holds one human message; the chat node sends the whole list to gpt-4o, gets an AIMessage back, returns it in a list; add_messages appends it so the final state holds the human message and the AI message">
+  <rect class="box2" x="10" y="20" width="200" height="66" rx="8"/>
+  <text x="110" y="42" text-anchor="middle" class="label">input state</text>
+  <text x="110" y="64" text-anchor="middle" class="small mono">[Human "why is the</text>
+  <text x="110" y="78" text-anchor="middle" class="small mono">sky blue"]</text>
+  <path class="arrow" d="M210,53 H266"/>
+  <rect class="box-solid" x="270" y="20" width="220" height="66" rx="8"/>
+  <text x="380" y="46" text-anchor="middle" class="on-solid mono">chat node</text>
+  <text x="380" y="68" text-anchor="middle" class="on-solid small">invoke(state["messages"])</text>
+  <path class="arrow" d="M490,53 H546"/>
+  <rect class="box-info" x="550" y="20" width="200" height="66" rx="8"/>
+  <text x="650" y="48" text-anchor="middle">gpt-4o</text>
+  <text x="650" y="68" text-anchor="middle" class="small">reads the whole list</text>
+  <path class="arrow-accent" d="M650,86 V116 H384 V128"/>
+  <text x="520" y="110" text-anchor="middle" class="small accent">AIMessage</text>
+  <rect class="box" x="270" y="130" width="220" height="40" rx="8"/>
+  <text x="380" y="155" text-anchor="middle" class="small mono">return {"messages": [AI]}</text>
+  <path class="arrow-ok" d="M380,170 V188"/>
+  <rect class="box-ok" x="150" y="190" width="460" height="46" rx="8"/>
+  <text x="380" y="210" text-anchor="middle" class="label">add_messages → final state</text>
+  <text x="380" y="228" text-anchor="middle" class="small mono">[Human "why is the sky blue", AI "…scattering…"]</text>
+</svg>
+<figcaption>The node returns only the new message; the reducer does the appending. <strong>Input one message, get back two.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> Both files were run with a fake model standing in for <code>gpt-4o</code> (the real wording will differ). Input <code>{"messages": [HumanMessage("why is the sky blue")]}</code>, result:
+<pre data-lang="text" data-tag="verified output (fake model)"><code>RESULT messages: [('HumanMessage', 'why is the sky blue'), ('AIMessage', 'The sky looks blue because air scatters blue light more.')]
+NODES: ['__start__', 'chat', '__end__']</code></pre>
+The list starts with your message and ends with the model's. The graph has three points: start, <code>chat</code>, end.</div>
+
+<h2>Run it in Studio</h2>
+<p>With <strong>4_graph</strong> selected, the Input panel now shows a <strong>Messages</strong> field instead of text fields, because the state has a single key holding messages. Click <strong>+ Message</strong>, pick the message type ("you see there is multiple … types of messages", 94:27), choose human, type your question and press <strong>Submit</strong>. The presenter asked about the colour of the sky. After a few seconds the reply appeared: "it's explaining us the scientific aspect of why the sky is blue" (95:23).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Simplified LangGraph Studio for 4_graph: on the left the drawing start, chat, end and an Input panel with Messages, a human message why is the sky blue and a Submit button; on the right the run shows the human message and the AI reply under the chat node">
+  <rect class="ui-window" x="10" y="10" width="740" height="280" rx="10"/>
+  <rect class="ui-chrome" x="10" y="10" width="740" height="40" rx="10"/>
+  <text x="28" y="35" class="label">Studio / 4_graph</text>
+  <rect class="ui-button-ghost" x="160" y="18" width="60" height="24" rx="6"/><text x="190" y="35" text-anchor="middle" class="small">Graph</text>
+  <text x="246" y="35" text-anchor="middle" class="small">Chat</text>
+  <rect class="box2" x="150" y="62" width="90" height="22" rx="8"/><text x="195" y="78" text-anchor="middle" class="small mono">__start__</text>
+  <rect class="box" x="150" y="96" width="90" height="22" rx="8"/><text x="195" y="112" text-anchor="middle" class="small mono">chat</text>
+  <rect class="box2" x="150" y="130" width="90" height="22" rx="8"/><text x="195" y="146" text-anchor="middle" class="small mono">__end__</text>
+  <path class="line" d="M195,84 V96"/><path class="line" d="M195,118 V130"/>
+  <text x="28" y="182" class="title">Input</text>
+  <text x="28" y="204" class="label">Messages</text>
+  <text x="400" y="204" text-anchor="end" class="small">Required</text>
+  <rect class="ui-field" x="28" y="212" width="372" height="28" rx="6"/>
+  <text x="38" y="231" class="small">human · why is the sky blue</text>
+  <text x="28" y="268" class="small">+ Message</text>
+  <rect class="ui-button" x="310" y="250" width="90" height="30" rx="6"/><text x="355" y="270" text-anchor="middle" class="on-solid">Submit</text>
+  <path class="line" d="M430,50 V290"/>
+  <text x="450" y="76" class="label">Turn 1</text>
+  <rect class="ui-bubble-user" x="560" y="88" width="170" height="30" rx="8"/><text x="645" y="108" text-anchor="middle" class="ui-on-user small">why is the sky blue</text>
+  <text x="450" y="140" class="small mono">chat</text>
+  <rect class="ui-bubble-ai" x="450" y="148" width="280" height="64" rx="8"/>
+  <rect class="ui-skeleton" x="462" y="160" width="250" height="10" rx="4"/>
+  <rect class="ui-skeleton" x="462" y="176" width="230" height="10" rx="4"/>
+  <rect class="ui-skeleton" x="462" y="192" width="180" height="10" rx="4"/>
+</svg>
+<figcaption>Illustration (simplified). <strong>The input form follows the state: one messages key gives one Messages field</strong> with a type picker for each message.</figcaption>
+</figure>
+
+<h2>Missing <code>load_dotenv</code></h2>
+<p>Graph 4 works in Studio, but the repo file has no <code>load_dotenv()</code>. Under <code>langgraph dev</code> that's fine: <code>"env": ".env"</code> in <code>langgraph.json</code> makes the server load your keys before it imports any graph. Import the same file from plain Python (a test, a script, <code>python -i</code>) without the key already set in your terminal, and line 14 fails before the graph even exists:</p>
+<pre data-lang="text" data-tag="verified error (plain Python, no key in the environment)"><code>openai.OpenAIError: Missing credentials. Please pass an `api_key`, `workload_identity`, `admin_api_key`, or set the `OPENAI_API_KEY` or `OPENAI_ADMIN_KEY` environment variable.</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Mistake, symptom, fix: running graph 4 from plain Python without load_dotenv; ChatOpenAI on line 14 finds no key and raises OpenAIError Missing credentials; fix by adding from dotenv import load_dotenv and load_dotenv() before the model, as graphs 3 and 5 do; under langgraph dev the env setting in langgraph.json already loads the key">
+  <rect class="box-warn" x="10" y="20" width="230" height="110" rx="10"/>
+  <text x="125" y="44" text-anchor="middle" class="title">mistake</text>
+  <text x="125" y="70" text-anchor="middle" class="small">file has no load_dotenv()</text>
+  <text x="125" y="90" text-anchor="middle" class="small">run from plain Python</text>
+  <text x="125" y="110" text-anchor="middle" class="small">(not langgraph dev)</text>
+  <path class="arrow-bad" d="M240,75 H264"/>
+  <rect class="box-bad" x="266" y="20" width="230" height="110" rx="10"/>
+  <text x="381" y="44" text-anchor="middle" class="title">symptom</text>
+  <text x="381" y="70" text-anchor="middle" class="small">line 14: ChatOpenAI(...)</text>
+  <text x="381" y="90" text-anchor="middle" class="small mono">openai.OpenAIError:</text>
+  <text x="381" y="110" text-anchor="middle" class="small mono">Missing credentials</text>
+  <path class="arrow-ok" d="M496,75 H520"/>
+  <rect class="box-ok" x="522" y="20" width="228" height="110" rx="10"/>
+  <text x="636" y="44" text-anchor="middle" class="title">fix</text>
+  <text x="636" y="70" text-anchor="middle" class="small mono">from dotenv import load_dotenv</text>
+  <text x="636" y="90" text-anchor="middle" class="small mono">load_dotenv()</text>
+  <text x="636" y="110" text-anchor="middle" class="small">before the model line</text>
+  <text x="380" y="168" text-anchor="middle" class="small">under langgraph dev the key is already loaded by "env": ".env" in langgraph.json,</text>
+  <text x="380" y="186" text-anchor="middle" class="small">which is why the video never hits this error</text>
+</svg>
+<figcaption><strong>Make every graph file load its own keys</strong>, so it works in Studio, in scripts and in tests. Graphs 3 and 5 already do; <a href="15-fix-and-harden.html">step 15</a> adds it to graph 4 and removes the unused imports.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+<li><strong>Returning the reply without a list</strong>: write <code>{"messages": [reply]}</code>, with square brackets. <code>add_messages</code> merges lists. A list is the safe, documented form.</li>
+<li><strong>Returning the whole history yourself</strong>, e.g. <code>{"messages": state["messages"] + [reply]}</code>: messages that already have IDs are matched and replaced rather than duplicated, but it's confusing and unnecessary. Return only the new message.</li>
+<li><strong>Forgetting <code>add_messages</code></strong> in a hand-written state: each reply overwrites the conversation (the "Plain" output above).</li>
+<li><strong><code>OpenAIError: Missing credentials</code></strong> when running the file outside Studio: add <code>load_dotenv()</code> (see above).</li>
+<li><strong><code>langgraph.json</code> path still pointing at graph 3</strong> after copying a line: Studio shows the wrong graph under the name 4_graph.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A conversation is a list of messages: system, human, AI and tool. The model reads the whole list on every call.</li>
+<li>By default a node's return value replaces a state key. A reducer changes that rule for one key.</li>
+<li><code>MessagesState</code> is a <code>TypedDict</code> with one key, <code>messages: Annotated[list[AnyMessage], add_messages]</code>. <code>add_messages</code> appends (and replaces messages that share an id).</li>
+<li>The <code>chat</code> node sends <code>state["messages"]</code> to the model and returns <code>{"messages": [reply]}</code>: only the new message.</li>
+<li>The repo file has unused imports and no <code>load_dotenv()</code>. It works under <code>langgraph dev</code> but fails from plain Python with <code>OpenAIError: Missing credentials</code>.</li>
+<li>Next: give the model a tool it can ask for (<a href="11-graph-5-binding-a-tool.html">step 11</a>).</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="09-graph-3-model-in-a-node.html"><small>← Previous · Step 09</small>Graph 3: A Model Inside a Node</a>
+<a class="next" href="11-graph-5-binding-a-tool.html"><small>Next · Step 11 →</small>Graph 5: Binding a Tool</a>
+</nav>
+</main>
+</body>
+</html>

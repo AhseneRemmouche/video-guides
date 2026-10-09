@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>28 · Smaller Bundle &amp; Safe Deployment</title>
+<meta name="description" content="Lazy-load the map, understand what VITE_ variables expose, and deploy without leaking keys.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 28/29</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 28 of 29 · Extra, not in the video</div>
+  <h1>Smaller Bundle &amp; Safe Deployment</h1>
+  <p class="lead">Lazy-load the map, understand what VITE_ variables expose, and deploy without leaking keys.</p>
+  <span class="video-link extra">Extension · built and browser-tested</span>
+</section>
+<div class="callout"><p><strong>Extension: not in the video.</strong> This step builds on steps 25–27. The code was <strong>type-checked</strong>, <strong>linted</strong>, <strong>built</strong> and <strong>run in headless Chrome</strong> against the production build with mocked OpenWeather answers (including at phone width, 390 px). The bundle sizes come from <code>npm run build</code> output; the key exposure was checked by building with a fake key and searching the output files.</p>
+<p><strong>What that proves:</strong> the map loads as a separate file, the numbers below are real, and any <code>VITE_</code> value ends up in the JavaScript sent to visitors. <strong>What it does not prove:</strong> how fast the app is on your users' connections, or the exact steps on any particular hosting service. The proxy code on this page is an <strong>illustrative sketch</strong>, not part of the tested project.</p></div>
+
+<h2>Goal</h2>
+<p>The app works and handles errors. Before you put it on the internet, two questions are left: <strong>how much does a visitor have to download</strong> before they see anything, and <strong>what happens to your API keys</strong> once the site is public? In this step you split the map into its own file, add a <code>.env.example</code> and a safer <code>.gitignore</code>, learn exactly what <code>VITE_</code> variables expose and how to limit the damage, and deploy the build to a static host.</p>
+
+<h2>Part 1: a smaller first download</h2>
+<p><code>npm run build</code> on the repo produces one JavaScript file with everything in it, and Vite prints a warning:</p>
+
+<pre data-lang="text" data-tag="verified output (npm run build, repo)"><code>dist/index.html                    0.48 kB │ gzip:   0.31 kB
+dist/assets/index-….css           51.22 kB │ gzip:  13.75 kB
+dist/assets/index-….js         2,005.92 kB │ gzip: 558.90 kB
+(!) Some chunks are larger than 500 kB after minification. Consider: ...</code></pre>
+
+<p>About 2 MB of JavaScript (about 559 kB compressed, which is what actually travels over the network) has to download and run before any card appears. Most of it is the map: Leaflet, react-leaflet and especially the MapTiler SDK. The cards don't need any of that. So we tell Vite to put the map in a separate file and load it only when it's needed.</p>
+
+<details class="primer"><summary>New to code splitting and lazy loading? One app, several files</summary>
+<p>A <a class="term" href="glossary.html#bundle">bundle</a> is the JavaScript file a <a class="term" href="glossary.html#build">build</a> produces from all your modules. <a class="term" href="glossary.html#code-splitting">Code splitting</a> means producing several files instead of one. Bundlers like Vite split automatically wherever your code uses a <strong>dynamic import</strong>: <code>import("./components/Map")</code> written as a function call. Unlike a normal <code>import … from</code> at the top of a file, it loads the module later, when the line runs, and returns a <a class="term" href="glossary.html#promise">promise</a>.</p>
+<p><a class="term" href="glossary.html#lazy-loading">Lazy loading</a> in React is <code>React.lazy</code>: you give it a function that does the dynamic import, and you get back a component you can render normally. The first time it renders, React starts the download and <em>suspends</em>, so the nearest <a class="term" href="glossary.html#suspense">Suspense</a> shows its fallback until the file has arrived. The same mechanism you used for data in step 19 now works for code.</p>
+</details>
+
+<pre data-file="src/App.tsx" data-lang="tsx" data-tag="after (step 28)"><code>import DailyForecast from "./components/cards/DailyForecast"
+import HourlyForecast from "./components/cards/HourlyForecast"
+import CurrentWeather from "./components/cards/CurrentWeather"
+import AdditionalInfo from "./components/cards/AdditionalInfo"
+import { Suspense, lazy, useState } from "react"
+import type { Coords } from "./types"
+import LocationDropdown from "./components/dropdowns/LocationDropdown"
+import { useQuery } from "@tanstack/react-query"
+import { getGeocode } from "./api"
+import MapTypeDropdown from "./components/dropdowns/MapTypeDropdown"
+import MapLegend from "./components/MapLegend"
+import CurrentSkeleton from "./components/skeletons/CurrentSkeleton"
+import DailySkeleton from "./components/skeletons/DailySkeleton"
+import HourlySkeleton from "./components/skeletons/HourlySkeleton"
+import AdditionalInfoSkeleton from "./components/skeletons/AdditionalInfoSkeleton"
+import SidePanel from "./components/SidePanel"
+import Hamburger from "/src/assets/hamburger.svg?react"
+import MobileHeader from "./components/MobileHeader"
+import LightDarkToggle from "./components/LightDarkToggle"
+import WeatherErrorBoundary from "./components/WeatherErrorBoundary"
+
+// The map pulls in Leaflet and MapTiler (most of the JavaScript). Loading it lazily lets
+// the cards appear first while the map code downloads in a separate file.
+const Map = lazy(() =&gt; import("./components/Map"))
+
+function App() {
+  const [coordinates, setCoords] = useState&lt;Coords&gt;({ lat: 50, lon: 45 })
+  const [location, setLocation] = useState("Tokyo")
+  const [mapType, setMapType] = useState("clouds_new")
+  const [isSidePanelOpen, setIsSidePanelOpen] = useState(false)
+
+  const { data: geocodeData, error: geocodeError } = useQuery({
+    queryKey: ["geocode", location],
+    queryFn: () =&gt; getGeocode(location),
+    enabled: location !== "custom", // a map click sets "custom": there is no city to look up
+  })
+
+  const onMapClick = (lat: number, lon: number) =&gt; {
+    setCoords({ lat, lon })
+    setLocation("custom")
+  }
+
+  const place = geocodeData?.[0]
+  // null until we know where to look: no requests for lat 0 / lon 0 while the city is loading
+  const coords: Coords | null =
+    location === "custom" ? coordinates : place ? { lat: place.lat, lon: place.lon } : null
+
+  return (
+    &lt;&gt;
+      &lt;MobileHeader setIsSidePanelOpen={setIsSidePanelOpen} /&gt;
+      &lt;div className="flex flex-col gap-8 pt-4 p-8 xs:pt-8 lg:w-[calc(100dvw-var(--sidebar-width))] 2xl:h-screen 2xl:min-h-[1120px]"&gt;
+        &lt;div className="flex flex-col gap-4 xs:flex-row xs:gap-8"&gt;
+          &lt;div className="flex flex-col md:flex-row gap-2 md:gap-4"&gt;
+            &lt;h1 className="text-2xl font-semibold"&gt;Location: &lt;/h1&gt;
+            &lt;LocationDropdown location={location} setLocation={setLocation} /&gt;
+          &lt;/div&gt;
+          &lt;div className="flex flex-col md:flex-row gap-2 md:gap-4"&gt;
+            &lt;h1 className="text-2xl font-semibold whitespace-nowrap"&gt;
+              Map Type:{" "}
+            &lt;/h1&gt;
+            &lt;MapTypeDropdown mapType={mapType} setMapType={setMapType} /&gt;
+          &lt;/div&gt;
+          &lt;div className="ml-auto flex gap-4 items-center"&gt;
+            &lt;div className="hidden xs:block"&gt;
+              &lt;LightDarkToggle /&gt;
+            &lt;/div&gt;
+            &lt;button
+              onClick={() =&gt; setIsSidePanelOpen(true)}
+              className="hidden xs:block"
+            &gt;
+              &lt;Hamburger className="size-6 lg:hidden" /&gt;
+            &lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+        {location !== "custom" &amp;&amp; geocodeError &amp;&amp; (
+          &lt;p role="alert" className="text-red-500"&gt;
+            {geocodeError.message}
+          &lt;/p&gt;
+        )}
+        {location !== "custom" &amp;&amp; geocodeData &amp;&amp; !place &amp;&amp; (
+          &lt;p role="alert" className="text-red-500"&gt;
+            Could not find "{location}". Pick another city or click the map.
+          &lt;/p&gt;
+        )}
+        &lt;div className="grid grid-cols-1 2xl:flex-1 2xl:min-h-0 md:grid-cols-2 2xl:grid-cols-4 2xl:grid-rows-4 gap-4"&gt;
+          &lt;div className="relative h-120 2xl:h-auto col-span-1 md:col-span-2 2xl:col-span-4 2xl:row-span-2 order-1"&gt;
+            &lt;Suspense fallback={&lt;div className="size-full rounded-xl bg-muted animate-pulse" /&gt;}&gt;
+              {coords &amp;&amp; &lt;Map coords={coords} onMapClick={onMapClick} mapType={mapType} /&gt;}
+            &lt;/Suspense&gt;
+            &lt;MapLegend mapType={mapType} /&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 2xl:row-span-2 order-2"&gt;
+            &lt;WeatherErrorBoundary title="Current Weather"&gt;
+              &lt;Suspense fallback={&lt;CurrentSkeleton /&gt;}&gt;
+                {coords ? &lt;CurrentWeather coords={coords} /&gt; : &lt;CurrentSkeleton /&gt;}
+              &lt;/Suspense&gt;
+            &lt;/WeatherErrorBoundary&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 order-3 2xl:order-4 2xl:row-span-2"&gt;
+            &lt;WeatherErrorBoundary title="Daily Forecast"&gt;
+              &lt;Suspense fallback={&lt;DailySkeleton /&gt;}&gt;
+                {coords ? &lt;DailyForecast coords={coords} /&gt; : &lt;DailySkeleton /&gt;}
+              &lt;/Suspense&gt;
+            &lt;/WeatherErrorBoundary&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 md:col-span-2 2xl:row-span-1 order-4 2xl:order-3"&gt;
+            &lt;WeatherErrorBoundary title="Hourly Forecast (48 Hours)"&gt;
+              &lt;Suspense fallback={&lt;HourlySkeleton /&gt;}&gt;
+                {coords ? &lt;HourlyForecast coords={coords} /&gt; : &lt;HourlySkeleton /&gt;}
+              &lt;/Suspense&gt;
+            &lt;/WeatherErrorBoundary&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 md:col-span-2 2xl:row-span-1 order-5"&gt;
+            &lt;WeatherErrorBoundary title="Additional Weather Info"&gt;
+              &lt;Suspense fallback={&lt;AdditionalInfoSkeleton /&gt;}&gt;
+                {coords ? &lt;AdditionalInfo coords={coords} /&gt; : &lt;AdditionalInfoSkeleton /&gt;}
+              &lt;/Suspense&gt;
+            &lt;/WeatherErrorBoundary&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      {coords &amp;&amp; (
+        &lt;SidePanel
+          coords={coords}
+          isSidePanelOpen={isSidePanelOpen}
+          setIsSidePanelOpen={setIsSidePanelOpen}
+        /&gt;
+      )}
+    &lt;/&gt;
+  )
+}
+
+export default App
+
+// styling - Tailwind
+// data fetching - TanStack Query (React Query)</code></pre>
+
+<h3>Line by line (the changed lines)</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>(removed)</td><td><code>import Map from "./components/Map"</code></td><td>Gone. A static import at the top would put <code>Map.tsx</code> and everything it imports into the main file, and lazy loading would have no effect.</td></tr>
+<tr><td>5</td><td><code>import { Suspense, lazy, useState } from "react"</code></td><td>Adds <code>lazy</code> to the React import.</td></tr>
+<tr><td>22–23</td><td><code>// The map pulls in Leaflet and MapTiler ...</code></td><td>Says why the map is special.</td></tr>
+<tr><td>24</td><td><code>const Map = lazy(() =&gt; import("./components/Map"))</code></td><td>Creates a lazy component. It is defined at the top level of the file, outside <code>App</code>: defining it inside would create a new component on every render and restart the loading. <code>React.lazy</code> needs the module to have a <strong>default export</strong> that is a component, which <code>Map.tsx</code> has (<code>export default function Map</code>). Vite sees the <code>import(...)</code> and builds <code>Map.tsx</code> into its own file.</td></tr>
+<tr><td>35</td><td><code>enabled: location !== "custom", ...</code></td><td>From step 25 (fix 2b), unchanged.</td></tr>
+<tr><td>87</td><td><code>&lt;Suspense fallback={&lt;div className="size-full rounded-xl bg-muted animate-pulse" /&gt;}&gt;</code></td><td>While the map file downloads, show a placeholder the size of the map: <code>size-full</code> fills the map area, <code>rounded-xl</code> matches the card corners, <code>bg-muted</code> uses the theme's muted colour, and <code>animate-pulse</code> makes it gently fade in and out, like the <a class="term" href="glossary.html#skeleton">skeletons</a>. Without a Suspense boundary here, the lazy map would suspend up to a boundary further out (or none) and hide much more of the page.</td></tr>
+<tr><td>88</td><td><code>{coords &amp;&amp; &lt;Map coords={coords} onMapClick={onMapClick} mapType={mapType} /&gt;}</code></td><td>Exactly as before. Used like any component; the props are type-checked as usual because <code>lazy</code> keeps the component's types.</td></tr>
+<tr><td>89</td><td><code>&lt;/Suspense&gt;</code></td><td>Closes the boundary. <code>&lt;MapLegend&gt;</code> on line 90 stays outside, so the legend shows immediately.</td></tr>
+</table></div>
+
+<pre data-lang="text" data-tag="verified output (npm run build, step 28)"><code>dist/assets/Map-….css             15.61 kB │ gzip:   6.46 kB
+dist/assets/index-….css           35.80 kB │ gzip:   7.29 kB
+dist/assets/index-….js           623.35 kB │ gzip: 177.48 kB
+dist/assets/Map-….js           1,383.59 kB │ gzip: 385.67 kB
+(!) Some chunks are larger than 500 kB after minification. ...</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Bar chart of compressed JavaScript sizes: before, one file of 558.90 kB; after, a main file of 177.48 kB needed first and a map file of 385.67 kB loaded afterwards">
+  <text x="16" y="30" class="title">gzip size of the JavaScript (kB)</text>
+  <text x="16" y="70" class="label">before</text>
+  <rect class="box-bad" x="120" y="52" width="559" height="28" rx="4"/>
+  <text x="400" y="71" text-anchor="middle" class="label">index.js 558.90 (everything)</text>
+  <text x="16" y="126" class="label">after</text>
+  <rect class="box-ok" x="120" y="108" width="177" height="28" rx="4"/>
+  <text x="208" y="127" text-anchor="middle" class="label">index.js 177.48</text>
+  <rect class="box-info" x="299" y="108" width="386" height="28" rx="4"/>
+  <text x="492" y="127" text-anchor="middle" class="label">Map.js 385.67 (loaded after)</text>
+  <path class="line" d="M120,150 H680"/>
+  <path class="line" d="M120,146 V154"/>
+  <path class="line" d="M400,146 V154"/>
+  <path class="line" d="M679,146 V154"/>
+  <text x="120" y="170" text-anchor="middle" class="small">0</text>
+  <text x="400" y="170" text-anchor="middle" class="small">~280</text>
+  <text x="679" y="170" text-anchor="middle" class="small">~559</text>
+  <text x="380" y="192" text-anchor="middle" class="small">green = needed before the cards can appear; blue = downloaded in parallel, needed only for the map</text>
+</svg>
+<figcaption>Numbers from the two builds (bar lengths to scale). <strong>The code needed for the first screen drops to about a third</strong>; the total stays about the same, it just arrives in two parts.</figcaption>
+</figure>
+
+<div class="callout"><p><strong>The warning is still there, and that's OK.</strong> Both files are still above Vite's 500 kB (uncompressed) warning limit: the map libraries are simply big, and the main file still contains React, TanStack Query, Radix and Zod. The warning is advice, not an error. The useful change is that the cards no longer wait for the map code. To go further you could look at which libraries are biggest (a bundle visualiser) or raise the limit with <code>build.chunkSizeWarningLimit</code> once you've checked the sizes are acceptable.</p></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Loading sequence after the change: browser downloads index.js, renders the header and card skeletons, starts the geocode request and the Map.js download, then the map replaces its placeholder">
+  <text x="100" y="24" text-anchor="middle" class="title">Browser</text>
+  <text x="380" y="24" text-anchor="middle" class="title">Your static host</text>
+  <text x="640" y="24" text-anchor="middle" class="title">OpenWeather</text>
+  <path class="line dashed" d="M100,32 V220"/>
+  <path class="line dashed" d="M380,32 V220"/>
+  <path class="line dashed" d="M640,32 V220"/>
+  <path class="arrow" d="M100,52 H376"/>
+  <text x="240" y="46" text-anchor="middle" class="small">1 get index.html + index.js</text>
+  <text x="110" y="78" class="small">2 header, skeletons, map placeholder</text>
+  <path class="arrow" d="M100,104 H636"/>
+  <text x="515" y="98" text-anchor="middle" class="small">3 geocode, then weather</text>
+  <path class="arrow" d="M100,134 H376"/>
+  <text x="240" y="128" text-anchor="middle" class="small">4 get Map.js (lazy)</text>
+  <path class="arrow-ok" d="M636,166 H104"/>
+  <text x="515" y="160" text-anchor="middle" class="small">5 data: cards fill in</text>
+  <path class="arrow-ok" d="M376,196 H104"/>
+  <text x="240" y="190" text-anchor="middle" class="small">6 Map.js arrives: map appears</text>
+</svg>
+<figcaption>Time flows down; steps 3–6 overlap in practice. <strong>Data and map code now download at the same time</strong> instead of the data waiting for the whole bundle.</figcaption>
+</figure>
+
+<h2>Part 2: what <code>VITE_</code> variables really expose</h2>
+<p>In step 5 the OpenWeather key went into <code>.env</code> as <code>VITE_API_KEY</code>, and in step 25 the MapTiler key joined it as <code>VITE_MAPTILER_KEY</code>. That keeps the keys <strong>out of Git</strong>. It does <strong>not</strong> keep them secret from visitors.</p>
+
+<details class="primer"><summary>New to build-time environment variables? Why <code>.env</code> does not hide a key from visitors</summary>
+<p>An <a class="term" href="glossary.html#env-variable">environment variable</a> is a named value given to a program from outside its code. In a server program it stays on the server. A Vite app is different: there is no server code at all, only files that the visitor's browser downloads and runs. When you run <code>npm run build</code>, Vite <strong>replaces</strong> every <code>import.meta.env.VITE_…</code> in your code with the value itself, as plain text (see <a class="term" href="glossary.html#vite-env">Vite env variables</a>). The <code>VITE_</code> prefix is Vite's safety switch: variables without it are never copied into browser code, precisely because whatever is copied is public.</p>
+</details>
+
+<p>You can see it for yourself. Build with a fake key and search the output:</p>
+<pre data-lang="sh" data-tag="verified (Git Bash / macOS / Linux)"><code>VITE_API_KEY=TESTKEY npm run build
+grep -c TESTKEY dist/assets/*.js</code></pre>
+<pre data-lang="text" data-tag="verified output"><code>repo build:     dist/assets/index-….js: 2   (both uses in the one bundle)
+step 28 build:  dist/assets/index-….js: 1   (api.ts)
+                dist/assets/Map-….js:   1   (the weather tile layer URL)</code></pre>
+
+<p>Anyone can do the same with your deployed site: open DevTools → <strong>Network</strong>, click any request to <code>api.openweathermap.org</code>, and read <code>appid=…</code> in the URL. Or open the JavaScript file and search for it. The MapTiler key appears the same way in its tile requests.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Flow of a VITE variable: .env on your computer, npm run build copies the value into dist/assets/*.js, the host serves it, every visitor's browser downloads it and can read it">
+  <rect class="box-ok" x="16" y="60" width="140" height="54" rx="8"/>
+  <text x="86" y="82" text-anchor="middle" class="mono">.env</text>
+  <text x="86" y="100" text-anchor="middle" class="small">not in Git</text>
+  <path class="arrow" d="M156,87 H182"/>
+  <rect class="box" x="184" y="60" width="140" height="54" rx="8"/>
+  <text x="254" y="82" text-anchor="middle" class="mono">npm run build</text>
+  <text x="254" y="100" text-anchor="middle" class="small">pastes the value in</text>
+  <path class="arrow" d="M324,87 H350"/>
+  <rect class="box-warn" x="352" y="60" width="150" height="54" rx="8"/>
+  <text x="427" y="82" text-anchor="middle" class="mono">dist/assets/*.js</text>
+  <text x="427" y="100" text-anchor="middle" class="small">key as plain text</text>
+  <path class="arrow" d="M502,87 H528"/>
+  <rect class="box-bad" x="530" y="60" width="214" height="54" rx="8"/>
+  <text x="637" y="82" text-anchor="middle" class="label">every visitor's browser</text>
+  <text x="637" y="100" text-anchor="middle" class="small">DevTools shows appid=...</text>
+  <text x="86" y="40" text-anchor="middle" class="ok">private</text>
+  <text x="637" y="40" text-anchor="middle" class="bad">public</text>
+  <text x="380" y="150" text-anchor="middle" class="small">.env protects the key from your Git history, not from the people using your site</text>
+</svg>
+<figcaption>The key moves from private to public at the build step. <strong>Treat every <code>VITE_</code> value as public</strong>, and plan for what someone could do with it.</figcaption>
+</figure>
+
+<h3>Add <code>.env.example</code> and ignore <code>.env</code></h3>
+<p>The repo's <code>.gitignore</code> (from Vite's template) ignores <code>*.local</code>, so <code>.env.local</code> is safe, but a file named exactly <code>.env</code> is <strong>not</strong> ignored. One <code>git add .</code> and your keys are in the history. Add it explicitly, and commit an example file instead so others know which variables to set:</p>
+
+<pre data-file=".env.example" data-lang="env" data-tag="new file (step 28)"><code># Copy this file to .env and fill in your own keys. Never commit .env.
+# VITE_ variables are built into the JavaScript the browser downloads: anyone can read them.
+VITE_API_KEY=your-openweather-key
+VITE_MAPTILER_KEY=your-maptiler-key</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code># Copy this file to .env and fill in your own keys. Never commit .env.</code></td><td>Lines starting with <code>#</code> are comments. Instructions for whoever clones the project.</td></tr>
+<tr><td>2</td><td><code># VITE_ variables are built into the JavaScript ...</code></td><td>The warning from this section, where people will read it.</td></tr>
+<tr><td>3</td><td><code>VITE_API_KEY=your-openweather-key</code></td><td>The variable name the code reads in <code>api.ts</code> and <code>Map.tsx</code>, with a placeholder value. Placeholders are safe to commit.</td></tr>
+<tr><td>4</td><td><code>VITE_MAPTILER_KEY=your-maptiler-key</code></td><td>The MapTiler key from step 25. Leave it empty and the app simply skips the base map.</td></tr>
+</table></div>
+
+<pre data-file=".gitignore" data-lang="text" data-tag="after (step 28)"><code># Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local secrets
+.env</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>10–13</td><td><code>node_modules</code><br><code>dist</code><br><code>dist-ssr</code><br><code>*.local</code></td><td>From Vite's template: installed packages, build output and <code>*.local</code> files (like <code>.env.local</code>) are never committed.</td></tr>
+<tr><td>26</td><td><code># Local secrets</code></td><td>Comment.</td></tr>
+<tr><td>27</td><td><code>.env</code></td><td>New: Git now ignores the <code>.env</code> file. If it was <em>already</em> committed, ignoring isn't enough: run <code>git rm --cached .env</code> (removes it from Git, keeps your local copy), commit, and replace the keys, because the old commit still contains them.</td></tr>
+</table></div>
+
+<h3>Limit what a public key can do</h3>
+<p>Since the keys can't be hidden in a browser-only app, the next best thing is to make a copied key useless elsewhere:</p>
+<ul>
+<li><strong>MapTiler</strong> keys can be restricted to allowed origins (your site's address) in the MapTiler account dashboard. Requests from other websites using your key are then refused. Look for the key's settings in your MapTiler account and check MapTiler's documentation for the current steps. Keep <code>http://localhost:5173</code> in the list (or use a separate development key) so local development keeps working.</li>
+<li><strong>OpenWeather</strong> keys travel in the URL as <code>appid=…</code> and are not restricted to a website in the same way. If someone copies yours, their calls count against your account. To keep this key truly secret you need a small piece of code that runs on a server, a <strong>proxy</strong>.</li>
+</ul>
+
+<h3>The proxy idea (illustrative)</h3>
+<p>A proxy is a tiny server-side function that sits between your app and OpenWeather. The browser calls <em>your</em> address without any key; the function adds the key, which it reads from a server-only environment variable (no <code>VITE_</code> prefix, never in the bundle), calls OpenWeather, and passes the answer back. Many static hosts offer "serverless functions" or "edge functions" for exactly this; each has its own file location and syntax.</p>
+
+<pre data-lang="js" data-tag="illustrative sketch, not part of the tested project"><code>// A generic serverless function using the standard Request/Response API.
+// Check your host's docs for where this file goes and how it is exported.
+export default async function handler(request) {
+  const { searchParams } = new URL(request.url)
+  const lat = Number(searchParams.get("lat"))
+  const lon = Number(searchParams.get("lon"))
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return new Response("lat and lon are required", { status: 400 })
+  }
+  const key = process.env.OPENWEATHER_KEY // server-only: no VITE_ prefix
+  const res = await fetch(
+    `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&amp;lon=${lon}&amp;units=imperial&amp;exclude=minutely,alerts&amp;appid=${key}`
+  )
+  return new Response(await res.text(), {
+    status: res.status,
+    headers: { "content-type": "application/json" },
+  })
+}</code></pre>
+
+<p>The app would then call something like <code>/api/weather?lat=…&amp;lon=…</code> instead of OpenWeather. Two things to keep in mind: the proxy only lets through the requests you allow (here only One Call, only numeric coordinates), so nobody can use it as a free door to the rest of your account; and the app also puts the key in the <strong>weather map tile</strong> URL (<code>Map.tsx</code>) and calls geocoding and air pollution, so a complete solution needs a route for each. Rate limiting on the proxy is a good next step.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Two architectures. Today: the browser calls OpenWeather directly with the key in the URL. With a proxy: the browser calls your function without a key, the function adds the key from a server environment variable and calls OpenWeather.">
+  <text x="16" y="26" class="title">Today (browser-only)</text>
+  <rect class="zone" x="16" y="38" width="220" height="70" rx="8"/>
+  <text x="126" y="58" text-anchor="middle" class="label">Browser</text>
+  <rect class="box-warn" x="36" y="68" width="180" height="30" rx="6"/>
+  <text x="126" y="88" text-anchor="middle" class="small">JS bundle contains the key</text>
+  <path class="arrow-bad" d="M236,83 H514"/>
+  <text x="375" y="76" text-anchor="middle" class="bad">...onecall?...&amp;appid=KEY</text>
+  <rect class="box-info" x="516" y="58" width="228" height="50" rx="8"/>
+  <text x="630" y="88" text-anchor="middle" class="label">api.openweathermap.org</text>
+  <path class="line dashed" d="M16,128 H744"/>
+  <text x="16" y="154" class="title">With a proxy</text>
+  <rect class="zone" x="16" y="166" width="180" height="70" rx="8"/>
+  <text x="106" y="186" text-anchor="middle" class="label">Browser</text>
+  <rect class="box-ok" x="28" y="196" width="156" height="30" rx="6"/>
+  <text x="106" y="216" text-anchor="middle" class="small">no key in the bundle</text>
+  <path class="arrow-ok" d="M196,211 H284"/>
+  <text x="240" y="202" text-anchor="middle" class="small">/api/weather</text>
+  <rect class="zone" x="286" y="166" width="210" height="70" rx="8"/>
+  <text x="391" y="186" text-anchor="middle" class="label">Your server function</text>
+  <rect class="box" x="300" y="196" width="182" height="30" rx="6"/>
+  <text x="391" y="216" text-anchor="middle" class="small">adds OPENWEATHER_KEY</text>
+  <path class="arrow" d="M496,211 H514"/>
+  <rect class="box-info" x="516" y="186" width="228" height="50" rx="8"/>
+  <text x="630" y="216" text-anchor="middle" class="label">api.openweathermap.org</text>
+</svg>
+<figcaption>Zones are where code runs. <strong>A secret can only stay secret in a zone the visitor can't see</strong>, which a static site doesn't have; the proxy adds one.</figcaption>
+</figure>
+
+<h2>Part 3: deploy the build</h2>
+<p>This app is a <strong>static site</strong>: after <code>npm run build</code>, the <code>dist/</code> folder contains an <code>index.html</code>, some CSS and JavaScript files and images. Any host that can serve files can run it; there is no server code to start. The exact screens differ per host, so here are the general steps. <strong>Check your host's documentation</strong> for the details.</p>
+
+<ol class="steps">
+<li><strong>Build and preview locally</strong>
+<p>Run <code>npm run build</code>, then <code>npm run preview</code>, and test the address it prints. This is the same code your visitors will get (it's how the broken marker of step 25 was found). Don't open <code>dist/index.html</code> by double-clicking: the files are referenced from the site root (<code>/assets/…</code>), which doesn't work from <code>file://</code>.</p></li>
+<li><strong>Push your project to a Git repository</strong>
+<p>Without <code>.env</code> (now ignored). Most hosts build straight from the repository.</p></li>
+<li><strong>Create the site on your host and set the build settings</strong>
+<p>Build command: <code>npm run build</code>. Output (publish) directory: <code>dist</code>. Many hosts detect Vite and fill these in for you.</p></li>
+<li><strong>Add the environment variables in the host's dashboard</strong>
+<p>Add <code>VITE_API_KEY</code> and <code>VITE_MAPTILER_KEY</code> with your values in the host's settings for environment variables. They must exist <strong>when the build runs</strong>, because Vite pastes them in at build time. If you add or change one after deploying, trigger a new build.</p></li>
+<li><strong>Deploy, then restrict the keys</strong>
+<p>Once you know your site's address (it will be <code>https://…</code>, which is why step 25 switched every API URL to https), add it to the MapTiler key's allowed origins.</p></li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Deployment pipeline: git push, the host runs npm run build with the dashboard environment variables, dist folder is served over https to visitors">
+  <rect class="box" x="16" y="50" width="130" height="54" rx="8"/>
+  <text x="81" y="72" text-anchor="middle" class="mono">git push</text>
+  <text x="81" y="90" text-anchor="middle" class="small">code, no .env</text>
+  <path class="arrow" d="M146,77 H170"/>
+  <rect class="box" x="172" y="50" width="190" height="54" rx="8"/>
+  <text x="267" y="72" text-anchor="middle" class="label">host runs</text>
+  <text x="267" y="90" text-anchor="middle" class="mono">npm run build</text>
+  <path class="arrow-accent" d="M267,24 V48"/>
+  <text x="267" y="18" text-anchor="middle" class="accent">VITE_ variables from the dashboard</text>
+  <path class="arrow" d="M362,77 H386"/>
+  <rect class="box-info" x="388" y="50" width="150" height="54" rx="8"/>
+  <text x="463" y="72" text-anchor="middle" class="mono">dist/</text>
+  <text x="463" y="90" text-anchor="middle" class="small">static files</text>
+  <path class="arrow" d="M538,77 H562"/>
+  <rect class="box-ok" x="564" y="50" width="180" height="54" rx="8"/>
+  <text x="654" y="72" text-anchor="middle" class="label">served over https</text>
+  <text x="654" y="90" text-anchor="middle" class="small">to every visitor</text>
+  <text x="380" y="140" text-anchor="middle" class="small">changing a VITE_ variable means building again: the old value is already inside the old files</text>
+</svg>
+<figcaption>A typical Git-based static deploy. <strong>The variables are used at build time, not at run time.</strong></figcaption>
+</figure>
+
+<p>This app has a single page and no client-side router, so you don't need the "redirect every path to <code>index.html</code>" rule that many hosts ask about for single-page apps.</p>
+
+<figure class="shot narrow"><img src="img/app-fixed-mobile.webp" alt="The fixed app at phone width: mobile header, location and map type dropdowns stacked, the map, then the cards one below the other." width="390" height="2404" loading="lazy"><figcaption>The final app (after steps 25–28) at 390 px wide, as most phone visitors will see it. (Test data, not real weather; base map tiles blocked in the test.)</figcaption></figure>
+
+<div class="callout ok"><p><strong>What you should see</strong></p>
+<ul>
+<li><code>npm run build</code> lists a separate <code>Map-….js</code> and <code>Map-….css</code>; <code>index-….js</code> is about 623 kB (177 kB gzip) instead of 2,006 kB (verified).</li>
+<li>In DevTools → Network on a fresh load, <code>Map-….js</code> is requested after <code>index-….js</code>; on a slow connection (Network → throttling) you briefly see the pulsing map placeholder while the cards already load.</li>
+<li><code>git status</code> doesn't list <code>.env</code>; <code>.env.example</code> is ready to commit.</li>
+<li>On the deployed site: all requests are https and the app looks like your <code>npm run preview</code> test.</li>
+</ul></div>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Keeping the static <code>import Map from …</code></strong> next to the lazy one: TypeScript reports a duplicate name, and if you rename one, the static import pulls the map back into the main file.</li>
+<li><strong>Lazy-loading a file without a default export</strong>: <code>lazy</code> fails at run time. Either export the component as default or map it: <code>lazy(() =&gt; import("./X").then((m) =&gt; ({ default: m.X })))</code>.</li>
+<li><strong>Thinking <code>.env</code> makes a key secret</strong>: it only keeps it out of Git. Any <code>VITE_</code> value is in the downloaded JavaScript.</li>
+<li><strong>Putting a real secret in a <code>VITE_</code> variable</strong> (a database password, a paid API's secret key): never do this in a browser app. Use a server function.</li>
+<li><strong>Setting the variables after the first deploy and expecting them to work</strong>: rebuild. Also check the names: a missing <code>VITE_</code> prefix makes the value <code>undefined</code> in the browser.</li>
+<li><strong>Committing <code>.env</code> before adding it to <code>.gitignore</code></strong>: ignoring it later doesn't remove it from the history. Replace the keys.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li><code>React.lazy</code> + <code>Suspense</code> split the map into its own file: the first JavaScript download goes from 558.90 kB to 177.48 kB gzip.</li>
+<li>Every <code>VITE_</code> variable is pasted into the bundle at build time and readable by any visitor (verified with a fake key).</li>
+<li><code>.env.example</code> documents the variables; <code>.gitignore</code> now ignores <code>.env</code>.</li>
+<li>Restrict the MapTiler key to your site's origin; a truly secret OpenWeather key needs a server-side proxy.</li>
+<li>Deploy <code>dist/</code> to any static host: build command <code>npm run build</code>, output <code>dist</code>, variables set in the host's dashboard before the build.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="27-remember-theme.html"><small>← Previous · Step 27</small>Remember the Theme &amp; Match the Map</a>
+<a class="next" href="29-react-19.html"><small>Next · Step 29 →</small>Switch to React 19 APIs</a>
+</nav>
+</main>
+</body>
+</html>

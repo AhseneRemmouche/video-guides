@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>26 · Handle API Errors Gracefully</title>
+<meta name="description" content="Error boundaries with QueryErrorResetBoundary, readable messages and a Try again button.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 26/29</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 26 of 29 · Extra, not in the video</div>
+  <h1>Handle API Errors Gracefully</h1>
+  <p class="lead">Error boundaries with QueryErrorResetBoundary, readable messages and a Try again button.</p>
+  <span class="video-link extra">Extension · built and browser-tested</span>
+</section>
+<div class="callout"><p><strong>Extension: not in the video.</strong> This step builds on step 25. The code was <strong>type-checked</strong>, <strong>linted</strong>, <strong>built</strong> and <strong>run in headless Chrome</strong> against the production build with mocked OpenWeather answers (fake but schema-valid JSON, or the error answers described below) and MapTiler blocked.</p>
+<p><strong>What that proves:</strong> when One Call fails, each card shows the error and a "Try again" button while the rest of the page keeps working, and the number of retries is what the page says. <strong>What it does not prove:</strong> the exact wording of every real OpenWeather error, or your account's plan. The "Try again" button's behaviour is explained from React's and TanStack Query's documented behaviour; it was not clicked in the test.</p></div>
+
+<h2>Goal</h2>
+<p>After step 25, a failed <em>geocode</em> request shows a readable message. But the four weather cards and the air pollution panel load their data with <code>useSuspenseQuery</code> (step 19), and that hook doesn't hand you an <code>error</code> to display. It <strong>throws</strong> the error, like a crash, into the component tree. Nothing in the app catches it, so React removes everything. The browser test ran step 25's code with One Call answering <code>401</code>:</p>
+
+<pre data-lang="text" data-tag="verified result (step 25 code, One Call failing)"><code>requests:  geo/1.0/direct?q=Tokyo
+           data/3.0/onecall?lat=35.68&amp;lon=139.69   (401)
+           data/2.5/air_pollution?lat=35.68&amp;lon=139.69
+           data/3.0/onecall?...   (401, retry 1)
+           data/3.0/onecall?...   (401, retry 2)
+           data/3.0/onecall?...   (401, retry 3)
+page error: Error: OpenWeather request failed (401): Please note that using One Call 3.0
+            requires a separate subscription to the One Call by Call plan.
+page text:  "" (blank page)</code></pre>
+
+<p>The air pollution data arrived fine, the map was fine, and still the user saw nothing. In this step you add an <a class="term" href="glossary.html#error-boundary">error boundary</a> around each card, so one failing request only replaces <em>that</em> card with a message and a "Try again" button. You also tune TanStack Query's defaults so a hopeless request isn't retried three times.</p>
+
+<div class="callout"><p><strong>Why One Call is the request most likely to fail.</strong> The presenter uses the One Call API 3.0 (step 5). On OpenWeather, One Call 3.0 needs a separate "One Call by Call" subscription on your account, in addition to a normal API key. Without it, OpenWeather answers with <code>401</code> and the message: <em>"Please note that using One Call 3.0 requires a separate subscription to the One Call by Call plan."</em> (The test used this documented message.) Geocoding and Air Pollution keep working with the same key, so this is exactly the "one part fails, the rest works" situation. Check OpenWeather's current plans and terms yourself; this guide doesn't list prices.</p></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Before: the error thrown by CurrentWeather travels up to the root and the whole app is removed. After: it stops at the nearest WeatherErrorBoundary, which shows an error card, and the other components keep working.">
+  <text x="190" y="24" text-anchor="middle" class="title">Before (step 25)</text>
+  <text x="570" y="24" text-anchor="middle" class="title">After (step 26)</text>
+  <rect class="box-bad" x="110" y="40" width="160" height="34" rx="8"/>
+  <text x="190" y="62" text-anchor="middle" class="label">App (removed)</text>
+  <rect class="box2" x="20" y="120" width="120" height="34" rx="8"/>
+  <text x="80" y="142" text-anchor="middle" class="label">Map</text>
+  <rect class="box2" x="150" y="120" width="80" height="34" rx="8"/>
+  <text x="190" y="142" text-anchor="middle" class="label">Suspense</text>
+  <rect class="box2" x="240" y="120" width="120" height="34" rx="8"/>
+  <text x="300" y="142" text-anchor="middle" class="label">SidePanel</text>
+  <rect class="box-bad" x="130" y="190" width="120" height="34" rx="8"/>
+  <text x="190" y="212" text-anchor="middle" class="label">CurrentWeather</text>
+  <path class="arrow-bad" d="M190,190 V156"/>
+  <path class="arrow-bad" d="M190,120 V76"/>
+  <text x="200" y="104" class="bad">throw</text>
+  <path class="line dashed" d="M380,36 V236"/>
+  <rect class="box-ok" x="490" y="40" width="160" height="34" rx="8"/>
+  <text x="570" y="62" text-anchor="middle" class="label">App (still there)</text>
+  <rect class="box-ok" x="398" y="104" width="100" height="34" rx="8"/>
+  <text x="448" y="126" text-anchor="middle" class="label">Map</text>
+  <rect class="box-warn" x="508" y="96" width="124" height="50" rx="8"/>
+  <text x="570" y="117" text-anchor="middle" class="label">ErrorBoundary</text>
+  <text x="570" y="135" text-anchor="middle" class="small">shows error card</text>
+  <rect class="box-ok" x="642" y="104" width="104" height="34" rx="8"/>
+  <text x="694" y="126" text-anchor="middle" class="label">SidePanel</text>
+  <rect class="box2" x="530" y="160" width="80" height="26" rx="8"/>
+  <text x="570" y="178" text-anchor="middle" class="small">Suspense</text>
+  <rect class="box-bad" x="510" y="200" width="120" height="34" rx="8"/>
+  <text x="570" y="222" text-anchor="middle" class="label">CurrentWeather</text>
+  <path class="arrow-bad" d="M570,200 V188"/>
+  <path class="arrow-bad" d="M570,160 V148"/>
+</svg>
+<figcaption>A thrown error travels up the component tree until something catches it. <strong>With no boundary it reaches the root and React removes the whole app; a boundary stops it at the card.</strong> (Simplified tree; the other cards have their own boundaries.)</figcaption>
+</figure>
+
+<details class="primer"><summary>New to error boundaries? What they catch and what they don't</summary>
+<p>An error boundary is a component that catches errors thrown while React renders the components <em>inside</em> it. Instead of letting the error take down the whole page, it shows a fallback UI that you choose. Think of it as <code>try</code>/<code>catch</code> for a part of the component tree.</p>
+<p>It catches errors thrown <strong>during rendering</strong>, in lifecycle methods, and errors that <code>useSuspenseQuery</code> throws for a failed query. It does <strong>not</strong> catch errors in event handlers (like an <code>onClick</code>; use a normal <code>try</code>/<code>catch</code> there), in code that runs later (a <code>setTimeout</code>), or errors thrown by the boundary itself.</p>
+<p>Without any boundary, React 19 removes the whole tree from the page when a render error happens, because showing half-broken UI could be worse than showing nothing. That is the blank page above.</p>
+</details>
+
+<details class="primer"><summary>Why a class component? (Everything else in this app is a function)</summary>
+<p>Since hooks arrived, almost all React code is written as function components. Error boundaries are the exception: React only lets you write one as a <strong>class component</strong>, because it needs two class-only methods, <code>static getDerivedStateFromError</code> and <code>componentDidCatch</code>. There is no hook equivalent. You write the class once and then use it like any component. (Libraries such as <code>react-error-boundary</code> wrap this class for you; here we write it ourselves so you can see every part.)</p>
+<p>A class component in short: it <code>extends Component&lt;Props, State&gt;</code>, keeps its <a class="term" href="glossary.html#state">state</a> in <code>this.state</code>, changes it with <code>this.setState(...)</code>, reads <a class="term" href="glossary.html#props">props</a> from <code>this.props</code>, and returns its JSX from a <code>render()</code> method.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+<li><strong>Create <code>src/components/WeatherErrorBoundary.tsx</code></strong>
+<p>A new file next to <code>SidePanel.tsx</code>. Contents below.</p></li>
+<li><strong>Wrap each card in <code>src/App.tsx</code></strong>
+<p>Import the boundary and put <code>&lt;WeatherErrorBoundary title="…"&gt;</code> around each card's <code>&lt;Suspense&gt;</code>.</p></li>
+<li><strong>Wrap the air pollution panel in <code>src/components/SidePanel.tsx</code></strong>
+<p>Same idea, title "Air Pollution".</p></li>
+<li><strong>Set query defaults in <code>src/main.tsx</code></strong>
+<p>Change <code>new QueryClient()</code> to the version with <code>retry</code> and <code>staleTime</code>.</p></li>
+</ol>
+
+<h2>The error boundary component</h2>
+
+<pre data-file="src/components/WeatherErrorBoundary.tsx" data-lang="tsx" data-tag="new file (step 26)"><code>import { Component, type ErrorInfo, type ReactNode } from "react"
+import { QueryErrorResetBoundary } from "@tanstack/react-query"
+import Card from "./cards/Card"
+
+type BoundaryProps = {
+  title: string
+  children: ReactNode
+  onReset: () =&gt; void
+}
+
+type BoundaryState = { error: Error | null }
+
+// React only offers error boundaries as class components.
+class ErrorBoundary extends Component&lt;BoundaryProps, BoundaryState&gt; {
+  state: BoundaryState = { error: null }
+
+  static getDerivedStateFromError(error: Error): BoundaryState {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error(`${this.props.title} failed`, error, info.componentStack)
+  }
+
+  retry = () =&gt; {
+    this.props.onReset() // lets TanStack Query fetch again instead of re-throwing the cached error
+    this.setState({ error: null })
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      &lt;Card title={this.props.title} childrenClassName="flex flex-col gap-4"&gt;
+        &lt;p role="alert" className="text-red-500"&gt;
+          {this.state.error.message}
+        &lt;/p&gt;
+        &lt;button
+          onClick={this.retry}
+          className="self-start rounded-md border px-3 py-1 hover:bg-muted"
+        &gt;
+          Try again
+        &lt;/button&gt;
+      &lt;/Card&gt;
+    )
+  }
+}
+
+// One boundary per card: if one request fails, the rest of the dashboard keeps working.
+export default function WeatherErrorBoundary({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    &lt;QueryErrorResetBoundary&gt;
+      {({ reset }) =&gt; (
+        &lt;ErrorBoundary title={title} onReset={reset}&gt;
+          {children}
+        &lt;/ErrorBoundary&gt;
+      )}
+    &lt;/QueryErrorResetBoundary&gt;
+  )
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { Component, type ErrorInfo, type ReactNode } from "react"</code></td><td><code>Component</code> is the base class for class components. <code>ErrorInfo</code> is the type of the extra information React passes to <code>componentDidCatch</code>. <code>ReactNode</code> is the type for "anything React can render" (used for <code>children</code>). The <code>type</code> keyword marks the last two as type-only imports.</td></tr>
+<tr><td>2</td><td><code>import { QueryErrorResetBoundary } from "@tanstack/react-query"</code></td><td>A small TanStack Query component that gives us a <code>reset</code> function, explained at line 51.</td></tr>
+<tr><td>3</td><td><code>import Card from "./cards/Card"</code></td><td>The card frame from step 8, so the error looks like a normal card with its title.</td></tr>
+<tr><td>5–9</td><td><code>type BoundaryProps = {</code><br><code>  title: string</code><br><code>  children: ReactNode</code><br><code>  onReset: () =&gt; void</code><br><code>}</code></td><td>The props of the inner class: the card title to show, the wrapped components (<code>children</code>), and a function to call before retrying.</td></tr>
+<tr><td>11</td><td><code>type BoundaryState = { error: Error | null }</code></td><td>The class's state: the caught error, or <code>null</code> when everything is fine.</td></tr>
+<tr><td>13</td><td><code>// React only offers error boundaries as class components.</code></td><td>Explains why this file looks different from the rest of the app.</td></tr>
+<tr><td>14</td><td><code>class ErrorBoundary extends Component&lt;BoundaryProps, BoundaryState&gt; {</code></td><td>Declares the class. The two <a class="term" href="glossary.html#generic">generic</a> parameters tell TypeScript the shapes of <code>this.props</code> and <code>this.state</code>. It is not exported: other files use the function wrapper at the bottom.</td></tr>
+<tr><td>15</td><td><code>state: BoundaryState = { error: null }</code></td><td>The starting state: no error.</td></tr>
+<tr><td>17–19</td><td><code>static getDerivedStateFromError(error: Error): BoundaryState {</code><br><code>  return { error }</code><br><code>}</code></td><td>React calls this when a component inside throws while rendering. Whatever it returns becomes the new state, so the next <code>render()</code> shows the error card. It must be <code>static</code> (it belongs to the class, not an instance) and must not have side effects; it only computes state.</td></tr>
+<tr><td>21–23</td><td><code>componentDidCatch(error: Error, info: ErrorInfo) {</code><br><code>  console.error(`${this.props.title} failed`, error, info.componentStack)</code><br><code>}</code></td><td>Called after the error is caught. This is the place for side effects like logging. <code>info.componentStack</code> lists which components were rendering, which helps when debugging. In a real product you would send this to an error-monitoring service.</td></tr>
+<tr><td>25–28</td><td><code>retry = () =&gt; {</code><br><code>  this.props.onReset() // ...</code><br><code>  this.setState({ error: null })</code><br><code>}</code></td><td>Runs when the user clicks "Try again". First it calls <code>onReset</code> (TanStack's <code>reset</code>), then clears the error so <code>render()</code> shows the children again. Written as an <a class="term" href="glossary.html#arrow-function">arrow function</a> property so <code>this</code> always points to the component when it is passed to <code>onClick</code>.</td></tr>
+<tr><td>30–31</td><td><code>render() {</code><br><code>  if (!this.state.error) return this.props.children</code></td><td>No error: render the wrapped components unchanged. The boundary is invisible when everything works.</td></tr>
+<tr><td>32–33</td><td><code>return (</code><br><code>  &lt;Card title={this.props.title} childrenClassName="flex flex-col gap-4"&gt;</code></td><td>With an error: draw a card with the same title as the card that failed, so the layout keeps its shape. <code>flex flex-col gap-4</code> stacks message and button with space between.</td></tr>
+<tr><td>34–36</td><td><code>&lt;p role="alert" className="text-red-500"&gt;</code><br><code>  {this.state.error.message}</code><br><code>&lt;/p&gt;</code></td><td>Shows the message, which comes from <code>fetchJson</code> (step 25): "OpenWeather request failed (401): …". Red text; <code>role="alert"</code> makes screen readers announce it.</td></tr>
+<tr><td>37–42</td><td><code>&lt;button onClick={this.retry}</code><br><code>  className="self-start rounded-md border px-3 py-1 hover:bg-muted"&gt;</code><br><code>  Try again</code></td><td>The retry button. <code>self-start</code> stops it stretching across the card; <code>rounded-md border px-3 py-1</code> gives a small outlined button; <code>hover:bg-muted</code> uses the theme's muted colour on hover, so it works in light and dark mode.</td></tr>
+<tr><td>48</td><td><code>// One boundary per card: ...</code></td><td>Explains the design choice.</td></tr>
+<tr><td>49</td><td><code>export default function WeatherErrorBoundary({ title, children }: { title: string; children: ReactNode }) {</code></td><td>The component other files use. It only needs a title and children; it supplies <code>onReset</code> itself.</td></tr>
+<tr><td>51–52</td><td><code>&lt;QueryErrorResetBoundary&gt;</code><br><code>  {({ reset }) =&gt; (</code></td><td>This TanStack component takes a function as its child (a "render prop") and calls it with <code>reset</code>. Why needed: TanStack Query keeps a failed query's error in its <a class="term" href="glossary.html#cache">cache</a>. If the boundary just cleared its own state, the card would render, <code>useSuspenseQuery</code> would see the cached error, and throw it again immediately. <code>reset()</code> tells the queries inside this area: "next time you're rendered, fetch again instead of re-throwing".</td></tr>
+<tr><td>53–55</td><td><code>&lt;ErrorBoundary title={title} onReset={reset}&gt;</code><br><code>  {children}</code><br><code>&lt;/ErrorBoundary&gt;</code></td><td>Connects the two: our class gets TanStack's <code>reset</code> as <code>onReset</code>.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Lifecycle of the boundary: child throws, getDerivedStateFromError sets state.error, render shows the error card, componentDidCatch logs; Try again calls reset and clears the error, then children render and the query fetches again">
+  <rect class="box-bad" x="16" y="20" width="130" height="50" rx="8"/>
+  <text x="81" y="42" text-anchor="middle" class="label">child throws</text>
+  <text x="81" y="58" text-anchor="middle" class="small">useSuspenseQuery</text>
+  <path class="arrow" d="M146,45 H162"/>
+  <rect class="box" x="164" y="20" width="180" height="50" rx="8"/>
+  <text x="254" y="42" text-anchor="middle" class="mono">getDerivedState</text>
+  <text x="254" y="58" text-anchor="middle" class="mono">FromError</text>
+  <path class="arrow" d="M344,45 H360"/>
+  <rect class="box-warn" x="362" y="20" width="160" height="50" rx="8"/>
+  <text x="442" y="42" text-anchor="middle" class="label">render()</text>
+  <text x="442" y="58" text-anchor="middle" class="small">error card + button</text>
+  <path class="arrow" d="M522,45 H538"/>
+  <rect class="box2" x="540" y="20" width="204" height="50" rx="8"/>
+  <text x="642" y="42" text-anchor="middle" class="mono">componentDidCatch</text>
+  <text x="642" y="58" text-anchor="middle" class="small">console.error (logging)</text>
+  <path class="arrow-accent" d="M442,70 V112"/>
+  <text x="452" y="96" class="accent">user clicks Try again</text>
+  <rect class="box" x="352" y="114" width="180" height="50" rx="8"/>
+  <text x="442" y="136" text-anchor="middle" class="mono">onReset()</text>
+  <text x="442" y="152" text-anchor="middle" class="small">TanStack reset</text>
+  <path class="arrow" d="M352,139 H300"/>
+  <rect class="box" x="120" y="114" width="178" height="50" rx="8"/>
+  <text x="209" y="136" text-anchor="middle" class="mono">setState</text>
+  <text x="209" y="152" text-anchor="middle" class="small">{ error: null }</text>
+  <path class="arrow-ok" d="M120,139 H60 V74"/>
+  <text x="380" y="196" text-anchor="middle" class="small">children render again; the query fetches again; success shows the card, failure loops back to the top row</text>
+</svg>
+<figcaption>Read the top row left to right (an error arrives), then follow the accent arrow (the user retries). <strong><code>reset</code> before <code>setState</code></strong> is what turns "show the cached error again" into "fetch again".</figcaption>
+</figure>
+
+<h2>Wrap the cards (App.tsx and SidePanel.tsx)</h2>
+<p>The full <code>App.tsx</code> is the step-25 file with an import and four wrappers. Here are the changed parts:</p>
+
+<pre data-lang="tsx" data-tag="excerpt (step 26, src/App.tsx lines 21 and 87–114)"><code>import WeatherErrorBoundary from "./components/WeatherErrorBoundary"
+...
+          &lt;div className="col-span-1 2xl:row-span-2 order-2"&gt;
+            &lt;WeatherErrorBoundary title="Current Weather"&gt;
+              &lt;Suspense fallback={&lt;CurrentSkeleton /&gt;}&gt;
+                {coords ? &lt;CurrentWeather coords={coords} /&gt; : &lt;CurrentSkeleton /&gt;}
+              &lt;/Suspense&gt;
+            &lt;/WeatherErrorBoundary&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 order-3 2xl:order-4 2xl:row-span-2"&gt;
+            &lt;WeatherErrorBoundary title="Daily Forecast"&gt;
+              &lt;Suspense fallback={&lt;DailySkeleton /&gt;}&gt;
+                {coords ? &lt;DailyForecast coords={coords} /&gt; : &lt;DailySkeleton /&gt;}
+              &lt;/Suspense&gt;
+            &lt;/WeatherErrorBoundary&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 md:col-span-2 2xl:row-span-1 order-4 2xl:order-3"&gt;
+            &lt;WeatherErrorBoundary title="Hourly Forecast (48 Hours)"&gt;
+              &lt;Suspense fallback={&lt;HourlySkeleton /&gt;}&gt;
+                {coords ? &lt;HourlyForecast coords={coords} /&gt; : &lt;HourlySkeleton /&gt;}
+              &lt;/Suspense&gt;
+            &lt;/WeatherErrorBoundary&gt;
+          &lt;/div&gt;
+          &lt;div className="col-span-1 md:col-span-2 2xl:row-span-1 order-5"&gt;
+            &lt;WeatherErrorBoundary title="Additional Weather Info"&gt;
+              &lt;Suspense fallback={&lt;AdditionalInfoSkeleton /&gt;}&gt;
+                {coords ? &lt;AdditionalInfo coords={coords} /&gt; : &lt;AdditionalInfoSkeleton /&gt;}
+              &lt;/Suspense&gt;
+            &lt;/WeatherErrorBoundary&gt;
+          &lt;/div&gt;</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>21</td><td><code>import WeatherErrorBoundary from "./components/WeatherErrorBoundary"</code></td><td>Default import of the new component.</td></tr>
+<tr><td>88</td><td><code>&lt;WeatherErrorBoundary title="Current Weather"&gt;</code></td><td>Wraps the Current Weather area. The title matches the real card's title, so the error card looks like it belongs there.</td></tr>
+<tr><td>89–91</td><td><code>&lt;Suspense fallback={&lt;CurrentSkeleton /&gt;}&gt;</code> … <code>&lt;/Suspense&gt;</code></td><td>Unchanged from step 25, now inside the boundary. Order matters: the boundary must be <em>above</em> the component that throws. <a class="term" href="glossary.html#suspense">Suspense</a> handles "still loading", the boundary handles "failed".</td></tr>
+<tr><td>92</td><td><code>&lt;/WeatherErrorBoundary&gt;</code></td><td>Closes the wrapper.</td></tr>
+<tr><td>95–99, 102–106, 109–113</td><td>(same for Daily, Hourly, Additional)</td><td>One boundary per card, each with its own title. Separate boundaries mean separate "Try again" buttons and, through <code>QueryErrorResetBoundary</code>, separate resets.</td></tr>
+</table></div>
+
+<p>In <code>SidePanel.tsx</code> the air pollution part gets the same treatment (lines 12 and 32–36 of the step-26 file):</p>
+
+<pre data-lang="tsx" data-tag="excerpt (step 26, src/components/SidePanel.tsx lines 12 and 32–36)"><code>import WeatherErrorBoundary from "./WeatherErrorBoundary"
+...
+      &lt;WeatherErrorBoundary title="Air Pollution"&gt;
+        &lt;Suspense fallback={&lt;SidePanelSkeleton /&gt;}&gt;
+          &lt;AirPollution {...props} /&gt;
+        &lt;/Suspense&gt;
+      &lt;/WeatherErrorBoundary&gt;</code></pre>
+
+<p>The close button (the chevron above it) stays outside the boundary, so on a phone the user can still close the panel if air pollution fails.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Five independent boundaries: Current Weather, Daily Forecast, Hourly Forecast and Additional Info share the One Call query; Air Pollution uses its own query">
+  <rect class="box-info" x="200" y="16" width="360" height="40" rx="8"/>
+  <text x="380" y="41" text-anchor="middle" class="mono">query ["weather", coords]  (One Call)</text>
+  <path class="arrow" d="M240,56 L90,96"/>
+  <path class="arrow" d="M330,56 L250,96"/>
+  <path class="arrow" d="M430,56 L410,96"/>
+  <path class="arrow" d="M520,56 L570,96"/>
+  <rect class="box-warn" x="16" y="98" width="150" height="50" rx="8"/>
+  <text x="91" y="120" text-anchor="middle" class="label">boundary</text>
+  <text x="91" y="138" text-anchor="middle" class="small">Current Weather</text>
+  <rect class="box-warn" x="176" y="98" width="150" height="50" rx="8"/>
+  <text x="251" y="120" text-anchor="middle" class="label">boundary</text>
+  <text x="251" y="138" text-anchor="middle" class="small">Daily Forecast</text>
+  <rect class="box-warn" x="336" y="98" width="150" height="50" rx="8"/>
+  <text x="411" y="120" text-anchor="middle" class="label">boundary</text>
+  <text x="411" y="138" text-anchor="middle" class="small">Hourly Forecast</text>
+  <rect class="box-warn" x="496" y="98" width="150" height="50" rx="8"/>
+  <text x="571" y="120" text-anchor="middle" class="label">boundary</text>
+  <text x="571" y="138" text-anchor="middle" class="small">Additional Info</text>
+  <rect class="box-ok" x="656" y="98" width="88" height="50" rx="8"/>
+  <text x="700" y="120" text-anchor="middle" class="label">boundary</text>
+  <text x="700" y="138" text-anchor="middle" class="small">Air Pollution</text>
+  <rect class="box-ok" x="620" y="16" width="124" height="40" rx="8"/>
+  <text x="682" y="41" text-anchor="middle" class="mono">["pollution", …]</text>
+  <path class="arrow-ok" d="M690,56 V96"/>
+  <text x="380" y="184" text-anchor="middle" class="small">one failing request reaches only the boundaries of the cards that use it</text>
+</svg>
+<figcaption>The four main cards share one cached One Call query (same <a class="term" href="glossary.html#query-key">query key</a>), so when it fails all four show the error. <strong>Air Pollution has its own query, so it keeps working</strong>, exactly what the test showed.</figcaption>
+</figure>
+
+<h2>Fewer retries, longer freshness (main.tsx)</h2>
+<p>By default TanStack Query retries a failed query <strong>3 times</strong>, waiting longer each time (1 s, 2 s, 4 s…). That is great for a shaky mobile connection, but useless for a wrong key or a missing subscription: those won't fix themselves in a few seconds. With the repo code, the invalid-key test recorded 28 requests in 20 seconds. Each retry also keeps the user looking at a skeleton for longer before the error appears.</p>
+
+<pre data-file="src/main.tsx" data-lang="tsx" data-tag="after (step 26)"><code>import { StrictMode } from "react"
+import { createRoot } from "react-dom/client"
+import "./index.css"
+import App from "./App.tsx"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import ThemeProvider from "./components/ThemeProvider.tsx"
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1, // one quick retry instead of three: a wrong key or missing subscription won't fix itself
+      staleTime: 5 * 60 * 1000, // weather data stays fresh for 5 minutes: switching back to a city reuses it
+    },
+  },
+})
+
+createRoot(document.getElementById("root")!).render(
+  &lt;StrictMode&gt;
+    &lt;QueryClientProvider client={queryClient}&gt;
+      &lt;ThemeProvider&gt;
+        &lt;App /&gt;
+      &lt;/ThemeProvider&gt;
+    &lt;/QueryClientProvider&gt;
+  &lt;/StrictMode&gt;
+)</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–6</td><td><code>import ...</code></td><td>Unchanged from step 24: React's <a class="term" href="glossary.html#strict-mode">StrictMode</a>, the root renderer, the CSS, <code>App</code>, TanStack's client and provider, and the theme <a class="term" href="glossary.html#provider">provider</a>.</td></tr>
+<tr><td>8</td><td><code>const queryClient = new QueryClient({</code></td><td>Creates the one cache for the whole app, now with options.</td></tr>
+<tr><td>9–10</td><td><code>defaultOptions: {</code><br><code>  queries: {</code></td><td>Defaults for every query in the app. Any single <code>useQuery</code> can still override them.</td></tr>
+<tr><td>11</td><td><code>retry: 1, // one quick retry ...</code></td><td>Try once more after a failure, then give up and report the error. One retry still smooths over a single dropped request. See <a class="term" href="glossary.html#retry">retry</a>.</td></tr>
+<tr><td>12</td><td><code>staleTime: 5 * 60 * 1000, // ...</code></td><td>Data counts as fresh for 5 minutes (the value is in milliseconds: 5 × 60 × 1000 = 300 000). While fresh, switching back to a city you already viewed, or returning to the browser tab, uses the cached data without a new request. The default <a class="term" href="glossary.html#stale-time">stale time</a> is 0, which refetches on every such occasion. Weather doesn't change every second, so this saves API calls.</td></tr>
+<tr><td>17–25</td><td><code>createRoot(...).render( ... )</code></td><td>Unchanged: <code>QueryClientProvider</code> makes this client available to every component.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Retry timeline: default retry 3 sends 4 requests with growing waits; retry 1 sends 2 requests and shows the error sooner">
+  <text x="16" y="30" class="label">default (retry: 3)</text>
+  <path class="line" d="M150,26 H740"/>
+  <circle class="dot-bad" cx="160" cy="26" r="7"/>
+  <circle class="dot-bad" cx="220" cy="26" r="7"/>
+  <circle class="dot-bad" cx="340" cy="26" r="7"/>
+  <circle class="dot-bad" cx="580" cy="26" r="7"/>
+  <text x="190" y="50" text-anchor="middle" class="small">wait 1 s</text>
+  <text x="280" y="50" text-anchor="middle" class="small">wait 2 s</text>
+  <text x="460" y="50" text-anchor="middle" class="small">wait 4 s</text>
+  <text x="660" y="50" text-anchor="middle" class="bad">error (blank page before step 26)</text>
+  <text x="16" y="100" class="label">step 26 (retry: 1)</text>
+  <path class="line" d="M150,96 H740"/>
+  <circle class="dot-bad" cx="160" cy="96" r="7"/>
+  <circle class="dot-bad" cx="220" cy="96" r="7"/>
+  <text x="190" y="120" text-anchor="middle" class="small">wait 1 s</text>
+  <text x="330" y="120" text-anchor="middle" class="ok">error card + Try again</text>
+  <text x="380" y="156" text-anchor="middle" class="small">each dot = one request for the same query; waits follow TanStack's default backoff (illustrative scale)</text>
+</svg>
+<figcaption>The test recorded 4 One Call requests before step 26 (1 + 3 retries) and 2 after it (1 + 1 retry). <strong>Fewer retries means a faster, clearer answer when the problem is permanent.</strong></figcaption>
+</figure>
+
+<h2>What the test showed</h2>
+<p>With the step-26 code and One Call answering <code>401</code>, the recorded requests were: geocode, One Call (401), air pollution, One Call again (401, the single retry). No page error, nothing blank:</p>
+
+<figure class="shot"><img src="img/fixed-onecall-subscription-error.webp" alt="Dashboard in dark mode: the map and the Air Pollution side panel work; the Current Weather, Hourly Forecast, Daily Forecast and Additional Weather Info cards each show the red message OpenWeather request failed (401): Please note that using One Call 3.0 requires a separate subscription to the One Call by Call plan, and a Try again button." width="1200" height="840" loading="lazy"><figcaption>One Call failing, everything else working. Each card shows the readable message and a "Try again" button; the air pollution panel shows its data. (Test data, not real weather; base map tiles blocked in the test.)</figcaption></figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Wireframe of the dashboard with One Call failing: map at the top, four cards each with a red message line and a Try again button, side panel with air pollution data on the right">
+  <rect class="ui-window" x="16" y="12" width="728" height="226" rx="8"/>
+  <rect class="ui-field" x="32" y="24" width="110" height="20" rx="4"/>
+  <text x="87" y="38" text-anchor="middle" class="small">Tokyo</text>
+  <rect class="ui-field" x="152" y="24" width="110" height="20" rx="4"/>
+  <text x="207" y="38" text-anchor="middle" class="small">clouds</text>
+  <rect class="ui-chrome" x="32" y="54" width="520" height="70" rx="6"/>
+  <text x="292" y="94" text-anchor="middle" class="small">map + marker</text>
+  <rect class="ui-field" x="32" y="132" width="120" height="96" rx="6"/>
+  <text x="40" y="150" class="label">Current</text>
+  <rect class="dot-bad" x="40" y="160" width="100" height="6" rx="3"/>
+  <rect class="dot-bad" x="40" y="172" width="80" height="6" rx="3"/>
+  <rect class="ui-button-ghost" x="40" y="190" width="68" height="22" rx="4"/>
+  <text x="74" y="205" text-anchor="middle" class="small">Try again</text>
+  <rect class="ui-field" x="162" y="132" width="250" height="44" rx="6"/>
+  <text x="170" y="148" class="label">Hourly</text>
+  <rect class="dot-bad" x="170" y="156" width="150" height="6" rx="3"/>
+  <rect class="ui-button-ghost" x="334" y="146" width="68" height="22" rx="4"/>
+  <text x="368" y="161" text-anchor="middle" class="small">Try again</text>
+  <rect class="ui-field" x="162" y="184" width="250" height="44" rx="6"/>
+  <text x="170" y="200" class="label">Additional</text>
+  <rect class="dot-bad" x="170" y="208" width="150" height="6" rx="3"/>
+  <rect class="ui-button-ghost" x="334" y="198" width="68" height="22" rx="4"/>
+  <text x="368" y="213" text-anchor="middle" class="small">Try again</text>
+  <rect class="ui-field" x="422" y="132" width="130" height="96" rx="6"/>
+  <text x="430" y="150" class="label">Daily</text>
+  <rect class="dot-bad" x="430" y="160" width="110" height="6" rx="3"/>
+  <rect class="dot-bad" x="430" y="172" width="80" height="6" rx="3"/>
+  <rect class="ui-button-ghost" x="430" y="190" width="68" height="22" rx="4"/>
+  <text x="464" y="205" text-anchor="middle" class="small">Try again</text>
+  <rect class="ui-chrome" x="566" y="12" width="178" height="226" rx="0"/>
+  <text x="580" y="36" class="label">Air Pollution</text>
+  <text x="580" y="62" class="title">2</text>
+  <rect class="ui-field" x="580" y="76" width="150" height="34" rx="6"/>
+  <rect class="ui-skeleton" x="590" y="90" width="100" height="6" rx="3"/>
+  <rect class="ui-field" x="580" y="118" width="150" height="34" rx="6"/>
+  <rect class="ui-skeleton" x="590" y="132" width="100" height="6" rx="3"/>
+  <rect class="ui-field" x="580" y="160" width="150" height="34" rx="6"/>
+  <rect class="ui-skeleton" x="590" y="174" width="100" height="6" rx="3"/>
+</svg>
+<figcaption>Illustration (simplified) of the screenshot above. Red bars = error message lines. <strong>The page keeps its layout; only the failed parts change.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><p><strong>What you should see</strong></p>
+<ul>
+<li><code>npm run build</code> succeeds; <code>npm run lint</code> still reports the one <code>ThemeProvider.tsx</code> error (fixed in step 27).</li>
+<li>With a working key and One Call subscription: no visible change. Boundaries are invisible when nothing fails.</li>
+<li>Without the One Call subscription (or with the test's mocked 401): four cards with the red message and "Try again", air pollution still showing, and in DevTools → Network exactly two <code>onecall</code> requests (verified).</li>
+<li>In the console: one <code>Current Weather failed …</code> style log per boundary, from <code>componentDidCatch</code>.</li>
+</ul></div>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Boundary inside the component that throws</strong>: a boundary catches errors from its <em>children</em> only. Wrapping JSX <em>inside</em> <code>CurrentWeather</code> can't catch the error from that same component's <code>useSuspenseQuery</code>. Wrap it from the outside, in <code>App.tsx</code>.</li>
+<li><strong>"Try again" shows the error again instantly, no new request</strong>: <code>reset()</code> wasn't called (for example the class was used without <code>QueryErrorResetBoundary</code>), so the cached error is re-thrown.</li>
+<li><strong>Forgetting <code>static</code></strong> on <code>getDerivedStateFromError</code>: React won't find it and the boundary won't catch anything.</li>
+<li><strong>Expecting it to catch a failing <code>onClick</code></strong>: boundaries only catch rendering errors. Use <code>try</code>/<code>catch</code> in event handlers.</li>
+<li><strong>One boundary around the whole app only</strong>: it prevents the blank page, but then one failed request replaces the entire dashboard. Smaller boundaries keep the rest usable.</li>
+<li><strong>Setting <code>retry: 0</code></strong>: possible, but then a single dropped connection shows an error immediately. One retry is a good middle ground.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li><code>useSuspenseQuery</code> throws failed queries into the tree; without a boundary React removes the whole app (verified blank page).</li>
+<li>Error boundaries are class components with <code>getDerivedStateFromError</code> (state) and <code>componentDidCatch</code> (logging).</li>
+<li><code>QueryErrorResetBoundary</code>'s <code>reset</code> makes "Try again" fetch again instead of re-throwing the cached error.</li>
+<li>One boundary per card: when One Call fails, the map and air pollution keep working.</li>
+<li><code>retry: 1</code> and <code>staleTime: 5 min</code> give faster errors and fewer repeat requests.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="25-fix-the-bugs.html"><small>← Previous · Step 25</small>Fix the Bugs Found While Testing</a>
+<a class="next" href="27-remember-theme.html"><small>Next · Step 27 →</small>Remember the Theme &amp; Match the Map</a>
+</nav>
+</main>
+</body>
+</html>

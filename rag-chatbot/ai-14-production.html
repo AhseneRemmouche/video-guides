@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 14 · Running AI in Production</title>
+<meta name="description" content="Cost, latency, rate limits, caching, observability and deployment.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 14/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">AI &amp; Agents Handbook · Chapter 14 of 16</div>
+  <h1>Running AI in Production</h1>
+  <p class="lead">Cost, latency, rate limits, caching, observability and deployment.</p>
+</section>
+<p>On your laptop the chatbot works for one person: you. In production it must work for many people at once, every day, at a cost the company accepts, without surprising slowdowns, and in a way you can debug when someone says "it gave me a weird answer yesterday". This chapter covers what changes when an AI app goes live.</p>
+
+<p>You will learn:</p>
+<ul>
+  <li>where the <strong>cost</strong> of this app comes from, how to measure it with the AI SDK's <code>usage</code> data, and how to reduce it;</li>
+  <li>what makes AI responses feel slow (<strong>latency</strong>) and how to speed them up;</li>
+  <li>how to stay <strong>reliable</strong> when the provider rate-limits you, times out or fails;</li>
+  <li>which kinds of <strong>caching</strong> help;</li>
+  <li>how to see what the app is doing (<strong>observability</strong>): logging, tracing with OpenTelemetry, and LLM-specific tools;</li>
+  <li>how to deploy on Vercel with Neon, and a go-live checklist.</li>
+</ul>
+
+<div class="callout"><p><strong>Why this matters for your chatbot:</strong> the agent from <a href="22-build-an-agent.html">step 22</a> can make up to 6 model calls for one question, each re-sending the whole conversation. Uploads call a vision model and an embedding model. Without measurement you won't know what a question costs, why it took 12 seconds, or why it failed for one user at 9:02 this morning.</p></div>
+
+<h2>Cost: where the money goes</h2>
+<p>AI providers charge mainly per <a class="term" href="glossary.html#token">token</a>, a piece of a word (very roughly 4 characters of English text). Prices are listed per million tokens, differ by model, and change often, so this chapter gives no prices: check your provider's pricing page. What matters is understanding <em>which</em> tokens you pay for.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Usage</th><th>How it is billed (typically)</th><th>Where in this app</th></tr>
+<tr><td>Input tokens</td><td>Everything you send: system prompt, tool definitions, conversation history, tool results, images</td><td>Every chat step (<a href="05-chat-route-handler.html">step 5</a>, <a href="22-build-an-agent.html">step 22</a>)</td></tr>
+<tr><td>Output tokens</td><td>Everything the model generates, usually priced higher than input</td><td>Answers and tool-call arguments</td></tr>
+<tr><td>Reasoning tokens</td><td>Hidden "thinking" tokens of <a class="term" href="glossary.html#reasoning-model">reasoning models</a>, billed as output even though you don't see them</td><td><code>gpt-5-mini</code> in the chat route is a reasoning model</td></tr>
+<tr><td>Embeddings</td><td>Input tokens only; embedding models are much cheaper per token than chat models</td><td>Every upload (<a href="10-embedding-utility.html">step 10</a>, <a href="12-server-action.html">step 12</a>) and every search query (<a href="14-semantic-search.html">step 14</a>)</td></tr>
+<tr><td>Vision</td><td>Images are converted to input tokens; bigger and more detailed images cost more</td><td>Images in chat (<a href="18-images-in-chat.html">step 18</a>), OCR of uploads (<a href="21-images-as-knowledge.html">step 21</a>)</td></tr>
+<tr><td>Speech to text</td><td>Billed by audio length or audio tokens, depending on the model</td><td><a href="19-speech-to-text.html">step 19</a></td></tr>
+<tr><td>Text to speech</td><td>Billed by input text and/or generated audio, depending on the model</td><td><a href="20-text-to-speech.html">step 20</a></td></tr>
+</table></div>
+
+<h3>The agent multiplies input tokens</h3>
+<p>This is the most important cost insight for agents. A model has no memory between calls, so <strong>every step re-sends everything so far</strong>. A rough, illustrative estimate for one question to the step 22 agent (token counts are rules of thumb, not measurements):</p>
+<ul>
+  <li>System prompt + three tool definitions: roughly 500 tokens.</li>
+  <li>The question: about 20 tokens.</li>
+  <li>Three 900-character chunks from the search tool: about 3 × 225 ≈ 700 tokens.</li>
+</ul>
+<p>Step 1 (decide to search) sends about 520 input tokens. Step 2 (answer) sends those 520 again plus the tool call and the 700 tokens of results: about 1,250. If the agent searches twice and calls the calculator, there are 4 steps, and the input grows each time. Ten turns into a conversation, the history alone can be thousands of tokens per step. Long conversations and many steps get expensive quickly.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 248" role="img" aria-label="Stacked bars of input tokens per agent step: step 1 is about 520 tokens (system prompt and tool definitions plus the question); step 2 is about 1,250 (the same plus the tool call and three search results); steps 3 and 4 grow further as more tool calls and results are added.">
+  <text x="10" y="22" class="title">Input tokens sent on each step of one question</text>
+  <text x="10" y="59" class="label">Step 1</text>
+  <rect class="box" x="90" y="40" width="125" height="28" rx="3"/><rect class="box-warn" x="215" y="40" width="5" height="28"/>
+  <text x="230" y="59" class="small">≈ 520 tokens: decide to search</text>
+  <text x="10" y="103" class="label">Step 2</text>
+  <rect class="box" x="90" y="84" width="125" height="28" rx="3"/><rect class="box-warn" x="215" y="84" width="5" height="28"/><rect class="box-info" x="220" y="84" width="8" height="28"/><rect class="box-ok" x="228" y="84" width="175" height="28" rx="3"/>
+  <text x="413" y="103" class="small">≈ 1,250 tokens: answer (or search again)</text>
+  <text x="10" y="147" class="label">Step 3</text>
+  <rect class="box" x="90" y="128" width="125" height="28" rx="3"/><rect class="box-warn" x="215" y="128" width="5" height="28"/><rect class="box-info" x="220" y="128" width="8" height="28"/><rect class="box-ok" x="228" y="128" width="175" height="28" rx="3"/><rect class="box-info" x="403" y="128" width="8" height="28"/><rect class="box-ok dashed" x="411" y="128" width="175" height="28" rx="3"/>
+  <text x="596" y="147" class="small">+ second search's results</text>
+  <text x="10" y="191" class="label">Step 4</text>
+  <rect class="box" x="90" y="172" width="125" height="28" rx="3"/><rect class="box-warn" x="215" y="172" width="5" height="28"/><rect class="box-info" x="220" y="172" width="8" height="28"/><rect class="box-ok" x="228" y="172" width="175" height="28" rx="3"/><rect class="box-info" x="403" y="172" width="8" height="28"/><rect class="box-ok dashed" x="411" y="172" width="175" height="28" rx="3"/><rect class="box-info" x="586" y="172" width="12" height="28"/>
+  <text x="606" y="191" class="small">+ calculator call</text>
+  <rect class="box" x="90" y="222" width="12" height="12" rx="2"/><text x="106" y="232" class="small">system prompt + 3 tool definitions (≈500)</text>
+  <rect class="box-warn" x="365" y="222" width="12" height="12" rx="2"/><text x="381" y="232" class="small">question (≈20)</text>
+  <rect class="box-info" x="480" y="222" width="12" height="12" rx="2"/><text x="496" y="232" class="small">tool calls</text>
+  <rect class="box-ok" x="565" y="222" width="12" height="12" rx="2"/><text x="581" y="232" class="small">tool results (3 chunks ≈700)</text>
+</svg>
+<figcaption>Illustrative, drawn to scale from the rough token counts above (not measurements); steps 3 and 4 show the "searches twice and calls the calculator" case. Each bar <strong>repeats everything from the bar before</strong> and adds the newest tool call and result, which is why agent questions cost more than plain chat.</figcaption>
+</figure>
+
+
+<h3>Measure it: the <code>usage</code> data</h3>
+<p>You don't need to estimate by hand. Every AI SDK call reports token usage: <code>generateText</code> returns <code>usage</code> (last step) and <code>totalUsage</code> (all steps); <code>streamText</code> gives the same in its <code>onFinish</code> callback; <code>embed</code> and <code>embedMany</code> return <code>usage.tokens</code>.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>const result = streamText({
+  model: openai("gpt-5-mini"),
+  messages: convertToModelMessages(messages),
+  tools,
+  system: SYSTEM_PROMPT,
+  stopWhen: stepCountIs(6),
+  onFinish: ({ totalUsage, steps }) =&gt; {
+    console.log("[usage]", {
+      steps: steps.length,
+      inputTokens: totalUsage.inputTokens,
+      outputTokens: totalUsage.outputTokens,
+      reasoningTokens: totalUsage.reasoningTokens,
+      cachedInputTokens: totalUsage.cachedInputTokens,
+    });
+  },
+});</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–6</td><td><code>const result = streamText({ … stopWhen: stepCountIs(6),</code></td><td>The same call as in step 22's <code>route.ts</code>, shortened.</td></tr>
+<tr><td>7</td><td><code>onFinish: ({ totalUsage, steps }) =&gt; {</code></td><td>A callback the AI SDK runs once, after the whole response (all steps) has finished streaming. <code>totalUsage</code> is the sum over all steps; <code>steps</code> is the list of steps, so <code>steps.length</code> tells you how many model calls the question needed.</td></tr>
+<tr><td>8–14</td><td><code>console.log("[usage]", { … })</code></td><td>Logs the numbers you need for cost: input and output tokens, plus reasoning tokens (billed as output) and cached input tokens (often billed at a discount). The last two are optional fields and may be <code>undefined</code> if the provider does not report them.</td></tr>
+<tr><td>15–16</td><td><code>}, });</code></td><td>Close the callback and the options.</td></tr>
+</table></div>
+<p>Multiply the totals by your model's current per-token prices to get the cost of each question. In production, store these numbers (with user id, model and timestamp) in a table or an observability tool, so you can answer "what does an average question cost?" and "which user or feature is the most expensive?". Also set a monthly budget and alerts in the provider's dashboard.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Illustrative split of one chat question's bill: a large share for input tokens across all steps, a large share for output and reasoning tokens, and a tiny sliver for the query embedding.">
+  <text x="10" y="22" class="title">Where one chat question's cost goes (illustrative proportions)</text>
+  <rect class="box" x="10" y="38" width="400" height="48" rx="4"/>
+  <text x="210" y="59" text-anchor="middle">Input tokens, all steps</text>
+  <text x="210" y="76" text-anchor="middle" class="small">system prompt, tools, history, tool results</text>
+  <rect class="box-warn" x="410" y="38" width="318" height="48" rx="4"/>
+  <text x="569" y="59" text-anchor="middle">Output + reasoning tokens</text>
+  <text x="569" y="76" text-anchor="middle" class="small">fewer tokens, but a higher price each</text>
+  <rect class="box-ok" x="730" y="38" width="20" height="48" rx="2"/>
+  <path class="line" d="M740,86 V106 H700"/>
+  <text x="694" y="110" text-anchor="end" class="small">query embedding: a tiny sliver (cheap model)</text>
+  <text x="10" y="140" class="small">More steps, longer history, more chunks → the input share grows.</text>
+  <text x="10" y="160" class="small">Long answers or a lot of hidden reasoning → the output share grows.</text>
+</svg>
+<figcaption>The proportions are <strong>illustrative only</strong>, not measured and not to scale: the real split depends on your model's prices, answer length and number of steps, and can easily flip. Measure it with <code>totalUsage</code> as shown above.</figcaption>
+</figure>
+
+
+<h3>Reducing cost</h3>
+<ul>
+  <li><strong>Use the smallest model that passes your evals.</strong> Many tasks (classification, OCR of clean text, short answers) don't need the largest model. Prove it with the test set from <a href="ai-12-evaluation.html">Evaluating AI Applications</a> before switching.</li>
+  <li><strong>Shorter prompts.</strong> Every word in the system prompt is paid for on every step of every question.</li>
+  <li><strong>Fewer, better chunks.</strong> The search tool returns 3 chunks (<code>searchDocuments(query, 3, 0.5)</code>). Returning 10 would roughly triple the tool-result tokens. A higher threshold drops weak matches.</li>
+  <li><strong>Trim history.</strong> Send only the last N messages, or summarise older ones, instead of the whole conversation.</li>
+  <li><strong>Limit output</strong> with <code>maxOutputTokens</code>, and keep the "give concise answers" instruction.</li>
+  <li><strong>Limit steps.</strong> <code>stepCountIs(6)</code> caps the agent loop; look at how many steps typical questions need and keep the cap close to that.</li>
+  <li><strong>Batch embeddings.</strong> <a href="10-embedding-utility.html">Step 10</a> uses <code>embedMany</code> to embed all chunks of a document in one request instead of one call per chunk. The token price is the same, but you make far fewer requests, which is faster and less likely to hit rate limits. Some providers also offer discounted batch APIs for work that does not need an immediate answer.</li>
+  <li><strong>Cache</strong> (see below).</li>
+  <li><strong>Resize images</strong> before sending them to a vision model, when full resolution is not needed.</li>
+</ul>
+
+<h2>Latency: making it feel fast</h2>
+<p><a class="term" href="glossary.html#latency">Latency</a> is how long the user waits. For chat, two numbers matter:</p>
+<ul>
+  <li><strong>Time to first token (TTFT)</strong>: from pressing Send until the first words appear. This is what makes an app <em>feel</em> fast or slow.</li>
+  <li><strong>Total time</strong>: until the answer is complete.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Timeline of one agent question: auth, model step 1, search, model step 2 streaming">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <path class="arrow" d="M10,150 H750"/>
+  <text x="740" y="170" text-anchor="end" class="small">time</text>
+  <rect class="box2" x="10" y="60" width="60" height="50" rx="6"/><text x="40" y="82" text-anchor="middle" class="small">send</text><text x="40" y="98" text-anchor="middle" class="small">+ auth</text>
+  <rect class="box" x="75" y="60" width="185" height="50" rx="6"/><text x="167" y="82" text-anchor="middle">Step 1 · model</text><text x="167" y="98" text-anchor="middle" class="small">decides to call search</text>
+  <rect class="box2" x="265" y="60" width="150" height="50" rx="6"/><text x="340" y="82" text-anchor="middle">Search tool</text><text x="340" y="98" text-anchor="middle" class="small">embed query + SQL</text>
+  <rect class="box" x="420" y="60" width="330" height="50" rx="6"/><text x="585" y="82" text-anchor="middle">Step 2 · model streams the answer</text><text x="585" y="98" text-anchor="middle" class="small">words appear as they are generated</text>
+  <path class="arrow" d="M440,40 V58"/>
+  <text x="440" y="32" text-anchor="middle" class="small">first answer words (TTFT)</text>
+  <text x="167" y="135" text-anchor="middle" class="small">reasoning + network</text>
+  <text x="340" y="135" text-anchor="middle" class="small">OpenAI + Neon round trips</text>
+</svg>
+<figcaption>Illustrative timeline (not to scale). For an agent, the answer can only start after the tool steps finish, so each step adds to the wait. The step 23 UI shows tool calls as they happen, so the user sees progress before the first answer words.</figcaption>
+</figure>
+
+<p>Ways to reduce latency:</p>
+<ul>
+  <li><strong><a class="term" href="glossary.html#streaming">Streaming</a>.</strong> Already done since <a href="05-chat-route-handler.html">step 5</a>: <code>streamText</code> + <code>toUIMessageStreamResponse()</code> sends words as they are generated, so users start reading after the first token instead of waiting for the whole answer.</li>
+  <li><strong>Show progress.</strong> <a href="23-show-agent-steps.html">Step 23</a> renders each tool call ("Searching the knowledge base…") so the wait before the answer feels shorter.</li>
+  <li><strong>Fewer steps.</strong> Each agent step is a full model round trip. Clear tool descriptions and a good system prompt avoid unnecessary searches.</li>
+  <li><strong>Parallel tool calls.</strong> A model can request several tool calls in one step (for example, two searches with different wording); the AI SDK executes them together rather than one after another, saving a round trip.</li>
+  <li><strong>Smaller or faster models.</strong> Smaller models usually respond faster. Reasoning models "think" before answering, which improves hard questions but adds delay; some offer a setting to reduce reasoning effort (for OpenAI via <code>providerOptions</code>; check the provider docs).</li>
+  <li><strong>Shorter input.</strong> Fewer input tokens means less to process before the first token.</li>
+  <li><strong>Region choice.</strong> Put your server functions and your Neon database in the same (or nearby) region. The search tool makes database calls on every question; a server in Europe talking to a database in the US adds a long round trip each time.</li>
+  <li><strong>Caching</strong>, below, skips work entirely.</li>
+</ul>
+
+<h2>Reliability: when things go wrong</h2>
+<p>In production, external calls fail: the provider is overloaded, your account hits its limits, the network blips, a request hangs. Plan for each case.</p>
+
+<h3>Rate limits and 429 errors</h3>
+<p>Providers limit how many requests and tokens you can use per minute (a <a class="term" href="glossary.html#rate-limit">rate limit</a>), with limits that depend on your account tier. When you exceed them, the API answers with HTTP <a class="term" href="glossary.html#status">status</a> <strong>429 Too Many Requests</strong>. Busy apps hit this at peak times, and big uploads can hit token-per-minute limits on embeddings.</p>
+
+<h3>Retries with backoff</h3>
+<p>The AI SDK retries failed calls automatically. The <code>maxRetries</code> setting defaults to <strong>2</strong> (so up to 3 attempts in total), with <strong>exponential backoff</strong>: it waits a bit before the first retry and longer before each next one, and respects the provider's "retry after" hints when present. Retrying immediately would just hit the same limit again.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 186" role="img" aria-label="Retry timeline with maxRetries 2: attempt 1 gets a 429 error, the SDK waits, attempt 2 gets a 429, it waits longer, attempt 3 succeeds.">
+  <text x="380" y="26" text-anchor="middle" class="label">maxRetries: 2 (the default) = up to 3 attempts in total</text>
+  <rect class="box" x="10" y="52" width="110" height="44" rx="8"/><text x="65" y="72" text-anchor="middle">Attempt 1</text><text x="65" y="88" text-anchor="middle" class="small">first call</text>
+  <rect class="box-bad" x="125" y="58" width="60" height="32" rx="6"/><text x="155" y="79" text-anchor="middle" class="bad">429</text>
+  <rect class="box2 dashed" x="190" y="58" width="90" height="32" rx="6"/><text x="235" y="79" text-anchor="middle" class="small">wait</text>
+  <rect class="box" x="285" y="52" width="110" height="44" rx="8"/><text x="340" y="72" text-anchor="middle">Attempt 2</text><text x="340" y="88" text-anchor="middle" class="small">retry 1</text>
+  <rect class="box-bad" x="400" y="58" width="60" height="32" rx="6"/><text x="430" y="79" text-anchor="middle" class="bad">429</text>
+  <rect class="box2 dashed" x="465" y="58" width="160" height="32" rx="6"/><text x="545" y="79" text-anchor="middle" class="small">wait longer</text>
+  <rect class="box-ok" x="630" y="52" width="120" height="44" rx="8"/><text x="690" y="72" text-anchor="middle">Attempt 3</text><text x="690" y="88" text-anchor="middle" class="small">retry 2 · success</text>
+  <text x="235" y="118" text-anchor="middle" class="small">backoff</text>
+  <text x="545" y="118" text-anchor="middle" class="small">longer backoff</text>
+  <path class="arrow" d="M10,140 H748"/>
+  <text x="745" y="160" text-anchor="end" class="small">time</text>
+  <text x="10" y="176" class="small">If all 3 attempts fail, the error reaches your code (and the user sees your error UI).</text>
+</svg>
+<figcaption>Illustrative timeline, not to scale. Each failed attempt waits <strong>longer</strong> than the one before (exponential backoff), giving the provider's rate limit time to reset; a "retry after" hint from the provider is respected when present.</figcaption>
+</figure>
+
+<pre data-lang="ts" data-tag="illustrative"><code>const { embeddings } = await embedMany({
+  model: openai.textEmbeddingModel("text-embedding-3-small"),
+  values: inputs,
+  maxRetries: 5, // uploads are not interactive: worth waiting longer
+});</code></pre>
+<p>For interactive chat, keep retries low (the user is waiting); for background work such as indexing documents, allow more.</p>
+
+<h3>Timeouts and cancellation</h3>
+<p>A call that hangs is worse than one that fails. The AI SDK functions accept an <code>abortSignal</code>, a standard JavaScript way to cancel work:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>// Cancel if the user closes the tab or stops the request
+const result = streamText({
+  // …model, messages, tools, system, stopWhen…
+  abortSignal: req.signal,
+});
+
+// Or give up after 60 seconds (e.g. for OCR during upload)
+const { text } = await generateText({
+  // …model, messages…
+  abortSignal: AbortSignal.timeout(60_000),
+});</code></pre>
+<p><code>req.signal</code> is the request's own abort signal: when the browser disconnects, generation stops, so you stop paying for tokens nobody will read. <code>AbortSignal.timeout(ms)</code> is built into Node.js and modern browsers and creates a signal that fires after the given number of milliseconds.</p>
+
+<h3>Fallbacks</h3>
+<p>If a model or provider is down, you can fall back to another one. A simple pattern for non-streaming calls:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>async function extractTextWithFallback(messages: ModelMessage[]) {
+  try {
+    return await generateText({ model: openai("gpt-4.1-mini"), messages });
+  } catch (error) {
+    console.error("Primary model failed, trying fallback", error);
+    return await generateText({ model: openai("gpt-4.1"), messages });
+  }
+}</code></pre>
+<p>Because the AI SDK uses one interface for all <a class="term" href="glossary.html#provider">providers</a>, the fallback could also be a different provider's model. Two cautions: run your evals on the fallback model too (it may behave differently), and remember that with <code>streamText</code> errors can happen <em>after</em> streaming has started, so a simple try/catch around the call does not catch them; fallbacks for streams need more care.</p>
+
+<h3>Graceful error UI</h3>
+<ul>
+  <li><strong>Hide internals.</strong> By default, <code>toUIMessageStreamResponse()</code> sends the browser a generic "An error occurred." message instead of the real error, so stack traces and provider details don't leak. You can pass an <code>onError</code> function to map known errors to friendly text, and log the real error on the server.</li>
+  <li><strong>Offer a retry.</strong> <code>useChat</code> exposes an <code>error</code> value and a <code>regenerate()</code> function. Show "Something went wrong. Try again" with a button that calls <code>regenerate()</code>.</li>
+  <li><strong>Return clear statuses.</strong> The routes in this project already return <code>400</code> for bad input and <code>500</code>/<code>502</code> for failures (for example the transcription route in <a href="19-speech-to-text.html">step 19</a>); keep messages short and non-technical for users.</li>
+</ul>
+
+<h2>Caching</h2>
+<p><a class="term" href="glossary.html#caching">Caching</a> means saving a result so you can reuse it instead of computing it again. Three kinds are useful here:</p>
+<div class="table-wrap"><table>
+<tr><th>Cache</th><th>What is reused</th><th>Watch out for</th></tr>
+<tr><td>Response cache</td><td>The full answer to a repeated question ("How many vacation days do I get?" is asked by everyone)</td><td>Only for questions that don't depend on the user or the date; clear it when documents change; exact-text matching misses rephrasings</td></tr>
+<tr><td>Embedding cache</td><td>The embedding of a text you embedded before (same text + same model = same vector)</td><td>Store the model name with the vector; switching models invalidates everything</td></tr>
+<tr><td>Provider prompt caching</td><td>The provider reuses processing of a repeated prompt <em>prefix</em> (system prompt, tool definitions)</td><td>Works best when the unchanging parts come first; rules differ by provider</td></tr>
+</table></div>
+<p><strong>Response caching</strong> is the biggest saving but the riskiest: a cached answer can be stale or wrong for a different user. A safe version caches only the first message of a conversation, keyed by the normalised question text plus a "knowledge base version" that you bump on every upload.</p>
+<p><strong>Embedding caching</strong> is simple and safe. The question "how many vacation days do I get" produces the same embedding every time, so you can store <code>question text → vector</code> in a table or key-value store and skip the API call when it is already there.</p>
+<p><strong>Provider prompt caching</strong> happens on the provider's side. Some providers apply it automatically for long prompts with a repeated beginning (OpenAI does this, for prompts above a minimum length); others require you to mark which parts to cache (Anthropic, for example, uses explicit cache markers). Cached input tokens are usually cheaper and faster. In the AI SDK, <code>usage.cachedInputTokens</code> shows how many input tokens were served from the cache. To benefit, keep the system prompt and tool definitions stable and at the start of every request, as this project already does.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 312" role="img" aria-label="A question passes three caches in order: a response cache (a hit returns a saved answer), an embedding cache (a hit reuses a saved vector and skips the embedding call), then search and the model call, where the provider's prompt cache reuses the unchanging start of the prompt: system prompt and tool definitions.">
+  <rect class="box2" x="10" y="40" width="100" height="50" rx="8"/><text x="60" y="70" text-anchor="middle">Question</text>
+  <path class="arrow" d="M110,65 H138"/>
+  <rect class="box-info" x="140" y="40" width="150" height="50" rx="8"/><text x="215" y="61" text-anchor="middle">1 Response cache</text><text x="215" y="78" text-anchor="middle" class="small">same question before?</text>
+  <path class="arrow" d="M290,65 H318"/><text x="304" y="34" text-anchor="middle" class="small">miss</text>
+  <rect class="box-info" x="320" y="40" width="150" height="50" rx="8"/><text x="395" y="61" text-anchor="middle">2 Embedding cache</text><text x="395" y="78" text-anchor="middle" class="small">same text embedded?</text>
+  <path class="arrow" d="M470,65 H498"/><text x="484" y="34" text-anchor="middle" class="small">miss</text>
+  <rect class="box" x="500" y="40" width="110" height="50" rx="8"/><text x="555" y="61" text-anchor="middle">Search</text><text x="555" y="78" text-anchor="middle" class="small">embed + SQL</text>
+  <path class="arrow" d="M610,65 H628"/>
+  <rect class="box" x="630" y="40" width="120" height="50" rx="8"/><text x="690" y="61" text-anchor="middle">3 Model call</text><text x="690" y="78" text-anchor="middle" class="small">prompt cache</text>
+  <path class="arrow-ok" d="M215,90 V136"/><text x="225" y="118" class="small">hit</text>
+  <path class="arrow-ok" d="M395,90 V136"/><text x="405" y="118" class="small">hit</text>
+  <rect class="box-ok" x="140" y="138" width="150" height="46" rx="8"/><text x="215" y="158" text-anchor="middle" class="label">Return saved answer</text><text x="215" y="174" text-anchor="middle" class="small">skips everything</text>
+  <rect class="box-ok" x="320" y="138" width="150" height="46" rx="8"/><text x="395" y="158" text-anchor="middle" class="label">Reuse saved vector</text><text x="395" y="174" text-anchor="middle" class="small">skips one API call</text>
+  <path class="arrow-accent" d="M690,90 V226"/>
+  <text x="10" y="220" class="label">3 · Inside each model request (prompt caching works on the beginning):</text>
+  <rect class="box-ok" x="10" y="230" width="200" height="36" rx="4"/><text x="110" y="253" text-anchor="middle" class="label">system prompt</text>
+  <rect class="box-ok" x="210" y="230" width="200" height="36" rx="4"/><text x="310" y="253" text-anchor="middle" class="label">tool definitions</text>
+  <rect class="box2" x="410" y="230" width="190" height="36" rx="4"/><text x="505" y="253" text-anchor="middle" class="label">conversation history</text>
+  <rect class="box2" x="600" y="230" width="150" height="36" rx="4"/><text x="675" y="253" text-anchor="middle" class="label">newest message</text>
+  <path class="line" d="M10,276 V282 H410 V276"/>
+  <text x="210" y="298" text-anchor="middle" class="small">cacheable prefix: identical at the start of every request</text>
+  <path class="line" d="M410,276 V282 H750 V276"/>
+  <text x="580" y="298" text-anchor="middle" class="small">changes every time: processed normally</text>
+</svg>
+<figcaption>The three caches from the table, checked in order. <strong>A hit skips work</strong>: a response-cache hit skips everything, an embedding-cache hit skips one API call, and the provider's prompt cache makes the unchanging start of each request cheaper and faster (it shows up as <code>cachedInputTokens</code>).</figcaption>
+</figure>
+
+
+<h2>Observability: seeing what the app does</h2>
+<p><a class="term" href="glossary.html#observability">Observability</a> is the ability to understand what your system did, from the data it records. For an AI app you want to answer: which tools did the agent call, with what inputs, what came back, how long each step took, how many tokens it used, and what the user saw.</p>
+
+<h3>Logging</h3>
+<p>The agent route already logs each step with <code>onStepFinish</code>:</p>
+<pre data-lang="ts" data-file="src/app/api/chat/route.ts (excerpt)"><code>      onStepFinish: ({ toolCalls, finishReason }) =&gt; {
+        for (const call of toolCalls) {
+          console.log(`[agent] called ${call.toolName}`, call.input);
+        }
+        console.log(`[agent] step finished: ${finishReason}`);
+      },</code></pre>
+<p>That is a good start for development. For production, improve it in three ways: log <strong>structured</strong> data (JSON objects with fields such as <code>userId</code>, <code>chatId</code>, <code>step</code>, <code>toolName</code>, <code>durationMs</code>, <code>usage</code>) so you can search and aggregate; add an <strong>id</strong> that links all steps of one request; and remember that logs contain users' questions, which are personal data (see <a href="ai-13-security-safety.html">Security &amp; Safety</a>). On Vercel, anything written with <code>console.log</code> in a function appears in the project's runtime logs.</p>
+
+<h3>Tracing with OpenTelemetry</h3>
+<p>A <strong>trace</strong> records one request as a tree of timed operations ("spans"): the chat request, inside it each model call, inside those each tool call. <strong>OpenTelemetry</strong> (OTel) is the open standard for producing traces, supported by most monitoring tools. The AI SDK can emit OpenTelemetry spans for its calls through the <code>experimental_telemetry</code> option (marked experimental, so details may change):</p>
+<pre data-lang="ts" data-tag="illustrative"><code>const result = streamText({
+  // …model, messages, tools, system, stopWhen…
+  experimental_telemetry: {
+    isEnabled: true,
+    functionId: "chat-agent",
+    metadata: { route: "/api/chat" },
+    recordInputs: true,  // set to false to keep prompts out of traces
+    recordOutputs: true, // set to false to keep answers out of traces
+  },
+});</code></pre>
+<p>Telemetry is off by default. <code>functionId</code> names this call so you can group traces; <code>metadata</code> adds your own fields; <code>recordInputs</code> and <code>recordOutputs</code> control whether prompt and response text are included, which matters for privacy. You also need to register an OpenTelemetry exporter in your app; in Next.js this is done in an <code>instrumentation.ts</code> file (for example with the <code>@vercel/otel</code> package), as described in the AI SDK and Next.js telemetry docs.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 252" role="img" aria-label="An illustrative trace drawn as a waterfall: the POST /api/chat span contains the streamText span, which contains model step 1, the searchKnowledgeBase tool call and model step 2, each as a timed bar.">
+  <text x="10" y="22" class="small">Span (indent = inside the one above)</text>
+  <text x="230" y="22" class="small">Time →</text>
+  <text x="10" y="55" class="label">POST /api/chat</text>
+  <rect class="box2" x="230" y="38" width="515" height="26" rx="4"/>
+  <text x="22" y="91" class="label">streamText</text>
+  <rect class="box" x="236" y="74" width="505" height="26" rx="4"/>
+  <text x="34" y="127" class="label">model step 1</text>
+  <rect class="box-info" x="242" y="110" width="165" height="26" rx="4"/>
+  <text x="34" y="163" class="label">searchKnowledgeBase</text>
+  <rect class="box-ok" x="410" y="146" width="105" height="26" rx="4"/>
+  <text x="34" y="199" class="label">model step 2</text>
+  <rect class="box-info" x="518" y="182" width="221" height="26" rx="4"/>
+  <path class="arrow" d="M230,230 H748"/>
+  <text x="745" y="246" text-anchor="end" class="small">time</text>
+</svg>
+<figcaption>Illustrative trace, not real timings. A trace is a tree of timed <em>spans</em>: <strong>each bar is one operation</strong>, drawn inside the operation that started it, so you can see at a glance which step made a slow answer slow.</figcaption>
+</figure>
+
+
+<h3>LLM observability tools</h3>
+<p>Generic logging tools work, but LLM-focused tools show conversations, prompts, tool calls, token costs and evaluation scores side by side. Examples at the time of writing (2025), listed neutrally: Langfuse, LangSmith, Braintrust, Helicone and Arize Phoenix. Many accept OpenTelemetry data from the AI SDK. Choose based on hosting (cloud or self-hosted), data-privacy needs and price, and check their current docs.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 252" role="img" aria-label="Observability pipeline: onStepFinish and onFinish logs go to Vercel runtime logs; experimental_telemetry produces OpenTelemetry spans that an exporter registered in instrumentation.ts sends on; both end up in a dashboard or LLM observability tool showing tool calls, tokens, durations and errors.">
+  <text x="110" y="24" text-anchor="middle" class="small">in your route</text>
+  <text x="350" y="24" text-anchor="middle" class="small">collected by</text>
+  <text x="625" y="24" text-anchor="middle" class="small">where you look</text>
+  <rect class="box" x="10" y="40" width="200" height="50" rx="8"/><text x="110" y="61" text-anchor="middle" class="mono">onStepFinish / onFinish</text><text x="110" y="78" text-anchor="middle" class="small">structured console.log</text>
+  <path class="arrow" d="M210,65 H248"/>
+  <rect class="box2" x="250" y="40" width="200" height="50" rx="8"/><text x="350" y="61" text-anchor="middle">Vercel runtime logs</text><text x="350" y="78" text-anchor="middle" class="small">search and filter</text>
+  <rect class="box" x="10" y="140" width="200" height="50" rx="8"/><text x="110" y="161" text-anchor="middle" class="mono">experimental_telemetry</text><text x="110" y="178" text-anchor="middle" class="small">OpenTelemetry spans</text>
+  <path class="arrow" d="M210,165 H248"/>
+  <rect class="box2" x="250" y="140" width="200" height="50" rx="8"/><text x="350" y="161" text-anchor="middle" class="mono">instrumentation.ts</text><text x="350" y="178" text-anchor="middle" class="small">exporter, e.g. @vercel/otel</text>
+  <path class="arrow" d="M450,65 H498"/>
+  <path class="arrow" d="M450,165 H498"/>
+  <rect class="box-info" x="500" y="40" width="250" height="150" rx="8"/>
+  <text x="625" y="64" text-anchor="middle" class="title">Dashboard / LLM tool</text>
+  <text x="625" y="90" text-anchor="middle" class="small">tool calls and their inputs</text>
+  <text x="625" y="110" text-anchor="middle" class="small">tokens and cost per request</text>
+  <text x="625" y="130" text-anchor="middle" class="small">duration of each step</text>
+  <text x="625" y="150" text-anchor="middle" class="small">errors and failed calls</text>
+  <text x="625" y="170" text-anchor="middle" class="small">linked by one request id</text>
+  <text x="380" y="228" text-anchor="middle" class="small">Privacy: logs and traces contain users' questions. Decide recordInputs / recordOutputs and a retention period.</text>
+</svg>
+<figcaption>Two roads to the same goal. Logs are the quick start; OpenTelemetry traces add timing and nesting. <strong>Either way, the data ends up somewhere you can search</strong> when a user says "it gave me a weird answer yesterday".</figcaption>
+</figure>
+
+
+<h2>Deploying on Vercel</h2>
+<p>The project is a standard Next.js app, so it deploys to Vercel (the company behind Next.js and the AI SDK) or any host that runs Next.js. Vercel-specific points:</p>
+<ul>
+  <li><strong>Environment variables.</strong> <code>.env.local</code> is not uploaded (and must not be committed). Add <code>OPENAI_API_KEY</code>, <code>NEON_DATABASE_URL</code>, <code>NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY</code>, <code>CLERK_SECRET_KEY</code> and any other variables in the Vercel dashboard under the project's settings (Environment Variables). You can set different values for Production, Preview and Development. Changes apply to new deployments, so redeploy after editing them.</li>
+  <li><strong>Clerk production instance.</strong> Clerk uses separate development and production instances with different keys; set up the production instance and your domain before launch.</li>
+  <li><strong>Function duration.</strong> Route handlers run as serverless functions with a maximum duration that depends on your plan and settings. A streaming agent answer with several steps can take a while. Next.js lets you set the limit per route with a <em>route segment config</em> export:</li>
+</ul>
+<pre data-lang="ts" data-file="src/app/api/chat/route.ts (addition)" data-tag="illustrative"><code>// Allow streaming responses up to 60 seconds
+export const maxDuration = 60;</code></pre>
+<p><code>maxDuration</code> is a number of seconds; the platform caps it according to your plan, so check Vercel's current limits. If a function exceeds it, the response is cut off mid-stream.</p>
+<ul>
+  <li><strong>Request body size.</strong> Vercel limits the request body sent to a function to about <strong>4.5&nbsp;MB</strong>, regardless of Next.js settings. This affects the project in two places: the <code>bodySizeLimit: "10mb"</code> server action setting from <a href="21-images-as-knowledge.html">step 21</a> cannot raise it, and the chat's image attachments (up to 4 images of 4&nbsp;MB each, sent as base64, which adds about 33%, in <a href="18-images-in-chat.html">step 18</a>) can exceed it. For large files in production, upload them directly from the browser to object storage (for example Vercel Blob or S3) and send only the URL or a reference to your server, or lower the limits in the UI.</li>
+  <li><strong>Native packages.</strong> <code>next.config.ts</code> already lists <code>pdf-parse</code> in <code>serverExternalPackages</code> so it is loaded at runtime instead of bundled; keep that in production.</li>
+  <li><strong>Preview deployments.</strong> Every branch gets its own URL. Point previews at a separate database (see Neon branches below) so testing never touches production data.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 338" role="img" aria-label="Deployment map: the browser sends requests (body limit about 4.5 MB) to Vercel functions: the /api/chat route handler with maxDuration and the processFile server action, which read secrets from Vercel Environment Variables and call OpenAI and Neon Postgres; Clerk uses a production instance. A bar lists the limits stated on the page.">
+  <text x="75" y="22" text-anchor="middle" class="title">Browser</text>
+  <text x="347" y="22" text-anchor="middle" class="title">Vercel</text>
+  <text x="647" y="22" text-anchor="middle" class="title">External services</text>
+  <rect class="zone" x="10" y="32" width="130" height="236" rx="10"/>
+  <rect class="zone" x="175" y="32" width="345" height="236" rx="10"/>
+  <rect class="zone" x="545" y="32" width="205" height="236" rx="10"/>
+  <rect class="box2" x="20" y="50" width="110" height="50" rx="8"/><text x="75" y="71" text-anchor="middle">Users</text><text x="75" y="88" text-anchor="middle" class="small">chat, upload</text>
+  <path class="arrow" d="M130,75 H193"/>
+  <text x="162" y="66" text-anchor="middle" class="small">body</text>
+  <text x="162" y="92" text-anchor="middle" class="small">≈4.5 MB</text>
+  <rect class="box" x="195" y="45" width="305" height="56" rx="8"/><text x="347" y="67" text-anchor="middle" class="mono">/api/chat</text><text x="347" y="88" text-anchor="middle" class="small">route handler · export const maxDuration = 60</text>
+  <rect class="box" x="195" y="111" width="305" height="50" rx="8"/><text x="347" y="132" text-anchor="middle" class="mono">processFile</text><text x="347" y="150" text-anchor="middle" class="small">server action (upload, OCR, embeddings)</text>
+  <rect class="box-info" x="195" y="171" width="305" height="84" rx="8"/><text x="347" y="192" text-anchor="middle">Environment Variables</text>
+  <text x="347" y="210" text-anchor="middle" class="small">OPENAI_API_KEY, NEON_DATABASE_URL,</text>
+  <text x="347" y="226" text-anchor="middle" class="small">CLERK_SECRET_KEY, NEXT_PUBLIC_CLERK_…</text>
+  <text x="347" y="244" text-anchor="middle" class="small">Production · Preview · Development</text>
+  <rect class="box2" x="560" y="45" width="175" height="50" rx="8"/><text x="647" y="66" text-anchor="middle">OpenAI</text><text x="647" y="83" text-anchor="middle" class="small">chat, embeddings, OCR</text>
+  <rect class="box2" x="560" y="105" width="175" height="76" rx="8"/><text x="647" y="126" text-anchor="middle">Neon Postgres</text><text x="647" y="144" text-anchor="middle" class="small">branch: production</text><text x="647" y="160" text-anchor="middle" class="small">branches: dev, previews</text><text x="647" y="174" text-anchor="middle" class="small">same region as functions</text>
+  <rect class="box2" x="560" y="191" width="175" height="50" rx="8"/><text x="647" y="212" text-anchor="middle">Clerk</text><text x="647" y="229" text-anchor="middle" class="small">production instance</text>
+  <path class="arrow" d="M500,70 H558"/>
+  <path class="arrow" d="M500,136 H558"/>
+  <rect class="box-warn" x="10" y="282" width="740" height="44" rx="8"/>
+  <text x="380" y="300" text-anchor="middle" class="label">Limits stated on this page: request body ≈ 4.5 MB (bodySizeLimit cannot raise it)</text>
+  <text x="380" y="317" text-anchor="middle" class="label">maxDuration is capped by your plan · env var changes need a redeploy</text>
+</svg>
+<figcaption>Where each piece runs once deployed. Secrets live in Vercel's <strong>Environment Variables</strong>, not in files; the database lives in Neon, ideally in the same region as your functions. Check Vercel's current limits for your plan.</figcaption>
+</figure>
+
+
+<h2>The database in production</h2>
+<ul>
+  <li><strong>Neon branches.</strong> Neon can create a <em>branch</em> of your database: an instant copy-on-write copy of its data and schema. Use one branch for production, and separate branches for development, previews and eval runs. You can test a migration or a re-chunking experiment on a branch and throw it away.</li>
+  <li><strong>Migrations.</strong> Apply schema changes with Drizzle migrations (<a href="09-vector-database.html">step 9</a>) as a deliberate deployment step, tested on a branch first, never by editing the production database by hand.</li>
+  <li><strong>Connection handling.</strong> Serverless functions can open many short-lived connections at once. The project uses Neon's HTTP driver (<code>drizzle-orm/neon-http</code> with <code>@neondatabase/serverless</code>), which sends each query as an HTTP request and suits serverless well. If you switch to a regular TCP Postgres driver, use Neon's <strong>pooled</strong> <a class="term" href="glossary.html#connection-string">connection string</a> (the host contains <code>-pooler</code>), which puts a connection pooler in front of the database.</li>
+  <li><strong>Index maintenance.</strong> The HNSW <a class="term" href="glossary.html#index">index</a> from step 9 keeps searches fast as the table grows (see <a href="indexing-explained.html">Indexing explained</a>). Check with <a class="term" href="glossary.html#explain">EXPLAIN</a> that queries still use it after schema changes. After deleting or replacing many documents, Postgres's routine <code>VACUUM</code> cleans up; rebuilding the index (<code>REINDEX</code>) after very large changes can restore search quality and speed. Index builds on big tables need memory and time, so do them outside peak hours.</li>
+  <li><strong>Backups and restore.</strong> Know how to restore your data: Neon supports restoring to an earlier point in time within your plan's history window. Test it once before you need it.</li>
+  <li><strong>Re-indexing documents.</strong> Changing the chunk size or embedding model means re-processing every document. Keep the original files somewhere (the project currently stores only chunks, not the source PDFs), or you cannot rebuild the knowledge base.</li>
+</ul>
+
+<h2>Monitoring quality</h2>
+<p>An app can be fast, cheap and error-free while giving bad answers. Watch quality as closely as uptime:</p>
+<ul>
+  <li><strong>User feedback</strong>: thumbs up/down rate over time, and the comments.</li>
+  <li><strong>Sampled automatic grading</strong>: run the LLM judge from <a href="ai-12-evaluation.html">Evaluating AI Applications</a> on a small share of real conversations.</li>
+  <li><strong>Retrieval health</strong>: how often the search tool returns "No relevant information found". A rise suggests users ask about topics missing from the knowledge base, or that something broke.</li>
+  <li><strong>Agent health</strong>: average steps per question and how often the 6-step limit is reached.</li>
+  <li><strong>Regression evals before every change</strong> to the prompt, model, chunking or search settings.</li>
+</ul>
+
+<h2>Common misconceptions</h2>
+<div class="callout warn"><ul>
+  <li><strong>"Streaming makes it cheaper."</strong> It makes it <em>feel</em> faster; you pay for the same tokens.</li>
+  <li><strong>"Batching embeddings makes them cheaper."</strong> With the standard API, the token price is the same; you save requests and time. (Separate discounted batch APIs are a different, asynchronous product.)</li>
+  <li><strong>"The cheapest model is always cheapest."</strong> A weaker model that needs more agent steps, longer prompts or retries can cost more per <em>correct</em> answer. Measure.</li>
+  <li><strong>"Works on localhost means works in production."</strong> Function time limits, body size limits, cold starts, regions and rate limits only show up when deployed.</li>
+</ul></div>
+
+<h2>Go-live checklist</h2>
+<ol class="steps">
+  <li><strong>Secrets</strong> set in the Vercel dashboard for each environment; none in git; none with <code>NEXT_PUBLIC_</code> except the Clerk publishable key.</li>
+  <li><strong>Clerk production instance</strong> configured, sign-up restricted as needed, admin roles assigned (<a href="16-rbac.html">step 16</a>).</li>
+  <li><strong>Database</strong>: production Neon branch, migrations applied, HNSW index present, a separate branch for development and previews, restore tested.</li>
+  <li><strong>Knowledge base</strong> uploaded with the final chunk settings; source files kept; only documents all users may read (until access control exists).</li>
+  <li><strong>Limits</strong>: <code>stopWhen</code> step cap, <code>maxOutputTokens</code>, per-user rate limit, input length checks, upload sizes that fit the platform's body limit.</li>
+  <li><strong><code>export const maxDuration</code></strong> on long-running routes, within your plan's limit.</li>
+  <li><strong>Reliability</strong>: sensible <code>maxRetries</code>, <code>abortSignal</code> (request signal or timeouts), friendly error UI with retry.</li>
+  <li><strong>Cost</strong>: usage logged per request, provider budget and alerts set, cost per question estimated.</li>
+  <li><strong>Observability</strong>: structured logs or OpenTelemetry traces, with privacy settings decided (<code>recordInputs</code>/<code>recordOutputs</code>), and a log retention period.</li>
+  <li><strong>Quality</strong>: eval suite passing on the production configuration; feedback buttons live; a weekly review routine.</li>
+  <li><strong>Security</strong>: the checklist in <a href="ai-13-security-safety.html">Security &amp; Safety for AI Apps</a> worked through.</li>
+  <li><strong>Region</strong>: functions and Neon database in the same or nearby region.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 244" role="img" aria-label="Go-live board with twelve tiles matching the checklist: secrets, Clerk production, database, knowledge base, limits, duration, reliability, cost, observability, quality, security and region.">
+  <text x="10" y="20" class="small">Row 1: set up · Row 2: runtime and cost · Row 3: operate</text>
+  <rect class="box" x="10" y="34" width="178" height="58" rx="8"/><rect class="box2" x="20" y="46" width="14" height="14" rx="3"/><text x="42" y="58" class="title">1 Secrets</text><text x="20" y="80" class="small">Vercel env vars, per env</text>
+  <rect class="box" x="197" y="34" width="178" height="58" rx="8"/><rect class="box2" x="207" y="46" width="14" height="14" rx="3"/><text x="229" y="58" class="title">2 Clerk prod</text><text x="207" y="80" class="small">instance, sign-up, roles</text>
+  <rect class="box" x="384" y="34" width="178" height="58" rx="8"/><rect class="box2" x="394" y="46" width="14" height="14" rx="3"/><text x="416" y="58" class="title">3 Database</text><text x="394" y="80" class="small">branch, migrations, HNSW</text>
+  <rect class="box" x="571" y="34" width="178" height="58" rx="8"/><rect class="box2" x="581" y="46" width="14" height="14" rx="3"/><text x="603" y="58" class="title">4 Knowledge</text><text x="581" y="80" class="small">final chunks, files kept</text>
+  <rect class="box-info" x="10" y="102" width="178" height="58" rx="8"/><rect class="box2" x="20" y="114" width="14" height="14" rx="3"/><text x="42" y="126" class="title">5 Limits</text><text x="20" y="148" class="small">steps, tokens, rate, size</text>
+  <rect class="box-info" x="197" y="102" width="178" height="58" rx="8"/><rect class="box2" x="207" y="114" width="14" height="14" rx="3"/><text x="229" y="126" class="title">6 Duration</text><text x="207" y="148" class="small">export const maxDuration</text>
+  <rect class="box-info" x="384" y="102" width="178" height="58" rx="8"/><rect class="box2" x="394" y="114" width="14" height="14" rx="3"/><text x="416" y="126" class="title">7 Reliability</text><text x="394" y="148" class="small">retries, abortSignal, UI</text>
+  <rect class="box-info" x="571" y="102" width="178" height="58" rx="8"/><rect class="box2" x="581" y="114" width="14" height="14" rx="3"/><text x="603" y="126" class="title">8 Cost</text><text x="581" y="148" class="small">usage logged, budget alerts</text>
+  <rect class="box-ok" x="10" y="170" width="178" height="58" rx="8"/><rect class="box2" x="20" y="182" width="14" height="14" rx="3"/><text x="42" y="194" class="title">9 Observability</text><text x="20" y="216" class="small">logs/traces, privacy set</text>
+  <rect class="box-ok" x="197" y="170" width="178" height="58" rx="8"/><rect class="box2" x="207" y="182" width="14" height="14" rx="3"/><text x="229" y="194" class="title">10 Quality</text><text x="207" y="216" class="small">evals pass, feedback live</text>
+  <rect class="box-ok" x="384" y="170" width="178" height="58" rx="8"/><rect class="box2" x="394" y="182" width="14" height="14" rx="3"/><text x="416" y="194" class="title">11 Security</text><text x="394" y="216" class="small">security checklist done</text>
+  <rect class="box-ok" x="571" y="170" width="178" height="58" rx="8"/><rect class="box2" x="581" y="182" width="14" height="14" rx="3"/><text x="603" y="194" class="title">12 Region</text><text x="581" y="216" class="small">functions near Neon</text>
+</svg>
+<figcaption>The twelve checklist items as a board (numbers match the list). <strong>Tick every tile before real users arrive</strong>; the first row is one-off setup, the last row is ongoing work you keep doing after launch.</figcaption>
+</figure>
+
+
+<div class="recap"><strong>Recap</strong><ul>
+  <li>Cost comes from input, output, reasoning, embedding, vision and audio usage; agents multiply input tokens because every step re-sends the context.</li>
+  <li>Measure with the AI SDK's <code>usage</code> / <code>totalUsage</code> (e.g. in <code>onFinish</code>), then reduce with smaller models, shorter prompts, fewer chunks, trimmed history, caching and batched embeddings.</li>
+  <li>Latency: stream, show progress, cut steps, use parallel tool calls and faster models, and keep the database near your functions.</li>
+  <li>Reliability: automatic retries with backoff (<code>maxRetries</code>, default 2), <code>abortSignal</code> for cancellation and timeouts, fallbacks, and a friendly error UI.</li>
+  <li>Observability: structured logs from <code>onStepFinish</code>/<code>onFinish</code>, and OpenTelemetry traces via <code>experimental_telemetry</code>.</li>
+  <li>On Vercel: env vars in the dashboard, <code>export const maxDuration</code> for long streams, and a request body limit of about 4.5&nbsp;MB.</li>
+  <li>Neon in production: branches, migrations, the pooled connection string for TCP drivers, index maintenance and tested restores.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+  <li><a href="https://ai-sdk.dev/docs/ai-sdk-core/telemetry" target="_blank" rel="noopener">AI SDK: telemetry</a></li>
+  <li><a href="https://ai-sdk.dev/docs/ai-sdk-core/settings" target="_blank" rel="noopener">AI SDK: settings (maxRetries, abortSignal, maxOutputTokens)</a></li>
+  <li><a href="https://ai-sdk.dev/docs/ai-sdk-ui/error-handling" target="_blank" rel="noopener">AI SDK UI: error handling</a></li>
+  <li><a href="https://nextjs.org/docs/app/api-reference/file-conventions/route-segment-config" target="_blank" rel="noopener">Next.js: route segment config (maxDuration)</a></li>
+  <li><a href="https://vercel.com/docs/functions/limitations" target="_blank" rel="noopener">Vercel: functions limits</a></li>
+  <li><a href="https://vercel.com/docs/environment-variables" target="_blank" rel="noopener">Vercel: environment variables</a></li>
+  <li><a href="https://neon.com/docs/introduction/branching" target="_blank" rel="noopener">Neon: branching</a></li>
+  <li><a href="https://neon.com/docs/connect/connection-pooling" target="_blank" rel="noopener">Neon: connection pooling</a></li>
+  <li><a href="https://platform.openai.com/docs/guides/rate-limits" target="_blank" rel="noopener">OpenAI: rate limits</a></li>
+  <li><a href="https://platform.openai.com/docs/guides/prompt-caching" target="_blank" rel="noopener">OpenAI: prompt caching</a></li>
+  <li><a href="https://opentelemetry.io/docs/" target="_blank" rel="noopener">OpenTelemetry documentation</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="ai-13-security-safety.html"><small>← Chapter 13</small>Security &amp; Safety for AI Apps</a>
+<a class="next" href="ai-15-prompting-rag-finetuning.html"><small>Chapter 15 →</small>Prompting vs RAG vs Fine-Tuning</a>
+</nav>
+</main>
+</body>
+</html>

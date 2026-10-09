@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>18 · Test Your Graphs Without an API Key</title>
+<meta name="description" content="pytest with a fake chat model: check routing, tools and memory for free.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 18/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 18 of 19 · Extra, not in the video</div>
+  <h1>Test Your Graphs Without an API Key</h1>
+  <p class="lead">pytest with a fake chat model: check routing, tools and memory for free.</p>
+  <span class="video-link extra">Extension · verified against LangGraph 1.2.11</span>
+</section>
+<div class="callout"><p><strong>Extension: not in the video.</strong> This step completes README exercise 8, "Add tests that invoke each graph with a small input". <code>tests/test_graphs.py</code> was run with <code>uv run pytest -q</code> against the repo's locked versions (LangGraph 1.2.11, LangChain 1.3.18) plus pytest 9.1.1: <strong>13 passed</strong>, with no API key and no internet. We also ran it once against the <em>unfixed</em> graph 3 to make sure a test really fails when the code is wrong.</p>
+<p><strong>What that proves:</strong> the graphs' wiring, routing, tool calls, error handling and memory. <strong>What it doesn't:</strong> anything about a real model's answers. See "What these tests can't check" at the end.</p></div>
+
+<h2>Goal</h2>
+<p>So far you have checked every graph by hand: run it, read the output, decide whether it looks right. That's fine once. But each time you change a file you would have to redo it for every graph, and calls to gpt-4o cost money and give slightly different answers each time.</p>
+<p>In this step you write <strong>automated tests</strong>: small functions that run a graph with a known input and check the result. One command runs all of them in a few seconds. The trick that makes them free and repeatable is a <strong>fake chat model</strong> that replaces <code>ChatOpenAI</code> during the tests, so they never touch the internet.</p>
+
+<details class="primer"><summary>New to automated tests and pytest? The basic idea</summary>
+<p>A <strong>test</strong> is a function that runs some of your code and checks the result with <code>assert</code>. <code>assert x == y</code> does nothing when the condition is true and raises an <code>AssertionError</code> when it's false.</p>
+<p><a class="term" href="glossary.html#pytest">pytest</a> is the most widely used Python test runner. You don't register tests anywhere; it <strong>finds</strong> them by name: files called <code>test_*.py</code>, and inside them functions called <code>test_*</code>. It runs each one, catches failures, and prints a summary.</p>
+<pre data-lang="py" data-tag="illustrative"><code># tests/test_math.py
+def add(a, b):
+    return a + b
+
+def test_add():
+    assert add(2, 3) == 5   # passes
+</code></pre>
+<p>Tests are most useful when they run automatically and often: after every change, before every commit. That only works if they're fast, free and give the same result every time.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Normal run versus test run: normally the course file creates ChatOpenAI which calls the OpenAI API over the internet; in a test, ChatOpenAI is swapped for FakeChatModel, which answers instantly on your computer">
+  <text x="16" y="24" class="title">Normal run</text>
+  <rect class="box" x="16" y="36" width="200" height="50" rx="8"/>
+  <text x="116" y="58" text-anchor="middle" class="mono">8_graph_agent.py</text>
+  <text x="116" y="76" text-anchor="middle" class="small">ChatOpenAI(model="gpt-4o")</text>
+  <path class="arrow" d="M216,61 H300"/>
+  <text x="226" y="54" class="small">internet</text>
+  <rect class="box-warn" x="302" y="36" width="200" height="50" rx="8"/>
+  <text x="402" y="58" text-anchor="middle" class="label">OpenAI API</text>
+  <text x="402" y="76" text-anchor="middle" class="small">needs key · costs · varies</text>
+  <text x="16" y="130" class="title">Test run (pytest)</text>
+  <rect class="box" x="16" y="142" width="200" height="50" rx="8"/>
+  <text x="116" y="164" text-anchor="middle" class="mono">8_graph_agent.py</text>
+  <text x="116" y="182" text-anchor="middle" class="small">ChatOpenAI(...) is swapped</text>
+  <path class="arrow-ok" d="M216,167 H300"/>
+  <text x="226" y="160" class="small">same process</text>
+  <rect class="box-ok" x="302" y="142" width="200" height="50" rx="8"/>
+  <text x="402" y="164" text-anchor="middle" class="mono">FakeChatModel</text>
+  <text x="402" y="182" text-anchor="middle" class="small">no key · free · always the same</text>
+  <rect class="box2" x="530" y="142" width="214" height="50" rx="8"/>
+  <text x="637" y="164" text-anchor="middle" class="label">real ToolNode, real tools,</text>
+  <text x="637" y="182" text-anchor="middle" class="label">real edges and memory</text>
+  <path class="line dashed" d="M502,167 H528"/>
+  <text x="380" y="222" text-anchor="middle" class="small">Only the model is fake. Everything LangGraph does around it is the real code.</text>
+</svg>
+<figcaption>The course files stay exactly as they are; the test swaps one class while they load. <strong>You test your graph, not OpenAI.</strong></figcaption>
+</figure>
+
+<h2>Set up</h2>
+<ol class="steps">
+<li><strong>Add pytest as a development dependency</strong>
+<pre data-lang="ps" data-tag="terminal"><code>uv add --dev pytest</code></pre>
+<p><code>--dev</code> puts pytest in the <code>[dependency-groups]</code> <code>dev</code> list of <code>pyproject.toml</code> (lines 16–19 in step 15) rather than in <code>dependencies</code>: your graphs don't need pytest to run, only you do while developing. With the repo's lock it adds <code>pytest&gt;=9.1.1</code>.</p></li>
+<li><strong>Create the folder and file</strong>
+<p>Create a folder <code>tests</code> in the project root (next to <code>module1</code>, not inside it) and a file <code>tests/test_graphs.py</code> with the code below.</p>
+<pre class="tree">LangGraph_ACL/
+├── module1/
+│   ├── 0_graph_state_str.py … 9_graph_agent_memory.py
+│   └── 10_graph_division_tool.py
+├── <span class="new">tests/</span>
+│   └── <span class="new">test_graphs.py</span>
+├── langgraph.json
+└── pyproject.toml</pre></li>
+<li><strong>Make sure the step 15 and 16 fixes are in place</strong>
+<p>The tests import graph 9 (needs the fixed import and the <code>__main__</code> guard), check graph 3's <code>"Two"</code> fallback, and load graph 10. On the unfixed repo, some tests fail, which is the point.</p></li>
+</ol>
+
+<pre data-file="tests/test_graphs.py" data-lang="py" data-tag="extension"><code>"""Tests for the course graphs that run without an API key or internet.
+
+Run with:  uv run pytest -q
+The model-based graphs get a fake chat model, so the tests check the graph wiring
+(nodes, edges, routing, tool calls, memory), not the wording of real model answers.
+"""
+import importlib.util
+import os
+from pathlib import Path
+
+import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
+MODULE1 = Path(__file__).resolve().parent.parent / "module1"
+
+
+class FakeChatModel(BaseChatModel):
+    """Answers with a fixed text, or asks for a tool when tools are bound."""
+
+    reply: str = "fake answer"
+    tool_call: dict | None = None
+    tool_names: list = []
+
+    @property
+    def _llm_type(self):
+        return "fake"
+
+    def bind_tools(self, tools, **kwargs):
+        return self.model_copy(update={"tool_names": [t.name for t in tools]})
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        conversation = [m for m in messages if m.type != "system"]
+        if self.tool_call and self.tool_names and not isinstance(conversation[-1], ToolMessage):
+            message = AIMessage(content="", tool_calls=[{**self.tool_call, "id": "call_1"}])
+        elif isinstance(conversation[-1], ToolMessage):
+            message = AIMessage(content=f"The result is {conversation[-1].content}")
+        else:
+            message = AIMessage(content=self.reply)
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def load(file_name, monkeypatch, **fake):
+    """Import a numbered course file with ChatOpenAI replaced by FakeChatModel."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    import langchain_openai
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", lambda **kwargs: FakeChatModel(**fake))
+    spec = importlib.util.spec_from_file_location(file_name[:-3], MODULE1 / file_name)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_string_state_appends_greeting(monkeypatch):
+    graph = load("0_graph_state_str.py", monkeypatch).graph
+    assert graph.invoke("hey am new! ") == "hey am new! welcome to AI Career Lab!"
+
+
+def test_typed_state_returns_a_dict(monkeypatch):
+    graph = load("1_graph_state_dict.py", monkeypatch).graph
+    assert graph.invoke({"graph_str": "hello"}) == {"graph_str": "hello welcome to AI Career Lab!"}
+
+
+@pytest.mark.parametrize("text, node", [("hello I am new", "Node 2"), ("hi I am new", "Node 3"),
+                                        ("Hello I am new", "Node 3")])  # the check is case-sensitive
+def test_conditional_edge_routes_on_first_word(monkeypatch, text, node):
+    graph = load("2_graph_conditional_edge.py", monkeypatch).graph
+    assert graph.invoke({"graph_str": text})["graph_str"].endswith(f"I am in {node}")
+
+
+@pytest.mark.parametrize("reply, expected_end, number", [("2", "passed by node 2", 2), ("3", "passed by node 3", 3),
+                                                         ("1", "passed by node 1", 1), ("Two", "passed by node 1", 0)])
+def test_model_number_picks_the_route(monkeypatch, reply, expected_end, number):
+    graph = load("3_graph_introduction_model.py", monkeypatch, reply=reply).graph
+    result = graph.invoke({"graph_str": ""})
+    assert result["graph_str"].endswith(expected_end)
+    assert result["graph_int"] == number
+
+
+def test_messages_state_appends_the_reply(monkeypatch):
+    graph = load("4_graph_messages_state.py", monkeypatch, reply="Because of Rayleigh scattering.").graph
+    messages = graph.invoke({"messages": [HumanMessage(content="Why is the sky blue?")]})["messages"]
+    assert [m.type for m in messages] == ["human", "ai"]
+
+
+def test_agent_loops_through_the_tool(monkeypatch):
+    graph = load("8_graph_agent.py", monkeypatch,
+                 tool_call={"name": "multiply", "args": {"nb1": 12, "nb2": 7}}).graph
+    messages = graph.invoke({"messages": [HumanMessage(content="What is 12 multiplied by 7?")]})["messages"]
+    assert [m.type for m in messages] == ["human", "ai", "tool", "ai"]
+    assert messages[2].content == "84"
+
+
+def test_division_by_zero_becomes_a_tool_message(monkeypatch):
+    graph = load("10_graph_division_tool.py", monkeypatch,
+                 tool_call={"name": "division", "args": {"nb1": 5, "nb2": 0}}).graph
+    messages = graph.invoke({"messages": [HumanMessage(content="Divide 5 by 0")]})["messages"]
+    assert messages[2].type == "tool" and "Cannot divide by zero" in messages[2].content
+
+
+def test_memory_keeps_threads_apart(monkeypatch):
+    graph = load("9_graph_agent_memory.py", monkeypatch).graph
+    first = {"configurable": {"thread_id": "a"}}
+    graph.invoke({"messages": [HumanMessage(content="My name is Luca")]}, first)
+    graph.invoke({"messages": [HumanMessage(content="What is my name?")]}, first)
+    other = graph.invoke({"messages": [HumanMessage(content="What is my name?")]},
+                         {"configurable": {"thread_id": "b"}})
+    assert len(graph.get_state(first).values["messages"]) == 4
+    assert len(other["messages"]) == 2</code></pre>
+
+<h3>Line by line: setup and the fake model</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–6</td><td><code>"""Tests for the course graphs that run without an API key or internet. ..."""</code></td><td>A module <a class="term" href="glossary.html#docstring">docstring</a>: how to run the file and what it does and doesn't test. Future you will thank present you.</td></tr>
+<tr><td>7</td><td><code>import importlib.util</code></td><td>To load course files by path (their names start with a digit; step 17 explains why).</td></tr>
+<tr><td>8</td><td><code>import os</code></td><td>Not used anywhere in the file: a leftover. Harmless; delete it, or use it later for a real-model test (see the end of the page).</td></tr>
+<tr><td>9</td><td><code>from pathlib import Path</code></td><td>For building the path to <code>module1</code>.</td></tr>
+<tr><td>11</td><td><code>import pytest</code></td><td>Needed for <code>@pytest.mark.parametrize</code> (lines 65 and 72).</td></tr>
+<tr><td>12</td><td><code>from langchain_core.language_models.chat_models import BaseChatModel</code></td><td>The base class every LangChain chat model extends, <code>ChatOpenAI</code> included. Our fake extends it too, so the graphs can't tell the difference.</td></tr>
+<tr><td>13</td><td><code>from langchain_core.messages import AIMessage, HumanMessage, ToolMessage</code></td><td>The message types the fake creates and inspects. <code>langchain_core</code> is installed with <code>langchain</code>.</td></tr>
+<tr><td>14</td><td><code>from langchain_core.outputs import ChatGeneration, ChatResult</code></td><td>The wrapper objects a chat model must return from <code>_generate</code>.</td></tr>
+<tr><td>16</td><td><code>MODULE1 = Path(__file__).resolve().parent.parent / "module1"</code></td><td><code>__file__</code> is <code>tests/test_graphs.py</code>; <code>.resolve()</code> makes it absolute; <code>.parent</code> is <code>tests</code>; <code>.parent</code> again is the project root; <code>/ "module1"</code> joins the folder name. Works no matter where pytest is started.</td></tr>
+<tr><td>19</td><td><code>class FakeChatModel(BaseChatModel):</code></td><td>Our stand-in for <code>ChatOpenAI</code>.</td></tr>
+<tr><td>20</td><td><code>"""Answers with a fixed text, or asks for a tool when tools are bound."""</code></td><td>Its whole behaviour in one sentence.</td></tr>
+<tr><td>22</td><td><code>reply: str = "fake answer"</code></td><td>A field (LangChain models are Pydantic models, so fields are declared with type and default). The text to answer when no tool is involved. Tests change it, e.g. <code>reply="2"</code> for graph 3.</td></tr>
+<tr><td>23</td><td><code>tool_call: dict | None = None</code></td><td>Optionally, the tool call to request, like <code>{"name": "multiply", "args": {"nb1": 12, "nb2": 7}}</code>. <code>dict | None</code> means "a dict or nothing".</td></tr>
+<tr><td>24</td><td><code>tool_names: list = []</code></td><td>Names of the tools bound to this copy. Empty means "no tools bound", as in graphs 3 and 4.</td></tr>
+<tr><td>26–28</td><td><code>@property</code> / <code>def _llm_type(self): return "fake"</code></td><td><code>BaseChatModel</code> requires every model to name its type (used in logs and tracing). <code>@property</code> lets you read it as <code>model._llm_type</code> without parentheses.</td></tr>
+<tr><td>30–31</td><td><code>def bind_tools(self, tools, **kwargs):</code> / <code>return self.model_copy(update={"tool_names": [t.name for t in tools]})</code></td><td>Called by the graph files' <code>model_llm.bind_tools(tools)</code>. Like the real one, it returns a <em>new</em> model rather than changing the original. <code>model_copy(update=...)</code> copies the Pydantic object with one field changed; the list comprehension collects each tool's name.</td></tr>
+<tr><td>33</td><td><code>def _generate(self, messages, stop=None, run_manager=None, **kwargs):</code></td><td>The one method a chat model must implement. <code>BaseChatModel.invoke</code> turns your input into a list of messages and calls this.</td></tr>
+<tr><td>34</td><td><code>conversation = [m for m in messages if m.type != "system"]</code></td><td>Ignore the system message. Graphs 8–10 put it first, the repo version put it last; either way <code>conversation[-1]</code> is now the latest real message.</td></tr>
+<tr><td>35–36</td><td><code>if self.tool_call and self.tool_names and not isinstance(conversation[-1], ToolMessage):</code> / <code>message = AIMessage(content="", tool_calls=[{**self.tool_call, "id": "call_1"}])</code></td><td>Ask for a tool when: the test configured one, tools are bound, and we haven't just received a tool result. <code>{**self.tool_call, "id": "call_1"}</code> copies the dict and adds an <code>id</code>, which the ToolNode copies into its ToolMessage's <code>tool_call_id</code> to link answer and request. Empty <code>content</code> is what real models send with a tool call.</td></tr>
+<tr><td>37–38</td><td><code>elif isinstance(conversation[-1], ToolMessage):</code> / <code>message = AIMessage(content=f"The result is {conversation[-1].content}")</code></td><td>After a tool ran, give a final answer that quotes the tool result. No tool call, so <code>tools_condition</code> ends the loop.</td></tr>
+<tr><td>39–40</td><td><code>else:</code> / <code>message = AIMessage(content=self.reply)</code></td><td>The plain case: answer with the configured text.</td></tr>
+<tr><td>41</td><td><code>return ChatResult(generations=[ChatGeneration(message=message)])</code></td><td>The shape <code>BaseChatModel</code> expects. <code>invoke</code> unwraps it and returns just <code>message</code>, exactly like with <code>ChatOpenAI</code>.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Decision tree of FakeChatModel._generate: if a tool call is configured, tools are bound and the last message is not a tool message, request the tool; else if the last message is a tool message, answer The result is X; else answer the configured reply">
+  <rect class="box-solid" x="16" y="96" width="150" height="44" rx="8"/>
+  <text x="91" y="123" text-anchor="middle" class="on-solid">_generate()</text>
+  <path class="arrow" d="M166,118 H196"/>
+  <rect class="box-warn" x="198" y="84" width="230" height="68" rx="8"/>
+  <text x="313" y="106" text-anchor="middle" class="label">tool_call set and tools bound</text>
+  <text x="313" y="124" text-anchor="middle" class="label">and last is not a ToolMessage?</text>
+  <text x="313" y="142" text-anchor="middle" class="small">(system messages ignored)</text>
+  <path class="arrow-ok" d="M428,100 L490,44"/>
+  <text x="440" y="64" class="small">yes</text>
+  <rect class="box-ok" x="492" y="18" width="252" height="48" rx="8"/>
+  <text x="618" y="38" text-anchor="middle" class="label">AIMessage with tool_calls</text>
+  <text x="618" y="56" text-anchor="middle" class="small">→ tools_condition goes to "tools"</text>
+  <path class="arrow" d="M428,130 L490,130"/>
+  <text x="446" y="124" class="small">no</text>
+  <rect class="box-warn" x="492" y="108" width="252" height="44" rx="8"/>
+  <text x="618" y="135" text-anchor="middle" class="label">last is a ToolMessage?</text>
+  <path class="arrow-ok" d="M560,152 L520,186"/>
+  <path class="arrow" d="M680,152 L700,186"/>
+  <text x="512" y="174" class="small">yes</text>
+  <text x="700" y="174" class="small">no</text>
+  <rect class="box2" x="400" y="188" width="210" height="36" rx="8"/>
+  <text x="505" y="211" text-anchor="middle" class="label">"The result is 84"</text>
+  <rect class="box2" x="620" y="188" width="124" height="36" rx="8"/>
+  <text x="682" y="211" text-anchor="middle" class="mono">self.reply</text>
+</svg>
+<figcaption>Lines 34–40 as a picture. <strong>The fake is a tiny, predictable script of what a real model would do</strong>: ask for a tool once, then answer using the tool's result.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to fakes and monkeypatch? Swapping a class during a test</summary>
+<p>A <a class="term" href="glossary.html#fake-model">fake model</a> is a "test double": an object with the same interface as the real thing, but simple, predictable behaviour. LangGraph only ever calls <code>.invoke()</code> and <code>.bind_tools()</code> on the model, so a fake that answers those can stand in anywhere.</p>
+<p>The course files create the model themselves with <code>from langchain_openai import ChatOpenAI</code> and <code>ChatOpenAI(model="gpt-4o")</code>. To make them get our fake instead, the test replaces the <em>name</em> <code>ChatOpenAI</code> inside the <code>langchain_openai</code> module before the file runs. That's <strong>monkeypatching</strong>: changing something at runtime.</p>
+<p>pytest's built-in <code>monkeypatch</code> <strong>fixture</strong> does this safely. You get it just by naming a parameter <code>monkeypatch</code> in your test function, and pytest <strong>undoes every change</strong> when that test ends, so one test can't leak into the next.</p>
+<ul>
+<li><code>monkeypatch.setenv("NAME", "value")</code>: set an environment variable for this test only.</li>
+<li><code>monkeypatch.setattr(module, "name", new_value)</code>: replace an attribute for this test only.</li>
+</ul>
+</details>
+
+<h3>Line by line: the loader</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>44</td><td><code>def load(file_name, monkeypatch, **fake):</code></td><td>A helper used by every test. <code>**fake</code> collects any extra keyword arguments (<code>reply="2"</code>, <code>tool_call={...}</code>) into a dict that is passed on to the fake model.</td></tr>
+<tr><td>45</td><td><code>"""Import a numbered course file with ChatOpenAI replaced by FakeChatModel."""</code></td><td>What the helper does.</td></tr>
+<tr><td>46</td><td><code>monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")</code></td><td>A dummy key, so nothing complains about a missing variable. It's never sent anywhere, because no real client is created.</td></tr>
+<tr><td>47</td><td><code>import langchain_openai</code></td><td>The module whose attribute we're about to replace.</td></tr>
+<tr><td>48</td><td><code>monkeypatch.setattr(langchain_openai, "ChatOpenAI", lambda **kwargs: FakeChatModel(**fake))</code></td><td>The swap. When a course file then runs <code>from langchain_openai import ChatOpenAI</code>, it gets this <code>lambda</code>, a tiny anonymous function. <code>ChatOpenAI(model="gpt-4o")</code> calls it, it ignores <code>model=...</code> (<code>**kwargs</code>) and returns a <code>FakeChatModel</code> configured for this test.</td></tr>
+<tr><td>49</td><td><code>spec = importlib.util.spec_from_file_location(file_name[:-3], MODULE1 / file_name)</code></td><td>Describe the module to load. <code>file_name[:-3]</code> drops the last three characters, <code>.py</code>, to make a module name.</td></tr>
+<tr><td>50–51</td><td><code>module = importlib.util.module_from_spec(spec)</code> / <code>spec.loader.exec_module(module)</code></td><td>Create the module and run the course file inside it. This is where the file builds its graph, using the fake model.</td></tr>
+<tr><td>52</td><td><code>return module</code></td><td>Tests then read <code>.graph</code> from it.</td></tr>
+</table></div>
+
+<h3>Line by line: the tests</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it proves</th></tr>
+<tr><td>55–57</td><td><code>def test_string_state_appends_greeting(monkeypatch):</code> … <code>assert graph.invoke("hey am new! ") == "hey am new! welcome to AI Career Lab!"</code></td><td>Graph 0 (step 6): a string state goes through one node that appends the greeting. Note the trailing space in the input: without it the result is glued, <code>hey am new!welcome…</code>.</td></tr>
+<tr><td>60–62</td><td><code>def test_typed_state_returns_a_dict(monkeypatch):</code> … <code>== {"graph_str": "hello welcome to AI Career Lab!"}</code></td><td>Graph 1 (step 7): a <a class="term" href="glossary.html#typeddict">TypedDict</a> state comes back as a dict with the updated field.</td></tr>
+<tr><td>65–66</td><td><code>@pytest.mark.parametrize("text, node", [("hello I am new", "Node 2"), ("hi I am new", "Node 3"), ("Hello I am new", "Node 3")])</code></td><td>Runs the next test three times with different values (see the primer below). The third case records that the check is <strong>case-sensitive</strong>: <code>"Hello"</code> goes to node 3.</td></tr>
+<tr><td>67–69</td><td><code>def test_conditional_edge_routes_on_first_word(monkeypatch, text, node):</code> … <code>.endswith(f"I am in {node}")</code></td><td>Graph 2 (step 8): the routing function picks the right branch for each input. <code>endswith</code> checks only the end of the string, so the test doesn't depend on the greeting text.</td></tr>
+<tr><td>72–73</td><td><code>@pytest.mark.parametrize("reply, expected_end, number", [("2", ...), ("3", ...), ("1", ...), ("Two", "passed by node 1", 0)])</code></td><td>Four model replies for graph 3, including the one that crashed the repo version.</td></tr>
+<tr><td>74–78</td><td><code>graph = load("3_graph_introduction_model.py", monkeypatch, reply=reply).graph</code> … <code>assert result["graph_int"] == number</code></td><td>Graph 3 (step 9, fixed in step 15): the model's reply decides the route, and a non-number falls back to 0 and ends after node 1. Two <code>assert</code>s: both must hold.</td></tr>
+<tr><td>81–84</td><td><code>def test_messages_state_appends_the_reply(monkeypatch):</code> … <code>assert [m.type for m in messages] == ["human", "ai"]</code></td><td>Graph 4 (step 10): <code>add_messages</code> appends the reply to your message instead of replacing it. Each message has a <code>.type</code> such as <code>"human"</code> or <code>"ai"</code>.</td></tr>
+<tr><td>87–92</td><td><code>tool_call={"name": "multiply", "args": {"nb1": 12, "nb2": 7}}</code> … <code>== ["human", "ai", "tool", "ai"]</code> / <code>assert messages[2].content == "84"</code></td><td>Graph 8 (step 13): the full <a class="term" href="glossary.html#agent-loop">agent loop</a>. The fake asks for <code>multiply</code>, the <strong>real</strong> ToolNode runs the <strong>real</strong> <code>multiply</code> tool (so 84 is computed by your code), and the graph loops back to the model, which answers. Tool results are stored as text, hence <code>"84"</code>.</td></tr>
+<tr><td>95–99</td><td><code>tool_call={"name": "division", "args": {"nb1": 5, "nb2": 0}}</code> … <code>messages[2].type == "tool" and "Cannot divide by zero" in messages[2].content</code></td><td>Graph 10 (step 16): dividing by zero doesn't crash; the error becomes a tool message. Change line 47 of graph 10 back to <code>ToolNode(tools)</code> and this test fails.</td></tr>
+<tr><td>102–106</td><td><code>first = {"configurable": {"thread_id": "a"}}</code> / two <code>graph.invoke(..., first)</code></td><td>Graph 9 (step 14, fixed in step 15): two turns on thread <code>"a"</code>. This test only works because of fix 1: the repo version would crash with <code>NameError</code> while loading.</td></tr>
+<tr><td>107–108</td><td><code>other = graph.invoke(..., {"configurable": {"thread_id": "b"}})</code></td><td>One turn on a different thread.</td></tr>
+<tr><td>109</td><td><code>assert len(graph.get_state(first).values["messages"]) == 4</code></td><td>Thread <code>"a"</code> kept both turns: 2 human + 2 ai.</td></tr>
+<tr><td>110</td><td><code>assert len(other["messages"]) == 2</code></td><td>Thread <code>"b"</code> saw none of thread <code>"a"</code>: threads are isolated.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to <code>@pytest.mark.parametrize</code>? One test, many inputs</summary>
+<p>A <strong>decorator</strong> (the <code>@...</code> line above a function) changes how the function is used. <code>@pytest.mark.parametrize("a, b", [(1, 2), (3, 4)])</code> tells pytest: run this test once per tuple, passing the values as the parameters <code>a</code> and <code>b</code>.</p>
+<p>Each run is reported as its own test, with the values in its name, e.g. <code>test_conditional_edge_routes_on_first_word[Hello I am new-Node 3]</code>. If only one case fails, you see exactly which one. That's how 8 test functions become <strong>13 tests</strong>: 3 cases for graph 2, 4 for graph 3, 1 each for the other six.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Coverage map: eight test functions expand to thirteen tests covering graphs 0, 1, 2, 3, 4, 8, 9 and 10">
+  <text x="16" y="24" class="title">8 test functions → 13 tests</text>
+  <rect class="box" x="16" y="40" width="172" height="52" rx="8"/><text x="102" y="62" text-anchor="middle" class="label">graph 0 · string</text><text x="102" y="80" text-anchor="middle" class="small">1 test</text>
+  <rect class="box" x="200" y="40" width="172" height="52" rx="8"/><text x="286" y="62" text-anchor="middle" class="label">graph 1 · TypedDict</text><text x="286" y="80" text-anchor="middle" class="small">1 test</text>
+  <rect class="box-info" x="384" y="40" width="172" height="52" rx="8"/><text x="470" y="62" text-anchor="middle" class="label">graph 2 · routing</text><text x="470" y="80" text-anchor="middle" class="small">3 tests (parametrize)</text>
+  <rect class="box-info" x="568" y="40" width="176" height="52" rx="8"/><text x="656" y="62" text-anchor="middle" class="label">graph 3 · model number</text><text x="656" y="80" text-anchor="middle" class="small">4 tests (parametrize)</text>
+  <rect class="box" x="16" y="108" width="172" height="52" rx="8"/><text x="102" y="130" text-anchor="middle" class="label">graph 4 · messages</text><text x="102" y="148" text-anchor="middle" class="small">1 test</text>
+  <rect class="box" x="200" y="108" width="172" height="52" rx="8"/><text x="286" y="130" text-anchor="middle" class="label">graph 8 · agent loop</text><text x="286" y="148" text-anchor="middle" class="small">1 test</text>
+  <rect class="box-ok" x="384" y="108" width="172" height="52" rx="8"/><text x="470" y="130" text-anchor="middle" class="label">graph 10 · tool error</text><text x="470" y="148" text-anchor="middle" class="small">1 test</text>
+  <rect class="box-ok" x="568" y="108" width="176" height="52" rx="8"/><text x="656" y="130" text-anchor="middle" class="label">graph 9 · memory</text><text x="656" y="148" text-anchor="middle" class="small">1 test</text>
+  <text x="16" y="196" class="small">Not tested here: graphs 5 and 6 (exercise: copy the graph 8 test and expect ["human", "ai"] and ["human", "ai", "tool"]),</text>
+  <text x="16" y="214" class="small">11 (needs typed input) and 12 (prints only). Blue = parametrized, green = need the step 15–16 work.</text>
+</svg>
+<figcaption>Which graph each test covers. The graph 5 and 6 exercise works (we ran it with <code>tool_call={"name": "multiply", "args": {"nb1": 4, "nb2": 5}}</code>: 2 passed). <strong>Every concept in the course, from string state to memory, has at least one automatic check.</strong></figcaption>
+</figure>
+
+<h2>Run the tests</h2>
+<pre data-lang="ps" data-tag="terminal"><code>uv run pytest -q</code></pre>
+<p><code>uv run</code> runs a command inside the project's environment (installing anything missing first); <code>pytest</code> finds <code>tests/test_graphs.py</code>; <code>-q</code> ("quiet") prints one dot per passing test instead of one line each. Use <code>-v</code> ("verbose") to see every test's name.</p>
+
+<div class="callout ok"><p><strong>What you should see</strong> (verified):</p>
+<pre data-lang="text" data-tag="verified output"><code>.............                                                            [100%]
+13 passed in 4.38s</code></pre>
+<p>Thirteen dots, one per test. The time varies by machine. No key and no internet needed. With <code>-v</code> the names include the parameter values, for example <code>test_model_number_picks_the_route[Two-passed by node 1-0] PASSED</code>.</p></div>
+
+<h3>Watch a test catch a bug</h3>
+<p>A test you've never seen fail might not test anything. So we ran the same file with the <strong>repo's</strong> graph 3 (before the step 15 fix) put back in place. One case failed, with the exact bug from step 15:</p>
+<pre data-lang="text" data-tag="verified output (unfixed graph 3)"><code>E       ValueError: invalid literal for int() with base 10: 'Two'
+E       During task with name 'node1' and id '77e8b326-...'
+
+module1\3_graph_introduction_model.py:21: ValueError
+=========================== short test summary info ===========================
+FAILED tests/test_graphs.py::test_model_number_picks_the_route[Two-passed by node 1-0]
+1 failed, 12 passed in 6.27s</code></pre>
+<p>Read it from the bottom up: the summary says how many failed, the <code>FAILED</code> line names the test and the case, and the lines above show where the error happened (line 21 of graph 3) and why.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Before and after the fix: with the unfixed graph 3 the Two case fails and the summary is 1 failed, 12 passed; with the fixed file all 13 pass">
+  <rect class="box-bad" x="16" y="20" width="350" height="130" rx="8"/>
+  <text x="191" y="44" text-anchor="middle" class="title">repo graph 3</text>
+  <text x="191" y="70" text-anchor="middle" class="mono">int("Two") raises ValueError</text>
+  <text x="191" y="96" text-anchor="middle" class="mono">FAILED ...[Two-passed by node 1-0]</text>
+  <text x="191" y="128" text-anchor="middle" class="bad">1 failed, 12 passed</text>
+  <path class="arrow-ok" d="M366,85 H392"/>
+  <text x="379" y="76" text-anchor="middle" class="small">fix</text>
+  <rect class="box-ok" x="394" y="20" width="350" height="130" rx="8"/>
+  <text x="569" y="44" text-anchor="middle" class="title">fixed graph 3 (step 15)</text>
+  <text x="569" y="70" text-anchor="middle" class="mono">except ValueError: number = 0</text>
+  <text x="569" y="96" text-anchor="middle" class="mono">routes to END after node 1</text>
+  <text x="569" y="128" text-anchor="middle" class="ok">13 passed</text>
+</svg>
+<figcaption>Both outcomes were run. <strong>A good test fails on the bug and passes on the fix</strong>; that's how you know it's testing the right thing.</figcaption>
+</figure>
+
+<h2>What these tests can't check</h2>
+<p>A fake model makes tests free and repeatable precisely because it isn't smart. So these tests say nothing about:</p>
+<ul>
+<li><strong>Whether a real model picks the right tool</strong>, or passes the numbers in the right order. The fake does exactly what the test tells it.</li>
+<li><strong>The wording and quality of answers</strong>, or whether the system prompt works as intended.</li>
+<li><strong>Problems on OpenAI's side</strong>: a wrong or expired key, a model name that no longer exists, rate limits, timeouts, or the model inventing an answer instead of using a tool (a <a class="term" href="glossary.html#hallucination">hallucination</a>).</li>
+</ul>
+<p>For those you need a few <strong>real</strong> runs: try the graphs in Studio, look at the traces in <a class="term" href="glossary.html#langsmith">LangSmith</a>, and, when you're ready, write a handful of real-model tests that only run when a key is present. That's where the unused <code>import os</code> could come in, e.g. <code>@pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="needs a real key")</code> (note: this file sets a fake key inside <code>load()</code>, so put such tests in a separate file). The handbook chapter <a href="lg-09-deploying-and-production.html">Testing, Deploying &amp; Production</a> goes further.</p>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong><code>no tests ran</code></strong>: the file or function names don't start with <code>test_</code>, or you ran pytest from inside <code>module1</code>. Run from the project root.</li>
+<li><strong><code>pytest</code> not found</strong>: you skipped <code>uv add --dev pytest</code>, or ran plain <code>pytest</code> outside the activated environment. Use <code>uv run pytest</code>.</li>
+<li><strong>The graph 9 test errors with <code>NameError</code></strong>: graph 9 still has the repo's missing import. Apply step 15, fix 1.</li>
+<li><strong><code>FileNotFoundError</code> for <code>10_graph_division_tool.py</code></strong>: create it first (step 16), or delete that test.</li>
+<li><strong>Forgetting the <code>monkeypatch</code> parameter</strong> in a new test: <code>load()</code> needs it, and pytest only provides it when the test function asks for it by that exact name.</li>
+<li><strong>Importing the model before patching</strong>, e.g. a course file loaded at the top of the test file: it would grab the real <code>ChatOpenAI</code>. Always load course files through <code>load()</code> inside the test.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>uv add --dev pytest</code>, a <code>tests/test_graphs.py</code> file, and <code>uv run pytest -q</code> give you 13 automatic checks in seconds (verified: 13 passed), with no key and no internet (README exercise 8).</li>
+<li><code>FakeChatModel</code> extends <code>BaseChatModel</code>, implements <code>bind_tools</code> and <code>_generate</code>, and answers predictably.</li>
+<li><code>monkeypatch.setattr(langchain_openai, "ChatOpenAI", ...)</code> swaps the model while each course file loads, and pytest undoes it after every test.</li>
+<li><code>@pytest.mark.parametrize</code> runs one test with many inputs, each reported separately.</li>
+<li>The tests check routing, the agent loop with real tools, tool errors and thread memory, and they caught the original graph 3 bug.</li>
+<li>Fake-model tests can't judge a real model's choices or wording; use Studio, LangSmith and a few key-gated real tests for that.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="17-persistent-memory-sqlite.html"><small>← Previous · Step 17</small>Memory That Survives a Restart</a>
+<a class="next" href="19-streaming-and-drawing.html"><small>Next · Step 19 →</small>Stream Steps &amp; Draw Your Graph</a>
+</nav>
+</main>
+</body>
+</html>

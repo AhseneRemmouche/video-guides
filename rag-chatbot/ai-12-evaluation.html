@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 12 · Evaluating AI Applications</title>
+<meta name="description" content="Test sets, metrics, LLM-as-judge and regression testing for prompts and RAG.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 12/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">AI &amp; Agents Handbook · Chapter 12 of 16</div>
+  <h1>Evaluating AI Applications</h1>
+  <p class="lead">Test sets, metrics, LLM-as-judge and regression testing for prompts and RAG.</p>
+</section>
+<p>You have built a chatbot that answers questions from a handbook. You asked it "How many vacation days do I get?", it said "15 days for 0–2 years of service, 20 days for 3–5 years", and you were happy. But how do you <em>know</em> it still works tomorrow, after you change the prompt, the chunk size or the model? Clicking around and "eyeballing" a few answers does not scale, and it misses the quiet breakages. This chapter teaches you to <strong>evaluate</strong> an AI application: write down what "correct" means, measure it automatically, and re-run those measurements every time you change something.</p>
+
+<p>You will learn:</p>
+<ul>
+  <li>why AI apps need a different kind of testing than normal code;</li>
+  <li>how to build a small <strong>test set</strong> for <em>this</em> chatbot from the handbook facts used in the video;</li>
+  <li>the main kinds of checks: simple text checks, <strong>retrieval metrics</strong> (did the right chunk come back?), <strong>answer metrics</strong> (is the answer correct and grounded?), <strong>LLM-as-judge</strong> and human review;</li>
+  <li>how to write a tiny evaluation script in TypeScript, and how to use it as a regression test when you change chunk size, model or prompt;</li>
+  <li>how to keep measuring quality after launch (online evaluation), and which pitfalls to avoid.</li>
+</ul>
+
+<div class="callout"><p><strong>Why this matters for your chatbot:</strong> in <a href="11-chunking-utility.html">step 11</a> this guide changed the chunk size from the video's 150 / 20 to 900 / 150. That one change affects every answer the bot gives. Without an evaluation you can only <em>hope</em> it was an improvement. With one, you can show it: "before: 6 of 10 questions retrieved the right passage; after: 9 of 10".</p></div>
+
+<h2>Why AI apps need evals</h2>
+<p>An <a class="term" href="glossary.html#eval">eval</a> (short for <em>evaluation</em>) is a repeatable test that measures how well an AI system does a task. It is the AI version of a unit test, but with two big differences.</p>
+
+<h3>1. The output is not deterministic</h3>
+<p>Normal code is <strong>deterministic</strong>: <code>add(2, 3)</code> returns <code>5</code> every single time, so a test can say "expect exactly 5". An <a class="term" href="glossary.html#llm">LLM</a> is different. It picks each next <a class="term" href="glossary.html#token">token</a> with some randomness (see <a class="term" href="glossary.html#temperature">temperature</a>), so the same question can produce:</p>
+<ul>
+  <li>"You get 15 days of PTO per year if you have 0–2 years of service."</li>
+  <li>"Employees with up to two years of service receive <strong>15 days</strong> annually; 3–5 years: 20 days."</li>
+</ul>
+<p>Both are correct, but they are different strings. So you cannot test with "the answer must equal this exact text". You need checks that tolerate different wording but still catch wrong facts.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Normal code returns the same output every run; an LLM returns different wording each run with the same fact, so the check must look for the fact">
+  <rect class="zone" x="10" y="10" width="300" height="180" rx="10"/>
+  <rect class="zone" x="330" y="10" width="420" height="180" rx="10"/>
+  <text x="160" y="32" text-anchor="middle" class="title">Normal code</text>
+  <text x="540" y="32" text-anchor="middle" class="title">LLM</text>
+  <rect class="box" x="25" y="85" width="110" height="40" rx="8"/><text x="80" y="110" text-anchor="middle" class="mono">add(2, 3)</text>
+  <rect class="box2" x="185" y="48" width="70" height="30" rx="6"/><text x="220" y="68" text-anchor="middle">5</text>
+  <rect class="box2" x="185" y="93" width="70" height="30" rx="6"/><text x="220" y="113" text-anchor="middle">5</text>
+  <rect class="box2" x="185" y="138" width="70" height="30" rx="6"/><text x="220" y="158" text-anchor="middle">5</text>
+  <path class="arrow" d="M135,100 L183,65"/><path class="arrow" d="M135,105 H183"/><path class="arrow" d="M135,110 L183,150"/>
+  <text x="80" y="150" text-anchor="middle" class="small">same every run</text>
+  <text x="80" y="182" text-anchor="middle" class="ok">test: === 5</text>
+  <rect class="box" x="345" y="85" width="125" height="40" rx="8"/><text x="407" y="110" text-anchor="middle">Same question</text>
+  <rect class="box2" x="500" y="48" width="235" height="30" rx="6"/><text x="617" y="68" text-anchor="middle" class="label">"You get 15 days of PTO…"</text>
+  <rect class="box2" x="500" y="93" width="235" height="30" rx="6"/><text x="617" y="113" text-anchor="middle" class="label">"Up to two years: 15 days…"</text>
+  <rect class="box2" x="500" y="138" width="235" height="30" rx="6"/><text x="617" y="158" text-anchor="middle" class="label">"15 days per year."</text>
+  <path class="arrow" d="M470,100 L498,65"/><path class="arrow" d="M470,105 H498"/><path class="arrow" d="M470,110 L498,150"/>
+  <text x="407" y="150" text-anchor="middle" class="small">different every run</text>
+  <text x="407" y="182" text-anchor="middle" class="ok">check: contains "15"</text>
+</svg>
+<figcaption>Left: a classic test can expect one exact output. Right: three illustrative runs of the same question, worded differently but all correct. <strong>Evals check for the fact, not the exact string.</strong></figcaption>
+</figure>
+
+<h3>2. Changes break things silently</h3>
+<p>In normal code, a breaking change usually causes an error, a red test or a crash. In an AI app, the most common failures produce no error at all:</p>
+<ul>
+  <li>You reword the system prompt to make answers shorter, and the model stops calling <code>searchKnowledgeBase</code> for some questions. It now answers from its general knowledge, confidently and wrongly (a <a class="term" href="glossary.html#hallucination">hallucination</a>).</li>
+  <li>You change the chunk size, and the passage with "two weeks in advance" now sits in a chunk that no longer passes the <code>0.5</code> similarity threshold.</li>
+  <li>The provider updates a model, or you switch to a newer one, and its style or tool-use habits change.</li>
+</ul>
+<p>Everything still "works": the page loads, an answer streams in. Only an eval notices that the answer is now worse.</p>
+
+<details class="primer"><summary>New to testing? What a test is and why developers write them</summary>
+<p>A <strong>test</strong> is a small program that runs your code with a known input and checks the output against what you expect. If the check fails, the test reports it. Developers run tests automatically before every release, so mistakes are caught by a machine instead of by a user.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>// A classic, deterministic test
+const result = add(2, 3);
+if (result !== 5) throw new Error(`Expected 5, got ${result}`);</code></pre>
+<p>A <strong>regression</strong> is when something that used to work stops working after a change. A <strong>regression test</strong> is a test you keep running forever so that old bugs never come back unnoticed. Evals play exactly this role for prompts, models and retrieval settings.</p>
+</details>
+
+<h2>The parts of this app you can evaluate</h2>
+<p>A <a class="term" href="glossary.html#rag">RAG</a> chatbot is a pipeline. When an answer is wrong, the fault can be in different places, so it pays to measure each stage separately.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Where to evaluate a RAG chatbot: retrieval and answer">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="10" y="40" width="150" height="60" rx="8"/><text x="85" y="66" text-anchor="middle">Test question</text><text x="85" y="84" text-anchor="middle" class="small">"How much notice?"</text>
+  <rect class="box" x="200" y="40" width="160" height="60" rx="8"/><text x="280" y="66" text-anchor="middle">searchDocuments</text><text x="280" y="84" text-anchor="middle" class="small">top-3 chunks</text>
+  <rect class="box" x="400" y="40" width="160" height="60" rx="8"/><text x="480" y="66" text-anchor="middle">Model + tools</text><text x="480" y="84" text-anchor="middle" class="small">gpt-5-mini agent</text>
+  <rect class="box2" x="600" y="40" width="150" height="60" rx="8"/><text x="675" y="66" text-anchor="middle">Answer</text><text x="675" y="84" text-anchor="middle" class="small">streamed text</text>
+  <path class="arrow" d="M160,70 H198"/><path class="arrow" d="M360,70 H398"/><path class="arrow" d="M560,70 H598"/>
+  <rect class="box2" x="200" y="140" width="160" height="56" rx="8"/><text x="280" y="164" text-anchor="middle">Retrieval eval</text><text x="280" y="182" text-anchor="middle" class="small">right chunk? hit rate, MRR</text>
+  <rect class="box2" x="560" y="140" width="190" height="56" rx="8"/><text x="655" y="164" text-anchor="middle">Answer eval</text><text x="655" y="182" text-anchor="middle" class="small">correct? grounded? relevant?</text>
+  <path class="arrow" d="M280,100 V138"/><path class="arrow" d="M675,100 V138"/>
+</svg>
+<figcaption>Evaluate retrieval and answers separately. If retrieval fails, no prompt can fix the answer; if retrieval succeeds but the answer is wrong, the problem is in the prompt or model.</figcaption>
+</figure>
+
+<ul>
+  <li><strong>Retrieval</strong> (<a href="14-semantic-search.html">step 14</a>): given a question, does <code>searchDocuments</code> return the chunk that contains the answer?</li>
+  <li><strong>Tool use</strong> (<a href="15-search-tool.html">step 15</a>, <a href="22-build-an-agent.html">step 22</a>): does the model call <code>searchKnowledgeBase</code> when it should, <code>calculator</code> for arithmetic, and <code>getCurrentDate</code> for date questions?</li>
+  <li><strong>Answer</strong>: is the final text correct, supported by the retrieved chunks, and actually answering the question?</li>
+</ul>
+
+<h2>Building a test set for this chatbot</h2>
+<p>Every eval starts with a <strong>test set</strong> (also called a <em>dataset</em> or <em>golden set</em>): a list of questions together with what a correct answer must contain. The expected facts are your <a class="term" href="glossary.html#ground-truth">ground truth</a>: the answers you know are right because you checked them in the source document.</p>
+<p>The video's sample handbook gives us real, checkable facts (see <a href="15-search-tool.html">step 15</a>):</p>
+<ul>
+  <li>PTO: <strong>15 days</strong> per year for 0–2 years of service, <strong>20 days</strong> for 3–5 years.</li>
+  <li>Vacation requests must be submitted <strong>at least two weeks in advance</strong> through the HR portal.</li>
+  <li>An annual <strong>education budget of $2,000</strong> per employee.</li>
+</ul>
+<p>Turn these into "golden questions". Write each question the way a real employee might ask it, and list the facts a correct answer must include. Add a few variations in wording, because users rarely use the document's exact words.</p>
+
+<pre data-lang="ts" data-file="evals/test-set.ts" data-tag="illustrative"><code>// evals/test-set.ts
+export type TestCase = {
+  id: string;
+  question: string;
+  // Phrases that must appear in a retrieved chunk (retrieval check)
+  expectedInChunk: string[];
+  // Facts that must appear in the final answer (answer check)
+  expectedInAnswer: string[];
+};
+
+export const testSet: TestCase[] = [
+  {
+    id: "pto-new",
+    question: "How many vacation days do I get in my first year?",
+    expectedInChunk: ["15 days"],
+    expectedInAnswer: ["15"],
+  },
+  {
+    id: "pto-senior",
+    question: "I've worked here for 4 years. What's my PTO allowance?",
+    expectedInChunk: ["20 days"],
+    expectedInAnswer: ["20"],
+  },
+  {
+    id: "notice",
+    question: "How far ahead do I have to request time off?",
+    expectedInChunk: ["two weeks"],
+    expectedInAnswer: ["two weeks|2 weeks"],
+  },
+  {
+    id: "education",
+    question: "Is there money for courses or training?",
+    expectedInChunk: ["$2,000"],
+    expectedInAnswer: ["2,000|2000"],
+  },
+  {
+    id: "education-math",
+    question: "If I spend $450 on a course, how much of my education budget is left?",
+    expectedInChunk: ["$2,000"],
+    expectedInAnswer: ["1,550|1550"],
+  },
+  {
+    id: "out-of-scope",
+    question: "What is the company's policy on bringing pets to the office?",
+    expectedInChunk: [],
+    expectedInAnswer: [],
+  },
+];</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>// evals/test-set.ts</code></td><td>A suggested file location. An <code>evals/</code> folder at the project root keeps test data separate from app code.</td></tr>
+<tr><td>2–9</td><td><code>export type TestCase = { … }</code></td><td>A <a class="term" href="glossary.html#type">type</a> describing one test case, so <a class="term" href="glossary.html#typescript">TypeScript</a> warns you if a case is missing a field. <code>id</code> is a short name for reports. <code>question</code> is what a user would type.</td></tr>
+<tr><td>5–6</td><td><code>expectedInChunk: string[];</code></td><td>Text that must appear in at least one retrieved chunk. This tests <em>retrieval</em> only, without involving the chat model.</td></tr>
+<tr><td>7–8</td><td><code>expectedInAnswer: string[];</code></td><td>Facts the final answer must contain. A <code>|</code> inside a string means "any of these alternatives" (the script below splits on it), because the model may write "2 weeks" or "two weeks".</td></tr>
+<tr><td>11</td><td><code>export const testSet: TestCase[] = [</code></td><td>The list of cases. <code>TestCase[]</code> means "an array of <code>TestCase</code>".</td></tr>
+<tr><td>12–17</td><td><code>id: "pto-new", …</code></td><td>The first fact from the handbook. Note the question says "first year", not "0–2 years of service": a good test uses the user's words, not the document's.</td></tr>
+<tr><td>18–23</td><td><code>id: "pto-senior", …</code></td><td>Requires the model to map "4 years" to the 3–5 years band. That is a small reasoning step, so it catches models that just repeat the first number they see.</td></tr>
+<tr><td>30–35</td><td><code>id: "education", …</code></td><td>Uses "courses or training" instead of "education budget", testing that <a class="term" href="glossary.html#semantic-search">semantic search</a> matches by meaning.</td></tr>
+<tr><td>36–41</td><td><code>id: "education-math", …</code></td><td>A multi-tool case for the agent of <a href="22-build-an-agent.html">step 22</a>: it must search ($2,000) <em>and</em> use the <code>calculator</code> (2000 − 450 = 1550).</td></tr>
+<tr><td>42–47</td><td><code>id: "out-of-scope", …</code></td><td>A question the handbook does <em>not</em> answer. The correct behaviour is to say "I couldn't find that", as the system prompt requires. Empty arrays mean "no specific facts"; you check this case with a judge or by hand instead.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="One test case card: its expectedInChunk field feeds the retrieval check and its expectedInAnswer field feeds the answer check">
+  <rect class="box2" x="10" y="20" width="330" height="195" rx="10"/>
+  <text x="175" y="46" text-anchor="middle" class="title">One TestCase</text>
+  <text x="25" y="76" class="mono">id: "notice"</text>
+  <text x="25" y="102" class="mono">question: "How far ahead do I…"</text>
+  <rect class="box-info" x="20" y="116" width="310" height="26" rx="6"/><text x="25" y="134" class="mono">expectedInChunk: ["two weeks"]</text>
+  <rect class="box-ok" x="20" y="150" width="310" height="26" rx="6"/><text x="25" y="168" class="mono">expectedInAnswer: ["two weeks|2 weeks"]</text>
+  <text x="175" y="200" text-anchor="middle" class="small">"|" means: any of these alternatives</text>
+  <rect class="box-info" x="420" y="30" width="330" height="76" rx="8"/><text x="585" y="52" text-anchor="middle" class="title">Retrieval check</text><text x="585" y="72" text-anchor="middle" class="mono">searchDocuments(question, 3, 0.5)</text><text x="585" y="92" text-anchor="middle" class="small">does a top-3 chunk contain the phrase?</text>
+  <rect class="box-ok" x="420" y="130" width="330" height="76" rx="8"/><text x="585" y="152" text-anchor="middle" class="title">Answer check</text><text x="585" y="172" text-anchor="middle" class="small">run the agent, then look in the final text</text><text x="585" y="192" text-anchor="middle" class="small">does it contain one alternative?</text>
+  <path class="arrow" d="M340,129 L418,70"/><path class="arrow" d="M340,163 L418,166"/>
+</svg>
+<figcaption>Each golden case carries two kinds of ground truth: a phrase the <strong>retrieved chunk</strong> must contain, and facts the <strong>final answer</strong> must contain. That is what lets you test retrieval and answers separately.</figcaption>
+</figure>
+
+<div class="callout"><p><strong>Rule of thumb for a first test set:</strong> start with 20–50 cases that cover your most common question types, a few tricky phrasings, a few multi-step questions, and a few questions that should <em>not</em> be answered. Add a new case every time a user reports a bad answer. Over time the set becomes a record of everything that has ever gone wrong.</p></div>
+
+<details class="primer"><summary>Where do good test questions come from?</summary>
+<ul>
+  <li><strong>The documents themselves.</strong> Read the handbook and write one question per important fact.</li>
+  <li><strong>Real users.</strong> After launch, your logs (see "Online evaluation" below) show what people actually ask. Real questions are messier than the ones you invent.</li>
+  <li><strong>An LLM, with your review.</strong> You can ask a model to propose questions for each chunk ("write 3 questions this passage answers"). This is fast, but always read and correct them: generated questions tend to copy the document's wording, which makes retrieval look better than it is.</li>
+  <li><strong>Negative cases.</strong> Questions on topics not in the documents, and requests the bot should refuse.</li>
+</ul>
+</details>
+
+<h2>Types of checks</h2>
+<p>There is no single "accuracy" number for an AI app. You combine several checks, from cheap and strict to expensive and flexible.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Check</th><th>What it measures</th><th>Cost</th><th>Good for</th></tr>
+<tr><td>Exact / contains</td><td>Does the output contain "15" or "two weeks"?</td><td>Free, instant</td><td>Facts, numbers, names, required phrases</td></tr>
+<tr><td>Retrieval metrics</td><td>Did the right chunk come back, and how high?</td><td>One embedding call per question</td><td>Tuning chunk size, threshold, <code>limit</code>, embedding model</td></tr>
+<tr><td>LLM-as-judge</td><td>Faithfulness, relevance, correctness on a rubric</td><td>One extra model call per answer</td><td>Open-ended answers where wording varies</td></tr>
+<tr><td>Human review</td><td>Everything, including tone and subtle errors</td><td>Slow, expensive</td><td>Calibrating the judge, high-stakes answers, small samples</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Eval pyramid: many cheap contains checks at the bottom, then retrieval metrics, then LLM-as-judge, and a few human reviews at the top">
+  <rect class="box-warn" x="280" y="34" width="200" height="46" rx="8"/><text x="380" y="54" text-anchor="middle" class="title">Human review</text><text x="380" y="71" text-anchor="middle" class="small">small samples</text>
+  <rect class="box" x="230" y="86" width="300" height="46" rx="8"/><text x="380" y="106" text-anchor="middle" class="title">LLM-as-judge</text><text x="380" y="123" text-anchor="middle" class="small">rubric · one model call per answer</text>
+  <rect class="box-info" x="180" y="138" width="400" height="46" rx="8"/><text x="380" y="158" text-anchor="middle" class="title">Retrieval metrics</text><text x="380" y="175" text-anchor="middle" class="small">hit rate@3 · MRR · one embedding per question</text>
+  <rect class="box-ok" x="130" y="190" width="500" height="46" rx="8"/><text x="380" y="210" text-anchor="middle" class="title">Exact / contains checks</text><text x="380" y="227" text-anchor="middle" class="small">free · instant · run on every case</text>
+  <path class="arrow-accent" d="M60,228 V48"/><text x="60" y="36" text-anchor="middle" class="small">costly, few</text><text x="60" y="250" text-anchor="middle" class="small">cheap, many</text>
+  <path class="arrow-accent" d="M700,228 V48"/><text x="700" y="36" text-anchor="middle" class="small">judges meaning</text><text x="700" y="250" text-anchor="middle" class="small">strict facts</text>
+</svg>
+<figcaption>Run lots of the cheap checks at the bottom on every change, and fewer of the expensive ones near the top. <strong>Each level catches problems the level below cannot</strong>, so a good eval suite uses all four.</figcaption>
+</figure>
+
+<h3>Exact and "contains" checks</h3>
+<p>The simplest check: does the answer contain the expected text? For facts like numbers, this works surprisingly well. Make it a little forgiving: compare lowercase text, accept alternatives ("two weeks" or "2 weeks"), and ignore formatting such as <code>**bold**</code> markers.</p>
+<p>Limits: a contains-check passes "You do <em>not</em> get 15 days" because "15" appears. And it cannot judge whether an answer is helpful. Use it as a fast first filter, not as the only check.</p>
+
+<h3>Retrieval metrics: did the right chunk come back?</h3>
+<p>Retrieval is the foundation of RAG: if the chunk with "$2,000" never reaches the model, the model cannot answer correctly (or, worse, invents a number). Retrieval is also cheap to test, because you can call <code>searchDocuments</code> directly without the chat model.</p>
+<p>Some standard metrics, where <em>k</em> is how many results you retrieve (this app uses <code>searchDocuments(query, 3, 0.5)</code>, so <em>k</em>&nbsp;=&nbsp;3):</p>
+<ul>
+  <li><strong>Hit rate @ k</strong>: the share of questions where at least one relevant chunk is in the top <em>k</em>. If 9 of 10 questions get the right chunk in the top 3, hit rate@3 = 0.9. This is the most useful single number to start with.</li>
+  <li><strong>Recall @ k</strong>: when the answer is spread over several chunks, the share of <em>all</em> relevant chunks that made it into the top <em>k</em>. If a question needs 2 chunks and 1 came back, recall@3 = 0.5.</li>
+  <li><strong>MRR</strong> (mean reciprocal rank): rewards putting the right chunk <em>first</em>. For each question, take 1 divided by the position of the first relevant chunk (1st place = 1, 2nd = 0.5, 3rd = 0.33, not found = 0), then average over all questions. An MRR close to 1 means the best chunk is usually ranked first.</li>
+</ul>
+<details class="primer"><summary>A worked MRR example</summary>
+<p>Four test questions. The position of the first chunk containing the expected phrase:</p>
+<div class="table-wrap"><table>
+<tr><th>Question</th><th>First relevant chunk at</th><th>Reciprocal rank</th></tr>
+<tr><td>pto-new</td><td>1</td><td>1 / 1 = 1.00</td></tr>
+<tr><td>pto-senior</td><td>2</td><td>1 / 2 = 0.50</td></tr>
+<tr><td>notice</td><td>1</td><td>1 / 1 = 1.00</td></tr>
+<tr><td>education</td><td>not in top 3</td><td>0</td></tr>
+</table></div>
+<p>MRR = (1 + 0.5 + 1 + 0) / 4 = 0.625. Hit rate@3 = 3 / 4 = 0.75. The "education" miss is the one to investigate: maybe "courses or training" is too far in meaning from "education budget", or the similarity is just under the <code>0.5</code> threshold.</p>
+</details>
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Ranked top-3 results for four test questions, showing where the first matching chunk appears, the reciprocal rank, and the resulting hit rate and MRR">
+  <text x="20" y="34" class="small">question</text>
+  <text x="187" y="34" text-anchor="middle" class="small">#1</text><text x="272" y="34" text-anchor="middle" class="small">#2</text><text x="357" y="34" text-anchor="middle" class="small">#3</text>
+  <text x="450" y="34" text-anchor="middle" class="small">first hit</text><text x="530" y="34" text-anchor="middle" class="small">1 / rank</text>
+  <text x="20" y="66" class="mono">pto-new</text>
+  <rect class="box-ok" x="150" y="46" width="75" height="30" rx="6"/><text x="187" y="66" text-anchor="middle" class="label">match</text>
+  <rect class="box2" x="235" y="46" width="75" height="30" rx="6"/><text x="272" y="66" text-anchor="middle" class="small">other</text>
+  <rect class="box2" x="320" y="46" width="75" height="30" rx="6"/><text x="357" y="66" text-anchor="middle" class="small">other</text>
+  <text x="450" y="66" text-anchor="middle">1</text><text x="530" y="66" text-anchor="middle" class="ok">1.00</text>
+  <text x="20" y="111" class="mono">pto-senior</text>
+  <rect class="box2" x="150" y="91" width="75" height="30" rx="6"/><text x="187" y="111" text-anchor="middle" class="small">other</text>
+  <rect class="box-ok" x="235" y="91" width="75" height="30" rx="6"/><text x="272" y="111" text-anchor="middle" class="label">match</text>
+  <rect class="box2" x="320" y="91" width="75" height="30" rx="6"/><text x="357" y="111" text-anchor="middle" class="small">other</text>
+  <text x="450" y="111" text-anchor="middle">2</text><text x="530" y="111" text-anchor="middle" class="warn">0.50</text>
+  <text x="20" y="156" class="mono">notice</text>
+  <rect class="box-ok" x="150" y="136" width="75" height="30" rx="6"/><text x="187" y="156" text-anchor="middle" class="label">match</text>
+  <rect class="box2" x="235" y="136" width="75" height="30" rx="6"/><text x="272" y="156" text-anchor="middle" class="small">other</text>
+  <rect class="box2" x="320" y="136" width="75" height="30" rx="6"/><text x="357" y="156" text-anchor="middle" class="small">other</text>
+  <text x="450" y="156" text-anchor="middle">1</text><text x="530" y="156" text-anchor="middle" class="ok">1.00</text>
+  <text x="20" y="201" class="mono">education</text>
+  <rect class="box-bad" x="150" y="181" width="75" height="30" rx="6"/><text x="187" y="201" text-anchor="middle" class="small">other</text>
+  <rect class="box-bad" x="235" y="181" width="75" height="30" rx="6"/><text x="272" y="201" text-anchor="middle" class="small">other</text>
+  <rect class="box-bad" x="320" y="181" width="75" height="30" rx="6"/><text x="357" y="201" text-anchor="middle" class="small">other</text>
+  <text x="450" y="201" text-anchor="middle" class="bad">none</text><text x="530" y="201" text-anchor="middle" class="bad">0</text>
+  <rect class="box-info" x="600" y="46" width="150" height="165" rx="8"/>
+  <text x="675" y="74" text-anchor="middle" class="title">Hit rate@3</text><text x="675" y="94" text-anchor="middle" class="label">3 / 4 = 0.75</text>
+  <text x="675" y="134" text-anchor="middle" class="title">MRR</text><text x="675" y="154" text-anchor="middle" class="label">(1 + 0.5 + 1 + 0) / 4</text><text x="675" y="174" text-anchor="middle" class="label">= 0.625</text>
+</svg>
+<figcaption>The worked MRR example above, drawn as ranked result lists (illustrative, not measured). A green box is a chunk that contains the expected phrase. <strong>Hit rate</strong> only asks "is it in the top 3?"; <strong>MRR</strong> also rewards ranking it first. Recall@k works the same way but counts every relevant chunk, not just the first.</figcaption>
+</figure>
+
+<p>How do you know which chunk is "relevant"? The simplest way, used below, is to check whether the chunk text contains an expected phrase. That avoids depending on database ids, which change every time you re-upload with a new chunk size.</p>
+
+<h3>Answer metrics</h3>
+<p>Once retrieval works, judge the final answer. The three most common answer qualities for RAG are:</p>
+<ul>
+  <li><strong>Faithfulness</strong> (also called <em>groundedness</em>): is every claim in the answer supported by the retrieved chunks? An answer that says "20 days, plus 5 bonus days" when the chunk says nothing about bonus days is unfaithful, even if it sounds plausible. Faithfulness is your hallucination detector.</li>
+  <li><strong>Relevance</strong>: does the answer address the question that was asked? "Vacation requests go through the HR portal" is true but not relevant to "How many days do I get?".</li>
+  <li><strong>Correctness</strong>: does the answer match the ground truth? This needs your expected facts. An answer can be faithful to a wrong chunk and still be incorrect.</li>
+</ul>
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Three answer metrics compare the answer with different things: relevance with the question, faithfulness with the retrieved context, correctness with the ground truth">
+  <rect class="box2" x="20" y="20" width="170" height="44" rx="8"/><text x="105" y="47" text-anchor="middle">Question</text>
+  <rect class="box2" x="20" y="156" width="170" height="44" rx="8"/><text x="105" y="183" text-anchor="middle">Retrieved context</text>
+  <rect class="box-solid" x="300" y="85" width="160" height="50" rx="8"/><text x="380" y="115" text-anchor="middle" class="on-solid">Answer</text>
+  <rect class="box-ok" x="570" y="85" width="170" height="50" rx="8"/><text x="655" y="108" text-anchor="middle">Ground truth</text><text x="655" y="125" text-anchor="middle" class="small">your expected facts</text>
+  <path class="line" d="M300,98 L190,50"/><path class="line" d="M300,122 L190,170"/><path class="line" d="M460,110 H570"/>
+  <text x="270" y="50" class="accent">Relevance</text><text x="270" y="66" class="small">answers what was asked?</text>
+  <text x="270" y="166" class="accent">Faithfulness</text><text x="270" y="182" class="small">every claim in the context?</text>
+  <text x="515" y="100" text-anchor="middle" class="accent">Correctness</text><text x="515" y="154" text-anchor="middle" class="small">matches the facts?</text>
+</svg>
+<figcaption>Each answer metric compares the answer with <strong>something different</strong>. That is why an answer can be faithful (it matches the retrieved chunk) and still incorrect (the chunk was the wrong one).</figcaption>
+</figure>
+
+<p>Contains-checks cover correctness for simple facts. Faithfulness and relevance are about meaning, so they are usually measured with an LLM judge.</p>
+
+<h3>LLM-as-judge with a rubric</h3>
+<p><a class="term" href="glossary.html#llm-as-judge">LLM-as-judge</a> means using a language model to grade another model's output. You give the judge the question, the retrieved context, the answer and a <strong>rubric</strong> (a clear scoring guide), and ask it for scores. To make the scores machine-readable, use <a class="term" href="glossary.html#structured-output">structured output</a>: the AI SDK's <code>generateObject</code> with a <a class="term" href="glossary.html#zod">zod</a> schema forces the reply into a typed object.</p>
+
+<pre data-lang="ts" data-file="evals/judge.ts" data-tag="illustrative"><code>// evals/judge.ts
+import { generateObject } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+
+const scoreSchema = z.object({
+  faithfulness: z
+    .number()
+    .int()
+    .min(1)
+    .max(5)
+    .describe("5 = every claim is supported by the context; 1 = mostly unsupported"),
+  relevance: z
+    .number()
+    .int()
+    .min(1)
+    .max(5)
+    .describe("5 = directly answers the question; 1 = off-topic"),
+  correctness: z
+    .number()
+    .int()
+    .min(1)
+    .max(5)
+    .describe("5 = matches the reference facts; 1 = contradicts them"),
+  reasoning: z.string().describe("One or two sentences explaining the scores"),
+});
+
+export async function judgeAnswer(input: {
+  question: string;
+  context: string;
+  answer: string;
+  referenceFacts: string[];
+}) {
+  const { object } = await generateObject({
+    model: openai("gpt-4.1"), // ideally a different model from the one being tested
+    schema: scoreSchema,
+    temperature: 0,
+    system:
+      "You are a strict grader for a company handbook assistant. " +
+      "Judge only from the context and reference facts given. " +
+      "Do not use outside knowledge.",
+    prompt: [
+      `Question: ${input.question}`,
+      `Context retrieved from the handbook:\n${input.context}`,
+      `Reference facts: ${input.referenceFacts.join("; ") || "(none: the answer should say the information was not found)"}`,
+      `Answer to grade:\n${input.answer}`,
+    ].join("\n\n"),
+  });
+
+  return object; // { faithfulness, relevance, correctness, reasoning }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>import { generateObject } from "ai";</code></td><td>The AI SDK function that returns a typed object instead of free text. It sends your schema to the model and validates the reply against it.</td></tr>
+<tr><td>3–4</td><td><code>import { openai } … import { z } from "zod";</code></td><td>The OpenAI <a class="term" href="glossary.html#provider">provider</a> (same as in the app) and zod, the schema library used for tool inputs in <a href="15-search-tool.html">step 15</a>.</td></tr>
+<tr><td>6–26</td><td><code>const scoreSchema = z.object({ … });</code></td><td>The rubric as a schema. Each score is a whole number (<code>.int()</code>) from 1 to 5. The <code>.describe(…)</code> text is sent to the model, so it doubles as the scoring guide. Small integer scales (1–5, or pass/fail) are more consistent than asking for "a score from 0 to 100".</td></tr>
+<tr><td>25</td><td><code>reasoning: z.string()…</code></td><td>Asks the judge to explain itself. You read these explanations when a score looks surprising; they are often the fastest way to spot a bad test case or a confused judge.</td></tr>
+<tr><td>28–33</td><td><code>export async function judgeAnswer(input: { … })</code></td><td>Takes everything the judge needs: the question, the retrieved context (the chunks), the answer to grade, and the expected facts.</td></tr>
+<tr><td>34–36</td><td><code>const { object } = await generateObject({ model: …, schema: scoreSchema,</code></td><td>Calls the judge model. The model name is an example (at the time of writing, 2025); check your provider's current list. Using a different, often stronger model than the one under test reduces "self-grading" bias.</td></tr>
+<tr><td>37</td><td><code>temperature: 0,</code></td><td>Makes the judge as repeatable as possible, so the same answer gets the same score from run to run. Note: some <a class="term" href="glossary.html#reasoning-model">reasoning models</a> ignore or reject <code>temperature</code>; if you use one as judge, remove this line.</td></tr>
+<tr><td>38–41</td><td><code>system: "You are a strict grader…"</code></td><td>Instructions for the judge. "Do not use outside knowledge" is essential for faithfulness: the question is whether the answer is supported by <em>the handbook</em>, not whether it is true in general.</td></tr>
+<tr><td>42–47</td><td><code>prompt: [ … ].join("\n\n"),</code></td><td>Builds the grading request from labelled sections, separated by blank lines so the judge can tell them apart. The <code>||</code> fallback tells the judge what to expect for out-of-scope questions.</td></tr>
+<tr><td>50</td><td><code>return object;</code></td><td>The validated scores, already typed as <code>{ faithfulness: number; relevance: number; correctness: number; reasoning: string }</code>.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="LLM-as-judge flow: question, context, answer and reference facts plus a rubric go to a judge model, which returns scores and reasoning that you spot-check against human grades">
+  <rect class="box2" x="10" y="14" width="170" height="30" rx="6"/><text x="95" y="34" text-anchor="middle" class="label">Question</text>
+  <rect class="box2" x="10" y="52" width="170" height="30" rx="6"/><text x="95" y="72" text-anchor="middle" class="label">Retrieved context</text>
+  <rect class="box2" x="10" y="90" width="170" height="30" rx="6"/><text x="95" y="110" text-anchor="middle" class="label">Answer to grade</text>
+  <rect class="box2" x="10" y="128" width="170" height="30" rx="6"/><text x="95" y="148" text-anchor="middle" class="label">Reference facts</text>
+  <rect class="box-warn" x="10" y="180" width="170" height="36" rx="6"/><text x="95" y="203" text-anchor="middle" class="label">Rubric = zod schema</text>
+  <rect class="box-solid" x="250" y="80" width="170" height="70" rx="8"/><text x="335" y="104" text-anchor="middle" class="on-solid">Judge model</text><text x="335" y="122" text-anchor="middle" class="on-solid">generateObject</text><text x="335" y="140" text-anchor="middle" class="on-solid">temperature: 0</text>
+  <path class="arrow" d="M180,29 L248,92"/><path class="arrow" d="M180,67 L248,102"/><path class="arrow" d="M180,105 L248,112"/><path class="arrow" d="M180,143 L248,124"/><path class="arrow" d="M180,198 L248,138"/>
+  <rect class="box-ok" x="460" y="50" width="160" height="130" rx="8"/>
+  <text x="472" y="76" class="mono">faithfulness: 4</text><text x="472" y="100" class="mono">relevance: 5</text><text x="472" y="124" class="mono">correctness: 5</text><text x="472" y="148" class="mono">reasoning: "…"</text>
+  <text x="540" y="168" text-anchor="middle" class="small">typed scores</text>
+  <path class="arrow" d="M420,115 H458"/>
+  <rect class="box-info" x="645" y="85" width="105" height="60" rx="8"/><text x="697" y="110" text-anchor="middle" class="label">Spot-check</text><text x="697" y="128" text-anchor="middle" class="small">vs human grades</text>
+  <path class="arrow" d="M620,115 H643"/>
+</svg>
+<figcaption>What <code>judgeAnswer</code> does. The scores shown are illustrative. Because <strong>the judge is a model too</strong>, compare a sample of its grades with your own before you trust its numbers.</figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>A judge is a model too.</strong> It can be wrong, inconsistent or biased (for example towards longer answers, or towards answers written in its own style). Before trusting it, grade 20–30 answers yourself and compare. If you and the judge disagree often, improve the rubric (make the criteria more concrete) before relying on its numbers.</p></div>
+
+<h3>Human review</h3>
+<p>People remain the final reference. A practical routine for a small team:</p>
+<ul>
+  <li>Review a small random sample of real conversations every week, plus every conversation that got a thumbs-down.</li>
+  <li>Use the same rubric as the judge, so you can measure how well the judge agrees with humans.</li>
+  <li>Turn every confirmed bad answer into a new test case.</li>
+</ul>
+<p>For an HR assistant, involve someone who knows the policies. A developer may not notice that "two weeks" should have been "two weeks <em>through the HR portal</em>".</p>
+
+<h2>A small eval script</h2>
+<p>Here is a complete, minimal retrieval eval for this project. It calls the real <code>searchDocuments</code> function from <a href="14-semantic-search.html">step 14</a> with the same settings as the chat tool (<code>limit</code> 3, threshold 0.5), checks each result for the expected phrases, and prints hit rate@3 and MRR.</p>
+
+<pre data-lang="ts" data-file="evals/retrieval.ts" data-tag="illustrative"><code>// evals/retrieval.ts
+import { searchDocuments } from "../src/lib/search";
+import { testSet } from "./test-set";
+
+function matches(text: string, expected: string) {
+  const haystack = text.toLowerCase();
+  return expected
+    .split("|")
+    .some((option) =&gt; haystack.includes(option.toLowerCase()));
+}
+
+async function main() {
+  const cases = testSet.filter((c) =&gt; c.expectedInChunk.length &gt; 0);
+  let hits = 0;
+  let reciprocalRankSum = 0;
+
+  for (const testCase of cases) {
+    const results = await searchDocuments(testCase.question, 3, 0.5);
+
+    const rank = results.findIndex((r) =&gt;
+      testCase.expectedInChunk.every((phrase) =&gt; matches(r.content, phrase)),
+    );
+
+    if (rank &gt;= 0) {
+      hits++;
+      reciprocalRankSum += 1 / (rank + 1);
+      console.log(`PASS ${testCase.id} (rank ${rank + 1})`);
+    } else {
+      const best = results[0]?.similarity.toFixed(3) ?? "no results";
+      console.log(`FAIL ${testCase.id} (top similarity: ${best})`);
+    }
+  }
+
+  console.log(`\nHit rate@3: ${(hits / cases.length).toFixed(2)}`);
+  console.log(`MRR:        ${(reciprocalRankSum / cases.length).toFixed(2)}`);
+}
+
+main();</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>import { searchDocuments } from "../src/lib/search";</code></td><td>Imports the app's real search function, so you test exactly what the chatbot uses. A relative path (<code>../</code>) is used instead of the <code>@/</code> <a class="term" href="glossary.html#alias">alias</a> to keep the script runnable outside Next.js. <code>search.ts</code> imports <code>db-config.ts</code>, which loads <code>.env.local</code>, so the database URL and OpenAI key are available.</td></tr>
+<tr><td>3</td><td><code>import { testSet } from "./test-set";</code></td><td>The golden questions from the previous section.</td></tr>
+<tr><td>5–10</td><td><code>function matches(text, expected) { … }</code></td><td>A forgiving "contains" check: lowercases both sides and accepts any alternative separated by <code>|</code>. <code>.some(…)</code> is true if at least one alternative is found.</td></tr>
+<tr><td>13</td><td><code>const cases = testSet.filter(…)</code></td><td>Keeps only cases that have an expected chunk phrase. Out-of-scope questions are skipped here; they are checked at the answer level.</td></tr>
+<tr><td>14–15</td><td><code>let hits = 0; let reciprocalRankSum = 0;</code></td><td>Counters for the two metrics.</td></tr>
+<tr><td>17–18</td><td><code>for (…) { const results = await searchDocuments(testCase.question, 3, 0.5);</code></td><td>For each question, runs the real search with the same <code>limit</code> and threshold as the tool in <code>route.ts</code>. If you change those numbers in the app, change them here too (or better, share constants).</td></tr>
+<tr><td>20–22</td><td><code>const rank = results.findIndex(…)</code></td><td>Finds the position (0, 1, 2) of the first chunk containing <em>all</em> expected phrases; <code>-1</code> if none does.</td></tr>
+<tr><td>24–27</td><td><code>if (rank &gt;= 0) { hits++; reciprocalRankSum += 1 / (rank + 1); …</code></td><td>A hit. Positions start at 0, so <code>rank + 1</code> is the human position (1st, 2nd, 3rd) used by MRR.</td></tr>
+<tr><td>28–31</td><td><code>else { const best = results[0]?.similarity.toFixed(3) ?? "no results"; …</code></td><td>A miss. Printing the top similarity helps diagnose it: a value like 0.48 suggests the threshold is too strict; no results at all suggests the chunk does not exist (was the document uploaded?). <code>?.</code> and <code>??</code> handle an empty result list (see <a class="term" href="glossary.html#optional-chaining">optional chaining</a>).</td></tr>
+<tr><td>34–35</td><td><code>console.log(`\nHit rate@3: …`)</code></td><td>Prints the two summary numbers with two decimals.</td></tr>
+<tr><td>38</td><td><code>main();</code></td><td>Runs the async function. Top-level scripts often wrap their logic in <code>main</code> like this.</td></tr>
+</table></div>
+
+<p>Run it with <code>npx tsx evals/retrieval.ts</code>. <a class="term" href="glossary.html#npx">npx</a> downloads and runs <code>tsx</code>, a tool that executes TypeScript files directly without a build step. Expected output looks like:</p>
+<pre data-lang="sh" data-tag="illustrative"><code>PASS pto-new (rank 1)
+PASS pto-senior (rank 1)
+PASS notice (rank 2)
+FAIL education (top similarity: 0.471)
+PASS education-math (rank 1)
+
+Hit rate@3: 0.80
+MRR:        0.70</code></pre>
+
+<div class="callout warn"><p><strong>This script is illustrative.</strong> It is not part of the video or the repo. It assumes the handbook PDF is already uploaded, it uses real OpenAI calls (one embedding per question, a tiny cost), and it reads your real database. Point it at a separate test database or a <a class="term" href="glossary.html#neon">Neon</a> branch if you don't want evals to touch production data.</p></div>
+
+<h3>Evaluating full answers</h3>
+<p>To test the whole agent (search, calculator, final answer), the eval needs to run the same model, system prompt and tools as <code>src/app/api/chat/route.ts</code>. Calling the HTTP route from a script is awkward because it requires a Clerk sign-in. A cleaner design is to move the shared settings into their own module, for example <code>src/lib/agent.ts</code> exporting <code>tools</code> and <code>SYSTEM_PROMPT</code>, import them in the route, and import the same module in the eval:</p>
+<pre data-lang="ts" data-file="evals/answers.ts" data-tag="illustrative"><code>import { generateText, stepCountIs } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { tools, SYSTEM_PROMPT } from "../src/lib/agent"; // shared with route.ts
+import { testSet } from "./test-set";
+
+async function main() {
+  for (const testCase of testSet) {
+    const { text, steps } = await generateText({
+      model: openai("gpt-5-mini"),
+      system: SYSTEM_PROMPT,
+      tools,
+      stopWhen: stepCountIs(6),
+      prompt: testCase.question,
+    });
+
+    const toolsUsed = steps.flatMap((s) =&gt; s.toolCalls.map((c) =&gt; c.toolName));
+    const missing = testCase.expectedInAnswer.filter(
+      (fact) =&gt; !fact.split("|").some((o) =&gt; text.toLowerCase().includes(o.toLowerCase())),
+    );
+
+    console.log(missing.length === 0 ? "PASS" : "FAIL", testCase.id, toolsUsed, missing);
+  }
+}
+
+main();</code></pre>
+<p>Key ideas: <code>generateText</code> runs the same agent loop as <code>streamText</code> but returns the finished result, which is easier to check. <code>steps</code> tells you which tools were called, so you can also assert "the education-math case must call <code>calculator</code>". The loop sits inside an <code>async</code> <code>main</code> function, like the retrieval script, because <code>await</code> is only allowed inside <code>async</code> functions in this kind of script. Add the judge from the previous section for faithfulness and relevance by passing it the tool results from <code>steps</code> as the context.</p>
+
+<div class="callout"><p><strong>Run it several times.</strong> Because answers vary, a case that passes once may fail on the next run. For important cases, run each question 3–5 times and report the pass <em>rate</em> (for example "notice: 4/5"). A case that sometimes fails is a real problem for some of your users.</p></div>
+
+<h2>Regression testing: change one thing, re-run everything</h2>
+<p>Evals pay off when you change something. Typical changes in this project:</p>
+<ul>
+  <li><strong>Chunk size and overlap</strong> (<a href="11-chunking-utility.html">step 11</a>): 150 / 20 in the video and repo, 900 / 150 in this guide.</li>
+  <li><strong>Search settings</strong> (<a href="15-search-tool.html">step 15</a>): <code>limit</code> 3, threshold 0.5.</li>
+  <li><strong>Model</strong>: <code>gpt-5-mini</code> for chat, <code>text-embedding-3-small</code> for embeddings.</li>
+  <li><strong>Prompt</strong>: the system prompt, rewritten in <a href="22-build-an-agent.html">step 22</a> for the agent.</li>
+</ul>
+<p>The workflow is always the same:</p>
+<ol class="steps">
+  <li><strong>Record a baseline.</strong> Run the evals on the current version and save the numbers (and the per-case PASS/FAIL list).</li>
+  <li><strong>Change one thing.</strong> For example, switch <code>chunkSize</code> from 150 to 900 and <code>chunkOverlap</code> from 20 to 150.</li>
+  <li><strong>Rebuild what depends on it.</strong> A chunking change only takes effect for newly uploaded documents, so clear the <code>documents</code> table (or use a fresh Neon branch) and re-upload the handbook. Otherwise you are measuring a mix of old and new chunks.</li>
+  <li><strong>Re-run the same evals</strong> and compare with the baseline, case by case.</li>
+  <li><strong>Decide.</strong> Keep the change only if the important numbers improve and no important case got worse.</li>
+</ol>
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Regression loop: record a baseline, change one thing, re-index, re-run evals, compare, then keep the change or revert and try another">
+  <rect class="box2" x="10" y="40" width="125" height="56" rx="8"/><text x="72" y="64" text-anchor="middle" class="label">1 · Baseline</text><text x="72" y="82" text-anchor="middle" class="small">save the numbers</text>
+  <rect class="box" x="150" y="40" width="125" height="56" rx="8"/><text x="212" y="64" text-anchor="middle" class="label">2 · Change one</text><text x="212" y="82" text-anchor="middle" class="small">e.g. chunk 900/150</text>
+  <rect class="box" x="290" y="40" width="125" height="56" rx="8"/><text x="352" y="64" text-anchor="middle" class="label">3 · Re-index</text><text x="352" y="82" text-anchor="middle" class="small">re-upload handbook</text>
+  <rect class="box" x="430" y="40" width="125" height="56" rx="8"/><text x="492" y="64" text-anchor="middle" class="label">4 · Re-run evals</text><text x="492" y="82" text-anchor="middle" class="small">same test set</text>
+  <rect class="box-info" x="570" y="40" width="125" height="56" rx="8"/><text x="632" y="64" text-anchor="middle" class="label">5 · Compare</text><text x="632" y="82" text-anchor="middle" class="small">case by case</text>
+  <path class="arrow" d="M135,68 H148"/><path class="arrow" d="M275,68 H288"/><path class="arrow" d="M415,68 H428"/><path class="arrow" d="M555,68 H568"/>
+  <rect class="box-ok" x="400" y="150" width="180" height="50" rx="8"/><text x="490" y="172" text-anchor="middle">Keep the change</text><text x="490" y="190" text-anchor="middle" class="small">better, no key case worse</text>
+  <rect class="box-bad" x="600" y="150" width="150" height="50" rx="8"/><text x="675" y="172" text-anchor="middle">Revert / block</text><text x="675" y="190" text-anchor="middle" class="small">a key case got worse</text>
+  <path class="arrow-ok" d="M610,96 L520,148"/><path class="arrow-bad" d="M650,96 L670,148"/>
+  <path class="arrow dashed" d="M675,200 V225 H212 V98"/>
+  <text x="440" y="240" text-anchor="middle" class="small">try a different change</text>
+</svg>
+<figcaption>The five steps from the list above as a loop. <strong>Change one thing at a time</strong> and always re-index after a chunking change, or the comparison is meaningless. In CI the same "compare" step can block a merge.</figcaption>
+</figure>
+
+<p>A plausible (illustrative, not measured) outcome of the 150 → 900 change: with 150-character chunks, "15 days" and "two weeks in advance" may sit in separate chunks, so a broad question retrieves only part of the answer. With 900-character chunks, the whole vacation paragraph fits in one chunk, so hit rate rises; but each chunk mixes more topics, so similarity scores for very narrow questions may drop closer to the 0.5 threshold. Only your eval tells you which effect wins for your documents.</p>
+
+<div class="callout"><p><strong>Automate it.</strong> Once the scripts exist, you can run them in a CI pipeline (a server that runs checks on every code change, such as GitHub Actions) whenever someone edits <code>route.ts</code>, <code>chunking.ts</code> or <code>search.ts</code>. Because evals call paid APIs and take time, many teams run a small, fast set on every change and the full set nightly or before a release.</p></div>
+
+<h2>Online evaluation: measuring quality with real users</h2>
+<p>Everything above is <strong>offline</strong> evaluation: you run it yourself, on your test set, before release. <strong>Online</strong> evaluation measures quality in production, on real traffic. Both are needed: offline evals catch regressions before users see them; online signals show you questions you never thought of.</p>
+<ul>
+  <li><strong>Explicit feedback.</strong> Add thumbs-up / thumbs-down buttons under each assistant message. Store the message id, the rating, an optional comment, and the user id. A rising thumbs-down rate after a release is a strong warning sign.</li>
+  <li><strong>Implicit signals.</strong> The user immediately rephrases the same question, copies the answer, or gives up. These are noisier than explicit ratings but much more plentiful.</li>
+  <li><strong>Logging.</strong> Record each conversation's question, the tool calls and their results, the final answer, the model name and token usage. In <a href="22-build-an-agent.html">step 22</a> the <code>onStepFinish</code> callback already logs every tool call to the terminal; in production you would send the same data to a database or an <a class="term" href="glossary.html#observability">observability</a> tool (see <a href="ai-14-production.html">Running AI in Production</a>).</li>
+  <li><strong>Sampled judging.</strong> Run the LLM judge automatically on a small random share of real conversations (for example 5%) and chart faithfulness over time.</li>
+</ul>
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Online feedback loop: users chat, logs and thumbs ratings are stored, a sample is reviewed, bad answers become new test cases, offline evals check the next release">
+  <rect class="box2" x="10" y="30" width="150" height="56" rx="8"/><text x="85" y="54" text-anchor="middle">Users</text><text x="85" y="72" text-anchor="middle" class="small">real questions</text>
+  <rect class="box-solid" x="200" y="30" width="160" height="56" rx="8"/><text x="280" y="54" text-anchor="middle" class="on-solid">Chatbot</text><text x="280" y="72" text-anchor="middle" class="on-solid">in production</text>
+  <rect class="box" x="400" y="30" width="160" height="56" rx="8"/><text x="480" y="54" text-anchor="middle">Logs + thumbs</text><text x="480" y="72" text-anchor="middle" class="small">feedback table</text>
+  <rect class="box-info" x="590" y="30" width="160" height="56" rx="8"/><text x="670" y="54" text-anchor="middle">Review</text><text x="670" y="72" text-anchor="middle" class="small">e.g. 5% judged + humans</text>
+  <rect class="box-warn" x="590" y="150" width="160" height="56" rx="8"/><text x="670" y="174" text-anchor="middle">New test cases</text><text x="670" y="192" text-anchor="middle" class="small">from bad answers</text>
+  <rect class="box" x="400" y="150" width="160" height="56" rx="8"/><text x="480" y="174" text-anchor="middle">Offline evals</text><text x="480" y="192" text-anchor="middle" class="small">regression check</text>
+  <rect class="box-ok" x="200" y="150" width="160" height="56" rx="8"/><text x="280" y="174" text-anchor="middle">Release</text><text x="280" y="192" text-anchor="middle" class="small">only if evals pass</text>
+  <path class="arrow" d="M160,58 H198"/><path class="arrow" d="M360,58 H398"/><path class="arrow" d="M560,58 H588"/>
+  <path class="arrow" d="M670,86 V148"/>
+  <path class="arrow" d="M590,178 H562"/><path class="arrow" d="M400,178 H362"/>
+  <path class="arrow-accent" d="M280,150 V88"/>
+  <text x="85" y="120" text-anchor="middle" class="small">online: real traffic</text>
+  <text x="85" y="182" text-anchor="middle" class="small">offline: your test set</text>
+</svg>
+<figcaption>Online and offline evaluation feed each other: <strong>real traffic finds new failures</strong>, each confirmed failure becomes a test case, and the growing test set guards the next release.</figcaption>
+</figure>
+
+<p>A minimal feedback table, sketched with Drizzle like the <code>documents</code> table of <a href="09-vector-database.html">step 9</a>:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>export const feedback = pgTable("feedback", {
+  id: serial("id").primaryKey(),
+  messageId: text("message_id").notNull(),
+  userId: text("user_id").notNull(),
+  rating: integer("rating").notNull(), // 1 = thumbs up, -1 = thumbs down
+  comment: text("comment"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});</code></pre>
+
+<div class="callout warn"><p><strong>Privacy:</strong> logged conversations contain whatever users typed, possibly personal data (<a class="term" href="glossary.html#pii">PII</a>). Tell users you store them, limit who can read them, and delete them after a fixed period. See <a href="ai-13-security-safety.html">Security &amp; Safety</a>.</p></div>
+
+<h2>Tools in the ecosystem</h2>
+<p>You can do everything in this chapter with your own small scripts, and that is the best way to learn. As your test set grows, dedicated tools help with running evals, storing results, comparing versions and viewing traces. Some examples at the time of writing (2025), listed neutrally and not as recommendations; check each project's current docs and licence:</p>
+<div class="table-wrap"><table>
+<tr><th>Tool</th><th>What it is (roughly)</th></tr>
+<tr><td>promptfoo</td><td>An open-source command-line tool for testing prompts and models against test cases defined in a config file, with assertions such as "contains" and model-graded checks.</td></tr>
+<tr><td>Ragas</td><td>An open-source Python library focused on RAG evaluation, with metrics such as faithfulness, answer relevancy and context precision/recall.</td></tr>
+<tr><td>Braintrust</td><td>A hosted platform for running evals, comparing experiments and logging production traffic.</td></tr>
+<tr><td>LangSmith</td><td>A hosted platform from the LangChain team for tracing, datasets and evals; it can be used without LangChain.</td></tr>
+<tr><td>Langfuse</td><td>An open-source LLM observability and evaluation platform that can be self-hosted or used as a hosted service.</td></tr>
+</table></div>
+<p>Several of these can receive data from the AI SDK through its OpenTelemetry support (see <a href="ai-14-production.html">Running AI in Production</a>). Whatever tool you pick, the hard part stays the same: a good test set and a clear rubric.</p>
+
+<h2>Pitfalls</h2>
+<div class="callout warn"><p><strong>Common pitfalls in AI evaluation</strong></p>
+<ul>
+  <li><strong>Tiny test sets.</strong> With 5 questions, one flaky answer moves your score by 20 percentage points. Small differences between two versions ("82% vs 80%") are often just noise. Grow the set, and re-run several times before drawing conclusions.</li>
+  <li><strong>Judging with the same model.</strong> A model grading its own answers tends to be lenient towards its own style and blind to its own mistakes. Use a different (often stronger) judge model, and check it against human grades.</li>
+  <li><strong>Overfitting prompts to the tests.</strong> If you keep tweaking the system prompt until every test passes ("if asked about education, say $2,000"), you have taught the prompt your test set, not made the bot better. Keep a held-out set of questions you never look at while tuning, and use it only to confirm.</li>
+  <li><strong>Testing only happy paths.</strong> Include out-of-scope questions, ambiguous ones, and questions where the correct answer is "I don't know".</li>
+  <li><strong>Stale ground truth.</strong> When the handbook changes (say the education budget rises), update the expected facts too, or your evals will "fail" correct answers.</li>
+  <li><strong>Mixing changes.</strong> Changing chunk size, model and prompt at once makes it impossible to know which change caused an improvement or a regression.</li>
+  <li><strong>Forgetting to re-index.</strong> After a chunking or embedding-model change, old chunks in the database still use the old settings.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+  <li>AI outputs vary and changes break things silently, so you need evals: repeatable, automated quality measurements.</li>
+  <li>Start with a test set of golden questions and expected facts from your documents, like 15/20 PTO days, two weeks' notice and the $2,000 education budget.</li>
+  <li>Measure retrieval separately (hit rate@k, recall@k, MRR) by calling <code>searchDocuments</code> directly.</li>
+  <li>Measure answers for correctness, faithfulness and relevance using contains-checks, an LLM judge with a rubric (<code>generateObject</code> + zod), and human review.</li>
+  <li>Record a baseline, change one thing (such as chunk size 150/20 → 900/150), re-index, re-run, compare.</li>
+  <li>After launch, collect feedback and logs, and turn bad answers into new test cases.</li>
+  <li>Avoid tiny test sets, self-judging and overfitting the prompt to the tests.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+  <li><a href="https://ai-sdk.dev/docs/ai-sdk-core/generating-structured-data" target="_blank" rel="noopener">AI SDK: generating structured data (generateObject)</a></li>
+  <li><a href="https://ai-sdk.dev/docs/ai-sdk-core/testing" target="_blank" rel="noopener">AI SDK: testing</a></li>
+  <li><a href="https://platform.openai.com/docs/guides/evals" target="_blank" rel="noopener">OpenAI: evals guide</a></li>
+  <li><a href="https://docs.anthropic.com/en/docs/test-and-evaluate/develop-tests" target="_blank" rel="noopener">Anthropic: create strong empirical evaluations</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="ai-11-mcp.html"><small>← Chapter 11</small>Model Context Protocol (MCP)</a>
+<a class="next" href="ai-13-security-safety.html"><small>Chapter 13 →</small>Security &amp; Safety for AI Apps</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 · Setting Up the Vector Database</title>
+<meta name="description" content="Neon Postgres + pgvector + Drizzle schema and migrations.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 09/23</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 09 of 23 · 25:31</div>
+  <h1>Setting Up the Vector Database</h1>
+  <p class="lead">Neon Postgres + pgvector + Drizzle schema and migrations.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=3E5OxozYuA8&amp;t=1531s" target="_blank" rel="noopener">▶ Watch this part (25:31)</a>
+</section>
+<h2>The upload feature has three parts</h2>
+<ol>
+<li>A <strong>UI</strong> where users upload documents. This project keeps it simple and only accepts PDFs.</li>
+<li>A <strong><a class="term" href="glossary.html#server-action">server action</a></strong> that processes each PDF. It extracts the text, splits it into smaller <a class="term" href="glossary.html#chunk">chunks</a>, and turns each chunk into a vector <a class="term" href="glossary.html#embedding">embedding</a> with OpenAI's embedding model. Chunking makes <a class="term" href="glossary.html#semantic-search">semantic search</a> more accurate and efficient, and it is a crucial step in <a class="term" href="glossary.html#rag">RAG</a>.</li>
+<li>A <strong>vector <a class="term" href="glossary.html#database">database</a></strong> to store the embeddings. This becomes the knowledge base you search when users ask questions.</li>
+</ol>
+<p>You start with the <strong>database</strong>, because the embeddings need somewhere to go before you can process any PDFs.</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="Three parts of the upload feature: upload UI, server action, vector database; the database is built on this page">
+<rect class="box2" x="20" y="40" width="190" height="70" rx="8"/>
+<text x="115" y="70" class="label" text-anchor="middle">1. Upload UI</text>
+<text x="115" y="88" class="small" text-anchor="middle">the /upload page, PDFs only</text>
+<rect class="box2" x="260" y="40" width="230" height="70" rx="8"/>
+<text x="375" y="70" class="label" text-anchor="middle">2. Server action</text>
+<text x="375" y="88" class="small" text-anchor="middle">extract text, chunk, embed</text>
+<rect class="box-ok" x="540" y="40" width="200" height="70" rx="8"/>
+<text x="640" y="70" class="label" text-anchor="middle">3. Vector database</text>
+<text x="640" y="88" class="small" text-anchor="middle">Neon + pgvector</text>
+<path class="arrow" d="M210,75 H258"/>
+<path class="arrow" d="M490,75 H538"/>
+<text x="115" y="132" class="small" text-anchor="middle">later page</text>
+<text x="375" y="132" class="small" text-anchor="middle">later pages</text>
+<text x="640" y="132" class="accent" text-anchor="middle">THIS PAGE: built first</text>
+<text x="380" y="22" class="small" text-anchor="middle">a PDF travels left to right; its chunks and embeddings end up in the database</text>
+</svg>
+<figcaption>The upload feature in three parts. You build them <strong>right to left</strong>: the database first, because the server action needs somewhere to store its results.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to databases? What databases, tables, rows and columns are</summary>
+<p>A <strong>database</strong> is a program that stores data permanently and lets you search it quickly. Unlike a variable in your code, data in a database survives when your app restarts or your computer turns off.</p>
+<p>A relational database (like <a class="term" href="glossary.html#postgres">Postgres</a>) organises data in <strong>tables</strong>, much like spreadsheets:</p>
+<ul>
+<li>A <strong>table</strong> is one sheet, for one kind of thing. Here there will be one table called <code>documents</code>.</li>
+<li>A <strong>column</strong> is one field every row has, with a fixed type: a number, some text, a vector…</li>
+<li>A <strong>row</strong> is one record. Here, one row = one chunk of text from a PDF plus its embedding.</li>
+</ul>
+<p>So after you upload a 10-page PDF, the <code>documents</code> table might look like this:</p>
+<div class="table-wrap"><table>
+<tr><th>id</th><th>content</th><th>embedding</th></tr>
+<tr><td>1</td><td>"Employees get 25 vacation days per year…"</td><td>[0.012, -0.034, … 1,536 numbers]</td></tr>
+<tr><td>2</td><td>"…per year. Unused days can be carried over…"</td><td>[0.008, -0.021, …]</td></tr>
+<tr><td>3</td><td>"Remote work is allowed two days a week…"</td><td>[-0.041, 0.017, …]</td></tr>
+</table></div>
+<p>A <strong>vector database</strong> is simply a database that can also store vectors (long lists of numbers) and find the vectors closest to a given one. Postgres becomes a vector database once you add the <code>pgvector</code> extension, which you do on this page.</p>
+</details>
+
+<h2>Part A: create a Neon project</h2>
+<p><a class="term" href="glossary.html#neon">Neon</a> is serverless Postgres that supports vector operations (the <code>pgvector</code> <a class="term" href="glossary.html#extension">extension</a>), which makes it a good fit for storing embeddings.</p>
+<p>"Serverless" here means you never install or run a database server yourself. Neon runs Postgres in the cloud for you, and it can pause the database when nobody uses it (that is why the free plan is cheap to offer). Your app talks to it over the internet.</p>
+<ol class="steps">
+<li><strong>Create an account</strong> at <a href="https://neon.com" target="_blank" rel="noopener">neon.com</a>.
+<p>Click <strong>Sign up</strong> (or <strong>Get started</strong>). You can sign up with GitHub, Google or an email address. The free plan is enough for this whole project, and no credit card is needed.</p></li>
+<li><strong>Create a project</strong>
+<p>Right after signing up, Neon shows a <em>Create project</em> form (later you can reach it from the dashboard with <strong>New project</strong>). Fill it in like this:</p>
+<ul><li>Name: <strong>RAG Chatbot</strong></li><li>Postgres version: <strong>17</strong></li><li>Cloud provider: <strong>AWS</strong>, in a region close to you</li></ul>
+<p>Click <strong>Create project</strong>.</p>
+<p>A <em>project</em> is Neon's container for one database setup. It automatically contains a database called <code>neondb</code> and a user (a "role") that owns it. Picking a region close to you makes every query a little faster, because the data travels a shorter distance.</p></li>
+<li><strong>Copy the connection string</strong>
+<p>On the <em>Connect to your database</em> card, click <strong>Connect</strong>, then <strong>Copy snippet</strong>. Paste it into <code>.env.local</code> <strong>without</strong> the leading <code>psql</code> and quotes:</p>
+<pre data-file=".env.local" data-lang="env"><code>OPENAI_API_KEY=sk-...
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_SECRET_KEY=sk_test_...
+NEON_DATABASE_URL=postgresql://user:password@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require</code></pre>
+<p>The snippet Neon gives you is a command for <code>psql</code> (Postgres's own terminal client), so it looks like <code>psql 'postgresql://…'</code>. You only want the part inside the quotes. If your copied string ends with extra options such as <code>&amp;channel_binding=require</code>, keep them: they are part of the address.</p>
+<p>That's all you need from the Neon console. Everything else is done in code.</p></li>
+</ol>
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Neon setup in four steps, and how the copied psql snippet is trimmed into the NEON_DATABASE_URL line">
+<rect class="box" x="20" y="20" width="160" height="54" rx="8"/>
+<text x="100" y="42" class="label" text-anchor="middle">1. Sign up</text>
+<text x="100" y="60" class="small" text-anchor="middle">neon.com (free plan)</text>
+<path class="arrow" d="M180,47 H204"/>
+<rect class="box" x="206" y="20" width="160" height="54" rx="8"/>
+<text x="286" y="42" class="label" text-anchor="middle">2. Create project</text>
+<text x="286" y="60" class="small" text-anchor="middle">Postgres 17, AWS</text>
+<path class="arrow" d="M366,47 H390"/>
+<rect class="box" x="392" y="20" width="160" height="54" rx="8"/>
+<text x="472" y="42" class="label" text-anchor="middle">3. Connect</text>
+<text x="472" y="60" class="small" text-anchor="middle">Copy snippet</text>
+<path class="arrow" d="M552,47 H576"/>
+<rect class="box-ok" x="578" y="20" width="160" height="54" rx="8"/>
+<text x="658" y="42" class="label" text-anchor="middle">4. .env.local</text>
+<text x="658" y="60" class="small" text-anchor="middle">NEON_DATABASE_URL=…</text>
+<text x="20" y="108" class="small">WHAT "COPY SNIPPET" GIVES YOU</text>
+<rect class="box-warn" x="20" y="116" width="330" height="40" rx="8"/>
+<text x="185" y="140" class="mono" text-anchor="middle">psql 'postgresql://…?sslmode=require'</text>
+<path class="arrow" d="M352,136 H398"/>
+<text x="400" y="108" class="small">WHAT GOES IN .env.local</text>
+<rect class="box-ok" x="400" y="116" width="340" height="40" rx="8"/>
+<text x="570" y="140" class="mono" text-anchor="middle">NEON_DATABASE_URL=postgresql://…</text>
+<text x="185" y="176" class="small" text-anchor="middle">drop psql and the quotes</text>
+</svg>
+<figcaption>The only four things you do in the Neon console. The copied snippet is a <code>psql</code> command; keep only the <code>postgresql://…</code> part inside the quotes.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to connection strings? What each part means and why it's secret</summary>
+<p>A <a class="term" href="glossary.html#connection-string">connection string</a> is a single line of text that tells a program <em>where</em> the database is and <em>how to log in</em>. It is built like a web address:</p>
+<pre data-lang="env"><code>postgresql://user:password@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require
+└─protocol─┘ └user┘└password┘└──────────host (the server)─────┘└db─┘└─options──┘</code></pre>
+<ul>
+<li><code>postgresql://</code>: the kind of database to speak to.</li>
+<li><code>user:password</code>: the login. <strong>The real password is inside this string.</strong></li>
+<li><code>ep-xxxx…neon.tech</code>: the address of your Neon database server.</li>
+<li><code>/neondb</code>: which database on that server.</li>
+<li><code>?sslmode=require</code>: insist on an encrypted connection, so nobody can read the traffic.</li>
+</ul>
+<p><strong>Why it's secret:</strong> anyone who has this string can read, change or delete all your data. That is why it goes in <code>.env.local</code> (which <code>create-next-app</code> already lists in <code>.gitignore</code>, so <a class="term" href="glossary.html#git">Git</a> never uploads it) and why its name does <strong>not</strong> start with <code>NEXT_PUBLIC_</code>: only variables with that prefix are sent to the browser. If you ever leak it, open the Neon console and reset the role's password, then paste the new string.</p>
+</details>
+
+<div class="callout"><p><strong>How to know it worked:</strong> <code>.env.local</code> (in your project root, next to <code>package.json</code>) now has a line starting with <code>NEON_DATABASE_URL=postgresql://</code>, with no spaces around <code>=</code> and no quotes or <code>psql</code> in front.</p></div>
+<div class="callout warn"><p><strong>Common mistakes:</strong></p>
+<ul>
+<li>Leaving <code>psql '</code> at the start or <code>'</code> at the end. The driver then can't read the address and every database command fails.</li>
+<li>Copying a string where the password is hidden as <code>****</code>. If the snippet shows stars, click <strong>Show password</strong> (or the eye icon) before copying.</li>
+<li>Naming the variable differently (for example <code>DATABASE_URL</code>). The code on this page reads <code>NEON_DATABASE_URL</code> exactly.</li>
+</ul></div>
+
+<h2>Part B: install the database packages</h2>
+<pre data-lang="sh"><code>npm install @neondatabase/serverless drizzle-orm drizzle-kit dotenv</code></pre>
+<p>Run this in the <a class="term" href="glossary.html#terminal">terminal</a>, inside your project folder. <a class="term" href="glossary.html#npm">npm</a> is Node's package manager, <code>install</code> downloads the listed <a class="term" href="glossary.html#package">packages</a> into <code>node_modules</code> and records them in <code>package.json</code>. You can list several packages in one command, separated by spaces. A name starting with <code>@</code> (like <code>@neondatabase/serverless</code>) is a <em>scoped</em> package: <code>@neondatabase</code> is the publisher, <code>serverless</code> is the package.</p>
+<div class="table-wrap"><table>
+<tr><th>Package</th><th>Role</th></tr>
+<tr><td><code>@neondatabase/serverless</code></td><td>Neon's database driver for TypeScript (queries over HTTP). A <em>driver</em> is the low-level piece that actually sends your queries to the database and brings back the results. Using HTTP instead of a long-lived connection suits serverless hosting, where your code starts and stops for each request.</td></tr>
+<tr><td><code>drizzle-orm</code></td><td>A type-safe ORM, so you write TypeScript instead of SQL. "Type-safe" means TypeScript knows your table's columns, so a typo like <code>documents.contnet</code> is flagged in your editor before you run anything.</td></tr>
+<tr><td><code>drizzle-kit</code></td><td>The CLI for generating and running migrations (database changes). You use it with <code>npx drizzle-kit …</code> below. It is a development tool, used from the terminal, not by your app while it runs.</td></tr>
+<tr><td><code>dotenv</code></td><td>Loads environment variables. Needed because drizzle-kit and the db config run outside Next.js's own env loading.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to SQL and ORMs? What they are and why Drizzle is used</summary>
+<p><a class="term" href="glossary.html#sql">SQL</a> (Structured Query Language) is the language databases like Postgres understand. A few examples:</p>
+<pre data-lang="sql"><code>SELECT content FROM documents WHERE id = 1;          -- read
+INSERT INTO documents (content) VALUES ('Hello');     -- add a row
+CREATE TABLE notes (id serial PRIMARY KEY, body text); -- create a table</code></pre>
+<p>An <a class="term" href="glossary.html#orm">ORM</a> (Object-Relational Mapper) lets you do the same from your normal programming language. With Drizzle you write:</p>
+<pre data-lang="ts"><code>await db.insert(documents).values({ content: "Hello" });</code></pre>
+<p>and Drizzle turns it into the <code>INSERT INTO …</code> SQL for you. Benefits for a beginner: autocomplete for table and column names, type errors when you pass the wrong kind of value, and one place (the <a class="term" href="glossary.html#schema">schema</a> file) that describes your tables. Drizzle stays close to SQL, so what you learn transfers.</p>
+</details>
+
+<h2>Part C: the database connection</h2>
+<p>Create <code>src/lib/db-config.ts</code>:</p>
+<pre data-file="src/lib/db-config.ts" data-lang="ts" data-tag="from the GitHub repo"><code>import { drizzle } from "drizzle-orm/neon-http";
+import { neon } from "@neondatabase/serverless";
+import { config } from "dotenv";
+
+config({ path: ".env.local" });
+
+const sql = neon(process.env.NEON_DATABASE_URL!);
+export const db = drizzle(sql);</code></pre>
+<ul>
+<li><code>config({ path: ".env.local" })</code> loads the environment variables from <code>.env.local</code>.</li>
+<li><code>neon(...)</code> creates an SQL client from the connection string. The <code>!</code> tells TypeScript the value is definitely set.</li>
+<li><code>drizzle(sql)</code> wraps the client in a Drizzle instance. <code>db</code> is what the rest of the app imports.</li>
+</ul>
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Four layers: your TypeScript code calls drizzle-orm, which builds SQL, which the Neon serverless driver sends to Neon Postgres">
+<text x="20" y="46" class="small">YOUR CODE</text>
+<rect class="box" x="120" y="16" width="330" height="48" rx="8"/>
+<text x="285" y="35.5" class="mono" text-anchor="middle">db.insert(documents).values({…})</text>
+<text x="285" y="52.5" class="small" text-anchor="middle">TypeScript, with autocomplete</text>
+<path class="arrow" d="M285,64 V84"/>
+<text x="20" y="116" class="small">DRIZZLE ORM</text>
+<rect class="box" x="120" y="86" width="330" height="48" rx="8"/>
+<text x="285" y="105.5" class="mono" text-anchor="middle">drizzle-orm/neon-http</text>
+<text x="285" y="122.5" class="small" text-anchor="middle">turns the call into SQL</text>
+<path class="arrow" d="M285,134 V154"/>
+<text x="20" y="186" class="small">DRIVER</text>
+<rect class="box" x="120" y="156" width="330" height="48" rx="8"/>
+<text x="285" y="175.5" class="mono" text-anchor="middle">@neondatabase/serverless</text>
+<text x="285" y="192.5" class="small" text-anchor="middle">neon(): sends the SQL over HTTPS</text>
+<path class="arrow" d="M285,204 V224"/>
+<text x="20" y="256" class="small">DATABASE</text>
+<rect class="box-ok" x="120" y="226" width="330" height="48" rx="8"/>
+<text x="285" y="245.5" class="label" text-anchor="middle">Neon Postgres + pgvector</text>
+<text x="285" y="262.5" class="small" text-anchor="middle">runs the SQL, stores rows</text>
+<text x="296" y="81" class="small">method call</text>
+<text x="296" y="151" class="small">INSERT INTO "documents" …</text>
+<text x="296" y="221" class="small">HTTPS (encrypted)</text>
+<path class="arrow-accent dashed" d="M452,250 H500 V44 H452"/>
+<text x="512" y="140" class="small">results come back</text>
+<text x="512" y="156" class="small">as typed JS objects</text>
+<text x="512" y="196" class="mono">db = drizzle(sql)</text>
+<text x="512" y="214" class="mono">sql = neon(URL)</text>
+</svg>
+<figcaption>The two lines in <code>db-config.ts</code> stack these layers: <code>neon(…)</code> is the driver, <code>drizzle(sql)</code> puts the ORM on top. The rest of the app only ever touches the top layer, <code>db</code>.</figcaption>
+</figure>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { drizzle } from "drizzle-orm/neon-http";</code></td><td>Imports the <code>drizzle</code> function from the part of Drizzle made for Neon's HTTP driver. Drizzle has a separate entry point per driver (<code>neon-http</code>, <code>node-postgres</code>, …); picking the wrong one would fail because the driver objects differ.</td></tr>
+<tr><td>2</td><td><code>import { neon } from "@neondatabase/serverless";</code></td><td>Imports <code>neon</code>, Neon's function that creates a client able to send SQL to your database over HTTP.</td></tr>
+<tr><td>3</td><td><code>import { config } from "dotenv";</code></td><td>Imports <code>config</code> from <code>dotenv</code>, the function that reads a <code>.env</code>-style file and puts its values into <code>process.env</code>.</td></tr>
+<tr><td>4</td><td>(blank)</td><td>Separates the imports from the code, for readability only.</td></tr>
+<tr><td>5</td><td><code>config({ path: ".env.local" });</code></td><td>Reads <code>.env.local</code> and loads its variables. By default <code>dotenv</code> looks for a file named <code>.env</code>, so the <code>path</code> option points it at <code>.env.local</code> instead. Inside the running Next.js app this is harmless (Next.js already loaded the file), but it makes the same file work in scripts that run outside Next.js. Without it, <code>process.env.NEON_DATABASE_URL</code> could be <code>undefined</code> in those scripts.</td></tr>
+<tr><td>6</td><td>(blank)</td><td>Spacing.</td></tr>
+<tr><td>7</td><td><code>const sql = neon(process.env.NEON_DATABASE_URL!);</code></td><td>Creates the low-level SQL client from your connection string. <code>process.env.NEON_DATABASE_URL</code> reads the variable. The trailing <code>!</code> is TypeScript's <a class="term" href="glossary.html#non-null">non-null assertion</a>: environment variables have type <code>string | undefined</code>, and <code>!</code> says "trust me, it's set". It doesn't check anything at runtime, so if the variable is missing you get a connection error later instead of a type error now.</td></tr>
+<tr><td>8</td><td><code>export const db = drizzle(sql);</code></td><td>Wraps the raw client in Drizzle, which adds the friendly TypeScript API (<code>db.insert(…)</code>, <code>db.select(…)</code>). <code>export</code> makes <code>db</code> importable elsewhere: the server action (step 12) and the search (step 14) both do <code>import { db } from "@/lib/db-config"</code>. Creating it once here means every file shares one setup.</td></tr>
+</table></div>
+
+<h2>Part D: the schema</h2>
+<p>Create <code>src/lib/db-schema.ts</code> to define the <code>documents</code> table:</p>
+<pre data-file="src/lib/db-schema.ts" data-lang="ts" data-tag="from the GitHub repo"><code>import { pgTable, serial, text, vector, index } from "drizzle-orm/pg-core";
+
+export const documents = pgTable(
+  "documents",
+  {
+    id: serial("id").primaryKey(),
+    content: text("content").notNull(),
+    embedding: vector("embedding", { dimensions: 1536 }), // text-embedding-3-small
+  },
+  (table) =&gt; [
+    index("embeddingIndex").using(
+      "hnsw",
+      table.embedding.op("vector_cosine_ops")
+    ),
+  ]
+);
+
+export type InsertDocument = typeof documents.$inferInsert;
+export type SelectDocument = typeof documents.$inferSelect;</code></pre>
+<div class="table-wrap"><table>
+<tr><th>Column / part</th><th>Meaning</th></tr>
+<tr><td><code>id</code></td><td>Auto-incrementing <a class="term" href="glossary.html#primary-key">primary key</a>.</td></tr>
+<tr><td><code>content</code></td><td>The actual text chunk from the PDF (cannot be null).</td></tr>
+<tr><td><code>embedding</code></td><td>A vector with <strong>1,536 dimensions</strong>, the output size of OpenAI's <code>text-embedding-3-small</code> model. These two must always match.</td></tr>
+<tr><td>Third argument → <code>index(...)</code></td><td>Creates an <strong>HNSW</strong> <a class="term" href="glossary.html#index">index</a> (<em>Hierarchical Navigable Small World</em>) on the embedding using <a class="term" href="glossary.html#cosine">cosine</a> distance. Searching vectors without an index is slow. HNSW makes similarity search fast. The syntax is boilerplate you can copy as-is.</td></tr>
+<tr><td><code>$inferInsert</code> / <code>$inferSelect</code></td><td>TypeScript types for inserting and reading rows, derived from the schema.</td></tr>
+</table></div>
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The documents table with columns id, content and embedding, and three example rows">
+<rect class="box" x="20" y="20" width="90" height="46" rx="0"/>
+<text x="65" y="39" class="title" text-anchor="middle">id</text>
+<text x="65" y="56" class="small" text-anchor="middle">serial, PK</text>
+<rect class="box" x="110" y="20" width="380" height="46" rx="0"/>
+<text x="300" y="39" class="title" text-anchor="middle">content</text>
+<text x="300" y="56" class="small" text-anchor="middle">text, not null</text>
+<rect class="box" x="490" y="20" width="250" height="46" rx="0"/>
+<text x="615" y="39" class="title" text-anchor="middle">embedding</text>
+<text x="615" y="56" class="small" text-anchor="middle">vector(1536)</text>
+<rect class="box2" x="20" y="66" width="90" height="32" rx="0"/>
+<text x="30" y="87" class="mono">1</text>
+<rect class="box2" x="110" y="66" width="380" height="32" rx="0"/>
+<text x="120" y="87" class="label">Employees get 25 vacation days per year…</text>
+<rect class="box2" x="490" y="66" width="250" height="32" rx="0"/>
+<text x="500" y="87" class="mono">[0.012, -0.034, … 1,536 numbers]</text>
+<rect class="box2" x="20" y="98" width="90" height="32" rx="0"/>
+<text x="30" y="119" class="mono">2</text>
+<rect class="box2" x="110" y="98" width="380" height="32" rx="0"/>
+<text x="120" y="119" class="label">…per year. Unused days can be carried over…</text>
+<rect class="box2" x="490" y="98" width="250" height="32" rx="0"/>
+<text x="500" y="119" class="mono">[0.008, -0.021, …]</text>
+<rect class="box2" x="20" y="130" width="90" height="32" rx="0"/>
+<text x="30" y="151" class="mono">3</text>
+<rect class="box2" x="110" y="130" width="380" height="32" rx="0"/>
+<text x="120" y="151" class="label">Remote work is allowed two days a week…</text>
+<rect class="box2" x="490" y="130" width="250" height="32" rx="0"/>
+<text x="500" y="151" class="mono">[-0.041, 0.017, …]</text>
+<path class="line" d="M110,172 V180 H490 V172"/>
+<text x="300" y="196" class="small" text-anchor="middle">one row = one chunk of text from a PDF</text>
+<path class="line" d="M490,172 V180 H740 V172"/>
+<text x="615" y="196" class="small" text-anchor="middle">HNSW index "embeddingIndex" (cosine)</text>
+</svg>
+<figcaption>What the <code>documents</code> table will hold once PDFs are uploaded. The rows are <strong>illustrative</strong> (the table is empty for now), and real embeddings have 1,536 numbers each, shortened here with <code>…</code>.</figcaption>
+</figure>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { pgTable, serial, text, vector, index } from "drizzle-orm/pg-core";</code></td><td>Imports Drizzle's building blocks for Postgres (<code>pg-core</code>): <code>pgTable</code> defines a table, <code>serial</code>, <code>text</code> and <code>vector</code> define column types, and <code>index</code> defines an index.</td></tr>
+<tr><td>3</td><td><code>export const documents = pgTable(</code></td><td>Defines the table and stores the definition in a variable called <code>documents</code>. Your code uses this variable whenever it talks about the table (for example <code>db.insert(documents)</code>). <code>export</code> lets other files import it.</td></tr>
+<tr><td>4</td><td><code>"documents",</code></td><td>First argument: the table's real name inside Postgres. This is what you will see in the Neon console.</td></tr>
+<tr><td>5, 9</td><td><code>{</code> … <code>},</code></td><td>Second argument: an <a class="term" href="glossary.html#object">object</a> listing the columns. Each key (<code>id</code>, <code>content</code>, <code>embedding</code>) is the name you use in TypeScript; the string inside each function is the column name in the database.</td></tr>
+<tr><td>6</td><td><code>id: serial("id").primaryKey(),</code></td><td><code>serial</code> is an integer that Postgres fills in automatically: 1, 2, 3… for each new row, so you never pass an <code>id</code> yourself. <code>.primaryKey()</code> makes it the unique identifier of each row: no two rows can share it and it can never be empty.</td></tr>
+<tr><td>7</td><td><code>content: text("content").notNull(),</code></td><td>A <code>text</code> column (a string of any length) that holds the chunk. <code>.notNull()</code> makes the database reject any row without content, because a row with no text would be useless to search.</td></tr>
+<tr><td>8</td><td><code>embedding: vector("embedding", { dimensions: 1536 }), // text-embedding-3-small</code></td><td>A <code>vector</code> column (provided by pgvector) that holds exactly 1,536 numbers. The size must equal what the embedding model returns; inserting a vector of another length fails with an error. There is no <code>.notNull()</code>, so the database technically allows an empty embedding, but this app always fills it. The <code>//</code> comment reminds you which model the 1,536 comes from.</td></tr>
+<tr><td>10</td><td><code>(table) =&gt; [</code></td><td>Third argument: an arrow <a class="term" href="glossary.html#function">function</a> that receives the table's columns as <code>table</code> and returns an array of extras, such as indexes. It is a function (not a plain array) so that you can refer to columns like <code>table.embedding</code>.</td></tr>
+<tr><td>11</td><td><code>index("embeddingIndex").using(</code></td><td>Creates an index named <code>embeddingIndex</code>. <code>.using(…)</code> chooses the index method.</td></tr>
+<tr><td>12</td><td><code>"hnsw",</code></td><td>The index method: HNSW, a graph-based structure that finds <em>approximately</em> nearest vectors very quickly instead of comparing your question with every row. (Approximate means it can very occasionally miss a close match, in exchange for big speed gains.)</td></tr>
+<tr><td>13</td><td><code>table.embedding.op("vector_cosine_ops")</code></td><td>Indexes the <code>embedding</code> column and tells pgvector to organise it for <strong>cosine distance</strong>. This must match the distance used when searching (step 14 uses cosine); an index built for another distance would simply be ignored.</td></tr>
+<tr><td>14–16</td><td><code>),</code> <code>]</code> <code>);</code></td><td>Close the <code>using(</code> call, the array, and the <code>pgTable(</code> call.</td></tr>
+<tr><td>18</td><td><code>export type InsertDocument = typeof documents.$inferInsert;</code></td><td>Creates a TypeScript <a class="term" href="glossary.html#type">type</a> describing a row you can <em>insert</em>. Drizzle works it out from the table: <code>content</code> is required, while <code>id</code> (auto-filled) and <code>embedding</code> (nullable) are optional. <code>typeof</code> here means "the type of this value".</td></tr>
+<tr><td>19</td><td><code>export type SelectDocument = typeof documents.$inferSelect;</code></td><td>The type of a row you <em>read back</em>: every column is present (<code>id: number</code>, <code>content: string</code>, <code>embedding: number[] | null</code>). You write these types once and never have to keep them in sync by hand.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to Postgres extensions? Why <code>vector</code> has to be switched on</summary>
+<p>Plain Postgres knows numbers, text, dates and so on, but not vectors. An <strong>extension</strong> is an add-on that teaches Postgres new tricks. <code>pgvector</code> adds:</p>
+<ul>
+<li>a new column type, <code>vector(n)</code>;</li>
+<li>distance operators, such as <code>&lt;=&gt;</code> for cosine distance;</li>
+<li>vector indexes such as HNSW.</li>
+</ul>
+<p>Neon has pgvector installed on its servers, but each database must <em>enable</em> it once with <code>CREATE EXTENSION vector;</code>. Until then, any table using the <code>vector</code> type fails with an error like <em>type "vector" does not exist</em>. That's why Part F enables it first.</p>
+</details>
+
+<h2>Part E: configure drizzle-kit</h2>
+<p>Create <code>drizzle.config.ts</code> in the <strong>project root</strong>:</p>
+<pre data-file="drizzle.config.ts" data-lang="ts" data-tag="from the GitHub repo"><code>import { config } from "dotenv";
+import { defineConfig } from "drizzle-kit";
+
+config({ path: ".env.local" });
+
+export default defineConfig({
+  schema: "./src/lib/db-schema.ts",
+  out: "./migrations",
+  dialect: "postgresql",
+  dbCredentials: {
+    url: process.env.NEON_DATABASE_URL!,
+  },
+});</code></pre>
+<p>This tells Drizzle where the schema is, where to write migrations and how to connect.</p>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { config } from "dotenv";</code></td><td>Imports <code>dotenv</code>'s loader. <code>drizzle-kit</code> runs as a plain Node.js command, not inside Next.js, so nobody else loads <code>.env.local</code> for it.</td></tr>
+<tr><td>2</td><td><code>import { defineConfig } from "drizzle-kit";</code></td><td>Imports a helper that does nothing at runtime but gives you autocomplete and type checking for every config option.</td></tr>
+<tr><td>4</td><td><code>config({ path: ".env.local" });</code></td><td>Loads <code>.env.local</code> so that line 11 can read the connection string. Without this line, <code>drizzle-kit migrate</code> fails because the URL is <code>undefined</code>.</td></tr>
+<tr><td>6</td><td><code>export default defineConfig({</code></td><td>drizzle-kit looks for <code>drizzle.config.ts</code> in the folder where you run it and reads its <em>default export</em>. That's why the file must be in the project root and use <code>export default</code>.</td></tr>
+<tr><td>7</td><td><code>schema: "./src/lib/db-schema.ts",</code></td><td>Where your table definitions live. <code>generate</code> reads this file to know what the database <em>should</em> look like. A wrong path means "no schema found" and empty migrations.</td></tr>
+<tr><td>8</td><td><code>out: "./migrations",</code></td><td>The folder where generated migration SQL files (and a <code>meta</code> folder with Drizzle's bookkeeping) are written. It is created if it doesn't exist.</td></tr>
+<tr><td>9</td><td><code>dialect: "postgresql",</code></td><td>Which SQL flavour to produce. MySQL and SQLite use slightly different SQL, so drizzle-kit needs to know.</td></tr>
+<tr><td>10–12</td><td><code>dbCredentials: { url: process.env.NEON_DATABASE_URL!, },</code></td><td>How to connect when running <code>migrate</code>: the same connection string the app uses. The <code>!</code> again tells TypeScript the variable is set.</td></tr>
+<tr><td>13</td><td><code>});</code></td><td>Closes the config object and the <code>defineConfig</code> call.</td></tr>
+</table></div>
+
+<h2>Part F: enable pgvector, then create the table</h2>
+
+<details class="primer"><summary>New to migrations? What <code>generate --custom</code>, <code>generate</code> and <code>migrate</code> each do</summary>
+<p>A <a class="term" href="glossary.html#migration">migration</a> is a file of SQL that changes the database's structure (creating a table, adding a column, enabling an extension). Migrations are numbered and kept in your project, so the exact history of changes can be replayed on any new database, in the same order. Think of them as "save points" for your database's shape.</p>
+<div class="table-wrap"><table>
+<tr><th>Command</th><th>What it does</th><th>Touches the database?</th></tr>
+<tr><td><code>npx drizzle-kit generate --custom</code></td><td>Creates a new, <strong>empty</strong> numbered SQL file in <code>migrations/</code> for you to fill in by hand. Used for things the schema file can't describe, like enabling an extension.</td><td>No, it only writes a file.</td></tr>
+<tr><td><code>npx drizzle-kit generate</code></td><td>Compares your schema file with a snapshot of what earlier migrations already did, and writes a new SQL file containing only the <em>differences</em> (here: create the <code>documents</code> table and its index).</td><td>No, it only writes a file.</td></tr>
+<tr><td><code>npx drizzle-kit migrate</code></td><td>Connects to the database and runs every migration file that hasn't been applied yet, in order. It records which ones ran in a bookkeeping table (<code>__drizzle_migrations</code>), so running it again does nothing.</td><td><strong>Yes.</strong> This is the only one that changes Neon.</td></tr>
+</table></div>
+<p>In each command, <a class="term" href="glossary.html#npx">npx</a> runs a CLI tool from your project's <code>node_modules</code>, <code>drizzle-kit</code> is the tool, <code>generate</code>/<code>migrate</code> is the sub-command, and <code>--custom</code> is a flag (an option that changes how the sub-command behaves).</p>
+</details>
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="Timeline of four commands: generate --custom creates file 0000, migrate enables vector, generate creates file 0001, migrate creates the documents table">
+<text x="20" y="22" class="small">COMMAND (npx drizzle-kit …)</text>
+<rect class="box2" x="20" y="30" width="170" height="40" rx="8"/>
+<text x="105" y="54" class="mono" text-anchor="middle">1. generate --custom</text>
+<rect class="box2" x="205" y="30" width="170" height="40" rx="8"/>
+<text x="290" y="54" class="mono" text-anchor="middle">2. migrate</text>
+<rect class="box2" x="390" y="30" width="170" height="40" rx="8"/>
+<text x="475" y="54" class="mono" text-anchor="middle">3. generate</text>
+<rect class="box2" x="575" y="30" width="170" height="40" rx="8"/>
+<text x="660" y="54" class="mono" text-anchor="middle">4. migrate</text>
+<text x="20" y="96" class="small">FILE IN migrations/</text>
+<rect class="box" x="20" y="104" width="170" height="54" rx="8"/>
+<text x="105" y="126" class="mono" text-anchor="middle">0000_….sql</text>
+<text x="105" y="144" class="small" text-anchor="middle">CREATE EXTENSION vector</text>
+<rect class="box" x="390" y="104" width="170" height="54" rx="8"/>
+<text x="475" y="126" class="mono" text-anchor="middle">0001_….sql</text>
+<text x="475" y="144" class="small" text-anchor="middle">CREATE TABLE + INDEX</text>
+<text x="20" y="186" class="small">NEON DATABASE</text>
+<rect class="box-ok" x="205" y="194" width="170" height="54" rx="8"/>
+<text x="290" y="216" class="label" text-anchor="middle">vector enabled</text>
+<text x="290" y="234" class="small" text-anchor="middle">runs 0000</text>
+<rect class="box-ok" x="575" y="194" width="170" height="54" rx="8"/>
+<text x="660" y="216" class="label" text-anchor="middle">documents + index</text>
+<text x="660" y="234" class="small" text-anchor="middle">runs 0001, skips 0000</text>
+<path class="arrow" d="M165,70 V102"/>
+<path class="arrow" d="M535,70 V102"/>
+<path class="arrow-accent" d="M290,70 V192"/>
+<path class="arrow-accent" d="M660,70 V192"/>
+<path class="line dashed" d="M190,131 H250 V192"/>
+<path class="line dashed" d="M560,131 H620 V192"/>
+</svg>
+<figcaption>Read left to right. <code>generate</code> only <strong>writes files</strong> (middle row); <code>migrate</code> is the only command that <strong>changes Neon</strong> (bottom row). The order matters: the extension (0000) must exist before the table that uses <code>vector</code> (0001). You type the one SQL line in 0000 yourself; 0001 is written for you.</figcaption>
+</figure>
+
+<ol class="steps">
+<li><strong>Generate an empty custom migration</strong>
+<p>Postgres needs the <code>vector</code> extension before it can store vectors. This is an important step.</p>
+<pre data-lang="sh"><code>npx drizzle-kit generate --custom</code></pre>
+<p>This creates a new, empty SQL file in <code>migrations/</code>.</p>
+<p>The file name is a number plus two random words (for example <code>0000_material_thaddeus_ross.sql</code>). Yours will have different words; that's normal. The number at the front is what keeps the order.</p></li>
+<li><strong>Add the extension to that file</strong>
+<pre data-file="migrations/0000_material_thaddeus_ross.sql" data-lang="sql" data-tag="from the GitHub repo"><code>-- Custom SQL migration file, put your code below! --
+CREATE EXTENSION IF NOT EXISTS vector;</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>-- Custom SQL migration file, put your code below! --</code></td><td>A comment that drizzle-kit writes into every custom migration. In SQL, anything after <code>--</code> on a line is ignored. You can leave it.</td></tr>
+<tr><td>2</td><td><code>CREATE EXTENSION IF NOT EXISTS vector;</code></td><td>The line you add. It enables pgvector in this database. <code>IF NOT EXISTS</code> makes it safe to run on a database where the extension is already on (it does nothing instead of throwing an error). The <code>;</code> ends the SQL statement.</td></tr>
+</table></div></li>
+<li><strong>Run the migration</strong>
+<pre data-lang="sh"><code>npx drizzle-kit migrate</code></pre>
+<p>You should see drizzle-kit report that migrations were applied, with no red error text.</p></li>
+<li><strong>Check it in Neon</strong>
+<p>Open the Neon console → <strong>SQL Editor</strong> and run:</p>
+<pre data-lang="sql"><code>SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';</code></pre>
+<p>You should see <code>vector</code> listed with its version number.</p>
+<p>In words: "from Postgres's built-in list of enabled extensions (<code>pg_extension</code>), show the name and version of the one called <code>vector</code>". No rows means the migration didn't run.</p></li>
+<li><strong>Generate the migration for the <code>documents</code> table</strong>
+<pre data-lang="sh"><code>npx drizzle-kit generate</code></pre>
+<p>A second migration file appears. It contains SQL roughly like this:</p>
+<pre data-file="migrations/0001_flimsy_shadowcat.sql" data-lang="sql" data-tag="from the GitHub repo"><code>CREATE TABLE "documents" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"content" text NOT NULL,
+	"embedding" vector(1536)
+);
+--&gt; statement-breakpoint
+CREATE INDEX "embeddingIndex" ON "documents" USING hnsw ("embedding" vector_cosine_ops);</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>CREATE TABLE "documents" (</code></td><td>Creates the table named in your schema. The double quotes are Postgres's way of quoting names exactly as written.</td></tr>
+<tr><td>2</td><td><code>"id" serial PRIMARY KEY NOT NULL,</code></td><td>The SQL for <code>serial("id").primaryKey()</code>: an auto-numbered integer that uniquely identifies each row.</td></tr>
+<tr><td>3</td><td><code>"content" text NOT NULL,</code></td><td>The SQL for <code>text("content").notNull()</code>.</td></tr>
+<tr><td>4</td><td><code>"embedding" vector(1536)</code></td><td>The pgvector column with 1,536 dimensions. This line only works because migration 0000 enabled the extension first.</td></tr>
+<tr><td>5</td><td><code>);</code></td><td>Ends the column list and the <code>CREATE TABLE</code> statement.</td></tr>
+<tr><td>6</td><td><code>--&gt; statement-breakpoint</code></td><td>A marker drizzle-kit adds between statements. Some drivers can only run one statement at a time, so <code>migrate</code> splits the file here and runs each part separately. For SQL it is just a comment.</td></tr>
+<tr><td>7</td><td><code>CREATE INDEX "embeddingIndex" ON "documents" USING hnsw ("embedding" vector_cosine_ops);</code></td><td>The SQL for the third argument of <code>pgTable</code>: an HNSW index named <code>embeddingIndex</code> on the <code>embedding</code> column, organised for cosine distance.</td></tr>
+</table></div>
+<p>You never write this file by hand: drizzle-kit translated your TypeScript schema into it. Reading it is a good way to learn what your schema means in SQL.</p></li>
+<figure class="diagram">
+<svg viewBox="0 0 760 310" role="img" aria-label="Each line of the TypeScript schema mapped to the SQL that drizzle-kit generated from it">
+<text x="20" y="24" class="title">db-schema.ts (TypeScript you write)</text>
+<text x="410" y="24" class="title">0001_….sql (SQL drizzle-kit writes)</text>
+<rect class="box" x="20" y="38" width="340" height="34" rx="6"/>
+<text x="190" y="59" class="mono" text-anchor="middle">pgTable("documents", { … })</text>
+<rect class="box2" x="410" y="38" width="330" height="34" rx="6"/>
+<text x="575" y="59" class="mono" text-anchor="middle">CREATE TABLE "documents" ( … )</text>
+<path class="arrow-accent" d="M362,55 H408"/>
+<rect class="box" x="20" y="82" width="340" height="34" rx="6"/>
+<text x="190" y="103" class="mono" text-anchor="middle">serial("id").primaryKey()</text>
+<rect class="box2" x="410" y="82" width="330" height="34" rx="6"/>
+<text x="575" y="103" class="mono" text-anchor="middle">"id" serial PRIMARY KEY NOT NULL</text>
+<path class="arrow-accent" d="M362,99 H408"/>
+<rect class="box" x="20" y="126" width="340" height="34" rx="6"/>
+<text x="190" y="147" class="mono" text-anchor="middle">text("content").notNull()</text>
+<rect class="box2" x="410" y="126" width="330" height="34" rx="6"/>
+<text x="575" y="147" class="mono" text-anchor="middle">"content" text NOT NULL</text>
+<path class="arrow-accent" d="M362,143 H408"/>
+<rect class="box" x="20" y="170" width="340" height="34" rx="6"/>
+<text x="190" y="191" class="mono" text-anchor="middle">vector("embedding", { dimensions: 1536 })</text>
+<rect class="box2" x="410" y="170" width="330" height="34" rx="6"/>
+<text x="575" y="191" class="mono" text-anchor="middle">"embedding" vector(1536)</text>
+<path class="arrow-accent" d="M362,187 H408"/>
+<rect class="box" x="20" y="214" width="340" height="34" rx="6"/>
+<text x="190" y="235" class="mono" text-anchor="middle">index("embeddingIndex").using("hnsw", …)</text>
+<rect class="box2" x="410" y="214" width="330" height="34" rx="6"/>
+<text x="575" y="235" class="mono" text-anchor="middle">CREATE INDEX "embeddingIndex" …</text>
+<path class="arrow-accent" d="M362,231 H408"/>
+<rect class="box" x="20" y="258" width="340" height="34" rx="6"/>
+<text x="190" y="279" class="mono" text-anchor="middle">.op("vector_cosine_ops")</text>
+<rect class="box2" x="410" y="258" width="330" height="34" rx="6"/>
+<text x="575" y="279" class="mono" text-anchor="middle">USING hnsw (… vector_cosine_ops)</text>
+<path class="arrow-accent" d="M362,275 H408"/>
+</svg>
+<figcaption>Each schema call on the left becomes the SQL on the right when you run <code>npx drizzle-kit generate</code>. Notice <code>primaryKey()</code> also adds <code>NOT NULL</code> automatically, and the index is a separate <code>CREATE INDEX</code> statement.</figcaption>
+</figure>
+<li><strong>Apply it</strong>
+<pre data-lang="sh"><code>npx drizzle-kit migrate</code></pre>
+<p>Only the new file runs; migration 0000 is skipped because it is already recorded as applied.</p></li>
+<li><strong>Check it in Neon</strong>
+<p>In the console, open <strong>Tables</strong>. The <code>documents</code> table should be there with <code>id</code>, <code>content</code> and <code>embedding</code> (<code>vector(1536)</code>).</p>
+<p>The table is empty for now. Rows appear after you upload your first PDF in step 13.</p></li>
+</ol>
+
+<div class="callout warn"><p><strong>Common mistakes:</strong></p>
+<ul>
+<li><strong>Running the commands in the wrong folder.</strong> drizzle-kit looks for <code>drizzle.config.ts</code> in the current folder. Run them from the project root (where <code>package.json</code> is).</li>
+<li><strong><em>type "vector" does not exist</em></strong> when migrating: the extension migration is missing or empty. Check that the 0000 file contains the <code>CREATE EXTENSION</code> line and that its number is lower than the table migration's.</li>
+<li><strong>Running <code>generate</code> before <code>generate --custom</code>.</strong> The table migration then gets number 0000 and runs first, causing the error above. Delete the generated files (the SQL file and the <code>migrations/meta</code> folder) and start Part F again in the right order, as long as you haven't migrated yet.</li>
+<li><strong>Editing a migration after it has been applied.</strong> <code>migrate</code> won't run it again. Make changes in the schema and run <code>generate</code> to get a <em>new</em> migration instead.</li>
+<li><strong>Connection errors</strong> (<em>url is undefined</em>, <em>password authentication failed</em>): recheck the <code>NEON_DATABASE_URL</code> line in <code>.env.local</code>.</li>
+</ul></div>
+
+<div class="callout"><p><strong>Why index at all, and how does HNSW work?</strong> Without the index, every question compares its vector with every stored row. The <a href="indexing-explained.html"><strong>Indexing Explained</strong></a> page covers the problem, how the layered graph works, the operator classes, the costs, and an important catch: the search query has to sort by distance for this index to be used.</p></div>
+
+<div class="callout"><p><strong>Why a separate custom migration?</strong> The extension must exist <em>before</em> the <code>CREATE TABLE</code> that uses the <code>vector</code> type runs. Putting it in its own earlier migration keeps the order correct on every new database you set up.</p></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Neon Postgres with pgvector is ready, connected through Drizzle (<code>db</code>).</li>
+<li>The <code>documents</code> table stores each text chunk and its 1,536-dimension embedding, with an HNSW index for fast cosine-similarity search.</li>
+<li>Next: utilities that turn text into embeddings.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="08-protecting-routes.html"><small>← Previous · Step 08</small>Protecting Routes</a>
+<a class="next" href="10-embedding-utility.html"><small>Next · Step 10 →</small>Embedding Utility</a>
+</nav>
+</main>
+</body>
+</html>

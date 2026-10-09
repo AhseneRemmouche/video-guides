@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 9 · What Are AI Agents?</title>
+<meta name="description" content="The agent loop, workflows vs agents, and when an agent is (and isn&#x27;t) the right tool.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 9/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">AI &amp; Agents Handbook · Chapter 9 of 16</div>
+  <h1>What Are AI Agents?</h1>
+  <p class="lead">The agent loop, workflows vs agents, and when an agent is (and isn&#x27;t) the right tool.</p>
+</section>
+<p>"Agent" is one of the most used (and most stretched) words in AI right now. In this chapter you will learn what an <a class="term" href="glossary.html#agent">AI agent</a> actually is, how the <a class="term" href="glossary.html#agent-loop">agent loop</a> works step by step, how agents differ from simpler "workflows", and, just as important, when you should <em>not</em> build one. You will then see exactly how this project became an agent in <a href="22-build-an-agent.html">step 22</a>, with a full multi-step trace, and which AI SDK building blocks control the loop.</p>
+
+<div class="callout"><strong>Why this matters for your chatbot.</strong> Up to <a href="15-search-tool.html">step 15</a>, the chatbot could make one search and then answer. After <a href="22-build-an-agent.html">step 22</a> it can search, check today's date, do arithmetic and combine the results, deciding for itself which tool to use next. That small change turns a "question → answer" bot into a system that plans its own steps. Understanding the loop helps you debug it, keep it cheap, and keep it safe.</div>
+
+<h2>A plain definition</h2>
+<p>An <strong>AI agent</strong> is a <a class="term" href="glossary.html#llm">large language model (LLM)</a> that <strong>uses tools in a loop to work towards a goal, deciding its own next step each time</strong>. Three parts of that sentence matter:</p>
+<ul>
+<li><strong>Uses tools.</strong> The model can ask your code to run functions (search a database, read the date, call an API). This is <a class="term" href="glossary.html#tool-calling">tool calling</a>, covered in depth in <a href="ai-06-tool-calling.html">Tool Calling in Depth</a>.</li>
+<li><strong>In a loop.</strong> After a tool runs, its result goes back to the model, which can then call another tool, or the same tool again, or answer.</li>
+<li><strong>Deciding its own next step.</strong> Your code does not say "first search, then calculate". The model looks at what it knows so far and chooses. That is the difference between an agent and a fixed program.</li>
+</ul>
+<p>A useful mental picture: a normal chatbot is like asking a colleague a question and getting an answer straight from memory. An agent is like asking a colleague who can walk to the filing cabinet, check the calendar, use a calculator, and then come back with an answer, choosing for themselves which of those to do.</p>
+
+<details class="primer"><summary>New to "tools"? What a tool is, in one minute</summary>
+<p>A <strong>tool</strong> is a normal function in your code (TypeScript here) plus a short description and an input <a class="term" href="glossary.html#schema">schema</a>. You send the description and schema to the model. The model cannot run code itself; instead it replies with a structured request such as "please call <code>calculator</code> with <code>{ "expression": "30 - 10 + 1" }</code>". The <a class="term" href="glossary.html#ai-sdk">AI SDK</a> sees that request, runs your function, and sends the result back to the model.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>// What the model "sees" (simplified): a name, a description and an input shape
+calculator: "Evaluate a math expression and return the exact result."
+  input: { expression: string }
+
+// What the model replies with when it wants the tool:
+{ toolName: "calculator", input: { expression: "30 - 10 + 1" } }</code></pre>
+<p>The model only ever <em>asks</em>. Your code decides whether and how to run the request. That is an important safety property you will come back to later.</p>
+</details>
+
+<h2>The agent loop</h2>
+<p>Every agent, from a tiny demo to a large coding assistant, runs some version of the same loop:</p>
+<ol class="steps">
+<li><strong>Observe:</strong> the model reads everything it has so far: the system prompt, the conversation, and any earlier tool results.</li>
+<li><strong>Think:</strong> it decides what is missing. ("I need the vacation policy. I also need today's date.")</li>
+<li><strong>Act:</strong> it requests a tool call. Your code runs the tool.</li>
+<li><strong>Observe the result:</strong> the tool's output is added to the conversation.</li>
+<li><strong>Repeat</strong> until the model decides it has enough, or a stopping rule ends the loop.</li>
+<li><strong>Answer:</strong> the model writes a final text reply instead of another tool call.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Agent loop: goal, observe, think, act with a tool, observe result, repeat, then answer">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="10" y="100" width="120" height="60" rx="8"/><text x="70" y="126" text-anchor="middle">Goal</text><text x="70" y="144" text-anchor="middle" class="small">user question</text>
+  <rect class="box" x="170" y="30" width="150" height="60" rx="8"/><text x="245" y="56" text-anchor="middle">1 · Observe</text><text x="245" y="74" text-anchor="middle" class="small">prompt + history</text>
+  <rect class="box" x="370" y="30" width="150" height="60" rx="8"/><text x="445" y="56" text-anchor="middle">2 · Think</text><text x="445" y="74" text-anchor="middle" class="small">what is missing?</text>
+  <rect class="box" x="370" y="170" width="150" height="60" rx="8"/><text x="445" y="196" text-anchor="middle">3 · Act</text><text x="445" y="214" text-anchor="middle" class="small">call a tool</text>
+  <rect class="box" x="170" y="170" width="150" height="60" rx="8"/><text x="245" y="196" text-anchor="middle">4 · Tool result</text><text x="245" y="214" text-anchor="middle" class="small">added to history</text>
+  <rect class="box2" x="590" y="30" width="160" height="60" rx="8"/><text x="670" y="56" text-anchor="middle">Answer</text><text x="670" y="74" text-anchor="middle" class="small">enough info, or limit hit</text>
+  <path class="arrow" d="M130,120 L168,70"/>
+  <path class="arrow" d="M320,60 H368"/>
+  <path class="arrow" d="M445,90 V168"/>
+  <path class="arrow" d="M370,200 H322"/>
+  <path class="arrow" d="M245,170 V92"/>
+  <path class="arrow" d="M520,60 H588"/>
+  <text x="555" y="50" text-anchor="middle" class="small">done</text>
+  <text x="270" y="135" text-anchor="middle" class="small">repeat</text>
+</svg>
+<figcaption>Each pass round the loop is one "step": one call to the model. The loop ends when the model answers in text or a stopping rule (such as a step limit) fires.</figcaption>
+</figure>
+
+<p>In the AI SDK, one pass round this loop is called a <strong>step</strong>. A step is one request to the model plus, if the model asked for tools, running those tools. That word matters, because the setting that controls the loop, <code>stopWhen: stepCountIs(6)</code>, counts steps.</p>
+
+<h2>The parts of an agent</h2>
+<p>Whatever framework you use, an agent is built from the same six ingredients. The right-hand column shows where each one lives in this project.</p>
+<div class="table-wrap"><table>
+<tr><th>Component</th><th>What it is</th><th>In this project (<code>src/app/api/chat/route.ts</code>, step 22)</th></tr>
+<tr><td><strong>Model</strong></td><td>The LLM that does the thinking and chooses tools. It must support tool calling.</td><td><code>openai("gpt-5-mini")</code></td></tr>
+<tr><td><strong>Instructions</strong> (system prompt)</td><td>The standing rules: role, which tools exist, how to use them, how to answer, what to do when unsure.</td><td><code>SYSTEM_PROMPT</code> with its numbered "How to work" list</td></tr>
+<tr><td><strong>Tools</strong></td><td>Functions the model may ask you to run. They are the agent's "hands".</td><td><code>searchKnowledgeBase</code>, <code>getCurrentDate</code>, <code>calculator</code></td></tr>
+<tr><td><strong>Memory</strong></td><td>What the agent can remember. Short-term memory is the conversation so far; long-term memory is anything stored outside it (see <a href="ai-10-agent-patterns.html">the next chapter</a>).</td><td>The <code>messages</code> array the browser sends on every request; the knowledge base itself acts as read-only long-term knowledge</td></tr>
+<tr><td><strong>Stopping condition</strong></td><td>The rule that ends the loop even if the model would keep going.</td><td><code>stopWhen: stepCountIs(6)</code></td></tr>
+<tr><td><strong>Environment</strong></td><td>The world the tools act on, and the limits on what they can touch.</td><td>The Neon <a class="term" href="glossary.html#database">database</a> (read through search), the server clock, and a locked-down <code>mathjs</code> instance</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="The six parts of an agent arranged around the agent loop: model, instructions, memory on the left; tools, stopping condition, environment on the right">
+  <rect class="box-solid" x="310" y="125" width="140" height="50" rx="8"/><text x="380" y="155" text-anchor="middle" class="on-solid">Agent loop</text>
+  <rect class="box-info" x="20" y="20" width="230" height="60" rx="8"/><text x="135" y="45" text-anchor="middle" class="title">Model (the only AI part)</text><text x="135" y="66" text-anchor="middle" class="mono">openai("gpt-5-mini")</text>
+  <rect class="box2" x="20" y="120" width="230" height="60" rx="8"/><text x="135" y="145" text-anchor="middle" class="title">Instructions</text><text x="135" y="166" text-anchor="middle" class="mono">SYSTEM_PROMPT</text>
+  <rect class="box2" x="20" y="220" width="230" height="60" rx="8"/><text x="135" y="245" text-anchor="middle" class="title">Memory</text><text x="135" y="266" text-anchor="middle" class="small">the messages array (conversation)</text>
+  <rect class="box2" x="510" y="20" width="230" height="60" rx="8"/><text x="625" y="45" text-anchor="middle" class="title">Tools</text><text x="625" y="66" text-anchor="middle" class="small">search · date · calculator</text>
+  <rect class="box2" x="510" y="120" width="230" height="60" rx="8"/><text x="625" y="145" text-anchor="middle" class="title">Stopping condition</text><text x="625" y="166" text-anchor="middle" class="mono">stepCountIs(6)</text>
+  <rect class="box2" x="510" y="220" width="230" height="60" rx="8"/><text x="625" y="245" text-anchor="middle" class="title">Environment</text><text x="625" y="266" text-anchor="middle" class="small">Neon DB · server clock · mathjs</text>
+  <path class="line" d="M250,50 L310,132"/>
+  <path class="line" d="M250,150 H310"/>
+  <path class="line" d="M250,250 L310,168"/>
+  <path class="line" d="M510,50 L450,132"/>
+  <path class="line" d="M510,150 H450"/>
+  <path class="line" d="M510,250 L450,168"/>
+</svg>
+<figcaption>The six ingredients plug into one loop. Only the highlighted <strong>model</strong> is AI; the other five are ordinary code and data you design, which is why good agents are mostly good engineering.</figcaption>
+</figure>
+
+<p>Notice that only the first row is "AI". Everything else is ordinary software that you design and control. Good agents are mostly good engineering around a model.</p>
+
+<h2>Workflows vs agents</h2>
+<p>Anthropic's article <a href="https://www.anthropic.com/engineering/building-effective-agents">"Building effective agents"</a> draws a helpful line that many teams now use. Paraphrasing it:</p>
+<ul>
+<li>A <a class="term" href="glossary.html#workflow">workflow</a> is a system where LLMs and tools are orchestrated through <strong>predefined code paths</strong>. Your code decides the order: "call the model to classify, then search, then call the model to answer".</li>
+<li>An <strong>agent</strong> is a system where the LLM <strong>dynamically directs its own process and tool usage</strong>. The model decides the order, how many steps, and when it is done.</li>
+</ul>
+<p>The same article calls both of these "agentic systems", and it builds both on one basic building block it calls the <strong>augmented LLM</strong>: a model enhanced with retrieval, tools and memory. Your step 15 chatbot is already an augmented LLM.</p>
+
+<div class="table-wrap"><table>
+<tr><th></th><th>Workflow</th><th>Agent</th></tr>
+<tr><td>Who decides the next step?</td><td>Your code (fixed path)</td><td>The model (chosen at run time)</td></tr>
+<tr><td>Number of model calls</td><td>Known in advance</td><td>Varies per question</td></tr>
+<tr><td>Predictability</td><td>High: same input usually takes the same path</td><td>Lower: two similar questions may take different paths</td></tr>
+<tr><td>Cost and <a class="term" href="glossary.html#latency">latency</a></td><td>Easy to estimate</td><td>Harder to estimate; can grow with each step</td></tr>
+<tr><td>Flexibility</td><td>Handles the cases you designed for</td><td>Can handle open-ended tasks you did not foresee</td></tr>
+<tr><td>Debugging</td><td>Like normal code</td><td>Need logs/traces of every step</td></tr>
+<tr><td>Example here</td><td>"Always search, then answer" (roughly step 15)</td><td>"Pick from three tools, up to six steps" (step 22)</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Three columns comparing a chatbot, a workflow and an agent, and who decides the next step in each">
+  <rect class="zone" x="10" y="10" width="236" height="280" rx="10"/>
+  <rect class="zone" x="262" y="10" width="236" height="280" rx="10"/>
+  <rect class="zone" x="514" y="10" width="236" height="280" rx="10"/>
+  <text x="128" y="34" text-anchor="middle" class="title">Chatbot (one call)</text>
+  <text x="380" y="34" text-anchor="middle" class="title">Workflow</text>
+  <text x="632" y="34" text-anchor="middle" class="title">Agent</text>
+  <rect class="box2" x="38" y="50" width="180" height="30" rx="8"/><text x="128" y="70" text-anchor="middle">Question</text>
+  <rect class="box" x="38" y="100" width="180" height="30" rx="8"/><text x="128" y="120" text-anchor="middle">Model (one call)</text>
+  <rect class="box-ok" x="38" y="150" width="180" height="30" rx="8"/><text x="128" y="170" text-anchor="middle">Answer</text>
+  <path class="arrow" d="M128,80 V98"/><path class="arrow" d="M128,130 V148"/>
+  <rect class="box2" x="290" y="50" width="180" height="30" rx="8"/><text x="380" y="70" text-anchor="middle">Question</text>
+  <rect class="box2" x="290" y="100" width="180" height="30" rx="8"/><text x="380" y="120" text-anchor="middle">Code runs search</text>
+  <rect class="box" x="290" y="150" width="180" height="30" rx="8"/><text x="380" y="170" text-anchor="middle">Model answers</text>
+  <rect class="box-ok" x="290" y="200" width="180" height="30" rx="8"/><text x="380" y="220" text-anchor="middle">Answer</text>
+  <path class="arrow" d="M380,80 V98"/><path class="arrow" d="M380,130 V148"/><path class="arrow" d="M380,180 V198"/>
+  <rect class="box2" x="542" y="50" width="180" height="30" rx="8"/><text x="632" y="70" text-anchor="middle">Question</text>
+  <rect class="box" x="530" y="110" width="96" height="44" rx="8"/><text x="578" y="137" text-anchor="middle">Model</text>
+  <rect class="box-info" x="648" y="110" width="90" height="44" rx="8"/><text x="693" y="137" text-anchor="middle">Tools</text>
+  <path class="arrow-accent" d="M626,122 H646"/><path class="arrow-accent" d="M648,144 H628"/>
+  <text x="637" y="104" text-anchor="middle" class="small">loop</text>
+  <rect class="box-ok" x="542" y="200" width="180" height="30" rx="8"/><text x="632" y="220" text-anchor="middle">Answer</text>
+  <path class="arrow" d="M600,80 L584,108"/><path class="arrow" d="M590,154 L615,198"/>
+  <text x="128" y="262" text-anchor="middle" class="small">next step decided by:</text><text x="128" y="280" text-anchor="middle" class="label">nobody (one shot)</text>
+  <text x="380" y="262" text-anchor="middle" class="small">next step decided by:</text><text x="380" y="280" text-anchor="middle" class="accent">your code (fixed path)</text>
+  <text x="632" y="262" text-anchor="middle" class="small">next step decided by:</text><text x="632" y="280" text-anchor="middle" class="accent">the model (at run time)</text>
+</svg>
+<figcaption>The key question is <strong>who decides the next step</strong>. A chatbot makes one call. A workflow follows a path written in your code ("always search, then answer"). An agent lets the model pick tools in a loop until it is ready to answer.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to "orchestration"? What the word means here</summary>
+<p><strong>Orchestration</strong> just means "deciding what runs, in which order, with which inputs". In a workflow, you write the orchestration as ordinary code: <code>const category = await classify(q); if (category === "policy") { … }</code>. In an agent, you hand the orchestration to the model: it picks the next tool based on what it has seen.</p>
+</details>
+
+<h2>Levels of autonomy</h2>
+<p>"Is it an agent?" is less useful than "how much control does the model have?". The scale below is an informal way to think about it (it is a teaching aid, not an official standard):</p>
+<div class="table-wrap"><table>
+<tr><th>Level</th><th>What the model controls</th><th>Example in this project's world</th></tr>
+<tr><td>0 · Single call</td><td>Only the words of one reply</td><td>Step 5: question in, streamed answer out</td></tr>
+<tr><td>1 · Augmented call</td><td>The reply, using context your code fetched</td><td>Code searches first, pastes chunks into the prompt, model answers</td></tr>
+<tr><td>2 · Workflow</td><td>Individual steps inside a path your code fixed</td><td>Classify the question, then run the matching pipeline</td></tr>
+<tr><td>3 · Tool-using agent (bounded)</td><td>Which tools to call, how often, when to stop, within a step limit</td><td>Step 22: three tools, at most 6 steps</td></tr>
+<tr><td>4 · Autonomous agent</td><td>Long multi-step tasks, possibly with actions that change things</td><td>"File my vacation request, update the team calendar and notify my manager"</td></tr>
+</table></div>
+<p>Each level up gives more flexibility and also more ways to go wrong. Move up only when the level below cannot do the job.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Autonomy spectrum from level 0 single call to level 4 autonomous agent, with step 22 marked at level 3">
+  <text x="380" y="30" text-anchor="middle" class="title">How much does the model control?</text>
+  <rect class="box2" x="10" y="56" width="140" height="56" rx="8"/><text x="80" y="80" text-anchor="middle" class="label">0 · Single call</text><text x="80" y="98" text-anchor="middle" class="small">step 5</text>
+  <rect class="box2" x="160" y="56" width="140" height="56" rx="8"/><text x="230" y="80" text-anchor="middle" class="label">1 · Augmented</text><text x="230" y="98" text-anchor="middle" class="small">code fetches context</text>
+  <rect class="box-info" x="310" y="56" width="140" height="56" rx="8"/><text x="380" y="80" text-anchor="middle" class="label">2 · Workflow</text><text x="380" y="98" text-anchor="middle" class="small">path fixed in code</text>
+  <rect class="box-solid" x="460" y="56" width="140" height="56" rx="8"/><text x="530" y="80" text-anchor="middle" class="on-solid">3 · Bounded agent</text><text x="530" y="98" text-anchor="middle" class="on-solid">this project, step 22</text>
+  <rect class="box-warn" x="610" y="56" width="140" height="56" rx="8"/><text x="680" y="80" text-anchor="middle" class="label">4 · Autonomous</text><text x="680" y="98" text-anchor="middle" class="small">long tasks, actions</text>
+  <path class="arrow-accent" d="M20,140 H738"/>
+  <text x="20" y="166" class="small">predictable · cheap · easy to test</text>
+  <text x="740" y="166" text-anchor="end" class="small">flexible · costly · riskier</text>
+  <text x="380" y="186" text-anchor="middle" class="label">more control handed to the model</text>
+</svg>
+<figcaption>An informal scale, not an official standard. Each step to the right buys flexibility and costs predictability. <strong>Move right only when the level to the left cannot do the job.</strong></figcaption>
+</figure>
+
+
+<h2>When to use an agent (and when not to)</h2>
+<p>A rule of thumb from Anthropic's article, and a good one for beginners: <strong>find the simplest solution that works, and only add complexity when it clearly improves results.</strong> Many useful AI features are a single, well-prompted model call with good retrieval.</p>
+<div class="table-wrap"><table>
+<tr><th>Choose…</th><th>When…</th><th>Example</th></tr>
+<tr><td><strong>A single call</strong></td><td>The task is one well-defined transformation and all needed information can be put in the prompt.</td><td>Summarise this uploaded policy in five bullet points.</td></tr>
+<tr><td><strong>A workflow</strong></td><td>The steps are known in advance and you want predictable cost, speed and behaviour.</td><td>Classify each support message, then send it to the right prompt.</td></tr>
+<tr><td><strong>An agent</strong></td><td>You cannot predict the steps; the number and order of tool calls depend on what earlier tools return.</td><td>"Can I take vacation from the 1st, given today's date and our notice rules?"</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Decision tree: if all info fits in one prompt use a single call; otherwise if steps are known use a workflow; otherwise use an agent">
+  <rect class="box2" x="200" y="10" width="320" height="40" rx="8"/><text x="360" y="35" text-anchor="middle">Can all needed info go in one prompt?</text>
+  <rect class="box-ok" x="20" y="96" width="170" height="50" rx="8"/><text x="105" y="117" text-anchor="middle" class="title">A single call</text><text x="105" y="135" text-anchor="middle" class="small">summarise this PDF</text>
+  <path class="arrow-ok" d="M200,30 H105 V93"/><text x="150" y="23" text-anchor="middle" class="ok">yes</text>
+  <rect class="box2" x="220" y="100" width="280" height="40" rx="8"/><text x="360" y="125" text-anchor="middle">Are the steps known in advance?</text>
+  <path class="arrow" d="M360,50 V97"/><text x="370" y="78" class="small">no</text>
+  <rect class="box-info" x="140" y="190" width="200" height="50" rx="8"/><text x="240" y="211" text-anchor="middle" class="title">A workflow</text><text x="240" y="229" text-anchor="middle" class="small">classify, then route</text>
+  <rect class="box" x="400" y="190" width="200" height="50" rx="8"/><text x="500" y="211" text-anchor="middle" class="title">An agent</text><text x="500" y="229" text-anchor="middle" class="small">steps depend on tool results</text>
+  <path class="arrow-ok" d="M310,140 L262,187"/><text x="270" y="162" text-anchor="end" class="ok">yes</text>
+  <path class="arrow" d="M410,140 L470,187"/><text x="452" y="162" class="small">no</text>
+  <rect class="box-warn" x="620" y="190" width="130" height="50" rx="8"/><text x="685" y="211" text-anchor="middle" class="label">then add limits</text><text x="685" y="229" text-anchor="middle" class="small">steps · logs · tests</text>
+  <path class="arrow" d="M600,215 H617"/>
+</svg>
+<figcaption>Ask the questions top to bottom and <strong>stop at the first "yes"</strong>. Only when neither the prompt nor a fixed path can do the job is an agent worth its extra cost, and then it needs a step limit, logging and tests.</figcaption>
+</figure>
+
+<h3>Why agents cost more than they look</h3>
+<ul>
+<li><strong>Cost:</strong> every step is a full model call, and each call re-sends the growing conversation (all earlier tool results included). Six steps can easily cost several times one call. See <a href="ai-14-production.html">Running AI in Production</a> for <a class="term" href="glossary.html#cost-control">cost control</a>.</li>
+<li><strong>Latency:</strong> steps run one after another, so waiting time adds up. Streaming the intermediate steps to the UI (as <a href="23-show-agent-steps.html">step 23</a> does) makes the wait feel shorter and more honest.</li>
+<li><strong>Predictability:</strong> the same question can take a different path on a different run, which makes testing harder (see <a href="ai-12-evaluation.html">Evaluating AI Applications</a>).</li>
+<li><strong>Errors compound:</strong> if each step is right, say, 95% of the time, a chain of several steps is right less often than any single step, because one mistake early (a bad search query) feeds every later step. This is simple probability, and it is the main reason to keep agents short and tools reliable.</li>
+</ul>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"An agent is a smarter model."</em> No. It is the same model, called several times, with tools. The model does not get more intelligent; it gets more chances and more information.</li>
+<li><em>"More autonomy is always better."</em> No. Autonomy trades predictability for flexibility. For many business features, a workflow is the better product.</li>
+<li><em>"Agents need a special framework."</em> No. The loop is a few lines of code. The AI SDK gives it to you with one option, <code>stopWhen</code>.</li>
+<li><em>"The model runs the tools."</em> No. The model only requests tool calls; your server runs them.</li>
+</ul></div>
+
+<h2>The ReAct pattern: reason, then act</h2>
+<p>The agent loop you saw above has a name in research: <a class="term" href="glossary.html#react-pattern">ReAct</a>, short for "Reasoning and Acting", from a 2022 research paper titled "ReAct: Synergizing Reasoning and Acting in Language Models". The idea is that the model alternates between:</p>
+<ul>
+<li><strong>Thought:</strong> a short piece of reasoning about what to do next.</li>
+<li><strong>Action:</strong> a tool call.</li>
+<li><strong>Observation:</strong> the tool's result.</li>
+</ul>
+<p>…repeating until it can give a final answer. Interleaving thinking with real observations helps the model correct itself: if a search returns nothing, the next thought can be "try different wording" rather than inventing an answer (a <a class="term" href="glossary.html#hallucination">hallucination</a>).</p>
+<pre data-lang="sh" data-tag="illustrative"><code>Thought: The question depends on the company's notice rule. Search for it.
+Action: searchKnowledgeBase({ query: "vacation request notice period" })
+Observation: [1] Vacation requests must be submitted at least 14 days ...
+Thought: I need today's date to count the days.
+Action: getCurrentDate({})
+Observation: { isoDate: "2025-11-10", ... }
+...
+Final answer: Yes, ...</code></pre>
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="ReAct strip: thought, action, observation, repeated, then a final answer">
+  <text x="380" y="30" text-anchor="middle" class="small">Thought = reasoning · Action = tool call · Observation = tool result</text>
+  <rect class="box-info" x="10" y="56" width="94" height="56" rx="8"/><text x="57" y="80" text-anchor="middle" class="label">Thought</text><text x="57" y="98" text-anchor="middle" class="small">need the rule</text>
+  <rect class="box" x="116" y="56" width="94" height="56" rx="8"/><text x="163" y="80" text-anchor="middle" class="label">Action</text><text x="163" y="98" text-anchor="middle" class="small">search</text>
+  <rect class="box-ok" x="222" y="56" width="94" height="56" rx="8"/><text x="269" y="80" text-anchor="middle" class="label">Observation</text><text x="269" y="98" text-anchor="middle" class="small">14-day rule</text>
+  <rect class="box-info" x="328" y="56" width="94" height="56" rx="8"/><text x="375" y="80" text-anchor="middle" class="label">Thought</text><text x="375" y="98" text-anchor="middle" class="small">need the date</text>
+  <rect class="box" x="434" y="56" width="94" height="56" rx="8"/><text x="481" y="80" text-anchor="middle" class="label">Action</text><text x="481" y="98" text-anchor="middle" class="small">getCurrentDate</text>
+  <rect class="box-ok" x="540" y="56" width="94" height="56" rx="8"/><text x="587" y="80" text-anchor="middle" class="label">Observation</text><text x="587" y="98" text-anchor="middle" class="small">2025-11-10</text>
+  <rect class="box-solid" x="646" y="56" width="104" height="56" rx="8"/><text x="698" y="80" text-anchor="middle" class="on-solid">Final answer</text><text x="698" y="98" text-anchor="middle" class="on-solid">(after more)</text>
+  <path class="arrow" d="M104,84 H114"/><path class="arrow" d="M210,84 H220"/><path class="arrow" d="M316,84 H326"/>
+  <path class="arrow" d="M422,84 H432"/><path class="arrow" d="M528,84 H538"/><path class="arrow" d="M634,84 H644"/>
+  <path class="line" d="M10,130 H316"/><text x="163" y="150" text-anchor="middle" class="small">round 1</text>
+  <path class="line" d="M328,130 H634"/><text x="481" y="150" text-anchor="middle" class="small">round 2</text>
+</svg>
+<figcaption>The same illustrative example as the text block above, drawn as a strip. Each round is <strong>think, call a tool, read the real result</strong>, so the next thought is based on facts, not guesses.</figcaption>
+</figure>
+
+<p>Modern tool-calling APIs build this in: the "action" is a structured tool call rather than text you have to parse, and with <a class="term" href="glossary.html#reasoning-model">reasoning models</a> the "thought" often happens inside the model before it emits a tool call. You do not need to write "Thought/Action/Observation" prompts yourself; the AI SDK's tool loop is a ReAct-style loop.</p>
+
+<h2>How this project became an agent (step 22)</h2>
+<p>In <a href="15-search-tool.html">step 15</a> the route had one tool, <code>searchKnowledgeBase</code>, and <code>stopWhen: stepCountIs(2)</code>: one step to call the search, one step to answer. That is a minimal loop: enough for "search once, then reply", but not for questions that need several kinds of information.</p>
+<p><a href="22-build-an-agent.html">Step 22</a> changed three things:</p>
+<ol>
+<li><strong>Three tools instead of one:</strong> <code>searchKnowledgeBase</code> (company documents), <code>getCurrentDate</code> (today's date, since a model has no clock) and <code>calculator</code> (exact arithmetic, since models are unreliable at maths).</li>
+<li><strong>A system prompt that explains how to work:</strong> search first when relevant, call <code>getCurrentDate</code> for date questions, use the calculator for any arithmetic, and say honestly when the tools do not have the answer.</li>
+<li><strong>A bigger step budget and logging:</strong> <code>stopWhen: stepCountIs(6)</code> plus an <code>onStepFinish</code> callback that prints every tool call.</li>
+</ol>
+<p>Here is the heart of it, copied from <code>code/22-route.ts</code> (lines 102–115):</p>
+<pre data-lang="ts" data-file="src/app/api/chat/route.ts" data-tag="excerpt · step 22"><code>    const result = streamText({
+      model: openai("gpt-5-mini"),
+      messages: convertToModelMessages(messages),
+      tools,
+      system: SYSTEM_PROMPT,
+      // An agent may need several tool calls before it can answer
+      stopWhen: stepCountIs(6),
+      onStepFinish: ({ toolCalls, finishReason }) =&gt; {
+        for (const call of toolCalls) {
+          console.log(`[agent] called ${call.toolName}`, call.input);
+        }
+        console.log(`[agent] step finished: ${finishReason}`);
+      },
+    });</code></pre>
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>const result = streamText({</code></td><td>Starts a <a class="term" href="glossary.html#streaming">streaming</a> model call. Despite the name, with tools and <code>stopWhen</code> it runs the whole agent loop, streaming each step's output as it happens.</td></tr>
+<tr><td>2</td><td><code>model: openai("gpt-5-mini"),</code></td><td>The model that thinks and picks tools. It must support tool calling, or the loop cannot work.</td></tr>
+<tr><td>3</td><td><code>messages: convertToModelMessages(messages),</code></td><td>The conversation so far (short-term memory). The browser's UI messages are converted into the format the model expects.</td></tr>
+<tr><td>4</td><td><code>tools,</code></td><td>The object holding the three tools. Their descriptions and schemas are sent to the model on every step so it knows what it can ask for.</td></tr>
+<tr><td>5</td><td><code>system: SYSTEM_PROMPT,</code></td><td>The agent's instructions: which tool to use when, and to admit when it does not know.</td></tr>
+<tr><td>6–7</td><td><code>stopWhen: stepCountIs(6),</code></td><td>The stopping condition. The loop runs at most 6 steps. Without it, the default is <code>stepCountIs(1)</code>: the model could request a tool but would never get a chance to read the result and answer.</td></tr>
+<tr><td>8</td><td><code>onStepFinish: ({ toolCalls, finishReason }) =&gt; {</code></td><td>A callback that runs after every step. It receives details of that step; here we take the tool calls and the reason the step ended.</td></tr>
+<tr><td>9–11</td><td><code>for (const call of toolCalls) { console.log(…) }</code></td><td>Prints each tool the model called and its input, in the server terminal. This is basic <a class="term" href="glossary.html#observability">observability</a>: you can see what the agent decided.</td></tr>
+<tr><td>12</td><td><code>console.log(`[agent] step finished: ${finishReason}`);</code></td><td>Prints why the step ended: <code>tool-calls</code> means "I asked for tools, keep looping"; <code>stop</code> means "I wrote my final answer".</td></tr>
+<tr><td>13–14</td><td><code>},</code> / <code>});</code></td><td>Close the callback and the options object.</td></tr>
+</table></div>
+
+<h3>A concrete trace: "Can I request vacation starting on December 1?"</h3>
+<p>Let us follow one question through the loop. The document text and dates below are <strong>made up for illustration</strong>; your knowledge base will contain whatever PDFs you uploaded, and your log will show your real date.</p>
+<p>Suppose a user asks: <em>"Can I request vacation starting on 2025-12-01?"</em> and the uploaded HR policy contains a sentence like "Vacation requests must be submitted at least 14 calendar days before the first day of leave."</p>
+<div class="table-wrap"><table>
+<tr><th>Step</th><th>Model decides</th><th>Tool result (observation)</th><th><code>finishReason</code></th></tr>
+<tr><td>1</td><td>This is about company rules: call <code>searchKnowledgeBase({ query: "vacation request notice period" })</code></td><td><code>[1] Vacation requests must be submitted at least 14 calendar days before…</code></td><td><code>tool-calls</code></td></tr>
+<tr><td>2</td><td>The answer depends on today: call <code>getCurrentDate({})</code></td><td><code>{ isoDate: "2025-11-10", readable: "Monday, November 10, 2025" }</code></td><td><code>tool-calls</code></td></tr>
+<tr><td>3</td><td>November has 30 days, so days from Nov 10 to Dec 1 is (30 − 10) + 1: call <code>calculator({ expression: "(30 - 10) + 1" })</code></td><td><code>{ expression: "(30 - 10) + 1", result: "21" }</code></td><td><code>tool-calls</code></td></tr>
+<tr><td>4</td><td>21 is at least 14, so the rule is met. Write the answer.</td><td>(no tool) "Yes. December 1 is 21 days away, and the policy requires at least 14 days' notice, so you can still request it…"</td><td><code>stop</code></td></tr>
+</table></div>
+<figure class="diagram">
+<svg viewBox="0 0 760 410" role="img" aria-label="Vertical timeline of the four illustrative agent steps: search, get date, calculator, then final answer, using 4 of 6 allowed steps">
+  <text x="235" y="22" text-anchor="middle" class="small">model decides</text>
+  <text x="535" y="22" text-anchor="middle" class="small">tool result (observation)</text>
+  <text x="712" y="22" text-anchor="middle" class="small">finishReason</text>
+  <path class="line" d="M50,50 V340"/>
+  <circle class="dot" cx="50" cy="66" r="14"/><text x="50" y="71" text-anchor="middle" class="on-solid">1</text>
+  <rect class="box" x="90" y="36" width="290" height="60" rx="8"/><text x="235" y="60" text-anchor="middle" class="label">About company rules: search</text><text x="235" y="80" text-anchor="middle" class="mono">searchKnowledgeBase({ query })</text>
+  <path class="arrow" d="M380,66 H408"/>
+  <rect class="box-ok" x="410" y="36" width="250" height="60" rx="8"/><text x="535" y="60" text-anchor="middle" class="small">top chunk</text><text x="535" y="80" text-anchor="middle" class="mono">[1] …at least 14 days…</text>
+  <text x="712" y="70" text-anchor="middle" class="mono">tool-calls</text>
+  <circle class="dot" cx="50" cy="150" r="14"/><text x="50" y="155" text-anchor="middle" class="on-solid">2</text>
+  <rect class="box" x="90" y="120" width="290" height="60" rx="8"/><text x="235" y="144" text-anchor="middle" class="label">Depends on today: get the date</text><text x="235" y="164" text-anchor="middle" class="mono">getCurrentDate({})</text>
+  <path class="arrow" d="M380,150 H408"/>
+  <rect class="box-ok" x="410" y="120" width="250" height="60" rx="8"/><text x="535" y="144" text-anchor="middle" class="small">server clock</text><text x="535" y="164" text-anchor="middle" class="mono">isoDate: "2025-11-10"</text>
+  <text x="712" y="154" text-anchor="middle" class="mono">tool-calls</text>
+  <circle class="dot" cx="50" cy="234" r="14"/><text x="50" y="239" text-anchor="middle" class="on-solid">3</text>
+  <rect class="box" x="90" y="204" width="290" height="60" rx="8"/><text x="235" y="228" text-anchor="middle" class="label">Count days: (30 − 10) + 1</text><text x="235" y="248" text-anchor="middle" class="mono">calculator({ expression })</text>
+  <path class="arrow" d="M380,234 H408"/>
+  <rect class="box-ok" x="410" y="204" width="250" height="60" rx="8"/><text x="535" y="228" text-anchor="middle" class="small">exact arithmetic</text><text x="535" y="248" text-anchor="middle" class="mono">result: "21"</text>
+  <text x="712" y="238" text-anchor="middle" class="mono">tool-calls</text>
+  <circle class="dot-ok" cx="50" cy="318" r="14"/><text x="50" y="323" text-anchor="middle" class="on-solid">4</text>
+  <rect class="box" x="90" y="288" width="290" height="60" rx="8"/><text x="235" y="312" text-anchor="middle" class="label">21 ≥ 14, rule met: answer</text><text x="235" y="332" text-anchor="middle" class="small">no tool this time</text>
+  <path class="arrow" d="M380,318 H408"/>
+  <rect class="box2" x="410" y="288" width="250" height="60" rx="8"/><text x="535" y="312" text-anchor="middle" class="small">text streams to the user</text><text x="535" y="332" text-anchor="middle" class="label">"Yes. 21 days away…"</text>
+  <text x="712" y="322" text-anchor="middle" class="ok">stop</text>
+  <rect class="box-solid" x="90" y="370" width="40" height="22" rx="4"/><rect class="box-solid" x="138" y="370" width="40" height="22" rx="4"/>
+  <rect class="box-solid" x="186" y="370" width="40" height="22" rx="4"/><rect class="box-solid" x="234" y="370" width="40" height="22" rx="4"/>
+  <rect class="box2" x="282" y="370" width="40" height="22" rx="4"/><rect class="box2" x="330" y="370" width="40" height="22" rx="4"/>
+  <text x="390" y="386" class="small">4 of the 6 steps allowed by stepCountIs(6)</text>
+</svg>
+<figcaption>Illustrative trace (made-up document text and dates), the same as the table above. Time flows down: <strong>each step is one model call</strong>; steps 1–3 end with <code>tool-calls</code> so the loop continues, step 4 ends with <code>stop</code>. The squares show how much of the step budget was used.</figcaption>
+</figure>
+
+<p>In the server terminal, the <code>onStepFinish</code> logging would print something like this (illustrative):</p>
+<pre data-lang="sh" data-tag="illustrative"><code>[agent] called searchKnowledgeBase { query: 'vacation request notice period' }
+[agent] step finished: tool-calls
+[agent] called getCurrentDate {}
+[agent] step finished: tool-calls
+[agent] called calculator { expression: '(30 - 10) + 1' }
+[agent] step finished: tool-calls
+[agent] step finished: stop</code></pre>
+<p>Four steps, well inside the limit of six. A few things worth noticing:</p>
+<ul>
+<li><strong>The order was not written anywhere in code.</strong> The system prompt suggests a strategy, but the model chose these three tools in this order because of this question. A question like "What is 15% of 2000?" would skip straight to the calculator.</li>
+<li><strong>Models may call several tools in one step.</strong> Many models can request <code>searchKnowledgeBase</code> and <code>getCurrentDate</code> together in step 1 (a "parallel tool call"), finishing in fewer steps. Both are correct.</li>
+<li><strong>The weak point is visible.</strong> In step 3 the model itself worked out the formula <code>(30 - 10) + 1</code>; the calculator only did the arithmetic. If the model had miscounted days in the month, the answer would be wrong while looking confident. A dedicated <code>daysBetween(start, end)</code> tool would remove that risk. This is a general lesson: <strong>move error-prone reasoning into deterministic tools.</strong></li>
+<li><strong>"Working days" are harder.</strong> If the policy said "10 working days", the agent would need weekends and public holidays. None of the three tools knows those, so a well-behaved agent should say so (rule 5 in the system prompt) rather than guess. A <code>countWorkingDays</code> tool backed by a holiday calendar would be the proper fix.</li>
+</ul>
+<p>The user sees each of these steps in the chat because <a href="23-show-agent-steps.html">step 23</a> renders every tool part (input, status and result) in the UI.</p>
+
+<h2>AI SDK building blocks for agents</h2>
+<p>The AI SDK v5 gives you a small set of options that control the loop. All of these work with both <code>generateText</code> and <code>streamText</code>.</p>
+
+<h3><code>stopWhen</code>: when the loop ends</h3>
+<p><code>stopWhen</code> takes one stop condition or an array of them (the loop stops when <em>any</em> is met). It is only checked after a step that produced tool results; a step where the model answers in plain text ends the loop anyway. Two helpers are built in: <code>stepCountIs(n)</code> and <code>hasToolCall(name)</code>. You can also write your own: a stop condition is just a function that receives the steps so far and returns <code>true</code> to stop.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { hasToolCall, stepCountIs, type StopCondition } from "ai";
+
+// Stop if the total tokens used across all steps passes a budget
+const tokenBudget = (max: number): StopCondition&lt;any&gt; =&gt; ({ steps }) =&gt;
+  steps.reduce((sum, s) =&gt; sum + (s.usage.totalTokens ?? 0), 0) &gt; max;
+
+stopWhen: [stepCountIs(6), hasToolCall("finalAnswer"), tokenBudget(20_000)],</code></pre>
+
+<h3><code>prepareStep</code>: change settings before each step</h3>
+<p><code>prepareStep</code> is a function called before every step. It receives the step number, the steps so far, the model and the messages, and may return changes for this step only: a different <code>model</code>, <code>toolChoice</code>, <code>activeTools</code> (a subset of tools), <code>system</code> prompt or <code>messages</code>. Return <code>undefined</code> to keep the defaults.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>prepareStep: ({ stepNumber }) =&gt; {
+  // Near the limit: take tools away so the model must answer now
+  if (stepNumber &gt;= 4) {
+    return { toolChoice: "none" };
+  }
+  return undefined;
+},</code></pre>
+<p>Typical uses: force a search on the first step, switch to a cheaper model for simple follow-up steps, hide risky tools until a condition is met, or trim old messages when the conversation gets long.</p>
+
+<h3><code>onStepFinish</code>: watch every step</h3>
+<p>You have already seen this in the project. It receives the finished step, including <code>toolCalls</code>, <code>toolResults</code>, <code>text</code>, <code>finishReason</code> and <code>usage</code> (token counts). Use it for logging, tracing, cost tracking, and saving intermediate results.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Life of one step: prepareStep, model call, run tools, onStepFinish, then the stopWhen check either loops to the next step or ends">
+  <path class="arrow-accent" d="M686,58 V30 H74 V54"/>
+  <text x="380" y="24" text-anchor="middle" class="accent">not met: next step</text>
+  <rect class="box-info" x="10" y="60" width="128" height="56" rx="8"/><text x="74" y="84" text-anchor="middle" class="mono">prepareStep</text><text x="74" y="102" text-anchor="middle" class="small">change model/tools</text>
+  <rect class="box" x="163" y="60" width="128" height="56" rx="8"/><text x="227" y="84" text-anchor="middle">Model call</text><text x="227" y="102" text-anchor="middle" class="small">one LLM request</text>
+  <rect class="box2" x="316" y="60" width="128" height="56" rx="8"/><text x="380" y="84" text-anchor="middle">Run tools</text><text x="380" y="102" text-anchor="middle" class="small">if requested</text>
+  <rect class="box-info" x="469" y="60" width="128" height="56" rx="8"/><text x="533" y="84" text-anchor="middle" class="mono">onStepFinish</text><text x="533" y="102" text-anchor="middle" class="small">log · trace · cost</text>
+  <rect class="box-warn" x="622" y="60" width="128" height="56" rx="8"/><text x="686" y="84" text-anchor="middle" class="mono">stopWhen?</text><text x="686" y="102" text-anchor="middle" class="small">any rule true?</text>
+  <path class="arrow" d="M138,88 H161"/><path class="arrow" d="M291,88 H314"/><path class="arrow" d="M444,88 H467"/><path class="arrow" d="M597,88 H620"/>
+  <path class="arrow-ok" d="M686,116 V158"/><text x="696" y="142" class="ok">met</text>
+  <rect class="box-ok" x="590" y="160" width="160" height="40" rx="8"/><text x="670" y="185" text-anchor="middle">Stop: return result</text>
+  <text x="20" y="168" class="small">A step where the model answers in plain text</text>
+  <text x="20" y="184" class="small">(no tool call) ends the loop anyway.</text>
+</svg>
+<figcaption>Where each AI SDK option fits in <strong>one step</strong>: <code>prepareStep</code> runs before the model call, <code>onStepFinish</code> after the tools, and <code>stopWhen</code> decides whether another step starts.</figcaption>
+</figure>
+
+<h3>The <code>Experimental_Agent</code> class</h3>
+<p>In <code>ai</code> 5.0.47 (the version this project uses), the package also exports an <code>Agent</code> class under the name <code>Experimental_Agent</code>. It bundles the settings you would otherwise pass to <code>generateText</code>/<code>streamText</code> (model, system, tools, <code>stopWhen</code>, <code>prepareStep</code>, <code>onStepFinish</code>, and so on) into one reusable object. In this version it has three methods: <code>generate(…)</code>, <code>stream(…)</code>, and <code>respond({ messages })</code>, which returns a streaming <a class="term" href="glossary.html#http">HTTP</a> response for <code>useChat</code>.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { Experimental_Agent as Agent, stepCountIs } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const hrAgent = new Agent({
+  model: openai("gpt-5-mini"),
+  system: SYSTEM_PROMPT,
+  tools, // the same three tools as step 22
+  stopWhen: stepCountIs(6),
+});
+
+// One-off use, e.g. in a script or test:
+const { text, steps } = await hrAgent.generate({
+  prompt: "Can I request vacation starting on 2025-12-01?",
+});</code></pre>
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { Experimental_Agent as Agent, stepCountIs } from "ai";</code></td><td>Imports the class and renames it <code>Agent</code> for readability. The <code>Experimental_</code> prefix warns that its API may change in future releases.</td></tr>
+<tr><td>2</td><td><code>import { openai } from "@ai-sdk/openai";</code></td><td>The OpenAI <a class="term" href="glossary.html#provider">provider</a>, as in the chat route.</td></tr>
+<tr><td>4–9</td><td><code>const hrAgent = new Agent({ … });</code></td><td>Creates the agent once with its model, instructions, tools and step limit. You can import <code>hrAgent</code> anywhere instead of repeating settings.</td></tr>
+<tr><td>11–14</td><td><code>await hrAgent.generate({ prompt: … })</code></td><td>Runs the full loop without streaming and returns the final <code>text</code> plus every <code>steps</code> entry (useful in tests).</td></tr>
+</table></div>
+<p>In a route handler you could replace the whole <code>streamText(…)</code> call with <code>return hrAgent.respond({ messages });</code>. The class is a convenience, not new capability: everything it does, the step 22 route already does with <code>streamText</code>. Because the API is marked experimental, check the <a href="https://ai-sdk.dev/docs">AI SDK docs</a> for the version you install.</p>
+
+<h2>Limits of agents and how to guard against them</h2>
+<div class="table-wrap"><table>
+<tr><th>Failure</th><th>What it looks like</th><th>Safeguard</th></tr>
+<tr><td><strong>Loops</strong></td><td>The model searches the same thing again and again, or alternates between two tools without progress.</td><td>A step limit (<code>stepCountIs</code>); <code>prepareStep</code> that removes tools near the limit; log and alert on repeated identical calls.</td></tr>
+<tr><td><strong>Cost blow-ups</strong></td><td>Each step re-sends the whole history; large tool results (long documents) multiply the cost.</td><td>Token budgets (a custom stop condition); keep tool results short (the search tool returns only 3 chunks); per-user <a class="term" href="glossary.html#rate-limit">rate limits</a>.</td></tr>
+<tr><td><strong>Slow answers</strong></td><td>Many sequential steps; a slow external API.</td><td>Timeouts, e.g. <code>abortSignal: AbortSignal.timeout(30_000)</code>; stream steps to the UI; prefer fewer, better tools.</td></tr>
+<tr><td><strong>Hallucinated tool calls</strong></td><td>The model calls a tool that does not exist, or passes invalid input.</td><td>The AI SDK validates inputs against your <a class="term" href="glossary.html#zod">zod</a> schema and reports errors; validate again inside <code>execute</code> (as <code>calculate()</code> limits length and disables risky functions).</td></tr>
+<tr><td><strong>Wrong but confident answers</strong></td><td>A bad early step (poor search query) poisons later steps.</td><td>Tell the model to admit uncertainty; return clear "no results" messages from tools; evaluate with real test questions (<a href="ai-12-evaluation.html">chapter 12</a>).</td></tr>
+<tr><td><strong>Harmful actions</strong></td><td>An agent with write tools does something irreversible, possibly because of <a class="term" href="glossary.html#prompt-injection">prompt injection</a> hidden in a document.</td><td>Least privilege (this project's tools are read-only); human approval before risky actions (<a href="ai-10-agent-patterns.html">chapter 10</a>); <a class="term" href="glossary.html#guardrails">guardrails</a> (<a href="ai-13-security-safety.html">chapter 13</a>).</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Agent loop inside a safe zone surrounded by guard rails: step limit, token budget, input validation and timeout">
+  <rect class="zone" x="200" y="50" width="360" height="140" rx="12"/>
+  <rect class="box-solid" x="310" y="100" width="140" height="40" rx="8"/><text x="380" y="125" text-anchor="middle" class="on-solid">Agent loop</text>
+  <text x="212" y="72" class="small">read-only tools (least privilege)</text>
+  <text x="212" y="178" class="small">risky action? ask a human first</text>
+  <rect class="box-warn" x="250" y="10" width="260" height="34" rx="8"/><text x="380" y="32" text-anchor="middle">Step limit: stepCountIs(6)</text>
+  <rect class="box-warn" x="250" y="196" width="260" height="34" rx="8"/><text x="380" y="218" text-anchor="middle">Token budget (custom stop)</text>
+  <rect class="box-warn" x="10" y="86" width="180" height="68" rx="8"/><text x="100" y="114" text-anchor="middle">Input validation</text><text x="100" y="134" text-anchor="middle" class="small">zod schema + execute()</text>
+  <rect class="box-warn" x="570" y="86" width="180" height="68" rx="8"/><text x="660" y="114" text-anchor="middle">Timeout</text><text x="660" y="134" text-anchor="middle" class="mono">AbortSignal.timeout</text>
+</svg>
+<figcaption>Think of the safeguards in the table as <strong>guard rails around the loop</strong>: a step limit and a token budget stop runaway loops and costs, a timeout stops slow runs, validation rejects bad tool input, and least privilege plus human approval limit what a mistake can damage.</figcaption>
+</figure>
+
+<div class="callout ok"><strong>How to know your agent is healthy.</strong> Watch the <code>[agent]</code> lines in the terminal while you test. Healthy runs use few steps, call tools that make sense for the question, and end with <code>step finished: stop</code>. If you often see six steps and no <code>stop</code>, the agent is hitting the limit: improve tool descriptions or the system prompt before raising the limit.</div>
+
+<div class="callout warn"><strong>Pitfalls</strong>
+<ul>
+<li>Forgetting <code>stopWhen</code>: the default is one step, so the model requests a tool and the reply ends with no answer.</li>
+<li>Raising the step limit to "fix" bad answers. More steps usually means more cost, not better reasoning. Fix the tools and instructions first.</li>
+<li>Vague tool descriptions. The description is the only thing the model knows about a tool; "Search the knowledge base" is weaker than saying what is in it and when to use it.</li>
+<li>Letting tools throw. The project's tools catch errors and return a message, so the model can recover instead of the whole request failing.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>An agent is an LLM using tools in a loop towards a goal, choosing its own next step.</li>
+<li>The loop: observe → think → act (tool) → observe the result → repeat → answer. Each pass is a "step".</li>
+<li>Components: model, instructions, tools, memory, stopping condition, environment. Only the first is AI.</li>
+<li>Workflows follow predefined code paths; agents let the model direct the process (Anthropic's framing). Start with the simplest option that works.</li>
+<li>Agents cost more, are slower and less predictable, and errors compound across steps.</li>
+<li>ReAct (reason + act) is the research name for the loop that tool-calling APIs now provide.</li>
+<li>Step 22 made this project an agent with three tools, a working-method system prompt, <code>stopWhen: stepCountIs(6)</code> and <code>onStepFinish</code> logging.</li>
+<li>Control the loop with <code>stopWhen</code>, <code>prepareStep</code> and <code>onStepFinish</code>; <code>Experimental_Agent</code> packages the same settings into a reusable object.</li>
+<li>Guard against loops, cost blow-ups and bad tool calls with step limits, budgets, timeouts, validation and least privilege.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://www.anthropic.com/engineering/building-effective-agents">Anthropic: Building effective agents</a></li>
+<li><a href="https://ai-sdk.dev/docs">AI SDK documentation</a> (see the sections on tool calling, multi-step calls and agents)</li>
+<li><a href="https://platform.openai.com/docs">OpenAI platform documentation</a> (function calling)</li>
+<li><a href="https://docs.anthropic.com">Anthropic documentation</a> (tool use)</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="ai-08-advanced-rag.html"><small>← Chapter 8</small>Advanced RAG</a>
+<a class="next" href="ai-10-agent-patterns.html"><small>Chapter 10 →</small>Agent Patterns, Memory &amp; Multi-Agent Systems</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 9 · Testing, Deploying &amp; Production</title>
+<meta name="description" content="langgraph.json, langgraph dev and the API server, deployment options, security and cost.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 9/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangGraph Handbook · Chapter 9 of 10</div>
+  <h1>Testing, Deploying &amp; Production</h1>
+  <p class="lead">langgraph.json, langgraph dev and the API server, deployment options, security and cost.</p>
+</section>
+<p>Everything in the course runs on your own computer: <code>python module1/...</code> in a terminal, or <code>langgraph dev</code> with Studio in the browser. This chapter is about the distance between that and "other people can use my agent safely". It covers how to test graphs so you can change them without fear, what every field in <a class="term" href="glossary.html#langgraph-json">langgraph.json</a> does, the difference between <code>langgraph dev</code>, <code>langgraph up</code> and <code>langgraph build</code>, how the LangGraph server stores your threads, the main ways to deploy, and the production concerns that matter most for agents: security, cost, latency and observability.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> <a href="18-testing-graphs.html">Step 18</a> gave you 13 tests that run without an API key. <a href="17-persistent-memory-sqlite.html">Step 17</a> showed that the server refuses your own checkpointer. Both are production topics in disguise. Deployment platforms change quickly, so this chapter explains the ideas and the commands that exist in the locked versions (langgraph-cli 0.4.31), and points you to the current docs for anything account- or plan-specific.</div>
+
+<h2>Testing graphs</h2>
+<p>A graph is ordinary Python, so it can be tested with <a class="term" href="glossary.html#pytest">pytest</a> like any other code. The trick is to test at three levels, from cheap and fast to slow and expensive:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Testing pyramid for graphs: many unit tests of node and routing functions at the bottom, graph tests with a fake model in the middle, a few real-model evaluations at the top">
+  <path class="box-ok" d="M80,230 L680,230 L600,165 L160,165 Z"/>
+  <path class="box" d="M160,160 L600,160 L520,95 L240,95 Z"/>
+  <path class="box-warn" d="M240,90 L520,90 L430,25 L330,25 Z"/>
+  <text x="380" y="195" text-anchor="middle" class="label">unit tests: node and routing functions, plain dicts in and out</text>
+  <text x="380" y="214" text-anchor="middle" class="small">milliseconds, no model, many of them</text>
+  <text x="380" y="126" text-anchor="middle" class="label">graph tests with a fake model</text>
+  <text x="380" y="143" text-anchor="middle" class="small">wiring, routing, tool calls, memory (step 18)</text>
+  <text x="380" y="62" text-anchor="middle" class="label">real-model checks</text>
+  <text x="380" y="78" text-anchor="middle" class="small">few, slow, cost money</text>
+</svg>
+<figcaption>Most bugs in this course were wiring bugs (wrong edge, missing import, wrong node name), which the two cheap layers catch. <strong>Keep real-model tests few and run them on purpose, not on every save.</strong></figcaption>
+</figure>
+
+<p><strong>Unit tests</strong> call your functions directly. A node is just a function that takes a dictionary and returns a dictionary, and a routing function returns a string. No graph, no model. These four tests were run against the repo's graph 2 and passed:</p>
+<pre data-lang="py" data-tag="verified"><code>import pytest
+from langgraph.errors import GraphRecursionError
+
+# load(...) is the same helper as in tests/test_graphs.py (file names start with a digit)
+
+
+def test_routing_function_alone():
+    g2 = load("2_graph_conditional_edge.py")
+    assert g2.next_step({"graph_str": "hello there"}) == "node2"
+    assert g2.next_step({"graph_str": "hi there"}) == "node3"
+
+
+def test_node_function_alone():
+    g2 = load("2_graph_conditional_edge.py")
+    assert g2.node2({"graph_str": "x "}) == {"graph_str": "x I am in Node 2"}
+
+
+def test_graph_shape():
+    g2 = load("2_graph_conditional_edge.py")
+    assert set(g2.graph.get_graph().nodes) == {"__start__", "node1", "node2", "node3", "__end__"}
+
+
+def test_loop_stops_at_the_limit():
+    from typing_extensions import TypedDict
+    from langgraph.graph import StateGraph, START
+
+    class State(TypedDict):
+        n: int
+
+    builder = StateGraph(State)
+    builder.add_node("again", lambda s: {"n": s["n"] + 1})
+    builder.add_edge(START, "again")
+    builder.add_edge("again", "again")
+    with pytest.raises(GraphRecursionError):
+        builder.compile().invoke({"n": 0}, {"recursion_limit": 10})</code></pre>
+<p><strong>Graph tests</strong> invoke the compiled graph with a <a class="term" href="glossary.html#fake-model">fake model</a> in place of <code>ChatOpenAI</code>, which is exactly what <a href="18-testing-graphs.html">step 18</a>'s <code>tests/test_graphs.py</code> does (13 tests, all passing with <code>uv run pytest -q</code>). They check that the agent produces Human, AI, Tool <code>"84"</code>, AI; that dividing by zero becomes a ToolMessage; that two threads stay apart. You can extend the same idea to the chapter 7 patterns: invoke until the interrupt, assert on <code>result["__interrupt__"]</code>, resume with a <code>Command</code>, assert on the final state.</p>
+<p><strong>Real-model checks</strong> (often called <em>evaluations</em>) answer a different question: "is the answer good?". They need a key, cost money and give slightly different results each time, so they are usually run on a small fixed set of questions before a release, and the results are compared over time. LangSmith has dataset and experiment features for this; the "Run experiment" button in the video's Studio screen belongs to that.</p>
+
+<details class="primer"><summary>New to testing? Why tests are worth it for a tiny project</summary>
+<p>A test is a small function that runs your code and checks one fact with <code>assert</code>. If the fact is false, pytest shows you which test failed and why. The value comes later: when you rename a node, add a tool or change a prompt, you run <code>uv run pytest -q</code> and know in two seconds whether you broke the wiring. In this course, the missing <code>HumanMessage</code> import in graph 9 was invisible in the video because the file was never run; a single test that imports it would have caught it immediately.</p>
+</details>
+
+<h2>langgraph.json, field by field</h2>
+<p><code>langgraph.json</code> tells the LangGraph server (and the CLI) where your graphs are and how to install your project. Here is the extension version from <a href="15-fix-and-harden.html">step 15</a>&ndash;<a href="16-division-tool-and-errors.html">16</a>:</p>
+<pre data-file="langgraph.json" data-lang="json" data-tag="extension"><code>{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "0_graph": "./module1/0_graph_state_str.py:graph",
+    "1_graph": "./module1/1_graph_state_dict.py:graph",
+    "2_graph": "./module1/2_graph_conditional_edge.py:graph",
+    "3_graph": "./module1/3_graph_introduction_model.py:graph",
+    "4_graph": "./module1/4_graph_messages_state.py:graph",
+    "5_graph": "./module1/5_graph_model_tool.py:graph",
+    "6_graph": "./module1/6_graph_tool_call.py:graph",
+    "8_graph": "./module1/8_graph_agent.py:graph",
+    "10_graph": "./module1/10_graph_division_tool.py:graph"
+  },
+  "env": ".env"
+}</code></pre>
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2&ndash;4</td><td><code>"dependencies": ["."]</code></td><td>What to install. <code>"."</code> means "this folder": the server reads <code>pyproject.toml</code> here and installs its dependencies (langchain, langchain-openai, langgraph...). You can also list package names or other local folders.</td></tr>
+<tr><td>5&ndash;15</td><td><code>"graphs": { "0_graph": "./module1/0_graph_state_str.py:graph", ... }</code></td><td>Graph id (the name in Studio's picker) &rarr; <code>path:variable</code>. The variable must be a compiled graph (or a function that builds one). Graph 9 is not listed because it brings its own checkpointer, which the server refuses.</td></tr>
+<tr><td>16</td><td><code>"env": ".env"</code></td><td>Environment variables for the server: a path to a <code>.env</code> file, or an inline mapping. This is why graphs without <code>load_dotenv()</code> still find <code>OPENAI_API_KEY</code> under <code>langgraph dev</code>.</td></tr>
+</table></div>
+<p>The CLI's own help (<code>langgraph validate --help</code>) and the CLI docs list more optional fields. The ones a beginner is most likely to need:</p>
+<div class="table-wrap"><table>
+<tr><th>Field</th><th>Purpose</th></tr>
+<tr><td><code>python_version</code></td><td><code>"3.11"</code>, <code>"3.12"</code> or <code>"3.13"</code>; <strong>defaults to 3.11</strong>. Verified: <code>langgraph dockerfile</code> on this project generated <code>FROM langchain/langgraph-api:3.11</code>, although the course uses 3.12. Add <code>"python_version": "3.12"</code> before building an image.</td></tr>
+<tr><td><code>dockerfile_lines</code></td><td>extra Dockerfile lines, for example to install a system package</td></tr>
+<tr><td><code>pip_config_file</code></td><td>a pip config, for private package indexes</td></tr>
+<tr><td><code>store</code>, <code>checkpointer</code></td><td>configure the server's built-in persistence (for example indexes for semantic search in the store)</td></tr>
+<tr><td><code>auth</code></td><td>points to your own authentication handler, so the API checks who is calling</td></tr>
+<tr><td><code>http</code>, <code>base_image</code>, <code>api_version</code></td><td>advanced server and image settings</td></tr>
+</table></div>
+<p>Before running anything, check the file. This was run on the extension project and printed <code>Configuration file ...\langgraph.json is valid. (9 graphs found)</code>:</p>
+<pre data-lang="ps" data-tag="verified"><code>uv run langgraph validate</code></pre>
+
+<div class="callout warn"><strong>Keep secrets out of langgraph.json.</strong> The CLI help shows an example with an inline <code>"env": {"OPENAI_API_KEY": "secret-key"}</code>. Do not copy that pattern into a file you commit. Keep <code>"env": ".env"</code>, keep <code>.env</code> in <code>.gitignore</code>, and set real secrets in your hosting platform's secret settings.</div>
+
+<h2>The LangGraph CLI: dev, up, build and friends</h2>
+<p>Running <code>langgraph --help</code> in the locked environment (langgraph-cli 0.4.31) lists these commands:</p>
+<div class="table-wrap"><table>
+<tr><th>Command</th><th>What it does</th><th>Needs</th></tr>
+<tr><td><code>langgraph dev</code></td><td>runs the API server in development mode, with hot reloading, on <code>127.0.0.1:2024</code>; opens Studio</td><td>the <code>inmem</code> extra (installed in the course); no Docker</td></tr>
+<tr><td><code>langgraph up</code></td><td>launches the API server in Docker, with a database, closer to production</td><td>Docker; per the CLI docs a LangSmith API key for local use and a license for production</td></tr>
+<tr><td><code>langgraph build</code></td><td>builds a Docker image of your server (<code>-t my-image</code>)</td><td>Docker</td></tr>
+<tr><td><code>langgraph dockerfile</code></td><td>writes a Dockerfile (optionally Docker Compose files) so you can build it your own way</td><td>nothing to run it</td></tr>
+<tr><td><code>langgraph new</code></td><td>creates a new project from a template</td><td>&nbsp;</td></tr>
+<tr><td><code>langgraph validate</code></td><td>checks <code>langgraph.json</code></td><td>&nbsp;</td></tr>
+<tr><td><code>langgraph deploy</code> (+ <code>list</code>, <code>logs</code>, <code>delete</code>, <code>revisions</code>)</td><td>marked <strong>[Beta]</strong>: builds and deploys to LangSmith's hosted platform</td><td>a LangSmith account with deployment access</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Comparison: langgraph dev runs in your Python process with local file persistence and hot reload; langgraph up runs Docker containers with the API server and a database; build produces an image you can run anywhere">
+  <rect class="zone" x="10" y="10" width="240" height="240" rx="10"/>
+  <text x="130" y="34" text-anchor="middle" class="title">langgraph dev</text>
+  <rect class="box" x="30" y="50" width="200" height="40" rx="8"/><text x="130" y="75" text-anchor="middle" class="label">API server in your venv</text>
+  <rect class="box2" x="30" y="100" width="200" height="40" rx="8"/><text x="130" y="125" text-anchor="middle" class="label">local folder (.langgraph_api)</text>
+  <rect class="box-ok" x="30" y="150" width="200" height="40" rx="8"/><text x="130" y="175" text-anchor="middle" class="label">hot reload, Studio</text>
+  <text x="130" y="220" text-anchor="middle" class="small">for development only</text>
+  <rect class="zone" x="260" y="10" width="240" height="240" rx="10"/>
+  <text x="380" y="34" text-anchor="middle" class="title">langgraph up</text>
+  <rect class="box" x="280" y="50" width="200" height="40" rx="8"/><text x="380" y="75" text-anchor="middle" class="label">API server container</text>
+  <rect class="box2" x="280" y="100" width="200" height="40" rx="8"/><text x="380" y="125" text-anchor="middle" class="label">Postgres (+ queue) containers</text>
+  <rect class="box-warn" x="280" y="150" width="200" height="40" rx="8"/><text x="380" y="175" text-anchor="middle" class="label">needs Docker running</text>
+  <text x="380" y="220" text-anchor="middle" class="small">production-like, on your machine</text>
+  <rect class="zone" x="510" y="10" width="240" height="240" rx="10"/>
+  <text x="630" y="34" text-anchor="middle" class="title">langgraph build</text>
+  <rect class="box" x="530" y="50" width="200" height="40" rx="8"/><text x="630" y="75" text-anchor="middle" class="label">Docker image</text>
+  <rect class="box2" x="530" y="100" width="200" height="40" rx="8"/><text x="630" y="125" text-anchor="middle" class="label">your code + deps inside</text>
+  <rect class="box-ok" x="530" y="150" width="200" height="40" rx="8"/><text x="630" y="175" text-anchor="middle" class="label">run it where you host</text>
+  <text x="630" y="220" text-anchor="middle" class="small">the artifact you deploy</text>
+</svg>
+<figcaption>Same <code>langgraph.json</code>, three ways to run it. <strong>The course only needs <code>dev</code>;</strong> <code>up</code> and <code>build</code> are where production starts. The container details of <code>up</code> follow the CLI docs and were not run for this guide.</figcaption>
+</figure>
+
+<h3>The server's built-in persistence</h3>
+<p>The API server (called <strong>Agent Server</strong> in the current LangSmith docs) is more than "run my graph over HTTP". It manages <strong>threads</strong> (saved conversations), <strong>runs</strong> (one execution on a thread), <strong>assistants</strong> (a graph plus a configuration) and a long-term memory <strong>store</strong>. Because it saves every thread itself, it rejects graphs compiled with their own checkpointer (the startup error from <a href="17-persistent-memory-sqlite.html">step 17</a> says so: "With LangGraph API, persistence is handled automatically by the platform"). Under <code>langgraph dev</code> that data goes to a local directory (the CLI docs: "State is persisted to a local directory"), which is why the repo's <code>.gitignore</code> lists <code>.langgraph_api</code>. With <code>up</code> or a deployment it goes to a real database.</p>
+<p>The practical rule: <strong>write your graph once without a checkpointer</strong> and let the environment decide. For plain-Python scripts, compile with <code>InMemorySaver</code> or <code>SqliteSaver</code> in the script (as step 17 does by reusing <code>agent8.builder</code>); for the server, register the plain compiled graph.</p>
+
+<h2>Deployment options, at a high level</h2>
+<p>There are two broad families. Names, features and plan requirements change often, so treat this as a map and <strong>check the current docs</strong> before choosing.</p>
+<div class="table-wrap"><table>
+<tr><th>Option</th><th>What you run</th><th>Who runs the servers</th><th>Good for</th></tr>
+<tr><td><strong>LangSmith Deployment, Cloud</strong></td><td>your repo + <code>langgraph.json</code></td><td>LangChain (managed)</td><td>least operations work; uses the same Agent Server API that Studio talks to</td></tr>
+<tr><td><strong>LangSmith Deployment, Hybrid / self-hosted</strong></td><td>Agent Servers in your own cloud or Kubernetes</td><td>you, with LangChain's control plane (or your own)</td><td>data must stay in your infrastructure</td></tr>
+<tr><td><strong>Standalone Agent Server</strong></td><td>the image from <code>langgraph build</code>, with your own Postgres and Redis</td><td>you (Docker, Compose, Kubernetes); per the docs it needs a license</td><td>teams already running containers</td></tr>
+<tr><td><strong>Your own web app</strong></td><td>for example a FastAPI or Flask app that imports the graph and calls <code>graph.invoke</code> / <code>graph.stream</code></td><td>you, anywhere Python runs</td><td>full control; you must add your own checkpointer (e.g. Postgres), auth, streaming endpoints and queueing</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Architecture of a deployed agent: browser or app in the user zone, API server and database in your server zone, model provider, LangSmith and tool APIs in external services">
+  <rect class="zone" x="10" y="10" width="170" height="240" rx="10"/><text x="95" y="32" text-anchor="middle" class="title">Users</text>
+  <rect class="box2" x="25" y="100" width="140" height="50" rx="8"/><text x="95" y="122" text-anchor="middle" class="label">web or chat UI</text><text x="95" y="139" text-anchor="middle" class="small">no API keys here</text>
+  <rect class="zone" x="200" y="10" width="300" height="240" rx="10"/><text x="350" y="32" text-anchor="middle" class="title">Your server zone</text>
+  <rect class="box" x="220" y="60" width="260" height="56" rx="8"/><text x="350" y="84" text-anchor="middle" class="label">Agent Server or your app</text><text x="350" y="102" text-anchor="middle" class="small">auth, graphs, streaming</text>
+  <rect class="box2" x="220" y="150" width="260" height="56" rx="8"/><text x="350" y="174" text-anchor="middle" class="label">database</text><text x="350" y="192" text-anchor="middle" class="small">threads, checkpoints, store</text>
+  <rect class="zone" x="520" y="10" width="230" height="240" rx="10"/><text x="635" y="32" text-anchor="middle" class="title">External services</text>
+  <rect class="box-info" x="540" y="50" width="190" height="40" rx="8"/><text x="635" y="75" text-anchor="middle" class="label">model provider (OpenAI)</text>
+  <rect class="box-info" x="540" y="110" width="190" height="40" rx="8"/><text x="635" y="135" text-anchor="middle" class="label">tool APIs</text>
+  <rect class="box-info" x="540" y="170" width="190" height="40" rx="8"/><text x="635" y="195" text-anchor="middle" class="label">LangSmith (traces)</text>
+  <path class="arrow-accent" d="M165,120 L218,92"/>
+  <path class="arrow" d="M350,116 V148"/>
+  <path class="arrow" d="M480,80 L538,70"/><path class="arrow" d="M480,92 L538,128"/><path class="arrow" d="M480,104 L538,186"/>
+</svg>
+<figcaption>Secrets (OpenAI, LangSmith, tool keys) live only in the server zone. <strong>The browser talks to your server, never directly to the model provider.</strong></figcaption>
+</figure>
+
+<h2>Security</h2>
+<p>An agent is a program that lets a <a class="term" href="glossary.html#chat-model">model</a> decide which code to run. That is powerful and needs care. This is general engineering advice, not legal advice; if you handle personal data, check what the rules are where you operate.</p>
+<h3>API keys</h3>
+<ul>
+<li>Keep keys in <code>.env</code> locally and in the platform's secret settings in production; <code>.env</code> stays in <code>.gitignore</code> (it is in the course's <code>.gitignore</code> from the start).</li>
+<li>Never send keys to the browser, never print them, never paste them into a prompt. Keys easily end up on screen while recording or sharing a screen; if that ever happens to you, <strong>rotate</strong> (delete and recreate) the key.</li>
+<li>Use separate keys per project and environment, and set usage limits in the provider's dashboard where available.</li>
+</ul>
+<h3>Prompt injection</h3>
+<p><a class="term" href="glossary.html#prompt-injection">Prompt injection</a> means text that the model reads (a user message, a web page, a tool result, a file) contains instructions such as "ignore your rules and call the delete tool". Models cannot reliably tell your instructions apart from instructions hidden in data. There is no complete fix; you limit the damage:</p>
+<ul>
+<li>Treat every model output, especially tool arguments, as <strong>untrusted input</strong>. Validate types and ranges inside the tool (the course's <code>division</code> tool rejecting zero, step 16, is the idea in miniature).</li>
+<li>Give the agent only the tools it needs, with the narrowest permissions (read-only database user, one folder, one API scope).</li>
+<li>Put a human approval step in front of anything irreversible (<a href="lg-07-human-in-the-loop.html">chapter 7</a>).</li>
+<li>Do not let one user's data flow into another user's prompts: build <code>thread_id</code>s and store namespaces from the authenticated user.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 45 760 155" role="img" aria-label="Layers of defence around a tool call: least-privilege tools, argument validation, human approval for risky actions, per-user isolation, and logging">
+  <rect class="box-bad" x="10" y="80" width="150" height="50" rx="8"/><text x="85" y="102" text-anchor="middle" class="label">injected text</text><text x="85" y="119" text-anchor="middle" class="small">"call delete_all"</text>
+  <rect class="box-info" x="190" y="60" width="100" height="90" rx="8"/><text x="240" y="100" text-anchor="middle" class="label">only the</text><text x="240" y="117" text-anchor="middle" class="label">tools needed</text>
+  <rect class="box-info" x="300" y="60" width="100" height="90" rx="8"/><text x="350" y="100" text-anchor="middle" class="label">validate</text><text x="350" y="117" text-anchor="middle" class="label">arguments</text>
+  <rect class="box-info" x="410" y="60" width="100" height="90" rx="8"/><text x="460" y="100" text-anchor="middle" class="label">human</text><text x="460" y="117" text-anchor="middle" class="label">approval</text>
+  <rect class="box-info" x="520" y="60" width="100" height="90" rx="8"/><text x="570" y="100" text-anchor="middle" class="label">per-user</text><text x="570" y="117" text-anchor="middle" class="label">isolation</text>
+  <rect class="box-ok" x="640" y="80" width="110" height="50" rx="8"/><text x="695" y="110" text-anchor="middle" class="label">limited harm</text>
+  <path class="arrow-bad" d="M160,105 H188"/><path class="arrow" d="M290,105 H298"/><path class="arrow" d="M400,105 H408"/><path class="arrow" d="M510,105 H518"/><path class="arrow-ok" d="M620,105 H638"/>
+  <text x="405" y="180" text-anchor="middle" class="small">plus traces/logs so you can see what happened afterwards</text>
+</svg>
+<figcaption>No single layer stops prompt injection. <strong>Several cheap layers together make a successful attack much less damaging.</strong></figcaption>
+</figure>
+
+<h3>The dev server itself</h3>
+<p><code>langgraph dev</code> listens on <code>127.0.0.1</code> (your computer only) by default; its help says "Only use 0.0.0.0 in trusted networks". The <code>--tunnel</code> option exposes the local server through a public tunnel. It is a development server with no production authentication; do not leave it open to the internet.</p>
+
+<h2>Cost and latency</h2>
+<p>For an agent, almost all cost and waiting time come from model calls. One question to graph 8 is not one call: it is one call per loop iteration, and each call resends the whole conversation.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="One user question to graph 8 can trigger several model calls: model asks for a tool, tool runs, model answers; each extra tool round adds another full model call">
+  <text x="20" y="30" class="title">"what is 10- 5, 20 * 3, 3 + 2" (seen at 131:10)</text>
+  <rect class="box-warn" x="20" y="60" width="140" height="46" rx="8"/><text x="90" y="80" text-anchor="middle" class="label">model call 1</text><text x="90" y="97" text-anchor="middle" class="small">asks for 3 tools</text>
+  <rect class="box2" x="190" y="60" width="140" height="46" rx="8"/><text x="260" y="80" text-anchor="middle" class="label">tools</text><text x="260" y="97" text-anchor="middle" class="small">no model cost</text>
+  <rect class="box-warn" x="360" y="60" width="140" height="46" rx="8"/><text x="430" y="80" text-anchor="middle" class="label">model call 2</text><text x="430" y="97" text-anchor="middle" class="small">final answer</text>
+  <rect class="box-bad" x="560" y="60" width="180" height="46" rx="8"/><text x="650" y="80" text-anchor="middle" class="label">if it never stops...</text><text x="650" y="97" text-anchor="middle" class="small">loop until the limit</text>
+  <path class="arrow" d="M160,83 H188"/><path class="arrow" d="M330,83 H358"/><path class="arrow-bad dashed" d="M500,83 H558"/>
+  <text x="380" y="150" text-anchor="middle" class="small">each model call resends the system message + the whole history so far</text>
+  <text x="380" y="172" text-anchor="middle" class="small">cost and waiting time grow with (number of calls) x (length of history)</text>
+</svg>
+<figcaption>In the videoIn the video the model asked for all three tools in one message, so two model calls were enough.#39;s run all three tool results appear under one <code>tools</code> step, so the model asked for them in a single message and two model calls were probably enough. <strong>A confused model can loop much longer, so cap it.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Set a recursion limit yourself.</strong> In LangGraph 1.2.11 the default <code>recursion_limit</code> is <strong>10007</strong> steps (read from the installed source: <code>DEFAULT_RECURSION_LIMIT = int(getenv("LANGGRAPH_DEFAULT_RECURSION_LIMIT", "10007"))</code>; a runaway loop in a verified test reported "Recursion limit of 10007 reached"). Older versions and many tutorials use 25. For an agent that calls a paid model on every loop, a very high default means a stuck loop can make thousands of calls before stopping. Pass a limit that fits your graph on every call, for example <code>graph.invoke(inputs, {"recursion_limit": 25, "configurable": {...}})</code>, and catch <code>GraphRecursionError</code> to show the user a friendly message.</div>
+
+<p>Other levers, all independent of any particular provider's prices:</p>
+<ul>
+<li><strong>Trim or summarise history</strong> (<a href="lg-06-persistence-and-memory.html">chapter 6</a>) so each call sends fewer tokens.</li>
+<li><strong>Use a smaller model for simple nodes</strong> (routing, classification) and a larger one only where needed (<a href="lg-04-models-in-graphs.html">chapter 4</a>).</li>
+<li><strong>Stream</strong> (<a href="lg-08-streaming-debugging-studio.html">chapter 8</a>): the total time is the same, but users see progress immediately.</li>
+<li><strong>Prefer plain Python over a model call</strong> when a rule will do. Graph 2's routing on the first word costs nothing; graph 3's routing on a model's number costs a call and can be wrong.</li>
+<li><strong>Watch tool loops</strong>: a tool that returns an error message invites the model to try again; make error messages clear about what to do (step 16).</li>
+</ul>
+
+<h2>Observability</h2>
+<p>Observability means being able to answer "what happened, and why?" about a run that already finished, without reproducing it. For agents the minimum is:</p>
+<div class="table-wrap"><table>
+<tr><th>Signal</th><th>Why</th><th>How in this stack</th></tr>
+<tr><td>Traces of every run</td><td>see the exact prompt, tool calls and answers</td><td>LangSmith tracing env vars (<a href="lg-08-streaming-debugging-studio.html">chapter 8</a>)</td></tr>
+<tr><td>Errors per node and per tool</td><td>find the weak step</td><td>traces, logs, <code>stream_mode="tasks"</code> events</td></tr>
+<tr><td>Latency and tokens per run</td><td>spot slow or expensive questions</td><td>traces record time and token usage</td></tr>
+<tr><td>Loop counts / recursion errors</td><td>detect confused agents</td><td>count steps in <code>"updates"</code>; alert on <code>GraphRecursionError</code></td></tr>
+<tr><td>User feedback</td><td>"was this answer helpful?"</td><td>store it next to the run id; LangSmith supports attaching feedback to runs</td></tr>
+</table></div>
+
+<h2>A production checklist for graph 8</h2>
+<ol class="steps">
+<li><strong>Tests pass</strong>: <code>uv run pytest -q</code>, plus a few real-model checks before each release.</li>
+<li><strong>Config checked</strong>: <code>langgraph validate</code>; <code>python_version</code> set to match your project.</li>
+<li><strong>No checkpointer in registered graphs</strong>; persistence comes from the server or from your app's database.</li>
+<li><strong>Secrets</strong> only in the platform's secret store; <code>.env</code> not committed.</li>
+<li><strong>Recursion limit</strong> passed explicitly; friendly message on <code>GraphRecursionError</code>.</li>
+<li><strong>Tools</strong> validate their arguments and handle errors (<code>handle_tool_errors=True</code>, step 16); risky tools need approval.</li>
+<li><strong>Threads</strong> built from authenticated user ids; long histories trimmed.</li>
+<li><strong>Tracing</strong> enabled, with a separate project for production.</li>
+</ol>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"<code>langgraph dev</code> is my production server."</em> The docs call it an in-memory server for development and testing.</li>
+<li><em>"If it works in Studio it is ready."</em> Studio used your local <code>.env</code> and your trust; production adds other users, auth, limits and real data.</li>
+<li><em>"Prompt injection is solved by a better system prompt."</em> A prompt helps a little; permissions, validation and approval help much more.</li>
+<li><em>"The recursion limit is 25."</em> Not in LangGraph 1.2.11 (10007). Set your own.</li>
+<li><em>"Tests need an API key."</em> Only real-model checks do. Wiring tests use a fake model (step 18).</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Test in three layers: plain functions, graphs with a fake model, a few real-model evaluations.</li>
+<li><code>langgraph.json</code>: <code>dependencies</code>, <code>graphs</code>, <code>env</code> are the essentials; set <code>python_version</code> (default 3.11); run <code>langgraph validate</code>.</li>
+<li>CLI 0.4.31: <code>dev</code> (no Docker, hot reload), <code>up</code> (Docker), <code>build</code> (image), <code>dockerfile</code>, <code>new</code>, <code>validate</code>, <code>deploy</code> [Beta].</li>
+<li>The server persists threads itself, so registered graphs must not bring a checkpointer.</li>
+<li>Deploy via LangSmith Deployment (cloud, hybrid, self-hosted, standalone) or your own app; check the current docs.</li>
+<li>Security: keys server-side only, least-privilege tools, validate arguments, human approval, per-user isolation.</li>
+<li>Cost/latency: cap loops with <code>recursion_limit</code>, trim history, use smaller models where possible, stream; observe with traces.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/test">LangGraph docs: Test</a></li>
+<li><a href="https://docs.langchain.com/langsmith/cli">LangSmith docs: LangGraph CLI (commands and langgraph.json)</a></li>
+<li><a href="https://docs.langchain.com/langsmith/application-structure">LangSmith docs: Application structure</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/local-server">LangGraph docs: Run a local server</a></li>
+<li><a href="https://docs.langchain.com/langsmith/deployments">LangSmith docs: Deployment overview</a> and <a href="https://docs.langchain.com/langsmith/agent-server">Agent Server</a></li>
+<li><a href="https://docs.langchain.com/langsmith/deploy-standalone-server">LangSmith docs: Standalone server</a></li>
+<li><a href="https://docs.langchain.com/oss/python/security-policy">LangChain security policy</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lg-08-streaming-debugging-studio.html"><small>← Chapter 8</small>Streaming, Debugging &amp; LangGraph Studio</a>
+<a class="next" href="lg-10-multi-agent-and-roadmap.html"><small>Chapter 10 →</small>Subgraphs, Multi-Agent Systems &amp; Your Roadmap</a>
+</nav>
+</main>
+</body>
+</html>

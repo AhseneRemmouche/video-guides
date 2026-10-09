@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 5 · Structured Output</title>
+<meta name="description" content="Getting typed JSON instead of prose with generateObject and zod.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">RAG Chatbot &amp; AI Agents · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 5/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">AI &amp; Agents Handbook · Chapter 5 of 16</div>
+  <h1>Structured Output</h1>
+  <p class="lead">Getting typed JSON instead of prose with generateObject and zod.</p>
+</section>
+<h2>What you will learn</h2>
+<p>So far your chatbot produces <em>prose</em>: sentences written for a human to read. That is perfect for answering questions, but sometimes your <strong>code</strong> needs to use what the model produced: save a document's title in the database, decide which path a question should take, or show three clickable follow-up questions. For that you want <strong><a class="term" href="glossary.html#structured-output">structured output</a></strong>: data in a predictable shape, such as a JSON object with named fields, that your program can rely on.</p>
+<p>In this chapter you will learn:</p>
+<ul>
+<li>why prose is hard for programs to use;</li>
+<li>what JSON and <a class="term" href="glossary.html#json-schema">JSON Schema</a> are;</li>
+<li>how <code>generateObject</code> and <code>streamObject</code> from the <a class="term" href="glossary.html#ai-sdk">AI SDK</a> v5 turn a <a class="term" href="glossary.html#zod">Zod</a> schema into typed, validated data;</li>
+<li>the output modes <code>'object'</code>, <code>'array'</code>, <code>'enum'</code> and <code>'no-schema'</code>;</li>
+<li>how to guide each field with <code>.describe()</code>, and how to handle failures (<code>NoObjectGeneratedError</code>);</li>
+<li>three worked examples for this project: document metadata, question intent, and suggested follow-up questions;</li>
+<li>when to use structured output and when to use tool calling.</li>
+</ul>
+
+<div class="callout ok"><strong>Why this matters for your chatbot.</strong> Right now, an uploaded PDF becomes anonymous chunks: the <code>documents</code> table from <a href="09-vector-database.html">step 9</a> stores only <code>content</code> and <code>embedding</code>. The bot cannot say which policy a chunk came from, which department owns it, or whether it is still in effect. One <code>generateObject</code> call at upload time could extract all of that. Structured output is also what powers routing, classification, form filling and most "AI feature inside a normal app" use cases.</div>
+
+<h2>Why prose is hard for programs</h2>
+<p>Imagine you ask a model "What is the title and effective date of this document?". You might get any of these:</p>
+<ul>
+<li>"The title is <em>Remote Work Policy</em> and it takes effect on 1 March 2025."</li>
+<li>"Title: Remote Work Policy. Effective: March 1st, 2025."</li>
+<li>"Sure! This document, titled 'Remote Work Policy', becomes effective 2025-03-01. Let me know if you need anything else."</li>
+</ul>
+<p>A human reads all three easily. Your code cannot. You could write a <a class="term" href="glossary.html#regex">regular expression</a> to pull out the title, but the wording changes from run to run, dates come in many formats, and one day the model will add a friendly sentence that breaks your pattern. This approach is fragile: it works in testing and fails in production.</p>
+<p>What you really want is this, every time:</p>
+<pre data-lang="json" data-tag="illustrative"><code>{
+  "title": "Remote Work Policy",
+  "effectiveDate": "2025-03-01"
+}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Three differently worded prose answers break a regex, while one fixed JSON shape can be read directly by code">
+  <rect class="zone" x="10" y="34" width="360" height="196" rx="10"/>
+  <text x="190" y="24" text-anchor="middle" class="label">Prose: same facts, different words</text>
+  <rect class="box-warn" x="24" y="48" width="222" height="36" rx="8"/>
+  <text x="135" y="70" text-anchor="middle" class="small">The title is Remote Work Policy…</text>
+  <path class="arrow" d="M246,66 L270,88"/>
+  <rect class="box-warn" x="24" y="94" width="222" height="36" rx="8"/>
+  <text x="135" y="116" text-anchor="middle" class="small">Title: Remote Work Policy…</text>
+  <path class="arrow" d="M246,112 L270,100"/>
+  <rect class="box-warn" x="24" y="140" width="222" height="36" rx="8"/>
+  <text x="135" y="162" text-anchor="middle" class="small">Sure! This document, titled…</text>
+  <path class="arrow" d="M246,158 L270,112"/>
+  <rect class="box-bad" x="272" y="72" width="88" height="56" rx="8"/>
+  <text x="316" y="97.0" text-anchor="middle">regex?</text>
+  <text x="316" y="113.0" text-anchor="middle" class="small">breaks</text>
+  <text x="190" y="214" text-anchor="middle" class="small">works in testing, fails in production</text>
+  <rect class="zone" x="390" y="34" width="360" height="196" rx="10"/>
+  <text x="570" y="24" text-anchor="middle" class="label">JSON: one predictable shape</text>
+  <rect class="box-ok" x="404" y="48" width="236" height="92" rx="8"/>
+  <text x="416" y="68" class="mono">{</text>
+  <text x="426" y="87" class="mono">"title": "Remote Work Policy",</text>
+  <text x="426" y="106" class="mono">"effectiveDate": "2025-03-01"</text>
+  <text x="416" y="125" class="mono">}</text>
+  <path class="arrow" d="M640,94 H658"/>
+  <rect class="box" x="660" y="66" width="82" height="56" rx="8"/>
+  <text x="701" y="91.0" text-anchor="middle">your code</text>
+  <text x="701" y="107.0" text-anchor="middle" class="small">uses fields</text>
+  <text x="416" y="166" class="small">• save the title in the database</text>
+  <text x="416" y="186" class="small">• route the question</text>
+  <text x="416" y="206" class="small">• show follow-up buttons</text>
+</svg>
+<figcaption>The same two facts written as prose come out differently every time, so code that parses them is fragile. <strong>JSON with fixed field names is something code can rely on</strong>. Example values are illustrative.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to JSON? The data format programs share</summary>
+<p><strong>JSON</strong> (JavaScript Object Notation) is a text format for data. It has <em>objects</em> in curly braces with <code>"key": value</code> pairs, <em>arrays</em> in square brackets, and simple values: strings in double quotes, numbers, <code>true</code>/<code>false</code> and <code>null</code> (meaning "no value").</p>
+<pre data-lang="json" data-tag="illustrative"><code>{
+  "title": "Expense Policy",
+  "pages": 4,
+  "approved": true,
+  "tags": ["finance", "travel"],
+  "reviewDate": null
+}</code></pre>
+<p>Almost every language can read JSON. In JavaScript, <code>JSON.parse(text)</code> turns JSON text into an <a class="term" href="glossary.html#object">object</a>, and <code>JSON.stringify(obj)</code> does the reverse. Your browser and server already exchange JSON all the time, for example the <code>{ messages }</code> body that <code>useChat</code> sends to <code>/api/chat</code>.</p>
+</details>
+
+<h2>JSON Schema: describing the shape</h2>
+<p>JSON alone is not enough: you also need to say <em>which</em> fields, of which types, are expected. <strong>JSON Schema</strong> is a standard way to describe that, written in JSON itself. It says things like "this is an object; it has a <code>title</code> that is a string; <code>department</code> must be one of these values; these fields are required".</p>
+<p>You will rarely write JSON Schema by hand. In this project you already describe shapes with <a class="term" href="glossary.html#zod">Zod</a> (the tool inputs in <a href="15-search-tool.html">step 15</a>), and the AI SDK converts Zod schemas into JSON Schema for you. A Zod schema like the metadata one later in this chapter becomes, roughly:</p>
+<pre data-lang="json" data-tag="illustrative · approximate conversion"><code>{
+  "type": "object",
+  "properties": {
+    "title": { "type": "string", "description": "The document's title, exactly as written on it" },
+    "department": {
+      "type": "string",
+      "enum": ["HR", "Finance", "IT", "Legal", "Operations", "Other"]
+    },
+    "effectiveDate": { "type": ["string", "null"] },
+    "summary": { "type": "string" }
+  },
+  "required": ["title", "department", "effectiveDate", "summary"],
+  "additionalProperties": false
+}</code></pre>
+<p>This JSON Schema is what actually travels to the model provider. Many providers support a "structured outputs" or "JSON mode" feature that uses the schema to constrain what the model may generate, so the reply is valid JSON in the right shape. Where a provider lacks that, the AI SDK puts the schema into the prompt instead. Either way, the SDK checks the result against your schema before giving it to you.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Each field of the metadata schema shown three ways: as Zod code, as JSON Schema sent to the provider, and as the TypeScript type you get back">
+  <text x="65" y="37" text-anchor="middle" class="small">field</text>
+  <rect class="box" x="130" y="14" width="200" height="38" rx="8"/>
+  <text x="230" y="37.5" text-anchor="middle">Zod (you write)</text>
+  <rect class="box" x="360" y="14" width="200" height="38" rx="8"/>
+  <text x="460" y="37.5" text-anchor="middle">JSON Schema (sent)</text>
+  <rect class="box" x="590" y="14" width="160" height="38" rx="8"/>
+  <text x="670" y="37.5" text-anchor="middle">TS type (you get)</text>
+  <path class="arrow" d="M330,33 H358"/>
+  <path class="arrow" d="M560,33 H588"/>
+  <text x="20" y="83" class="label">title</text>
+  <rect class="box2" x="130" y="64" width="200" height="28" rx="6"/>
+  <text x="230" y="82" text-anchor="middle" class="mono">z.string()</text>
+  <rect class="box2" x="360" y="64" width="200" height="28" rx="6"/>
+  <text x="460" y="82" text-anchor="middle" class="mono">"type": "string"</text>
+  <rect class="box-ok" x="590" y="64" width="160" height="28" rx="6"/>
+  <text x="670" y="82" text-anchor="middle" class="mono">string</text>
+  <text x="20" y="121" class="label">department</text>
+  <rect class="box2" x="130" y="102" width="200" height="28" rx="6"/>
+  <text x="230" y="120" text-anchor="middle" class="mono">z.enum([…6 values])</text>
+  <rect class="box2" x="360" y="102" width="200" height="28" rx="6"/>
+  <text x="460" y="120" text-anchor="middle" class="mono">"enum": ["HR", …]</text>
+  <rect class="box-ok" x="590" y="102" width="160" height="28" rx="6"/>
+  <text x="670" y="120" text-anchor="middle" class="mono">"HR" | … | "Other"</text>
+  <text x="20" y="159" class="label">effectiveDate</text>
+  <rect class="box2" x="130" y="140" width="200" height="28" rx="6"/>
+  <text x="230" y="158" text-anchor="middle" class="mono">z.string().nullable()</text>
+  <rect class="box2" x="360" y="140" width="200" height="28" rx="6"/>
+  <text x="460" y="158" text-anchor="middle" class="mono">["string", "null"]</text>
+  <rect class="box-ok" x="590" y="140" width="160" height="28" rx="6"/>
+  <text x="670" y="158" text-anchor="middle" class="mono">string | null</text>
+  <text x="20" y="197" class="label">summary</text>
+  <rect class="box2" x="130" y="178" width="200" height="28" rx="6"/>
+  <text x="230" y="196" text-anchor="middle" class="mono">z.string()</text>
+  <rect class="box2" x="360" y="178" width="200" height="28" rx="6"/>
+  <text x="460" y="196" text-anchor="middle" class="mono">"type": "string"</text>
+  <rect class="box-ok" x="590" y="178" width="160" height="28" rx="6"/>
+  <text x="670" y="196" text-anchor="middle" class="mono">string</text>
+  <text x="380" y="236" text-anchor="middle" class="small">the .describe() texts become each field's "description"; all four fields are "required"</text>
+</svg>
+<figcaption>One schema, three views. You write the <strong>Zod</strong> column; the AI SDK converts it to the <strong>JSON Schema</strong> the provider sees, and <code>z.infer</code> gives you the matching <strong>TypeScript type</strong>. Values are abbreviated.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="generateObject pipeline from Zod schema to typed object, with an error branch">
+  <defs><marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <rect class="box2" x="10" y="40" width="130" height="56" rx="8"/><text x="75" y="64" text-anchor="middle">Zod schema</text><text x="75" y="82" text-anchor="middle" class="small">+ prompt</text>
+  <rect class="box" x="170" y="40" width="130" height="56" rx="8"/><text x="235" y="64" text-anchor="middle">JSON Schema</text><text x="235" y="82" text-anchor="middle" class="small">sent to provider</text>
+  <rect class="box" x="330" y="40" width="130" height="56" rx="8"/><text x="395" y="64" text-anchor="middle">Model</text><text x="395" y="82" text-anchor="middle" class="small">writes JSON text</text>
+  <rect class="box" x="490" y="40" width="120" height="56" rx="8"/><text x="550" y="64" text-anchor="middle">Parse +</text><text x="550" y="82" text-anchor="middle">validate</text>
+  <rect class="box2" x="640" y="40" width="110" height="56" rx="8"/><text x="695" y="64" text-anchor="middle">object</text><text x="695" y="82" text-anchor="middle" class="small">typed, safe</text>
+  <path class="arrow" d="M140,68 H168"/><path class="arrow" d="M300,68 H328"/><path class="arrow" d="M460,68 H488"/><path class="arrow" d="M610,68 H638"/>
+  <path class="arrow" d="M550,96 V138"/>
+  <rect class="box2" x="440" y="140" width="220" height="50" rx="8"/><text x="550" y="162" text-anchor="middle">NoObjectGeneratedError</text><text x="550" y="180" text-anchor="middle" class="small">invalid JSON or wrong shape</text>
+</svg>
+<figcaption>You write a Zod schema; the SDK handles conversion, the provider call, parsing and validation. You get either a typed object or an error you can catch.</figcaption>
+</figure>
+
+<h2><code>generateObject</code>: your first structured call</h2>
+<p><code>generateObject</code> is the structured cousin of <code>generateText</code>. Instead of <code>text</code>, its result has an <code>object</code> field whose TypeScript type is inferred from your schema. The smallest possible example:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { generateObject } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+
+const { object } = await generateObject({
+  model: openai("gpt-5-mini"),
+  schema: z.object({
+    title: z.string(),
+    effectiveDate: z.string().nullable(),
+  }),
+  prompt: "Extract the title and effective date from: Remote Work Policy, effective 1 March 2025.",
+});
+
+console.log(object.title); // "Remote Work Policy"</code></pre>
+<p>Key options (checked against the AI SDK 5.0.47 type definitions used by this project):</p>
+<div class="table-wrap"><table>
+<tr><th>Option</th><th>Meaning</th></tr>
+<tr><td><code>model</code></td><td>The model to call, exactly as in <code>streamText</code>.</td></tr>
+<tr><td><code>schema</code></td><td>A Zod schema (or a JSON Schema via <code>jsonSchema()</code>). Required for <code>'object'</code> and <code>'array'</code> output.</td></tr>
+<tr><td><code>output</code></td><td><code>'object'</code> (default), <code>'array'</code>, <code>'enum'</code> or <code>'no-schema'</code>. See the next section.</td></tr>
+<tr><td><code>schemaName</code>, <code>schemaDescription</code></td><td>Optional name and description of the whole output. Some providers use them as extra guidance.</td></tr>
+<tr><td><code>mode</code></td><td><code>'auto'</code> (default and recommended), <code>'json'</code> or <code>'tool'</code>: how the schema is delivered to the provider. Leave it on <code>'auto'</code> unless you have a specific reason.</td></tr>
+<tr><td><code>system</code>, <code>prompt</code>, <code>messages</code></td><td>The same prompt options as <code>generateText</code>. Everything from <a href="ai-04-prompt-engineering.html">chapter 4</a> still applies.</td></tr>
+<tr><td><code>experimental_repairText</code></td><td>An optional function that gets a chance to fix broken JSON text before parsing.</td></tr>
+</table></div>
+<p>The result also includes <code>usage</code> (token counts), <code>finishReason</code> and the raw <code>response</code>, like <code>generateText</code>.</p>
+
+<h2>Output modes</h2>
+<div class="table-wrap"><table>
+<tr><th><code>output</code></th><th>You provide</th><th>You get</th><th>Good for</th></tr>
+<tr><td><code>'object'</code> (default)</td><td><code>schema</code> for one object</td><td>One object</td><td>Extraction: metadata, form fields, a summary with parts.</td></tr>
+<tr><td><code>'array'</code></td><td><code>schema</code> for <em>one element</em></td><td>An array of those elements</td><td>Lists: follow-up questions, action items, entities found in a text.</td></tr>
+<tr><td><code>'enum'</code></td><td><code>enum: [...]</code> list of strings (no schema)</td><td>One of those strings</td><td>Classification: intent, sentiment, category, yes/no.</td></tr>
+<tr><td><code>'no-schema'</code></td><td>Nothing</td><td>Any JSON value</td><td>Rare. Exploration, or when the shape is truly unknown. You must validate it yourself.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 246" role="img" aria-label="Four output modes: object returns one object, array returns a list of elements, enum returns one label, no-schema returns any JSON">
+  <rect class="zone" x="10" y="10" width="175" height="226" rx="10"/>
+  <text x="97" y="34" text-anchor="middle" class="mono">'object'</text>
+  <text x="97" y="52" text-anchor="middle" class="small">you give: schema: one object</text>
+  <rect class="box-ok" x="22" y="72" width="150" height="92" rx="8"/>
+  <text x="34" y="92" class="mono">{</text>
+  <text x="34" y="110" class="mono">title: "…",</text>
+  <text x="34" y="128" class="mono">department: "HR",</text>
+  <text x="34" y="146" class="mono">… }</text>
+  <text x="97" y="214" text-anchor="middle" class="small">you get: one object</text>
+  <rect class="zone" x="196" y="10" width="175" height="226" rx="10"/>
+  <text x="283" y="34" text-anchor="middle" class="mono">'array'</text>
+  <text x="283" y="52" text-anchor="middle" class="small">you give: schema: one element</text>
+  <text x="213" y="70" class="mono">[</text>
+  <rect class="box-ok" x="223" y="76" width="120" height="34" rx="8"/>
+  <text x="283" y="97.5" text-anchor="middle" class="mono">{ question }</text>
+  <rect class="box-ok" x="223" y="118" width="120" height="34" rx="8"/>
+  <text x="283" y="139.5" text-anchor="middle" class="mono">{ question }</text>
+  <rect class="box-ok" x="223" y="160" width="120" height="34" rx="8"/>
+  <text x="283" y="181.5" text-anchor="middle" class="mono">{ question }</text>
+  <text x="347" y="204" class="mono">]</text>
+  <text x="283" y="222" text-anchor="middle" class="small">you get: an array</text>
+  <rect class="zone" x="382" y="10" width="175" height="226" rx="10"/>
+  <text x="469" y="34" text-anchor="middle" class="mono">'enum'</text>
+  <text x="469" y="52" text-anchor="middle" class="small">you give: enum: [ … ]</text>
+  <rect class="box-ok" x="397" y="68" width="144" height="26" rx="13"/>
+  <text x="469" y="85.5" text-anchor="middle" class="mono">policy_question</text>
+  <rect class="box2" x="397" y="102" width="144" height="26" rx="13"/>
+  <text x="469" y="119.5" text-anchor="middle" class="mono">calculation</text>
+  <rect class="box2" x="397" y="136" width="144" height="26" rx="13"/>
+  <text x="469" y="153.5" text-anchor="middle" class="mono">small_talk</text>
+  <rect class="box2" x="397" y="170" width="144" height="26" rx="13"/>
+  <text x="469" y="187.5" text-anchor="middle" class="mono">out_of_scope</text>
+  <text x="469" y="222" text-anchor="middle" class="small">you get: exactly one label</text>
+  <rect class="zone" x="568" y="10" width="175" height="226" rx="10"/>
+  <text x="655" y="34" text-anchor="middle" class="mono">'no-schema'</text>
+  <text x="655" y="52" text-anchor="middle" class="small">you give: nothing</text>
+  <rect class="box-warn" x="585" y="80" width="140" height="84" rx="8"/>
+  <text x="655" y="119.0" text-anchor="middle">any JSON</text>
+  <text x="655" y="135.0" text-anchor="middle" class="small">shape unknown</text>
+  <text x="655" y="214" text-anchor="middle" class="small">you validate it yourself</text>
+</svg>
+<figcaption>What each <code>output</code> mode gives back. <strong>'object'</strong> for extraction, <strong>'array'</strong> for lists (the schema describes one element), <strong>'enum'</strong> for classification, <strong>'no-schema'</strong> only when the shape is truly unknown.</figcaption>
+</figure>
+
+<h2><code>.describe()</code>: hints for each field</h2>
+<p>Field names alone are often ambiguous. Is <code>date</code> the date the document was written, approved, or takes effect? In which format? Zod's <code>.describe("…")</code> attaches a description that ends up in the JSON Schema's <code>description</code>, which the model reads. You used this already: <code>z.string().describe("The search query to find relevant documents")</code> in the search tool.</p>
+<p>Good descriptions say what the field means, its format and what to do when the information is missing:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>effectiveDate: z
+  .string()
+  .nullable()
+  .describe("Date the document takes effect, as YYYY-MM-DD, or null if the document doesn't state one"),</code></pre>
+<p>That last part ("or null if…") is the structured-output version of "say what to do when unsure" from chapter 4. Without it, a model that must produce a string will often invent a plausible date.</p>
+
+<div class="callout"><strong>Tip: prefer <code>.nullable()</code> for "might be missing".</strong> A field that is <code>.optional()</code> may simply be left out; a field that is <code>.nullable()</code> is always present but may be <code>null</code>. Some providers' strict structured-output modes require every property to be present (OpenAI's strict mode, for example, which is an opt-in provider option in the <code>@ai-sdk/openai</code> version this project uses). Using <code>.nullable()</code> works everywhere and forces the model to make an explicit "not found" decision.</div>
+
+<h2>Worked example 1: extracting document metadata</h2>
+<p>Here is a complete helper that extracts a title, department, effective date and a one-line summary from the text of an uploaded document. It would live next to the other helpers in <code>src/lib/</code>.</p>
+<pre data-file="src/lib/extract-metadata.ts" data-lang="ts" data-tag="illustrative · not part of the project"><code>// src/lib/extract-metadata.ts
+import { generateObject, NoObjectGeneratedError } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+
+export const documentMetadataSchema = z.object({
+  title: z.string().describe("The document's title, exactly as written on it"),
+  department: z
+    .enum(["HR", "Finance", "IT", "Legal", "Operations", "Other"])
+    .describe("The department that owns this document"),
+  effectiveDate: z
+    .string()
+    .nullable()
+    .describe("Date the document takes effect, as YYYY-MM-DD, or null if not stated"),
+  summary: z.string().describe("One sentence describing what the document covers"),
+});
+
+export type DocumentMetadata = z.infer&lt;typeof documentMetadataSchema&gt;;
+
+export async function extractMetadata(text: string): Promise&lt;DocumentMetadata | null&gt; {
+  try {
+    const { object } = await generateObject({
+      model: openai("gpt-5-mini"),
+      schema: documentMetadataSchema,
+      schemaName: "DocumentMetadata",
+      schemaDescription: "Metadata about a company document",
+      prompt: `Extract metadata from the company document below.
+Use only information found in the document.
+
+&lt;document&gt;
+${text.slice(0, 8000)}
+&lt;/document&gt;`,
+    });
+    return object;
+  } catch (error) {
+    if (NoObjectGeneratedError.isInstance(error)) {
+      console.error("No valid metadata generated:", error.text);
+      return null;
+    }
+    throw error;
+  }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>import { generateObject, NoObjectGeneratedError } from "ai";</code></td><td>The structured-output function and the error class it throws when the model's output can't be turned into a valid object.</td></tr>
+<tr><td>3–4</td><td><code>import { openai } …; import { z } from "zod";</code></td><td>The same provider and schema library the chat route uses.</td></tr>
+<tr><td>6</td><td><code>export const documentMetadataSchema = z.object({</code></td><td>The shape we want. Exported so other code (for example a database insert) can reuse it.</td></tr>
+<tr><td>7</td><td><code>title: z.string().describe(…)</code></td><td>A required string. "Exactly as written" discourages the model from inventing a nicer title.</td></tr>
+<tr><td>8–10</td><td><code>department: z.enum([...]).describe(…)</code></td><td>Restricts the value to a fixed list, so you never get "Human Resources" one day and "HR dept." the next. <code>"Other"</code> is an escape hatch so the model is never forced to pick a wrong department.</td></tr>
+<tr><td>11–14</td><td><code>effectiveDate: z.string().nullable().describe(…)</code></td><td>A string or <code>null</code>. The description fixes the format (YYYY-MM-DD, easy to sort and store) and says to use <code>null</code> when no date is stated.</td></tr>
+<tr><td>15</td><td><code>summary: z.string().describe(…)</code></td><td>A one-sentence summary, handy for showing in an admin list of uploaded files.</td></tr>
+<tr><td>18</td><td><code>export type DocumentMetadata = z.infer&lt;typeof documentMetadataSchema&gt;;</code></td><td>Creates a TypeScript <a class="term" href="glossary.html#type">type</a> from the schema, so you write the shape only once.</td></tr>
+<tr><td>20</td><td><code>export async function extractMetadata(text: string): Promise&lt;DocumentMetadata | null&gt;</code></td><td>Takes the document text and returns either the metadata or <code>null</code> if extraction failed. Returning <code>null</code> (instead of crashing) lets the upload continue without metadata.</td></tr>
+<tr><td>21–33</td><td><code>try { const { object } = await generateObject({ … }); </code></td><td>Calls the model. <code>object</code> is already parsed, validated and typed as <code>DocumentMetadata</code>.</td></tr>
+<tr><td>25–26</td><td><code>schemaName</code>, <code>schemaDescription</code></td><td>Optional labels for the whole output; some providers use them as extra guidance.</td></tr>
+<tr><td>27–32</td><td><code>prompt: `Extract … &lt;document&gt;${text.slice(0, 8000)}&lt;/document&gt;`</code></td><td>The instruction, then the document wrapped in delimiter tags (chapter 4). <code>slice(0, 8000)</code> sends only the first 8,000 characters: titles, departments and dates are usually near the start, and this keeps the call cheap and inside the <a class="term" href="glossary.html#context-window">context window</a>. The limit is a rule of thumb; adjust for your documents.</td></tr>
+<tr><td>34</td><td><code>return object;</code></td><td>Success: hand back the typed object.</td></tr>
+<tr><td>35–39</td><td><code>if (NoObjectGeneratedError.isInstance(error)) { … return null; }</code></td><td>If the model produced invalid JSON or the wrong shape, log the raw text (<code>error.text</code>) for debugging and return <code>null</code>. <code>isInstance</code> is the AI SDK's recommended way to check error types.</td></tr>
+<tr><td>40</td><td><code>throw error;</code></td><td>Any other error (network failure, bad <a class="term" href="glossary.html#api-key">API key</a>) is re-thrown so it isn't silently hidden.</td></tr>
+</table></div>
+
+<h3>How you would add it to the project</h3>
+<p>The natural place is the upload <a class="term" href="glossary.html#server-action">server action</a>, <code>processFile</code> in <code>src/app/upload/actions.ts</code> (<a href="12-server-action.html">step 12</a>, updated in <a href="21-images-as-knowledge.html">step 21</a>). It already has the full extracted <code>text</code> before chunking. A sketch:</p>
+<pre data-file="src/app/upload/actions.ts" data-lang="ts" data-tag="illustrative · sketch, needs a schema change"><code>// after: const text = await extractText(file, buffer);
+const metadata = await extractMetadata(text);
+
+const chunks = await chunkContent(text);
+const embeddings = await generateEmbeddings(chunks);
+
+const records = chunks.map((chunk, index) =&gt; ({
+  content: chunk,
+  embedding: embeddings[index],
+  title: metadata?.title ?? file.name,
+  department: metadata?.department ?? null,
+  effectiveDate: metadata?.effectiveDate ?? null,
+}));</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 280" role="img" aria-label="Upload flow: file, extractText, extractMetadata, generateObject; success gives a metadata object stored with each chunk, failure returns null">
+  <rect class="box2" x="10" y="30" width="110" height="60" rx="8"/>
+  <text x="65" y="57.0" text-anchor="middle">Uploaded file</text>
+  <text x="65" y="73.0" text-anchor="middle" class="small">PDF or image</text>
+  <rect class="box" x="140" y="30" width="120" height="60" rx="8"/>
+  <text x="200" y="57.0" text-anchor="middle">extractText</text>
+  <text x="200" y="73.0" text-anchor="middle" class="small">full text</text>
+  <rect class="box" x="280" y="30" width="150" height="60" rx="8"/>
+  <text x="355" y="57.0" text-anchor="middle">extractMetadata</text>
+  <text x="355" y="73.0" text-anchor="middle" class="small">text.slice(0, 8000)</text>
+  <rect class="box" x="450" y="30" width="130" height="60" rx="8"/>
+  <text x="515" y="57.0" text-anchor="middle">generateObject</text>
+  <text x="515" y="73.0" text-anchor="middle" class="small">+ schema</text>
+  <rect class="box" x="600" y="30" width="150" height="60" rx="8"/>
+  <text x="675" y="57.0" text-anchor="middle">records</text>
+  <text x="675" y="73.0" text-anchor="middle" class="small">chunk + title, dept…</text>
+  <path class="arrow" d="M120,60 H138"/>
+  <path class="arrow" d="M260,60 H278"/>
+  <path class="arrow" d="M430,60 H448"/>
+  <path class="arrow-ok" d="M515,90 V128"/>
+  <rect class="box-ok" x="400" y="130" width="350" height="100" rx="8"/>
+  <text x="416" y="152" class="mono">title: "Remote Work Policy"</text>
+  <text x="416" y="171" class="mono">department: "HR"</text>
+  <text x="416" y="190" class="mono">effectiveDate: "2025-03-01"</text>
+  <text x="416" y="209" class="mono">summary: "…"</text>
+  <path class="arrow-ok" d="M675,130 V92"/>
+  <path class="arrow-bad" d="M470,90 L372,148"/>
+  <text x="400" y="116" text-anchor="end" class="small">fails</text>
+  <rect class="box-bad" x="150" y="150" width="220" height="56" rx="8"/>
+  <text x="260" y="175.0" text-anchor="middle">NoObjectGeneratedError</text>
+  <text x="260" y="191.0" text-anchor="middle" class="small">return null; title = file.name</text>
+  <text x="380" y="266" text-anchor="middle" class="small">Illustrative values. Needs new columns (title, department, effectiveDate) to store them.</text>
+</svg>
+<figcaption>Where <code>extractMetadata</code> would sit in <code>processFile</code>: <strong>one extra model call per upload</strong>. On success every chunk record gets the metadata; on <code>NoObjectGeneratedError</code> it returns <code>null</code> and the sketch falls back to <code>file.name</code>. Illustrative; not part of the project yet.</figcaption>
+</figure>
+<p>To make this work you would also need to:</p>
+<ol class="steps">
+<li><strong>Add columns</strong> such as <code>title</code>, <code>department</code> and <code>effectiveDate</code> to the <code>documents</code> table in <code>src/lib/db-schema.ts</code>, then generate and run a <a class="term" href="glossary.html#migration">migration</a> as in <a href="09-vector-database.html">step 9</a>. (A cleaner design is a separate <code>files</code> table with one row per upload, and a reference from each chunk to its file, so metadata isn't repeated on every chunk.)</li>
+<li><strong>Return the metadata from <code>searchDocuments</code></strong> so the search tool can include it: <code>[1] (HR · Leave Policy · effective 2025-03-01) …</code>. Now the model can cite document titles and notice outdated policies.</li>
+</ol>
+<p>Cost note: this adds one model call per upload. Uploads are rare and admin-only (<a href="16-rbac.html">step 16</a>), so that is usually a good trade.</p>
+
+<h2>Worked example 2: classifying a question's intent</h2>
+<p>Classification is the simplest structured output: pick one label from a list. Use <code>output: 'enum'</code>:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { generateObject } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+export async function classifyIntent(question: string) {
+  const { object: intent } = await generateObject({
+    model: openai("gpt-5-mini"),
+    output: "enum",
+    enum: ["policy_question", "calculation", "small_talk", "out_of_scope"],
+    system: "Classify the employee's message. policy_question = about company rules, benefits or procedures. calculation = needs arithmetic only. small_talk = greetings or thanks. out_of_scope = anything else.",
+    prompt: question,
+  });
+  return intent; // one of the four strings above
+}</code></pre>
+<p>Notes:</p>
+<ul>
+<li>With <code>output: 'enum'</code> you pass <code>enum</code> instead of <code>schema</code>. The SDK guarantees the result is one of those strings (or throws).</li>
+<li>Define each label in the instructions. Label names alone ("calculation") leave edge cases unclear.</li>
+<li>What could you do with it? Answer <code>small_talk</code> without tools, politely decline <code>out_of_scope</code>, or log intents to learn what employees actually ask. This is the <strong>routing</strong> pattern from <a href="ai-10-agent-patterns.html">chapter 10</a>. Remember it adds a model call (and some <a class="term" href="glossary.html#latency">latency</a>) before every answer, so only add it if you use the result.</li>
+</ul>
+
+<h2>Worked example 3: suggested follow-up questions</h2>
+<p>After the bot answers, showing two or three clickable follow-up questions helps users explore. Use <code>output: 'array'</code>: the schema describes <em>one element</em>, and you get back an array.</p>
+<pre data-lang="ts" data-tag="illustrative"><code>import { generateObject } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+
+export async function suggestFollowUps(question: string, answer: string) {
+  const { object } = await generateObject({
+    model: openai("gpt-5-mini"),
+    output: "array",
+    schema: z.object({
+      question: z.string().describe("A short follow-up question, under 12 words"),
+    }),
+    prompt: `An employee asked: &lt;question&gt;${question}&lt;/question&gt;
+The assistant answered: &lt;answer&gt;${answer}&lt;/answer&gt;
+Suggest 3 natural follow-up questions the company documents could answer.`,
+  });
+  return object.slice(0, 3).map((s) =&gt; s.question);
+}</code></pre>
+<p>The prompt asks for 3, and the code also keeps at most 3 with <code>slice(0, 3)</code>. Asking politely and then enforcing in code is a good habit: models usually follow counts, but your UI should never break if they don't.</p>
+
+<h3>Streaming it with <code>streamObject</code></h3>
+<p><code>streamObject</code> takes the same options but returns immediately and lets you read the object <em>while it is being generated</em>. Its result has a <code>partialObjectStream</code> (growing, incomplete versions of the object), an <code>elementStream</code> for <code>'array'</code> output (each finished element as soon as it is complete), and helpers like <code>toTextStreamResponse()</code> for sending it from a <a class="term" href="glossary.html#route-handler">route handler</a>. On the client, the <code>experimental_useObject</code> hook from <code>@ai-sdk/react</code> reads that stream and gives you a growing <code>object</code>.</p>
+<pre data-file="src/app/api/suggestions/route.ts" data-lang="ts" data-tag="illustrative · not part of the project"><code>import { streamObject } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { suggestionsSchema } from "./schema";
+// ./schema.ts contains:
+// export const suggestionsSchema = z.object({
+//   questions: z.array(z.string()).describe("3 short follow-up questions"),
+// });
+
+export async function POST(req: Request) {
+  const { question, answer } = await req.json();
+  const result = streamObject({
+    model: openai("gpt-5-mini"),
+    schema: suggestionsSchema,
+    prompt: `Question: ${question}\nAnswer: ${answer}\nSuggest 3 follow-up questions.`,
+  });
+  return result.toTextStreamResponse();
+}</code></pre>
+<pre data-lang="tsx" data-tag="illustrative"><code>"use client";
+import { experimental_useObject as useObject } from "@ai-sdk/react";
+import { suggestionsSchema } from "@/app/api/suggestions/schema";
+
+// inside your chat page component:
+const { object, submit, isLoading } = useObject({
+  api: "/api/suggestions",
+  schema: suggestionsSchema,
+});
+// call submit({ question, answer }) when an answer finishes,
+// then render object?.questions as buttons that send the text with sendMessage</code></pre>
+<p>Two practical notes: the schema lives in its own file (<code>schema.ts</code> next to the route) because both the server route and the <code>"use client"</code> page need it, and a Next.js <code>route.ts</code> file should only export HTTP handlers like <code>POST</code>; and because <code>object</code> is <em>partial</em> while streaming, use optional chaining (<code>object?.questions</code>) and expect some entries to be incomplete until loading ends. For something as short as three questions, plain <code>generateObject</code> is often simpler; streaming pays off for long objects that users watch appear.</p>
+
+<h2>Validation and errors</h2>
+<p>What can go wrong, and how the SDK reports it:</p>
+<ul>
+<li><strong>The model returns text that is not valid JSON</strong> (rare with providers' structured-output modes, possible with others) or JSON in the wrong shape (missing field, wrong type, value not in the enum). <code>generateObject</code> throws a <code>NoObjectGeneratedError</code>. It carries <code>text</code> (what the model actually wrote), <code>cause</code> (the parse or validation error), <code>usage</code>, <code>response</code> and <code>finishReason</code>. Log <code>text</code>: it tells you whether the problem is the prompt, the schema or the model.</li>
+<li><strong>The output is cut off</strong> because it hit a token limit. The JSON is incomplete, so parsing fails with the same error, and <code>finishReason</code> is <code>"length"</code>. Fix: ask for less, or raise <code>maxOutputTokens</code>.</li>
+<li><strong>Network or provider errors</strong> (timeouts, <a class="term" href="glossary.html#rate-limit">rate limits</a>, bad keys) are thrown as other error types; the SDK retries some automatically (<code>maxRetries</code>, default 2).</li>
+</ul>
+<p>With <code>streamObject</code>, errors don't throw from the call itself (it returns immediately); use its <code>onError</code> callback, and the final <code>object</code> promise rejects if the finished object doesn't match the schema.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 266" role="img" aria-label="Decision flow: the model reply must be valid JSON and fit the schema to become an object; otherwise NoObjectGeneratedError is thrown">
+  <rect class="box2" x="10" y="50" width="120" height="56" rx="8"/>
+  <text x="70" y="75.0" text-anchor="middle">Model reply</text>
+  <text x="70" y="91.0" text-anchor="middle" class="small">JSON text</text>
+  <polygon class="box-warn" points="225,38 295,78 225,118 155,78"/>
+  <text x="225" y="82" text-anchor="middle" class="label">valid JSON?</text>
+  <polygon class="box-warn" points="400,38 470,78 400,118 330,78"/>
+  <text x="400" y="82" text-anchor="middle" class="label">fits schema?</text>
+  <rect class="box-ok" x="500" y="50" width="110" height="56" rx="8"/>
+  <text x="555" y="75.0" text-anchor="middle">object</text>
+  <text x="555" y="91.0" text-anchor="middle" class="small">typed</text>
+  <rect class="box-info" x="630" y="50" width="120" height="56" rx="8"/>
+  <text x="690" y="75.0" text-anchor="middle">your checks</text>
+  <text x="690" y="91.0" text-anchor="middle" class="small">is it true?</text>
+  <path class="arrow" d="M130,78 H153"/>
+  <path class="arrow-ok" d="M295,78 H328"/>
+  <path class="arrow-ok" d="M470,78 H498"/>
+  <path class="arrow" d="M610,78 H628"/>
+  <text x="312" y="70" text-anchor="middle" class="small">yes</text>
+  <text x="484" y="70" text-anchor="middle" class="small">yes</text>
+  <text x="620" y="44" text-anchor="middle" class="small">valid ≠ true</text>
+  <path class="arrow-bad" d="M225,118 V168"/>
+  <path class="arrow-bad" d="M400,118 V168"/>
+  <text x="233" y="146" class="small">no</text>
+  <text x="408" y="146" class="small">no</text>
+  <rect class="box-bad" x="150" y="170" width="330" height="60" rx="8"/>
+  <text x="315" y="197.0" text-anchor="middle">NoObjectGeneratedError</text>
+  <text x="315" y="213.0" text-anchor="middle" class="small">carries text, cause, usage, finishReason</text>
+  <rect class="box2" x="510" y="170" width="240" height="60" rx="8"/>
+  <text x="630" y="190" text-anchor="middle" class="label">Network / provider errors</text>
+  <text x="630" y="207" text-anchor="middle" class="small">other error types,</text>
+  <text x="630" y="222" text-anchor="middle" class="small">retried first (maxRetries: 2)</text>
+  <text x="315" y="252" text-anchor="middle" class="small">a reply cut off at the token limit is invalid JSON too (finishReason "length")</text>
+</svg>
+<figcaption>Two gates stand between the model's text and your <code>object</code>; failing either throws <code>NoObjectGeneratedError</code> (log its <code>text</code>). Passing both proves only the <strong>shape</strong>: your own checks decide whether the values are true.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Valid is not the same as true.</strong> Schema validation proves the <em>shape</em>: <code>effectiveDate</code> is a string or null. It does not prove the date is correct, or even that it appears in the document. Models can still hallucinate values that fit the schema perfectly. For important fields, add checks in code (is the date a real date? does the title appear in the text?), keep a human in the loop for high-stakes data, and measure accuracy on real documents (<a href="ai-12-evaluation.html">chapter 12</a>).</div>
+
+<div class="callout"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"I can just ask for JSON in the prompt and call <code>JSON.parse</code>."</em> It works often, and fails sometimes: extra prose, code fences around the JSON, trailing commas, missing fields. <code>generateObject</code> handles the provider features, parsing and validation for you.</li>
+<li><em>"Structured output makes the model smarter."</em> It controls format, not knowledge. A wrong answer in a perfect JSON object is still wrong.</li>
+<li><em>"Bigger schemas are fine."</em> Deeply nested schemas with dozens of fields are harder for models to fill well. Prefer small, focused schemas, and split big extractions into several calls if needed.</li>
+</ul>
+</div>
+
+<h2>Structured output vs tool calling</h2>
+<p>Tool calling (<a href="ai-06-tool-calling.html">chapter 6</a>) also makes the model produce JSON that matches a Zod schema: the tool's <code>inputSchema</code>. In fact one of <code>generateObject</code>'s delivery modes, <code>mode: 'tool'</code>, works by offering the model a single tool and forcing it to call it. So when should you use which?</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>Structured output (<code>generateObject</code>)</th><th>Tool calling (<code>tools</code> in <code>streamText</code>)</th></tr>
+<tr><td><strong>Purpose</strong></td><td>The JSON <em>is</em> the final result.</td><td>The JSON is a <em>request to act</em>; your code runs and the model continues.</td></tr>
+<tr><td><strong>Who decides</strong></td><td>You always get an object (or an error).</td><td>The model decides whether and which tool to call (unless you set <code>toolChoice</code>).</td></tr>
+<tr><td><strong>Steps</strong></td><td>One call, one object.</td><td>Often several steps: call tool, read result, answer.</td></tr>
+<tr><td><strong>Typical use</strong></td><td>Extraction, classification, generating data for your UI or database.</td><td>Looking things up (search, date), doing things (calculator, sending email).</td></tr>
+<tr><td><strong>In this project</strong></td><td>Document metadata, intent, follow-ups (this chapter).</td><td><code>searchKnowledgeBase</code>, <code>getCurrentDate</code>, <code>calculator</code> (steps 15 and 22).</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Decision: if the JSON is the final result use generateObject in one call; if it is a request to act use tools, which loop through execute and back to the model">
+  <rect class="box-info" x="10" y="10" width="740" height="36" rx="8"/>
+  <text x="380" y="32.5" text-anchor="middle">Is the JSON the final result, or a request to do something?</text>
+  <rect class="box-ok" x="34" y="70" width="130" height="50" rx="8"/>
+  <text x="99" y="92.0" text-anchor="middle">Final result</text>
+  <text x="99" y="108.0" text-anchor="middle" class="small">generateObject</text>
+  <rect class="box" x="34" y="150" width="130" height="50" rx="8"/>
+  <text x="99" y="172.0" text-anchor="middle">Request to act</text>
+  <text x="99" y="188.0" text-anchor="middle" class="small">tools + streamText</text>
+  <path class="arrow" d="M99,46 V68"/>
+  <path class="arrow" d="M20,46 V175 H32"/>
+  <rect class="box2" x="176" y="77" width="84" height="36" rx="8"/>
+  <text x="218" y="99.5" text-anchor="middle" class="label">prompt</text>
+  <rect class="box2" x="272" y="77" width="84" height="36" rx="8"/>
+  <text x="314" y="99.5" text-anchor="middle" class="label">model</text>
+  <path class="arrow" d="M260,95 H270"/>
+  <rect class="box-ok" x="368" y="77" width="84" height="36" rx="8"/>
+  <text x="410" y="99.5" text-anchor="middle" class="label">object</text>
+  <path class="arrow" d="M356,95 H366"/>
+  <path class="arrow" d="M164,95 H174"/>
+  <text x="480" y="99" class="small">one call, one object</text>
+  <rect class="box2" x="176" y="157" width="84" height="36" rx="8"/>
+  <text x="218" y="179.5" text-anchor="middle" class="label">model</text>
+  <rect class="box2" x="272" y="157" width="84" height="36" rx="8"/>
+  <text x="314" y="179.5" text-anchor="middle" class="label">tool call</text>
+  <path class="arrow" d="M260,175 H270"/>
+  <rect class="box" x="368" y="157" width="84" height="36" rx="8"/>
+  <text x="410" y="179.5" text-anchor="middle" class="label">execute()</text>
+  <path class="arrow" d="M356,175 H366"/>
+  <rect class="box2" x="464" y="157" width="84" height="36" rx="8"/>
+  <text x="506" y="179.5" text-anchor="middle" class="label">result</text>
+  <path class="arrow" d="M452,175 H462"/>
+  <rect class="box2" x="560" y="157" width="84" height="36" rx="8"/>
+  <text x="602" y="179.5" text-anchor="middle" class="label">model</text>
+  <path class="arrow" d="M548,175 H558"/>
+  <rect class="box-ok" x="656" y="157" width="84" height="36" rx="8"/>
+  <text x="698" y="179.5" text-anchor="middle" class="label">answer</text>
+  <path class="arrow" d="M644,175 H654"/>
+  <path class="arrow" d="M164,175 H174"/>
+  <text x="380" y="224" text-anchor="middle" class="small">several steps: the model decides whether, and which, tool to call</text>
+</svg>
+<figcaption>Ask one question: <strong>is the JSON the result, or a request to act?</strong> Extraction, classification and UI data are results (<code>generateObject</code>); searching, reading the date or calculating are actions (tools).</figcaption>
+</figure>
+<p>You can also combine them: <code>generateText</code> and <code>streamText</code> accept an <code>experimental_output</code> option (for example <code>Output.object({ schema })</code>) so an agent can use tools and then return a structured final answer. As the name says, it is experimental in AI SDK v5, so check the docs before relying on it.</p>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Prose is for people; programs need structured data with a predictable shape.</li>
+<li>JSON is the data format; JSON Schema describes its shape. You write Zod, the AI SDK converts it.</li>
+<li><code>generateObject</code> returns a parsed, validated, typed <code>object</code>; <code>streamObject</code> streams partial objects.</li>
+<li>Output modes: <code>'object'</code>, <code>'array'</code> (schema per element), <code>'enum'</code> (pick a label), <code>'no-schema'</code>.</li>
+<li>Use <code>.describe()</code> to explain each field, its format, and what to do when information is missing; prefer <code>.nullable()</code>.</li>
+<li>Catch <code>NoObjectGeneratedError</code> and log its <code>text</code>. Remember: valid shape doesn't mean correct content.</li>
+<li>Use structured output when the JSON is the result; use tool calling when the model needs to act and continue.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://ai-sdk.dev/docs/ai-sdk-core/generating-structured-data">AI SDK: Generating structured data</a></li>
+<li><a href="https://ai-sdk.dev/docs/reference/ai-sdk-core/generate-object">AI SDK reference: generateObject</a></li>
+<li><a href="https://ai-sdk.dev/docs/reference/ai-sdk-ui/use-object">AI SDK reference: useObject</a></li>
+<li><a href="https://platform.openai.com/docs/guides/structured-outputs">OpenAI: Structured outputs</a></li>
+<li><a href="https://json-schema.org/learn/getting-started-step-by-step">JSON Schema: Getting started</a></li>
+<li><a href="https://zod.dev">Zod documentation</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="ai-04-prompt-engineering.html"><small>← Chapter 4</small>Prompt Engineering</a>
+<a class="next" href="ai-06-tool-calling.html"><small>Chapter 6 →</small>Tool Calling in Depth</a>
+</nav>
+</main>
+</body>
+</html>

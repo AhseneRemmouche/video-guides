@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 · Web Search with Tavily</title>
+<meta name="description" content="Give the agent internet access with a Tavily search tool, and see the difference without it.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 09/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 09 of 19 · 47:22</div>
+  <h1>Web Search with Tavily</h1>
+  <p class="lead">Give the agent internet access with a Tavily search tool, and see the difference without it.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wCkd8UYPn9c&amp;t=2842s" target="_blank" rel="noopener">▶ Watch this part (47:22)</a>
+</section>
+<h2>Goal</h2>
+<p>In step 08 you built a tiny tool that returned a fixed sentence. That proved the mechanics, but as the presenter says at 47:22, "this is not really what tools are for". In this step you give the <a class="term" href="glossary.html#agent">agent</a> a real superpower: <strong>searching the internet</strong>. You'll write a <code>web_search</code> <a class="term" href="glossary.html#tool">tool</a> that calls <a class="term" href="glossary.html#tavily">Tavily</a>, a search API built for AI agents, and then ask the agent for "the latest news of the day".</p>
+<p>This is the exact tool the personal chef project uses later (step 14) to look up recipes, so it's worth understanding every line.</p>
+
+<div class="callout"><p><strong>Where the code comes from.</strong> The lesson files of steps 4–11 are not in the presenter's GitHub repo. Code transcribed from the video (frames at 52:30–54:00), run against the repo's locked versions (langchain 1.3.12, langgraph 1.2.9, langchain-openai 1.3.4) with an offline test harness that replaced the model and the Tavily search with fakes.</p></div>
+
+<h2>Why a model needs a search tool</h2>
+<p>An <a class="term" href="glossary.html#llm">LLM</a> learns from a huge pile of text collected up to a certain date, called its <strong>training cutoff</strong>. After that date it learns nothing new. It has no browser and no internet connection of its own (47:46: "LLMs don't have really access to the internet"). Ask it about today's news and it can only say "I don't know", or worse, guess and invent something that sounds right (a <a class="term" href="glossary.html#hallucination">hallucination</a>).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Timeline: the model's knowledge stops at its training cutoff; events after that, up to today, are a gap that only a web search can fill">
+  <path class="line" d="M30,80 H730" />
+  <rect class="box-info" x="30" y="56" width="400" height="48" rx="8" />
+  <text x="230" y="76" text-anchor="middle">What the model learned in training</text>
+  <text x="230" y="93" text-anchor="middle" class="small">books, websites, code ... up to a date</text>
+  <rect class="box-warn" x="470" y="56" width="260" height="48" rx="8" />
+  <text x="600" y="76" text-anchor="middle">The gap</text>
+  <text x="600" y="93" text-anchor="middle" class="small">news, prices, new versions</text>
+  <path class="line dashed" d="M450,40 V124" />
+  <text x="450" y="32" text-anchor="middle" class="label">training cutoff</text>
+  <circle class="dot-bad" cx="730" cy="134" r="5" />
+  <text x="722" y="138" text-anchor="end" class="label">today: "latest news?"</text>
+  <rect class="box-ok" x="470" y="150" width="260" height="30" rx="8" />
+  <text x="600" y="170" text-anchor="middle" class="ok">web_search fills the gap</text>
+</svg>
+<figcaption>A model's knowledge is a snapshot. Anything after its training cutoff is unknown to it. <strong>A search tool brings fresh information into the conversation</strong>, so the model can answer from real, current pages instead of guessing.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to search APIs? What Tavily is and why not just "Google it"</summary>
+<p>A <strong>search API</strong> is a web search engine you call from code instead of a browser. You send a query string, it sends back results as data.</p>
+<p><a class="term" href="glossary.html#tavily">Tavily</a> is a search API designed for AI agents (47:46–48:33). Instead of a page of blue links with ads, it returns a clean list of results, each with a title, a URL and a short extract of the page text. That's exactly what a model needs: text it can read and cite.</p>
+<p>Why not scrape Google yourself? Search pages are made for humans, change often, block bots, and are full of HTML you'd have to clean up. A search API does that heavy lifting for you, which is what the presenter means by "we don't have to do a lot of heavy lifting".</p>
+<p>Tavily has a free plan. At the time of writing it gives 1,000 credits per month; the presenter says "more than a 1,000 credits just for free" and notes it is not a sponsor (48:09).</p>
+</details>
+
+<h2>Set up Tavily</h2>
+<ol class="steps">
+<li><strong>Create a Tavily account</strong>
+<p>Sign up on Tavily's website (48:33). The free plan is enough for this whole course.</p></li>
+<li><strong>Create an API key</strong>
+<p>In the dashboard, open <strong>API Keys</strong> and create a new key. The presenter names it "langchain beginner" and also sets a usage limit "just in case" (48:55). A limit is a good habit: if your code ever loops by mistake, it can't burn through all your credits.</p></li>
+<li><strong>Put the key in your <code>.env</code> file</strong>
+<p>Open the <code>.env</code> file you created in step 03 (<a href="03-project-setup.html">Project setup</a>). It already has a line for Tavily. Paste your key there:</p>
+<pre data-lang="env" data-tag="illustrative"><code>OPENAI_API_KEY=your-openai-key-here
+TAVILY_API_KEY=your-tavily-key-here</code></pre>
+<p>The name must be exactly <code>TAVILY_API_KEY</code>, because that's the name the Tavily client looks for. The presenter deletes the key shown on screen after recording and says "create your own. Don't try to copy this. It's not going to work" (48:55–49:17).</p></li>
+<li><strong>Install the Tavily package</strong>
+<p>In the terminal, with your virtual environment active, the presenter runs (49:41):</p>
+<pre data-lang="sh" data-tag="as in the video"><code>uv add tavily</code></pre>
+<p>Please read the callout right below before you run it. We recommend a slightly different command.</p></li>
+</ol>
+
+<div class="callout warn">
+<p><strong>Use the official package: <code>uv add tavily-python</code></strong></p>
+<p>The video installs a package named <code>tavily</code>, and the presenter's repo lists <code>tavily&gt;=1.1.0</code> as a <a class="term" href="glossary.html#dependency">dependency</a>. We checked the Python Package Index (PyPI) while writing this guide:</p>
+<ul>
+<li>The PyPI package <code>tavily</code> (version 1.1.0) is described as "Simple API TAVILY" and is published by an individual, not by Tavily.</li>
+<li>Tavily's <strong>official</strong> Python SDK is <code>tavily-python</code>, published by Tavily AI (source code at github.com/tavily-ai/tavily-python; version 0.8.5 when we checked).</li>
+<li>Both are imported the same way: <code>from tavily import TavilyClient</code>. So the code on this page works unchanged with either one.</li>
+<li>We read the source of the installed <code>tavily</code> 1.1.0. It only sends your requests to <code>https://api.tavily.com</code> with your key, so it is not harmful <em>in that version</em>.</li>
+</ul>
+<p>Why it still matters: a package with a name close to a famous one can change owner or behaviour in a later release, and it receives your API key. Installing look-alike packages is a common way <a class="term" href="glossary.html#supply-chain">supply-chain attacks</a> happen. The safe habit is to install the package the service itself documents.</p>
+<p><strong>Recommendation:</strong> run <code>uv add tavily-python</code> instead. If you already ran <code>uv add tavily</code>, run <code>uv remove tavily</code> first, then <code>uv add tavily-python</code>. Step 16 makes the same switch in the chef project.</p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Two different PyPI packages, tavily and tavily-python, both install a Python module named tavily; only tavily-python is published by Tavily">
+  <text x="190" y="26" text-anchor="middle" class="title">uv add tavily</text>
+  <text x="570" y="26" text-anchor="middle" class="title">uv add tavily-python</text>
+  <rect class="box-warn" x="40" y="40" width="300" height="56" rx="8" />
+  <text x="190" y="63" text-anchor="middle">PyPI: tavily 1.1.0</text>
+  <text x="190" y="81" text-anchor="middle" class="small">published by an individual</text>
+  <rect class="box-ok" x="420" y="40" width="300" height="56" rx="8" />
+  <text x="570" y="63" text-anchor="middle">PyPI: tavily-python 0.8.5</text>
+  <text x="570" y="81" text-anchor="middle" class="small">published by Tavily AI (official)</text>
+  <path class="arrow" d="M190,96 V120 H330" />
+  <path class="arrow" d="M570,96 V120 H432" />
+  <rect class="box" x="230" y="104" width="300" height="44" rx="8" />
+  <text x="380" y="131" text-anchor="middle" class="mono">from tavily import TavilyClient</text>
+  <text x="380" y="176" text-anchor="middle" class="label">Same import, different publishers: pick the official one.</text>
+</svg>
+<figcaption>The <em>package name</em> you install and the <em>module name</em> you import are not always the same. Two packages can both provide a module called <code>tavily</code>. <strong>Your code can't tell them apart, so you have to choose carefully when you install.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to package names? Why "tavily" and "tavily-python" are different things</summary>
+<p>When you run <code>uv add something</code>, uv downloads a <a class="term" href="glossary.html#package">package</a> called <code>something</code> from PyPI, the public store of Python packages. Anyone can publish a package there under any free name.</p>
+<p>Inside the package is one or more <a class="term" href="glossary.html#module">modules</a>, the names you use after <code>import</code>. The package name and the module name are chosen separately. For example, the package <code>python-dotenv</code> gives you the module <code>dotenv</code>, and the package <code>tavily-python</code> gives you the module <code>tavily</code>.</p>
+<p>So <code>import tavily</code> working does not tell you <em>which</em> package you installed. Check the service's own documentation for the exact install command, and look at <code>pyproject.toml</code> to see what you actually depend on.</p>
+</details>
+
+<h2>Write the search tool</h2>
+<ol class="steps">
+<li><strong>Open <code>tools.py</code></strong>
+<p>Keep working in the <code>tools.py</code> file from step 08. The presenter deletes the old <code>print_document</code> tool ("it was hard to make it work because it's such a simple tool", 49:17) and the strict system prompt, which isn't needed anymore (52:12).</p></li>
+<li><strong>Replace the file's contents</strong> with the code below. It creates a Tavily client, wraps its <code>search</code> method in a tool, and asks the agent for the latest news.</li>
+<li><strong>Run it</strong> with <code>python tools.py</code> and watch the "we are doing some research on ..." lines appear.</li>
+</ol>
+
+<pre data-file="tools.py" data-lang="py" data-tag="code from the video (frames at 52:30)"><code>from dotenv import load_dotenv
+from langchain.agents import create_agent
+from langchain.tools import tool
+from langchain.messages import HumanMessage
+from tavily import TavilyClient
+from typing import Dict, Any
+
+load_dotenv()
+
+tavily_client = TavilyClient()
+
+@tool
+def web_search(query: str) -&gt; Dict[str, Any]:
+    """tool for searching the web for information"""
+    print(f"we are doing some research on {query}")
+    return tavily_client.search(query)
+
+
+agent = create_agent(model="gpt-5-nano",
+                     tools=[web_search])
+
+response = agent.invoke(
+    {"messages": [HumanMessage(content="give me the lastest news of the day")]}
+)
+
+print("this is the AI last response: ")
+print(response["messages"][-1].content)
+
+print("--------------- this is the details -----------------")
+print(response["messages"])</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Structure of tools.py: imports feed the Tavily client and the web_search tool; the tool goes into create_agent; the agent is invoked and the answer printed">
+  <rect class="zone" x="10" y="14" width="200" height="222" rx="10" />
+  <text x="24" y="34" class="title">Lines 1–6 imports</text>
+  <text x="24" y="58" class="mono">load_dotenv</text>
+  <text x="24" y="82" class="mono">create_agent</text>
+  <text x="24" y="106" class="mono">tool</text>
+  <text x="24" y="130" class="mono">HumanMessage</text>
+  <text x="24" y="154" class="mono">TavilyClient</text>
+  <text x="24" y="178" class="mono">Dict, Any</text>
+  <rect class="box2" x="250" y="20" width="220" height="44" rx="8" />
+  <text x="360" y="39" text-anchor="middle" class="mono">load_dotenv()</text>
+  <text x="360" y="55" text-anchor="middle" class="small">line 8: read .env keys</text>
+  <rect class="box" x="250" y="80" width="220" height="44" rx="8" />
+  <text x="360" y="99" text-anchor="middle" class="mono">tavily_client = ...</text>
+  <text x="360" y="115" text-anchor="middle" class="small">line 10: one client</text>
+  <rect class="box" x="250" y="140" width="220" height="44" rx="8" />
+  <text x="360" y="159" text-anchor="middle" class="mono">@tool web_search</text>
+  <text x="360" y="175" text-anchor="middle" class="small">lines 12–16</text>
+  <rect class="box" x="510" y="140" width="230" height="44" rx="8" />
+  <text x="625" y="159" text-anchor="middle" class="mono">create_agent(tools=...)</text>
+  <text x="625" y="175" text-anchor="middle" class="small">lines 19–20</text>
+  <rect class="box-ok" x="510" y="196" width="230" height="44" rx="8" />
+  <text x="625" y="215" text-anchor="middle" class="mono">agent.invoke + print</text>
+  <text x="625" y="231" text-anchor="middle" class="small">lines 22–30</text>
+  <path class="arrow" d="M210,58 H248" />
+  <path class="arrow" d="M210,154 H232 V102 H248" />
+  <path class="arrow" d="M360,124 V138" />
+  <path class="arrow" d="M210,106 H226 V162 H248" />
+  <path class="arrow-accent" d="M470,162 H508" />
+  <path class="arrow" d="M625,184 V194" />
+</svg>
+<figcaption>How the parts of <code>tools.py</code> connect. Read it top to bottom: keys are loaded, <strong>one Tavily client is created, the tool uses that client, and the agent gets the tool in its <code>tools</code> list</strong>.</figcaption>
+</figure>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>from dotenv import load_dotenv</code></td><td>Imports the function that reads your <a class="term" href="glossary.html#env-file">.env file</a>. Without it, neither <code>OPENAI_API_KEY</code> nor <code>TAVILY_API_KEY</code> would be visible to the program.</td></tr>
+<tr><td>2</td><td><code>from langchain.agents import create_agent</code></td><td>The same agent builder you used in steps 05–08.</td></tr>
+<tr><td>3</td><td><code>from langchain.tools import tool</code></td><td>The <a class="term" href="glossary.html#decorator">decorator</a> that turns a normal Python function into a tool the model can call (you met it in <a href="08-first-tool.html">step 08</a>).</td></tr>
+<tr><td>4</td><td><code>from langchain.messages import HumanMessage</code></td><td>The message class for "what the user says".</td></tr>
+<tr><td>5</td><td><code>from tavily import TavilyClient</code></td><td>The Tavily client class. It knows how to send a search request to Tavily's servers and turn the reply into a Python <a class="term" href="glossary.html#dict">dictionary</a>. This line works with either package (see the callout above).</td></tr>
+<tr><td>6</td><td><code>from typing import Dict, Any</code></td><td>Imports two names used only in the <a class="term" href="glossary.html#type-hint">type hint</a> on line 13. <code>Dict</code> means "a dictionary", <code>Any</code> means "any type of value".</td></tr>
+<tr><td>8</td><td><code>load_dotenv()</code></td><td>Reads <code>.env</code> and puts each <code>NAME=value</code> line into the program's environment variables. It must run <strong>before</strong> line 10, because the client reads the key when it's created.</td></tr>
+<tr><td>10</td><td><code>tavily_client = TavilyClient()</code></td><td>Creates one client and stores it in a variable. No key is passed, so the client looks for the environment variable <code>TAVILY_API_KEY</code> by itself. It's created once, outside the function, so every search reuses it instead of building a new client each time.</td></tr>
+<tr><td>12</td><td><code>@tool</code></td><td>Registers the function below as a tool. LangChain reads the function's name, its parameters with their type hints, and its docstring, and builds a description the model receives with every request.</td></tr>
+<tr><td>13</td><td><code>def web_search(query: str) -&gt; Dict[str, Any]:</code></td><td>Defines the tool. <code>query: str</code> matters a lot: it tells the model "to call this tool, give me one text argument named <code>query</code>". <code>-&gt; Dict[str, Any]</code> says the function returns a dictionary with text keys and values of any type. As the presenter says (51:21), the return hint isn't required, but it documents what the function gives back for other developers.</td></tr>
+<tr><td>14</td><td><code>"""tool for searching the web for information"""</code></td><td>The <a class="term" href="glossary.html#docstring">docstring</a>. This becomes the tool's description, the only explanation the model gets of <em>when</em> to use the tool. A clear docstring is the difference between a tool that gets used and one that is ignored (you saw that in step 08).</td></tr>
+<tr><td>15</td><td><code>print(f"we are doing some research on {query}")</code></td><td>An <a class="term" href="glossary.html#f-string">f-string</a> that prints the query each time the tool runs. The presenter added it at 53:29 so you can watch the agent work. It only prints to <em>your</em> terminal; the model never sees it.</td></tr>
+<tr><td>16</td><td><code>return tavily_client.search(query)</code></td><td>Sends the query to Tavily and returns its reply, a dictionary of results. LangChain converts that dictionary into JSON text and puts it into a <a class="term" href="glossary.html#tool-message">ToolMessage</a>, which is how the model "reads" the search results. Each call uses Tavily credits.</td></tr>
+<tr><td>19–20</td><td><code>agent = create_agent(model="gpt-5-nano",<br>tools=[web_search])</code></td><td>Builds the agent with the model name as a string (the shortcut from step 06) and a <a class="term" href="glossary.html#list">list</a> holding one tool. Note: you pass the function object <code>web_search</code>, without parentheses. With parentheses you'd call it right away instead of handing it to the agent.</td></tr>
+<tr><td>22–24</td><td><code>response = agent.invoke(<br>{"messages": [HumanMessage(content="give me the lastest news of the day")]}<br>)</code></td><td>Runs the agent once with one user message. "lastest" is the presenter's typo; the model understands it anyway. <code>invoke</code> only returns when the whole <a class="term" href="glossary.html#agent-loop">agent loop</a> is finished, including every search.</td></tr>
+<tr><td>26–27</td><td><code>print("this is the AI last response: ")<br>print(response["messages"][-1].content)</code></td><td>Prints a label, then the text of the <strong>last</strong> message (<code>[-1]</code>), which is the agent's final answer.</td></tr>
+<tr><td>29–30</td><td><code>print("--------------- this is the details -----------------")<br>print(response["messages"])</code></td><td>Prints the whole message list so you can see every step: your question, the AI messages that request searches, the ToolMessages with results, and the final answer. It is long, because search results are long.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to type hints like <code>Dict[str, Any]</code>? What they mean</summary>
+<p>A <a class="term" href="glossary.html#type-hint">type hint</a> is a label that says what kind of value a variable, parameter or return value should be. Python itself doesn't enforce them: the program runs the same with or without them.</p>
+<ul>
+<li><code>query: str</code> – the parameter <code>query</code> should be a string (text).</li>
+<li><code>-&gt; Dict[str, Any]</code> – the function returns a dictionary. The part in square brackets says the keys are strings and the values can be anything.</li>
+</ul>
+<p>So why bother? Two reasons. Editors like VS Code use them to warn you about mistakes and to autocomplete. And LangChain's <code>@tool</code> reads the <em>parameter</em> hints to tell the model what arguments the tool takes. Without <code>query: str</code>, the model wouldn't know it should send text.</p>
+<p>Since Python 3.9 you can also write the built-in <code>dict[str, Any]</code> (lowercase) without importing <code>Dict</code>. Both mean the same thing.</p>
+</details>
+
+<h2>What happens when you run it</h2>
+<p>The presenter runs the file at 53:05 and then again after adding the print line (53:56). This time the terminal shows several research lines, for queries like "latest news", "breaking news" and "top headlines today" (54:00–54:20). The agent decided on its own to search <em>more than once</em>, then summarised what it found and asked which story or region you'd like more details on (54:44).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Sequence: your code invokes the agent, the model asks for web_search, the tool calls the Tavily API, results return as a ToolMessage, the model may search again, then answers">
+  <rect class="box2" x="20" y="14" width="120" height="34" rx="8" /><text x="80" y="36" text-anchor="middle">Your code</text>
+  <rect class="box" x="200" y="14" width="140" height="34" rx="8" /><text x="270" y="36" text-anchor="middle">gpt-5-nano</text>
+  <rect class="box" x="400" y="14" width="140" height="34" rx="8" /><text x="470" y="36" text-anchor="middle">web_search</text>
+  <rect class="box-info" x="600" y="14" width="140" height="34" rx="8" /><text x="670" y="36" text-anchor="middle">Tavily API</text>
+  <path class="line dashed" d="M80,48 V320" /><path class="line dashed" d="M270,48 V320" /><path class="line dashed" d="M470,48 V320" /><path class="line dashed" d="M670,48 V320" />
+  <path class="arrow" d="M80,74 H268" /><text x="174" y="68" text-anchor="middle" class="label">1 "latest news?"</text>
+  <path class="arrow-accent" d="M270,104 H468" /><text x="370" y="98" text-anchor="middle" class="label">2 tool call: query</text>
+  <path class="arrow" d="M470,134 H668" /><text x="570" y="128" text-anchor="middle" class="label">3 search(query)</text>
+  <path class="arrow" d="M670,164 H472" /><text x="570" y="158" text-anchor="middle" class="label">4 results dict</text>
+  <path class="arrow" d="M470,194 H272" /><text x="370" y="188" text-anchor="middle" class="label">5 ToolMessage (JSON)</text>
+  <rect class="box-warn" x="190" y="206" width="380" height="40" rx="8" />
+  <text x="380" y="224" text-anchor="middle" class="label">6 steps 2–5 repeat with new queries</text>
+  <text x="380" y="239" text-anchor="middle" class="small">"breaking news", "top headlines today" ...</text>
+  <path class="arrow-ok" d="M270,282 H82" /><text x="176" y="276" text-anchor="middle" class="label">7 final answer</text>
+  <text x="380" y="310" text-anchor="middle" class="small">time flows down</text>
+</svg>
+<figcaption>One <code>agent.invoke</code> call, step by step. The model never contacts Tavily itself: it <strong>asks</strong> for a tool call, LangChain runs your Python function, and the result goes back to the model as a ToolMessage. It can ask again as many times as it thinks it needs. See <a href="agent-loop-explained.html">How an Agent Thinks</a> for the full loop.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to the agent loop? Why the agent searched several times</summary>
+<p>An agent is a model in a loop. Each turn of the loop, the model looks at all the messages so far and decides: "Do I have enough to answer, or do I need a tool?"</p>
+<p>For "the latest news of the day" the first search may return only a few headlines. The model may then decide to search again with different words to cover more ground. Each search is a new <a class="term" href="glossary.html#tool-call">tool call</a>, a new run of your function, a new print line, and new credits used. The loop stops when the model writes a normal answer with no tool call.</p>
+<p>You don't write this loop yourself; <code>create_agent</code> builds it for you on top of <a class="term" href="glossary.html#langgraph">LangGraph</a>. The concept page <a href="agent-loop-explained.html">How an Agent Thinks</a> walks through it message by message.</p>
+</details>
+
+<h3>What a search result looks like</h3>
+<p><code>tavily_client.search(query)</code> returns a dictionary. The exact fields depend on Tavily's API version and options, but the core shape looks like this (shortened, values made up):</p>
+<pre data-lang="py" data-tag="illustrative"><code>{
+    "query": "top headlines today",
+    "answer": None,
+    "images": [],
+    "results": [
+        {
+            "title": "World news: what happened today",
+            "url": "https://news.example.com/today",
+            "content": "A short extract of the page text ...",
+            "score": 0.87,
+            "raw_content": None,
+        },
+        # ... more results (5 by default)
+    ],
+    "response_time": 1.2,
+}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="The result dictionary: top-level keys query, answer, images, results and response_time; results is a list of dictionaries with title, url, content and score">
+  <rect class="box2" x="20" y="20" width="250" height="196" rx="8" />
+  <text x="36" y="44" class="title">result (dict)</text>
+  <text x="36" y="72" class="mono">"query"</text><text x="150" y="72" class="small">your search text</text>
+  <text x="36" y="98" class="mono">"answer"</text><text x="150" y="98" class="small">off by default</text>
+  <text x="36" y="124" class="mono">"images"</text><text x="150" y="124" class="small">off by default</text>
+  <rect class="box" x="28" y="136" width="234" height="28" rx="6" />
+  <text x="36" y="155" class="mono">"results"</text><text x="150" y="155" class="small">list of hits</text>
+  <text x="36" y="190" class="mono">"response_time"</text><text x="150" y="190" class="small">seconds</text>
+  <path class="arrow-accent" d="M262,150 H318" />
+  <rect class="box-info" x="320" y="40" width="200" height="150" rx="8" />
+  <text x="336" y="62" class="title">results[0]</text>
+  <text x="336" y="88" class="mono">"title"</text>
+  <text x="336" y="112" class="mono">"url"</text>
+  <text x="336" y="136" class="mono">"content"</text>
+  <text x="336" y="160" class="mono">"score"</text>
+  <rect class="box-info" x="540" y="56" width="200" height="40" rx="8" /><text x="640" y="81" text-anchor="middle">results[1]</text>
+  <rect class="box-info" x="540" y="104" width="200" height="40" rx="8" /><text x="640" y="129" text-anchor="middle">results[2]</text>
+  <text x="640" y="170" text-anchor="middle" class="small">... up to max_results</text>
+</svg>
+<figcaption>The shape of a search result (illustrative). <strong>The useful part for the model is the list under <code>"results"</code></strong>: each hit has a title, a URL to cite, an extract of the page in <code>"content"</code>, and a relevance <code>"score"</code>.</figcaption>
+</figure>
+
+<div class="callout ok">
+<p><strong>What you should see</strong></p>
+<ul>
+<li>One or more lines like <code>we are doing some research on latest news today</code>, printed while the agent works (your queries will differ).</li>
+<li>Then <code>this is the AI last response:</code> followed by a summary of current headlines.</li>
+<li>Then the long "details" list: a <code>HumanMessage</code>, one or more <code>AIMessage</code>s with empty <code>content</code> and filled <code>tool_calls</code>, a <code>ToolMessage</code> full of JSON per search, and a final <code>AIMessage</code> with the answer.</li>
+<li>The run takes noticeably longer than in step 08, because each search is a real network request.</li>
+</ul>
+</div>
+
+<h2>With tools vs without tools</h2>
+<p>To prove the tool is doing the work, the presenter removes it ("you are not allowed to have any more tools", 55:07) and asks the same question. This time the model answers that it can't pull real-time headlines (55:31). Same model, same question, completely different ability. In the presenter's words, "this is the difference between working with agents and working with models".</p>
+<p>To try it yourself, change line 19–20 to <code>agent = create_agent(model="gpt-5-nano")</code> (no <code>tools</code>) and run again.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Comparison: without tools the model replies it cannot get real-time headlines; with web_search it searches Tavily several times and summarises current news">
+  <text x="190" y="26" text-anchor="middle" class="title">create_agent(model=...)</text>
+  <text x="570" y="26" text-anchor="middle" class="title">create_agent(..., tools=[web_search])</text>
+  <path class="line dashed" d="M380,14 V206" />
+  <rect class="ui-bubble-user" x="60" y="44" width="260" height="30" rx="8" /><text x="190" y="64" text-anchor="middle" class="ui-on-user">give me the latest news of the day</text>
+  <rect class="box-bad" x="40" y="94" width="300" height="56" rx="8" />
+  <text x="190" y="117" text-anchor="middle">"I can't pull real-time headlines"</text>
+  <text x="190" y="135" text-anchor="middle" class="small">only training data, no way to look</text>
+  <text x="190" y="184" text-anchor="middle" class="label">0 searches · a model</text>
+  <rect class="ui-bubble-user" x="440" y="44" width="260" height="30" rx="8" /><text x="570" y="64" text-anchor="middle" class="ui-on-user">give me the latest news of the day</text>
+  <rect class="box-info" x="420" y="94" width="140" height="56" rx="8" />
+  <text x="490" y="117" text-anchor="middle">web_search x N</text>
+  <text x="490" y="135" text-anchor="middle" class="small">via Tavily</text>
+  <path class="arrow" d="M560,122 H588" />
+  <rect class="box-ok" x="590" y="94" width="150" height="56" rx="8" />
+  <text x="665" y="117" text-anchor="middle">today's headlines</text>
+  <text x="665" y="135" text-anchor="middle" class="small">from real pages</text>
+  <text x="570" y="184" text-anchor="middle" class="label">several searches · an agent</text>
+</svg>
+<figcaption>The experiment at 55:07. <strong>The only difference is the <code>tools</code> list.</strong> Without it the model can only say what it doesn't know; with it, the agent can go and find out.</figcaption>
+</figure>
+
+<h2>Credits: what each run costs</h2>
+<p>Every call to <code>tavily_client.search</code> uses credits from your monthly allowance. Because the agent decides how many searches to run, <strong>one question can use several credits</strong>. Around 55:54 the presenter looks at Tavily's usage and sees the searches from the run counted there. With 1,000 free credits a month (at the time of writing) you have plenty for learning and personal projects, which is the presenter's point at 56:16.</p>
+<p>Two habits keep you in control: set a usage limit on the key (as the presenter did), and keep the <code>print</code> line in your tool so you always see how many searches happen.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="Illustrative credit meter: one question triggered four searches, each using credits from the monthly free allowance">
+  <text x="20" y="28" class="title">One question, several searches</text>
+  <rect class="box2" x="20" y="44" width="720" height="34" rx="8" />
+  <rect class="box-warn" x="22" y="46" width="60" height="30" rx="6" /><text x="52" y="66" text-anchor="middle" class="label">#1</text>
+  <rect class="box-warn" x="84" y="46" width="60" height="30" rx="6" /><text x="114" y="66" text-anchor="middle" class="label">#2</text>
+  <rect class="box-warn" x="146" y="46" width="60" height="30" rx="6" /><text x="176" y="66" text-anchor="middle" class="label">#3</text>
+  <rect class="box-warn" x="208" y="46" width="60" height="30" rx="6" /><text x="238" y="66" text-anchor="middle" class="label">#4</text>
+  <text x="500" y="66" text-anchor="middle" class="small">rest of the monthly free allowance</text>
+  <text x="20" y="106" class="label">each block = one web_search call = one printed "research" line</text>
+  <text x="20" y="130" class="small">The model decides how many searches it needs; you see each one in the terminal.</text>
+</svg>
+<figcaption>Illustrative, not to scale. <strong>Credits are spent per search, not per question</strong>, so count the "we are doing some research on ..." lines to know what a run cost.</figcaption>
+</figure>
+
+<div class="callout warn">
+<p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Key in the wrong variable name.</strong> The client looks for <code>TAVILY_API_KEY</code> exactly. A name like <code>TAVILY_KEY</code> or <code>TAVILLY_API_KEY</code> won't be found, so the client has no key and searches fail or get limited (the exact error depends on the package and version).</li>
+<li><strong><code>load_dotenv()</code> after <code>TavilyClient()</code>.</strong> The client reads the key when it's created, so loading <code>.env</code> later is too late. Keep line 8 above line 10.</li>
+<li><strong><code>ModuleNotFoundError: No module named 'tavily'</code>.</strong> The package isn't installed in the active <a class="term" href="glossary.html#virtual-environment">virtual environment</a>. Activate it and run <code>uv add tavily-python</code>.</li>
+<li><strong>Passing <code>tools=[web_search()]</code>.</strong> The parentheses call the function immediately (without a query, so it fails). Pass the tool itself: <code>tools=[web_search]</code>.</li>
+<li><strong>Forgetting the old tool.</strong> If you leave <code>print_document</code> in the list but delete its code, Python raises a <code>NameError</code>. The presenter removes both (52:12).</li>
+<li><strong>Trusting every result.</strong> Web pages can be wrong or even contain instructions aimed at the model (<a class="term" href="glossary.html#prompt-injection">prompt injection</a>). For news, ask the agent to cite URLs so you can check them.</li>
+</ul>
+</div>
+
+<div class="callout"><p><strong>Video vs repo.</strong> The repo (chef project) uses the same pattern in its own <code>tools.py</code>: a module-level <code>TavilyClient()</code> and a <code>@tool</code> function that returns <code>tavily_client.search(query)</code>, with logging instead of <code>print</code> (step 14). Its <code>pyproject.toml</code> depends on <code>tavily&gt;=1.1.0</code>; step 16 switches it to <code>tavily-python</code>. Background on safe dependencies is in the handbook chapter <a href="lc-09-security-cost.html">Security, Secrets &amp; Cost</a>.</p></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Models only know what they learned before their training cutoff; a search tool lets an agent fetch current information.</li>
+<li>Tavily is a search API for agents. Put your key in <code>.env</code> as <code>TAVILY_API_KEY</code>; <code>TavilyClient()</code> reads it from the environment.</li>
+<li>Install the official SDK with <code>uv add tavily-python</code>; the video's <code>uv add tavily</code> installs a different, unofficial package with the same import.</li>
+<li><code>web_search(query: str)</code> plus a clear docstring is all the model needs to use the tool; the returned dict becomes a JSON ToolMessage.</li>
+<li>The agent may search several times for one question; each search costs credits, and the <code>print</code> line shows you each one.</li>
+<li>Without the tool, the same model says it can't get real-time news: that's the difference between a model and an agent with tools.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="08-first-tool.html"><small>← Previous · Step 08</small>What Tools Are &amp; Your First Tool</a>
+<a class="next" href="10-short-term-memory.html"><small>Next · Step 10 →</small>Short-Term Memory</a>
+</nav>
+</main>
+</body>
+</html>

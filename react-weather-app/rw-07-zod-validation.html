@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 7 · Validating Data with Zod</title>
+<meta name="description" content="Schemas, inferred types, optional fields, parse vs safeParse and reading Zod errors.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 7/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">React Handbook · Chapter 7 of 10</div>
+  <h1>Validating Data with Zod</h1>
+  <p class="lead">Schemas, inferred types, optional fields, parse vs safeParse and reading Zod errors.</p>
+</section>
+<p>In <a href="07-typescript-zod.html">step 7</a> the presenter hovered over the weather data and saw the type <code>any</code> (at 23:17). They described the response with a <a class="term" href="glossary.html#zod">Zod</a> <a class="term" href="glossary.html#schema">schema</a> and called <code>.parse(data)</code> (at 27:29), and from then on TypeScript knew every field. Later steps added schemas for <a href="14-geocoding.html">geocoding</a> and <a href="20-side-panel.html">air pollution</a>. This chapter explains what a schema really is, how the types are generated from it, how to describe fields that may be missing, the difference between <code>parse</code> and <code>safeParse</code>, and, most usefully, how to read a <code>ZodError</code> when something goes wrong.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> Two of the bugs found when testing this app surfaced as Zod errors. A city without <code>local_names</code> made the geocode schema fail, and the app silently showed the weather for 0,0. An invalid API key produced <code>expected number, received undefined</code> at path <code>["lat"]</code>, which looks like a data problem but is really an <a class="term" href="glossary.html#http-status">HTTP 401</a>. If you can read a Zod error, you can tell those situations apart in seconds.</div>
+
+<p>All behaviour below was checked against the installed <code>zod</code> 4.1.12. Outputs shown as comments are real outputs from Node; type examples were compiled with <code>tsc</code> in strict mode.</p>
+
+<h2>The problem: TypeScript stops at the network</h2>
+<p><a class="term" href="glossary.html#typescript">TypeScript</a> checks your code before it runs. Then the types are erased: the JavaScript that runs in the browser has no idea what a <code>number</code> is supposed to be. <code>res.json()</code> returns <code>Promise&lt;any&gt;</code>, because TypeScript cannot know what a server will send. The presenter calls working with <code>any</code> "a big no no" (at 23:41): you can type <code>data.curent.temp</code> with a typo and nothing warns you.</p>
+<p>You could write a type by hand and cast: <code>const data = (await res.json()) as Weather</code>. That only <em>tells</em> TypeScript to trust you. If the server sends something else, the code carries on with wrong data and crashes later, far from the cause. <a class="term" href="glossary.html#validation">Validation</a> means actually checking the data when it arrives. Zod does that, and gives you the TypeScript type for free.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Two zones: at build time TypeScript checks your code using types; at run time the JSON from OpenWeather arrives and only Zod can check it">
+  <rect class="zone" x="10" y="30" width="340" height="190" rx="8"/>
+  <text x="180" y="22" text-anchor="middle" class="label">Build time (tsc, your editor)</text>
+  <rect class="box" x="30" y="50" width="300" height="40" rx="8"/>
+  <text x="180" y="75" text-anchor="middle" class="label">your code: data.current.temp</text>
+  <rect class="box-ok" x="30" y="105" width="300" height="40" rx="8"/>
+  <text x="180" y="130" text-anchor="middle" class="label">types: checked, then erased</text>
+  <text x="180" y="175" text-anchor="middle" class="small">TypeScript never sees the real response</text>
+  <rect class="zone" x="410" y="30" width="340" height="190" rx="8"/>
+  <text x="580" y="22" text-anchor="middle" class="label">Run time (the browser)</text>
+  <rect class="box-info" x="430" y="50" width="300" height="40" rx="8"/>
+  <text x="580" y="75" text-anchor="middle" class="label">JSON from OpenWeather: any</text>
+  <rect class="box-solid" x="430" y="105" width="300" height="40" rx="8"/>
+  <text x="580" y="130" text-anchor="middle" class="on-solid">weatherSchema.parse(data)</text>
+  <rect class="box-ok" x="430" y="160" width="140" height="40" rx="8"/>
+  <text x="500" y="185" text-anchor="middle" class="label">typed data</text>
+  <rect class="box-bad" x="590" y="160" width="140" height="40" rx="8"/>
+  <text x="660" y="185" text-anchor="middle" class="label">ZodError</text>
+  <path class="arrow" d="M580,90 V103"/>
+  <path class="arrow-ok" d="M540,145 L510,158"/>
+  <path class="arrow-bad" d="M620,145 L650,158"/>
+</svg>
+<figcaption>TypeScript guards your code; Zod guards the data. <strong>Anything that crosses the network must be checked at run time.</strong></figcaption>
+</figure>
+
+<h2>A schema is a description you can run</h2>
+<p>A schema is a JavaScript object that describes the shape of some data. You build it from small pieces. Here is the project's air pollution schema, <code>src/schemas/airPollutionSchema.ts</code> (shortened):</p>
+<pre data-lang="ts" data-tag="verified"><code>import z from "zod"
+
+export const AirPollutionSchema = z.object({
+  coord: z.object({
+    lat: z.number(),
+    lon: z.number(),
+  }),
+  list: z.array(
+    z.object({
+      dt: z.number(),
+      main: z.object({
+        aqi: z.number(),
+      }),
+      components: z.object({
+        co: z.number(),
+        // ... no, no2, o3, so2, pm2_5, pm10, nh3
+      }),
+    })
+  ),
+})</code></pre>
+<p>Read it from the outside in: "an object with a <code>coord</code> object and a <code>list</code> array; each list item has a number <code>dt</code>, an object <code>main</code> with a number <code>aqi</code>, and so on". The pieces you will use most:</p>
+<div class="table-wrap"><table>
+<tr><th>Piece</th><th>Accepts</th><th>In this project</th></tr>
+<tr><td><code>z.string()</code>, <code>z.number()</code>, <code>z.boolean()</code></td><td>one primitive value</td><td><code>timezone</code>, <code>temp</code></td></tr>
+<tr><td><code>z.object({...})</code></td><td>an object with these keys (extra keys are dropped)</td><td>every schema</td></tr>
+<tr><td><code>z.array(item)</code></td><td>an array where every element matches <code>item</code></td><td><code>hourly</code>, <code>daily</code>, the geocode result</td></tr>
+<tr><td><code>z.record(keySchema, valueSchema)</code></td><td>an object used as a dictionary, any keys</td><td><code>local_names</code> (language code to name, e.g. <code>{ en: "Tokyo", ... }</code>)</td></tr>
+<tr><td><code>z.enum(["a", "b"])</code>, <code>z.literal("a")</code></td><td>one of a fixed set of values</td><td>not used; a good fit for the map types</td></tr>
+</table></div>
+<p>Two Zod 4 details visible in the project. First, both import styles work: <code>import z from "zod"</code> (geocode and air pollution schemas) and <code>import { z } from "zod"</code> (weather schema). In 4.1.12 the default export is the same object as the named <code>z</code>. Second, <code>z.record</code> needs <strong>two</strong> arguments in Zod 4, the key schema and the value schema, as the project writes it: <code>z.record(z.string(), z.string())</code>. A one-argument <code>z.record(z.string())</code>, common in older Zod 3 examples, crashed when tested (<code>Cannot read properties of undefined (reading '_zod')</code>).</p>
+
+<details class="primer"><summary>New to "extra keys are dropped"? What z.object does with unknown fields</summary>
+<p>OpenWeather sends more fields than the schema lists. By default <code>z.object</code> <em>strips</em> them: <code>z.object({ a: z.number() }).parse({ a: 1, extra: 2 })</code> returns <code>{"a":1}</code>. That keeps your data small and matching its type. Zod 4 also has <code>z.looseObject</code>, which keeps unknown keys (returns <code>{"a":1,"b":2}</code>), and <code>z.strictObject</code>, which rejects them with <code>Unrecognized key: "b"</code>. For third-party APIs the default (strip) is right: the provider may add new fields at any time and that should not break your app.</p>
+</details>
+
+<h2>z.infer: the type comes from the schema</h2>
+<p>The real trick is that you do not write the TypeScript type separately. <a class="term" href="glossary.html#type-inference">Type inference</a> works it out from the schema with <code>z.infer</code>:</p>
+<pre data-lang="ts" data-tag="verified"><code>const GeocodeSchema = z.array(z.object({
+  name: z.string(),
+  local_names: z.record(z.string(), z.string()).optional(),
+  lat: z.number(), lon: z.number(), country: z.string(), state: z.string().optional(),
+}))
+type Geocode = z.infer&lt;typeof GeocodeSchema&gt;
+// { name: string; local_names?: Record&lt;string, string&gt; | undefined; lat: number; ... }[]
+
+const g: Geocode = [{ name: "Tokyo", lat: 35.68, lon: 139.69, country: "JP" }]   // OK
+// @ts-expect-error lat must be a number
+const bad: Geocode = [{ name: "X", lat: "1", lon: 2, country: "JP" }]</code></pre>
+<p>The project never even writes <code>z.infer</code> in the original code. It does not need to: <code>weatherSchema.parse(data)</code> already returns the inferred type, so <code>getWeather</code>'s return type, and therefore <code>data</code> in every card, is typed automatically. The improved <code>api.ts</code> from <a href="25-fix-the-bugs.html">step 25</a> uses <code>z.infer</code> inside a <a class="term" href="glossary.html#generic">generic</a> helper so one function can validate any schema:</p>
+<pre data-lang="ts" data-tag="verified"><code>async function fetchJson&lt;T extends z.ZodType&gt;(url: string, schema: T): Promise&lt;z.infer&lt;T&gt;&gt; {
+  const res = await fetch(url)
+  if (!res.ok) {
+    const body = await res.json().catch(() =&gt; null)
+    throw new Error(`OpenWeather request failed (${res.status}): ${body?.message ?? res.statusText}`)
+  }
+  return schema.parse(await res.json())
+}</code></pre>
+<p><code>T extends z.ZodType</code> means "any Zod schema". <code>z.infer&lt;T&gt;</code> means "the data type that schema describes". Pass <code>weatherSchema</code> and you get weather data; pass <code>GeocodeSchema</code> and you get an array of places.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="One schema produces two things: at build time z.infer produces the TypeScript type, at run time parse checks the data and returns it with that type">
+  <rect class="box-solid" x="270" y="15" width="220" height="44" rx="8"/>
+  <text x="380" y="42" text-anchor="middle" class="on-solid">weatherSchema</text>
+  <rect class="box" x="30" y="120" width="300" height="60" rx="8"/>
+  <text x="180" y="145" text-anchor="middle" class="mono">z.infer&lt;typeof weatherSchema&gt;</text>
+  <text x="180" y="166" text-anchor="middle" class="small">a TypeScript type (build time)</text>
+  <rect class="box-ok" x="430" y="120" width="300" height="60" rx="8"/>
+  <text x="580" y="145" text-anchor="middle" class="mono">weatherSchema.parse(json)</text>
+  <text x="580" y="166" text-anchor="middle" class="small">a real check (run time)</text>
+  <path class="arrow" d="M330,59 L210,118"/>
+  <path class="arrow" d="M430,59 L550,118"/>
+  <text x="380" y="110" text-anchor="middle" class="small">same source of truth</text>
+</svg>
+<figcaption>Write the shape once; get both the type and the check. <strong>The type can never drift away from what is actually validated.</strong></figcaption>
+</figure>
+
+<h2>Fields that may be missing: optional, nullable, nullish</h2>
+<p>Real APIs leave fields out. OpenWeather's geocoding results include <code>state</code> only for some countries, and <code>local_names</code> is missing for many smaller places. Zod has three modifiers, and they mean different things:</p>
+<div class="table-wrap"><table>
+<tr><th>Modifier</th><th>Allows the key to be missing / <code>undefined</code></th><th>Allows <code>null</code></th><th>Inferred type</th></tr>
+<tr><td><code>z.string().optional()</code></td><td>yes</td><td>no</td><td><code>string | undefined</code> (key optional)</td></tr>
+<tr><td><code>z.string().nullable()</code></td><td>no</td><td>yes</td><td><code>string | null</code></td></tr>
+<tr><td><code>z.string().nullish()</code></td><td>yes</td><td>yes</td><td><code>string | null | undefined</code></td></tr>
+</table></div>
+<p>Checked with <code>z.object({ a: z.string().optional(), b: z.string().nullable(), c: z.string().nullish() })</code>: <code>{ b: null }</code> passes; <code>{}</code> fails (<code>b</code> is nullable but still required); <code>{ a: null, b: "x" }</code> fails (optional does not accept <code>null</code>). Pick the modifier from the API's documentation: "may be absent" means <code>optional</code>, "may be null" means <code>nullable</code>.</p>
+<p>In the repo, <code>state</code> and <code>current.wind_gust</code> are optional, but <code>local_names</code> is required. That one line caused a real bug, fixed in step 25 by adding <code>.optional()</code>:</p>
+<pre data-lang="ts" data-tag="verified"><code>    local_names: z.record(z.string(), z.string()).optional(),</code></pre>
+<p>Note that <code>hourly[].wind_gust</code> is still required in the weather schema while <code>current.wind_gust</code> is optional. The test data included it, so this was not observed failing; if you see a ZodError with a path ending in <code>"wind_gust"</code>, you know where to look.</p>
+
+<h2>parse or safeParse?</h2>
+<p>Both run the same check. They differ in how they report failure.</p>
+<div class="table-wrap"><table>
+<tr><th></th><th><code>schema.parse(data)</code></th><th><code>schema.safeParse(data)</code></th></tr>
+<tr><td>Valid data</td><td>returns the data</td><td>returns <code>{ success: true, data }</code></td></tr>
+<tr><td>Invalid data</td><td><strong>throws</strong> a <code>ZodError</code></td><td>returns <code>{ success: false, error }</code> (a <code>ZodError</code>)</td></tr>
+<tr><td>Good for</td><td>code where a thrown error is already handled (a query function)</td><td>code that wants to branch: forms, optional data, logging</td></tr>
+</table></div>
+<p>The project uses <code>parse</code> inside query functions, and that is the right choice. When a query function throws, <a class="term" href="glossary.html#tanstack-query">TanStack Query</a> marks the query as failed, retries, and finally exposes the error (or throws it to an error boundary for suspense queries; see <a href="rw-06-tanstack-query.html">chapter 6</a>). <code>safeParse</code> is for when you want to decide yourself:</p>
+<pre data-lang="ts" data-tag="illustrative"><code>const result = GeocodeSchema.safeParse(json)
+if (!result.success) {
+  console.warn(z.prettifyError(result.error))
+  return []                      // treat as "no match" instead of failing
+}
+result.data[0]?.lat              // typed as number</code></pre>
+<p>(<code>safeParse</code> and <code>prettifyError</code> were run in Node against the real Zod; the surrounding function is a sketch.)</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Decision: inside a TanStack query function use parse so failures become query errors; in a form or optional data use safeParse and branch on success">
+  <rect class="box-solid" x="10" y="80" width="190" height="50" rx="8"/>
+  <text x="105" y="102" text-anchor="middle" class="on-solid">Who handles</text>
+  <text x="105" y="119" text-anchor="middle" class="on-solid">a failure?</text>
+  <rect class="box" x="260" y="20" width="230" height="56" rx="8"/>
+  <text x="375" y="44" text-anchor="middle" class="label">a query function or other</text>
+  <text x="375" y="62" text-anchor="middle" class="label">code that already catches</text>
+  <rect class="box" x="260" y="134" width="230" height="56" rx="8"/>
+  <text x="375" y="158" text-anchor="middle" class="label">this very function wants</text>
+  <text x="375" y="176" text-anchor="middle" class="label">to branch or recover</text>
+  <rect class="box-ok" x="550" y="28" width="200" height="40" rx="8"/>
+  <text x="650" y="53" text-anchor="middle" class="mono">parse (throws)</text>
+  <rect class="box-ok" x="550" y="142" width="200" height="40" rx="8"/>
+  <text x="650" y="167" text-anchor="middle" class="mono">safeParse (returns)</text>
+  <path class="arrow" d="M200,95 L258,52"/>
+  <path class="arrow" d="M200,115 L258,158"/>
+  <path class="arrow" d="M490,48 H548"/>
+  <path class="arrow" d="M490,162 H548"/>
+</svg>
+<figcaption>Both validate identically. <strong>Choose by who should deal with bad data.</strong> In <code>api.ts</code>, TanStack Query does, so <code>parse</code> is correct.</figcaption>
+</figure>
+
+<h2>Reading a ZodError</h2>
+<p>A <code>ZodError</code> contains a list called <code>issues</code>. Each issue has a <code>code</code> (the kind of problem), a <code>path</code> (where in the data), a human <code>message</code>, and extra details such as <code>expected</code>. The error's <code>message</code> is that list printed as JSON. Here are the two real examples from testing this app, reproduced in Node with the project's schemas.</p>
+
+<h3>Example 1: a place without local_names</h3>
+<pre data-lang="text" data-tag="verified"><code>GeocodeSchema.safeParse([{ name: "Smallville", lat: 1, lon: 2, country: "US" }])
+
+[
+  {
+    "expected": "record",
+    "code": "invalid_type",
+    "path": [
+      0,
+      "local_names"
+    ],
+    "message": "Invalid input: expected record, received undefined"
+  }
+]</code></pre>
+<p>Read the path like an address: item <code>0</code> of the array, field <code>local_names</code>. "Expected record, received undefined" means the field was not there at all. The fix is in the schema (make it optional), not in the data.</p>
+
+<h3>Example 2: an error response parsed as weather</h3>
+<p>With an invalid key, OpenWeather answers status 401 with a body like <code>{"cod":401,"message":"Invalid API key. ..."}</code>. The repo's <code>getWeather</code> never checks <code>res.ok</code>, so that body goes straight into <code>weatherSchema.parse</code>:</p>
+<pre data-lang="text" data-tag="verified"><code>[
+  {
+    "expected": "number",
+    "code": "invalid_type",
+    "path": [
+      "lat"
+    ],
+    "message": "Invalid input: expected number, received undefined"
+  },
+  {
+    "expected": "number",
+    "code": "invalid_type",
+    "path": [
+      "lon"
+    ],
+    "message": "Invalid input: expected number, received undefined"
+  },
+  ...</code></pre>
+<p>(Shortened: the run against a three-field schema produced three issues; the full weather schema produces one per missing top-level field.) The clue is that <em>every</em> top-level field is missing. That never means "the weather changed shape"; it means "this is not a weather response". Look at the Network tab: the status will be 4xx or 5xx. Step 25's <code>fetchJson</code> checks <code>res.ok</code> first, so the user sees <code>OpenWeather request failed (401): Invalid API key...</code> instead.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Anatomy of one Zod issue: code says what kind of problem, path says where, expected and received say what was wrong, message is the human sentence">
+  <rect class="box2" x="20" y="20" width="330" height="180" rx="8"/>
+  <text x="40" y="50" class="mono">{</text>
+  <text x="56" y="74" class="mono">"code": "invalid_type",</text>
+  <text x="56" y="98" class="mono">"path": [0, "local_names"],</text>
+  <text x="56" y="122" class="mono">"expected": "record",</text>
+  <text x="56" y="146" class="mono">"message": "Invalid input:</text>
+  <text x="56" y="166" class="mono">  expected record, ..."</text>
+  <text x="40" y="190" class="mono">}</text>
+  <rect class="box-info" x="440" y="58" width="300" height="32" rx="8"/>
+  <text x="590" y="79" text-anchor="middle" class="label">what kind of problem</text>
+  <rect class="box-warn" x="440" y="98" width="300" height="32" rx="8"/>
+  <text x="590" y="119" text-anchor="middle" class="label">where: item 0, field local_names</text>
+  <rect class="box-info" x="440" y="138" width="300" height="32" rx="8"/>
+  <text x="590" y="159" text-anchor="middle" class="label">what the schema wanted</text>
+  <path class="arrow" d="M300,70 L438,74"/>
+  <path class="arrow" d="M330,94 L438,113"/>
+  <path class="arrow" d="M280,118 L438,152"/>
+</svg>
+<figcaption>Read the <code>path</code> first, then <code>expected</code> versus "received". <strong>"received undefined" means the field was missing; many of them at once means the whole response is not what you think.</strong></figcaption>
+</figure>
+
+<h3>Friendlier output in Zod 4</h3>
+<p>Zod 4 adds helper functions that format an error. Both exist in 4.1.12 and produced these outputs for example 1:</p>
+<pre data-lang="text" data-tag="verified"><code>z.prettifyError(error)
+✖ Invalid input: expected record, received undefined
+  → at [0].local_names
+
+z.treeifyError(error)   // nested object that mirrors the data shape
+{"errors":[],"items":[{"errors":[],"properties":{"local_names":{"errors":["Invalid input: expected record, received undefined"]}}}]}</code></pre>
+<p><code>prettifyError</code> is ideal for <code>console.error</code>. <code>treeifyError</code> (and <code>z.flattenError</code> for flat objects) is meant for forms, where you show each message next to its field. Custom messages use the <code>error</code> parameter in Zod 4; a plain string still works as a shortcut. Both were checked:</p>
+<pre data-lang="ts" data-tag="verified"><code>z.string().min(1, { error: "City name is required" })   // message: "City name is required"
+z.string().min(1, "Short form")                          // message: "Short form"</code></pre>
+
+<h2>Where validation belongs</h2>
+<p>Validate once, at the edge of your app, right where untrusted data enters. In this project that edge is <code>api.ts</code>. Everything behind it (the cache, the cards, the side panel) can trust the types completely. Do not sprinkle checks like <code>if (typeof data.current.temp === "number")</code> through components; that is exactly what the schema already guarantees.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Pipeline in step 25: fetch, check res.ok, res.json, schema.parse, then the TanStack cache and the cards; failures at res.ok or parse become readable query errors">
+  <rect class="box" x="10" y="40" width="110" height="44" rx="8"/>
+  <text x="65" y="67" text-anchor="middle" class="mono">fetch(url)</text>
+  <rect class="box-warn" x="150" y="40" width="110" height="44" rx="8"/>
+  <text x="205" y="67" text-anchor="middle" class="mono">res.ok?</text>
+  <rect class="box" x="290" y="40" width="120" height="44" rx="8"/>
+  <text x="350" y="67" text-anchor="middle" class="mono">res.json()</text>
+  <rect class="box-solid" x="440" y="40" width="140" height="44" rx="8"/>
+  <text x="510" y="67" text-anchor="middle" class="on-solid">schema.parse</text>
+  <rect class="box-ok" x="610" y="40" width="140" height="44" rx="8"/>
+  <text x="680" y="60" text-anchor="middle" class="label">cache, cards</text>
+  <text x="680" y="76" text-anchor="middle" class="small">fully typed</text>
+  <path class="arrow" d="M120,62 H148"/>
+  <path class="arrow" d="M260,62 H288"/>
+  <path class="arrow" d="M410,62 H438"/>
+  <path class="arrow-ok" d="M580,62 H608"/>
+  <rect class="box-bad" x="150" y="115" width="430" height="40" rx="8"/>
+  <text x="365" y="140" text-anchor="middle" class="label">thrown Error: a readable message, retried, shown by the boundary</text>
+  <path class="arrow-bad" d="M205,84 V113"/>
+  <path class="arrow-bad" d="M510,84 V113"/>
+</svg>
+<figcaption>The <code>fetchJson</code> helper from step 25. <strong>Check the HTTP status before the shape</strong>, so a 401 is reported as a 401, not as a missing <code>lat</code>.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"TypeScript types protect me from bad API data."</em> They are erased before the code runs. Only a run-time check like Zod does.</li>
+<li><em>"<code>as Weather</code> is the same as parsing."</em> A cast is a promise you make to the compiler; nothing is checked.</li>
+<li><em>"optional and nullable are the same."</em> <code>optional</code> allows missing/<code>undefined</code>, <code>nullable</code> allows <code>null</code>. Use <code>nullish</code> for both.</li>
+<li><em>"A ZodError means the API changed."</em> Often it means you validated an error response. Check <code>res.ok</code> first.</li>
+<li><em>"Make every field optional to be safe."</em> Then every component must handle <code>undefined</code>. Mark only what the API documents as optional, and let surprises fail loudly.</li>
+<li><em>"Old Zod 3 examples work unchanged."</em> Mostly, but not all: Zod 4 needs two arguments for <code>z.record</code> and uses <code>{ error: ... }</code> for custom messages.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A schema describes data and can check it at run time; <code>z.infer</code> turns the same schema into a TypeScript type.</li>
+<li><code>parse</code> returns data or throws a <code>ZodError</code>; <code>safeParse</code> returns <code>{ success, data | error }</code>. Inside a query function, <code>parse</code> is right.</li>
+<li><code>optional</code> = may be missing, <code>nullable</code> = may be null, <code>nullish</code> = either. <code>local_names</code> needed <code>.optional()</code>.</li>
+<li>Read an issue's <code>path</code> and <code>expected</code>/received. Many "received undefined" at the top level means you parsed an error response.</li>
+<li>Zod 4 extras: <code>z.prettifyError</code>, <code>z.treeifyError</code>, <code>z.looseObject</code>/<code>z.strictObject</code>, <code>{ error }</code> messages, two-argument <code>z.record</code>.</li>
+<li>Validate once, at the boundary (<code>api.ts</code>), after checking <code>res.ok</code>.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://zod.dev/">Zod documentation: Intro</a> and <a href="https://zod.dev/basics">Basic usage (parse, safeParse, z.infer)</a></li>
+<li><a href="https://zod.dev/api">Defining schemas (objects, arrays, records, optional, nullable)</a></li>
+<li><a href="https://zod.dev/error-formatting">Formatting errors (prettifyError, treeifyError)</a> and <a href="https://zod.dev/error-customization">Customizing errors</a></li>
+<li><a href="https://zod.dev/v4">Release notes: what is new in Zod 4</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="rw-06-tanstack-query.html"><small>← Chapter 6</small>TanStack Query in Depth</a>
+<a class="next" href="rw-08-maps-on-the-web.html"><small>Chapter 8 →</small>Maps on the Web: Leaflet, Tiles &amp; Layers</a>
+</nav>
+</main>
+</body>
+</html>

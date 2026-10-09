@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 7 · Human-in-the-Loop &amp; Interrupts</title>
+<meta name="description" content="Pausing a graph with interrupt, approving or editing, and resuming with Command.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 7/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangGraph Handbook · Chapter 7 of 10</div>
+  <h1>Human-in-the-Loop &amp; Interrupts</h1>
+  <p class="lead">Pausing a graph with interrupt, approving or editing, and resuming with Command.</p>
+</section>
+<p>The agent from <a href="13-graph-8-agent-loop.html">step 13</a> decides on its own which math tool to call, and calls it immediately. For a calculator that is fine. For a tool that sends an email, spends money, deletes a file or writes to a database, you usually want a person to look first. This chapter shows how a LangGraph graph can <strong>pause</strong>, show something to a human, wait (for seconds or for days), and then <strong>resume</strong> with the human's answer. You will learn the <code>interrupt()</code> function, the <code>Command(resume=...)</code> object, the approve / edit / reject patterns, the older "breakpoint" style (<code>interrupt_before</code> / <code>interrupt_after</code>), and the <strong>Interrupts</strong> button you can see at the top of LangGraph Studio in the video.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> The video does not cover this topic; the presenter ends after memory and says there is "a lot more to be learned" (at 136:17). <a class="term" href="glossary.html#human-in-the-loop">Human-in-the-loop</a> is the natural next step for graph 8: the same agent, but you approve each tool call. Everything here is built on the checkpoints from <a href="lg-06-persistence-and-memory.html">chapter 6</a>, so read that first.</div>
+
+<h2>The idea: pausing is just saving</h2>
+<p>A Python function cannot normally "wait three days for a human". The process might restart, the server might scale down, the user might close the browser. LangGraph solves this with checkpoints. When a node asks for human input, LangGraph:</p>
+<ol class="steps">
+<li><strong>Stops the node</strong> at the point where it called <code>interrupt(...)</code>.</li>
+<li><strong>Saves a checkpoint</strong> that records "this node is waiting, and here is the question".</li>
+<li><strong>Returns</strong> from <code>invoke</code> with the question under a special key, <code>__interrupt__</code>.</li>
+</ol>
+<p>Later (any time later, from any process that uses the same checkpointer) you call the graph again on the <strong>same thread</strong> with <code>Command(resume=answer)</code>. LangGraph loads the checkpoint, runs the waiting node again, and this time <code>interrupt(...)</code> <em>returns</em> the answer instead of stopping.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Sequence diagram: your code invokes the graph, the node calls interrupt, a checkpoint is saved, the question is returned, a human answers, your code resumes with Command, the node runs again and gets the answer">
+  <rect class="box-solid" x="20" y="10" width="150" height="34" rx="8"/><text x="95" y="32" text-anchor="middle" class="on-solid">your code</text>
+  <rect class="box-solid" x="230" y="10" width="150" height="34" rx="8"/><text x="305" y="32" text-anchor="middle" class="on-solid">graph</text>
+  <rect class="box-solid" x="440" y="10" width="150" height="34" rx="8"/><text x="515" y="32" text-anchor="middle" class="on-solid">checkpointer</text>
+  <rect class="box-solid" x="630" y="10" width="110" height="34" rx="8"/><text x="685" y="32" text-anchor="middle" class="on-solid">human</text>
+  <path class="line dashed" d="M95,44 V320"/><path class="line dashed" d="M305,44 V320"/><path class="line dashed" d="M515,44 V320"/><path class="line dashed" d="M685,44 V320"/>
+  <path class="arrow-accent" d="M95,70 H303"/><text x="200" y="64" text-anchor="middle" class="small">1. invoke(input, config)</text>
+  <path class="arrow" d="M305,100 H513"/><text x="410" y="94" text-anchor="middle" class="small">2. node calls interrupt(): save</text>
+  <path class="arrow" d="M305,130 H97"/><text x="200" y="124" text-anchor="middle" class="small">3. result["__interrupt__"]</text>
+  <path class="arrow" d="M95,160 H683"/><text x="520" y="154" text-anchor="middle" class="small">4. show the question (UI, email, chat...)</text>
+  <rect class="box-warn" x="560" y="170" width="190" height="26" rx="6"/><text x="655" y="188" text-anchor="middle" class="small">waits: seconds or days</text>
+  <path class="arrow" d="M685,214 H97"/><text x="390" y="208" text-anchor="middle" class="small">5. "approve"</text>
+  <path class="arrow-accent" d="M95,244 H303"/><text x="200" y="238" text-anchor="middle" class="small">6. invoke(Command(resume=...))</text>
+  <path class="arrow" d="M305,274 H513"/><text x="410" y="268" text-anchor="middle" class="small">7. load checkpoint, re-run node</text>
+  <path class="arrow-ok" d="M305,304 H97"/><text x="200" y="298" text-anchor="middle" class="small">8. final state</text>
+</svg>
+<figcaption>Time flows down. Between message 3 and message 6 nothing is running: <strong>the paused graph is only a row in the checkpointer</strong>, which is why the pause can last as long as you like.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>A checkpointer is required.</strong> Verified with LangGraph 1.2.11: compiled <em>without</em> a checkpointer, the graph still stops at <code>interrupt()</code> and returns <code>__interrupt__</code>, but resuming fails with <code>RuntimeError: Cannot use Command(resume=...) without checkpointer</code>. There is nowhere to resume <em>from</em>. Under <code>langgraph dev</code> you do not add one yourself; the server provides it (<a href="lg-06-persistence-and-memory.html">chapter 6</a>).</div>
+
+<h2>A complete example: review an email before sending</h2>
+<p>This graph writes a draft, asks a human to review it, and then either sends it, sends an edited version, or stops. It needs no model and no API key, so you can run it as is. It was run with all three answers; the outputs are shown after the code.</p>
+<pre data-lang="py" data-tag="verified"><code>from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import interrupt, Command
+
+
+class State(TypedDict):
+    draft: str
+    status: str
+
+
+def write_draft(state: State):
+    return {"draft": "Dear student, your answer 84 is correct."}
+
+
+def human_review(state: State):
+    decision = interrupt({"question": "Send this email?", "draft": state["draft"]})
+    if decision["action"] == "approve":
+        return Command(goto="send", update={"status": "approved"})
+    if decision["action"] == "edit":
+        return Command(goto="send", update={"draft": decision["draft"], "status": "edited"})
+    return Command(goto=END, update={"status": "rejected"})
+
+
+def send(state: State):
+    print("SENDING:", state["draft"])
+    return {}
+
+
+builder = StateGraph(State)
+builder.add_node("write_draft", write_draft)
+builder.add_node("human_review", human_review, destinations=("send", END))
+builder.add_node("send", send)
+builder.add_edge(START, "write_draft")
+builder.add_edge("write_draft", "human_review")
+builder.add_edge("send", END)
+graph = builder.compile(checkpointer=InMemorySaver())
+
+config = {"configurable": {"thread_id": "review-1"}}
+result = graph.invoke({"draft": "", "status": "new"}, config)
+print(result["__interrupt__"][0].value)      # the question for the human
+final = graph.invoke(Command(resume={"action": "approve"}), config)
+print(final)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>4</td><td><code>from langgraph.types import interrupt, Command</code></td><td>The two pieces of the feature. <code>interrupt</code> pauses; <code>Command</code> carries the answer back in, and can also choose the next node.</td></tr>
+<tr><td>7&ndash;9</td><td><code>class State(TypedDict): ...</code></td><td>Two fields: the email text and a status, so you can see afterwards which branch ran.</td></tr>
+<tr><td>17</td><td><code>decision = interrupt({...})</code></td><td>First run: the node stops here and the dictionary is handed to your code as the question. On resume: the node starts again from line 16, and this time <code>interrupt</code> returns whatever you passed to <code>Command(resume=...)</code>.</td></tr>
+<tr><td>18&ndash;22</td><td><code>return Command(goto=..., update=...)</code></td><td>Routes and updates in one return (covered in <a href="lg-03-control-flow.html">chapter 3</a>). Approve goes to <code>send</code>; edit replaces the draft first; anything else ends.</td></tr>
+<tr><td>32</td><td><code>add_node(..., destinations=("send", END))</code></td><td>Tells LangGraph where the <code>Command</code> can go, so the graph drawing (and Studio) shows those edges. Routing works without it, but the picture would be missing arrows.</td></tr>
+<tr><td>37</td><td><code>compile(checkpointer=InMemorySaver())</code></td><td>Required: the pause is stored here.</td></tr>
+<tr><td>40</td><td><code>result = graph.invoke(...)</code></td><td>Runs <code>write_draft</code>, then pauses in <code>human_review</code>. The returned dictionary has <code>draft</code>, <code>status</code> and <code>__interrupt__</code>.</td></tr>
+<tr><td>41</td><td><code>result["__interrupt__"][0].value</code></td><td>A list of <code>Interrupt</code> objects; <code>.value</code> is what you passed to <code>interrupt()</code>, here the question and the draft.</td></tr>
+<tr><td>42</td><td><code>graph.invoke(Command(resume=...), config)</code></td><td>Same <code>config</code>, so the same thread. The input is a <code>Command</code> instead of a state dictionary.</td></tr>
+</table></div>
+
+<div class="callout ok"><strong>What you should see</strong> (real output, one thread per answer):
+<pre data-lang="text" data-tag="verified"><code>{'question': 'Send this email?', 'draft': 'Dear student, your answer 84 is correct.'}
+SENDING: Dear student, your answer 84 is correct.
+{'draft': 'Dear student, your answer 84 is correct.', 'status': 'approved'}
+
+# thread review-2, resume={"action": "edit", "draft": "Well done! 12 x 7 = 84."}
+SENDING: Well done! 12 x 7 = 84.
+{'draft': 'Well done! 12 x 7 = 84.', 'status': 'edited'}
+
+# thread review-3, resume={"action": "reject"}
+{'draft': 'Dear student, your answer 84 is correct.', 'status': 'rejected'}</code></pre>
+While paused, <code>graph.get_state(config).next</code> is <code>('human_review',)</code>, and the question is also available as <code>graph.get_state(config).tasks[0].interrupts[0].value</code>. That is how a web app can show "waiting for your approval" after a page reload.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="The review graph: start, write_draft, human_review which pauses, then send or end depending on the answer">
+  <rect class="box2" x="10" y="90" width="90" height="36" rx="18"/><text x="55" y="113" text-anchor="middle" class="label">__start__</text>
+  <rect class="box" x="140" y="90" width="120" height="36" rx="8"/><text x="200" y="113" text-anchor="middle" class="label">write_draft</text>
+  <rect class="box-warn" x="300" y="80" width="150" height="56" rx="8"/><text x="375" y="103" text-anchor="middle" class="label">human_review</text><text x="375" y="122" text-anchor="middle" class="small">interrupt() pauses</text>
+  <rect class="box-ok" x="530" y="30" width="100" height="36" rx="8"/><text x="580" y="53" text-anchor="middle" class="label">send</text>
+  <rect class="box2" x="660" y="150" width="90" height="36" rx="18"/><text x="705" y="173" text-anchor="middle" class="label">__end__</text>
+  <path class="arrow" d="M100,108 H138"/><path class="arrow" d="M260,108 H298"/>
+  <path class="arrow-ok" d="M450,95 L528,52"/><text x="500" y="55" text-anchor="end" class="small">approve / edit</text>
+  <path class="arrow-bad" d="M450,125 L658,166"/><text x="545" y="160" class="small">reject</text>
+  <path class="arrow" d="M630,48 C700,48 705,100 705,148"/>
+</svg>
+<figcaption>The decision lives inside <code>human_review</code>: the human's answer picks the branch. <strong>Approve, edit and reject are just three values of the resume payload</strong>; you design the payload shape.</figcaption>
+</figure>
+
+<h2>The rule that surprises everyone: the node starts over</h2>
+<p>On resume, LangGraph does not continue from the middle of the Python function; it cannot, because the function's local variables are long gone. It runs the <strong>whole node again from the top</strong>, and when execution reaches the same <code>interrupt()</code> call, that call returns the resume value. A verified test: a node that appends to a list before calling <code>interrupt</code> ran its first line <strong>2 times</strong> for one pause and one resume.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Before and after: code before interrupt runs twice, so side effects belong after the interrupt or in a separate node">
+  <rect class="zone" x="10" y="10" width="360" height="180" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title bad">Risky</text>
+  <rect class="box-bad" x="30" y="50" width="320" height="30" rx="6"/><text x="190" y="70" text-anchor="middle" class="mono">charge_card()       # runs twice</text>
+  <rect class="box2" x="30" y="88" width="320" height="30" rx="6"/><text x="190" y="108" text-anchor="middle" class="mono">ok = interrupt("Confirm?")</text>
+  <rect class="box2" x="30" y="126" width="320" height="30" rx="6"/><text x="190" y="146" text-anchor="middle" class="mono">...</text>
+  <rect class="zone" x="390" y="10" width="360" height="180" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title ok">Safe</text>
+  <rect class="box2" x="410" y="50" width="320" height="30" rx="6"/><text x="570" y="70" text-anchor="middle" class="mono">ok = interrupt("Confirm?")</text>
+  <rect class="box-ok" x="410" y="88" width="320" height="30" rx="6"/><text x="570" y="108" text-anchor="middle" class="mono">if ok: charge_card()  # once</text>
+  <text x="570" y="146" text-anchor="middle" class="small">or put the side effect in the next node</text>
+</svg>
+<figcaption>Everything above <code>interrupt()</code> runs on the first pass <em>and</em> on the resume. <strong>Keep code before an interrupt free of side effects</strong> (no emails, payments or database writes), and call <code>interrupt</code>s in the same order every time.</figcaption>
+</figure>
+
+<h2>Approving tool calls in graph 8</h2>
+<p>Now the useful case. The agent from <a href="13-graph-8-agent-loop.html">step 13</a> loops <code>chat_with_tools</code> &rarr; <code>tools</code> &rarr; <code>chat_with_tools</code>. Each time the model asks for a tool, we want a person to see the tool name and arguments first. There are two ways to do it. Both were verified on the fixed <code>8_graph_agent.py</code> with the fake model from <a href="18-testing-graphs.html">step 18</a>, which asks for <code>multiply(12, 7)</code>.</p>
+
+<h3>Way 1: a static breakpoint before the <code>tools</code> node</h3>
+<p>You can tell <code>compile</code> to pause before (or after) named nodes. No change to the graph code is needed:</p>
+<pre data-lang="py" data-tag="verified"><code>graph = builder.compile(checkpointer=InMemorySaver(), interrupt_before=["tools"])
+config = {"configurable": {"thread_id": "1"}}
+
+graph.invoke({"messages": [HumanMessage(content="What is 12 multiplied by 7?")]}, config)
+snapshot = graph.get_state(config)
+print(snapshot.next)                                     # ('tools',)
+print(snapshot.values["messages"][-1].tool_calls[0])     # name 'multiply', args {'nb1': 12, 'nb2': 7}
+
+graph.invoke(None, config)     # approve: continue as planned -&gt; ToolMessage "84", final answer</code></pre>
+<p>With a breakpoint you resume with <code>invoke(None, config)</code>, not with a <code>Command</code>, because nothing is waiting for a value. To <strong>edit</strong> or <strong>reject</strong> you change the saved state first with <code>update_state</code>:</p>
+<pre data-lang="py" data-tag="verified"><code>from langchain.messages import ToolMessage
+
+last = graph.get_state(config).values["messages"][-1]
+
+# edit: same message id, so add_messages REPLACES it instead of appending
+edited = last.model_copy(update={"tool_calls": [{**last.tool_calls[0], "args": {"nb1": 12, "nb2": 8}}]})
+graph.update_state(config, {"messages": [edited]})
+graph.invoke(None, config)     # the tool now returns "96"
+
+# reject (on another paused thread): answer the call yourself, as if you were the tools node
+graph.update_state(config, {"messages": [ToolMessage(content="The user rejected this tool call.",
+                                                     tool_call_id=last.tool_calls[0]["id"])]},
+                   as_node="tools")
+graph.invoke(None, config)     # the model sees the rejection and answers without the tool</code></pre>
+<p>The reject trick uses <code>as_node="tools"</code> so LangGraph follows the <code>tools</code> node's edge back to <code>chat_with_tools</code> (verified: <code>next</code> became <code>('chat_with_tools',)</code>). Every tool call must get a matching <a class="term" href="glossary.html#tool-message">ToolMessage</a>; without one, the model provider rejects the next request.</p>
+
+<h3>Way 2: a review node that calls <code>interrupt()</code></h3>
+<p>Breakpoints are handy for debugging. For approval steps in an application, <code>interrupt()</code> is usually the better fit, because the question, the answer and the routing live together in your code. Here a <code>review</code> node sits between the model and the tools:</p>
+<pre data-lang="py" data-tag="verified"><code>from langgraph.graph import StateGraph, START, END, MessagesState
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.types import interrupt, Command
+from langchain.messages import ToolMessage
+
+
+def review(state: MessagesState):
+    call = state["messages"][-1].tool_calls[0]
+    answer = interrupt({"tool": call["name"], "args": call["args"]})
+    if answer == "yes":
+        return Command(goto="tools")
+    return Command(goto="chat_with_tools",
+                   update={"messages": [ToolMessage(content="Rejected by the user.",
+                                                    tool_call_id=call["id"])]})
+
+
+builder = StateGraph(MessagesState)
+builder.add_node("chat_with_tools", chat_with_tools)          # from 8_graph_agent.py
+builder.add_node("review", review, destinations=("tools", "chat_with_tools"))
+builder.add_node("tools", ToolNode(tools))
+builder.add_edge(START, "chat_with_tools")
+builder.add_conditional_edges("chat_with_tools", tools_condition, {"tools": "review", END: END})
+builder.add_edge("tools", "chat_with_tools")
+graph = builder.compile(checkpointer=InMemorySaver())</code></pre>
+<p>Notice the third argument to <code>add_conditional_edges</code>: a <strong>path map</strong>. <code>tools_condition</code> still returns the string <code>"tools"</code> (it always does, see <a href="12-graph-6-toolnode.html">step 12</a>), and the map sends that to <code>review</code> instead. Verified run: the first invoke returned <code>{'tool': 'multiply', 'args': {'nb1': 12, 'nb2': 7}}</code> as the question; resuming with <code>"yes"</code> produced Human, AI, Tool <code>"84"</code>, AI; resuming with <code>"no"</code> produced the same four message types with the rejection as the tool result. (This simple version reviews only the first tool call in a message; a real one would loop over all of them.)</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Graph 8 with a review node: chat_with_tools goes to review when a tool is requested, review goes to tools on yes or back to chat_with_tools on no, tools goes back to chat_with_tools">
+  <rect class="box2" x="10" y="95" width="90" height="36" rx="18"/><text x="55" y="118" text-anchor="middle" class="label">__start__</text>
+  <rect class="box" x="150" y="95" width="150" height="36" rx="8"/><text x="225" y="118" text-anchor="middle" class="label">chat_with_tools</text>
+  <rect class="box-warn" x="380" y="20" width="130" height="50" rx="8"/><text x="445" y="42" text-anchor="middle" class="label">review</text><text x="445" y="60" text-anchor="middle" class="small">interrupt()</text>
+  <rect class="box" x="600" y="20" width="110" height="50" rx="8"/><text x="655" y="50" text-anchor="middle" class="label">tools</text>
+  <rect class="box2" x="380" y="170" width="90" height="36" rx="18"/><text x="425" y="193" text-anchor="middle" class="label">__end__</text>
+  <path class="arrow" d="M100,113 H148"/>
+  <path class="arrow" d="M300,105 L378,52"/><text x="300" y="70" class="small">"tools"</text>
+  <path class="arrow" d="M300,122 L378,182"/><text x="296" y="160" text-anchor="end" class="small">no tool call</text>
+  <path class="arrow-ok" d="M510,45 H598"/><text x="554" y="38" text-anchor="middle" class="small">yes</text>
+  <path class="arrow-bad" d="M420,70 C400,95 330,105 302,108"/><text x="400" y="100" class="small">no + ToolMessage</text>
+  <path class="arrow" d="M655,70 C655,140 400,135 302,118"/>
+</svg>
+<figcaption>Only the routing changes; <code>chat_with_tools</code> and the three tools are reused from step 13. <strong>The model never runs a tool the human did not approve.</strong></figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<tr><th></th><th><code>interrupt()</code> in a node</th><th><code>interrupt_before</code> / <code>interrupt_after</code></th></tr>
+<tr><td>Where you set it</td><td>inside node code</td><td><code>compile(...)</code> (or per call on <code>invoke</code>/<code>stream</code>), or Studio's Interrupts button</td></tr>
+<tr><td>Can show a custom question</td><td>yes, any JSON-friendly value</td><td>no; you inspect the state yourself</td></tr>
+<tr><td>Resume with</td><td><code>Command(resume=value)</code></td><td><code>invoke(None, config)</code></td></tr>
+<tr><td>Edit / reject</td><td>in your node, based on the answer</td><td><code>update_state</code> before resuming</td></tr>
+<tr><td>Best for</td><td>approval steps in a real app</td><td>debugging: "stop before the tools node so I can look"</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to <code>interrupt_after</code>? When "after" is useful</summary>
+<p><code>interrupt_before=["two"]</code> stops <em>before</em> node <code>two</code> runs, so you can change its input. <code>interrupt_after=["one"]</code> stops <em>after</em> node <code>one</code> ran, so you can check its output before anything else happens. Verified on a two-node counter graph (<code>one</code> adds 1, <code>two</code> multiplies by 10): with <code>interrupt_before=["two"]</code> the first invoke returned <code>{'n': 2}</code> with <code>next == ('two',)</code>; after <code>update_state(config, {"n": 5})</code> the resume returned <code>{'n': 50}</code>. With <code>interrupt_after=["one"]</code> the first invoke also stopped at <code>{'n': 2}</code>, and resuming gave <code>{'n': 20}</code>.</p>
+</details>
+
+<h2>The Interrupts button in LangGraph Studio</h2>
+<p>In the video, every Studio screen shows two buttons above the graph drawing: <strong>Memory</strong> and <strong>Interrupts</strong> (for example at 42:25 with graph 0 and at 131:10 with graph 8). The presenter does not click them. According to the Studio docs, the Interrupts button sets breakpoints: you pick a node and whether to pause <em>before</em> or <em>after</em> it, submit your input, and the run stops there; you then click <strong>Continue</strong> in the thread log to resume. It is the visual version of <code>interrupt_before</code> / <code>interrupt_after</code>, and you do not need to change your code or add a checkpointer, because the <a class="term" href="glossary.html#langgraph-dev">langgraph dev</a> server already persists threads.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Simplified wireframe of LangGraph Studio with graph 8: Memory and Interrupts buttons above the graph, a breakpoint before the tools node, and a thread panel with a Continue button">
+  <rect class="ui-window" x="10" y="10" width="740" height="280" rx="10"/>
+  <rect class="ui-chrome" x="10" y="10" width="740" height="36" rx="10"/>
+  <text x="30" y="33" class="label">Studio / 8_graph</text>
+  <rect class="ui-button-ghost" x="150" y="17" width="60" height="22" rx="5"/><text x="180" y="32" text-anchor="middle" class="small">Graph</text>
+  <rect class="ui-button-ghost" x="215" y="17" width="50" height="22" rx="5"/><text x="240" y="32" text-anchor="middle" class="small">Chat</text>
+  <text x="440" y="33" class="label">Thread 01a0...</text>
+  <rect class="ui-button-ghost" x="600" y="17" width="64" height="22" rx="5"/><text x="632" y="32" text-anchor="middle" class="small">Interact</text>
+  <rect class="ui-button-ghost" x="670" y="17" width="60" height="22" rx="5"/><text x="700" y="32" text-anchor="middle" class="small">Trace</text>
+  <path class="line" d="M420,46 V290"/>
+  <rect class="ui-button-ghost" x="200" y="56" width="70" height="26" rx="5"/><text x="235" y="73" text-anchor="middle" class="small">Memory</text>
+  <rect class="box-warn" x="280" y="56" width="90" height="26" rx="5"/><text x="325" y="73" text-anchor="middle" class="small">Interrupts</text>
+  <rect class="box2" x="120" y="96" width="100" height="28" rx="14"/><text x="170" y="114" text-anchor="middle" class="small">__start__</text>
+  <rect class="box" x="105" y="142" width="130" height="30" rx="6"/><text x="170" y="161" text-anchor="middle" class="small">chat_with_tools</text>
+  <rect class="box-warn" x="260" y="186" width="90" height="30" rx="6"/><text x="305" y="205" text-anchor="middle" class="small">tools</text>
+  <circle class="dot-warn" cx="262" cy="188" r="6"/>
+  <rect class="box2" x="120" y="236" width="100" height="28" rx="14"/><text x="170" y="254" text-anchor="middle" class="small">__end__</text>
+  <path class="arrow" d="M170,124 V140"/><path class="arrow" d="M235,165 L270,184"/><path class="arrow" d="M170,172 V234"/>
+  <text x="300" y="240" text-anchor="middle" class="small">pause before tools</text>
+  <rect class="ui-bubble-user" x="440" y="60" width="200" height="28" rx="8"/><text x="452" y="79" class="ui-on-user">What is 12 multiplied by 7?</text>
+  <rect class="ui-bubble-ai" x="440" y="98" width="290" height="44" rx="8"/><text x="452" y="116" class="small">chat_with_tools</text><text x="452" y="133" class="label">tool call: multiply(12, 7)</text>
+  <rect class="box-warn" x="440" y="152" width="290" height="30" rx="8"/><text x="585" y="172" text-anchor="middle" class="small">interrupted before "tools"</text>
+  <rect class="ui-button" x="440" y="194" width="100" height="30" rx="6"/><text x="490" y="214" text-anchor="middle" class="on-solid">Continue</text>
+</svg>
+<figcaption>Illustration (simplified). The top bar, Memory and Interrupts buttons, graph and thread panel match the video's Studio screens; the paused state and Continue button follow the Studio docs and were not shown in the video. <strong>Breakpoints in Studio need no code change.</strong></figcaption>
+</figure>
+
+<p>If your graph calls <code>interrupt()</code> itself, Studio also stops there and shows the question in the thread, and you resume by sending a value. The exact UI changes between Studio versions, so follow the "How to use Studio" page linked below if the buttons look different for you.</p>
+
+<h2>Common human-in-the-loop patterns</h2>
+<div class="table-wrap"><table>
+<tr><th>Pattern</th><th>What the human sees</th><th>Typical resume payload</th></tr>
+<tr><td>Approve or reject</td><td>the action and its arguments</td><td><code>"yes"</code> / <code>"no"</code>, or <code>{"action": "approve"}</code></td></tr>
+<tr><td>Edit then continue</td><td>a draft or tool arguments, in an editable form</td><td><code>{"action": "edit", "draft": "..."}</code></td></tr>
+<tr><td>Review a tool call</td><td>tool name + args, before <code>tools</code> runs</td><td>approve / edit args / reject with a reason</td></tr>
+<tr><td>Ask for missing information</td><td>"Which date did you mean?"</td><td>the user's text; the node can loop and ask again if it is invalid</td></tr>
+<tr><td>Validate model output</td><td>the model's answer before it is saved or shown</td><td>accept, or a correction</td></tr>
+</table></div>
+<p>If you build agents with LangChain's <code>create_agent</code> instead of a hand-made graph, LangChain 1.3.18 also has a ready-made <code>HumanInTheLoopMiddleware</code> (in <code>langchain.agents.middleware</code>) that pauses before chosen tools; under the hood it uses the same <code>interrupt</code> mechanism. See <a href="lg-05-agent-architectures.html">chapter 5</a> for <code>create_agent</code> vs hand-built graphs.</p>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+<li><strong>No checkpointer</strong> in plain Python: the graph pauses but cannot resume (<code>RuntimeError: Cannot use Command(resume=...) without checkpointer</code>).</li>
+<li><strong>Different thread id on resume</strong>: LangGraph looks in another notebook, finds nothing waiting, and starts fresh.</li>
+<li><strong>Resuming with a dictionary instead of <code>Command</code></strong>: <code>invoke({"action": "approve"}, config)</code> is treated as new input, not as the answer.</li>
+<li><strong>Side effects before <code>interrupt()</code></strong>: they run twice. Move them after the interrupt or into the next node.</li>
+<li><strong>Wrapping <code>interrupt()</code> in <code>try/except Exception</code></strong>: the pause works by raising a special exception internally; a broad <code>except</code> swallows it. Verified: with <code>try: interrupt(...)</code> / <code>except Exception:</code> the graph never paused and the <code>except</code> branch ran instead. Keep interrupts outside broad try blocks.</li>
+<li><strong>Rejecting a tool call without a ToolMessage</strong>: the next model call fails because a tool call has no answer.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>interrupt(value)</code> pauses a node, saves a checkpoint and returns <code>value</code> to your code under <code>__interrupt__</code>.</li>
+<li>Resume on the same thread with <code>invoke(Command(resume=answer), config)</code>; <code>interrupt</code> then returns <code>answer</code>.</li>
+<li>The node re-runs from the top on resume: keep side effects after the interrupt.</li>
+<li>A checkpointer is required (the server provides one under <code>langgraph dev</code>).</li>
+<li>Static breakpoints: <code>compile(interrupt_before=[...])</code> / <code>interrupt_after</code>, resume with <code>invoke(None, config)</code>, edit with <code>update_state</code>; Studio's Interrupts button does the same visually.</li>
+<li>For graph 8, put a review step before <code>tools</code> and answer rejected calls with a <code>ToolMessage</code>.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/interrupts">LangGraph docs: Interrupts</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/human-in-the-loop">LangChain docs: Human-in-the-loop (middleware for create_agent)</a></li>
+<li><a href="https://docs.langchain.com/langsmith/use-studio">LangSmith docs: How to use Studio (breakpoints, threads)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/use-time-travel">LangGraph docs: Use time travel</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lg-06-persistence-and-memory.html"><small>← Chapter 6</small>Persistence, Memory &amp; Time Travel</a>
+<a class="next" href="lg-08-streaming-debugging-studio.html"><small>Chapter 8 →</small>Streaming, Debugging &amp; LangGraph Studio</a>
+</nav>
+</main>
+</body>
+</html>

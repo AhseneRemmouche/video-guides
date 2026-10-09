@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>17 · Memory That Survives a Restart</title>
+<meta name="description" content="SqliteSaver, a chat loop, and why langgraph dev refuses your own checkpointer.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 17/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 17 of 19 · Extra, not in the video</div>
+  <h1>Memory That Survives a Restart</h1>
+  <p class="lead">SqliteSaver, a chat loop, and why langgraph dev refuses your own checkpointer.</p>
+  <span class="video-link extra">Extension · verified against LangGraph 1.2.11</span>
+</section>
+<div class="callout"><p><strong>Extension: not in the video.</strong> This step completes README exercise 7, "Replace <code>MemorySaver</code> with a persistent checkpointer". <code>module1/11_graph_sqlite_memory.py</code> was run against LangGraph 1.2.11 and <code>langgraph-checkpoint-sqlite</code> 3.1.1 with the offline fake model from step 15, in <strong>two separate Python processes</strong> one after the other: the first saved 4 messages, the second, started fresh, continued the same conversation to 8.</p>
+<p><strong>What that proves:</strong> the conversation really is stored on disk and reloaded by a new program. <strong>What it doesn't:</strong> what a real model answers. With your key the answers will be real, but the saving and loading work the same way.</p></div>
+
+<h2>Goal</h2>
+<p>At the end of the course the presenter makes a point worth repeating: in Studio the conversation is remembered, "however, if we are actually doing everything in the terminal, we will realize after every run, we are not actually keeping the memory" (132:02–132:28). Graph 9 fixes that with <code>MemorySaver</code>, but only <em>while the program runs</em>. <code>MemorySaver</code> keeps everything in the computer's RAM, and RAM is wiped when Python exits.</p>
+<p>In this step you build a small chat program whose memory is a <strong>file on disk</strong>. Ask a question, quit, start the program again tomorrow with the same thread name, and the math teacher still knows what you talked about.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="MemorySaver keeps state in RAM and loses it when the process ends; SqliteSaver writes it to checkpoints.sqlite on disk so a second process can load it">
+  <text x="16" y="24" class="title">MemorySaver (graph 9)</text>
+  <rect class="box" x="16" y="36" width="200" height="50" rx="8"/>
+  <text x="116" y="58" text-anchor="middle" class="label">run 1: 4 messages</text>
+  <text x="116" y="76" text-anchor="middle" class="small">kept in RAM</text>
+  <path class="arrow-bad" d="M216,61 H282"/>
+  <rect class="box-bad" x="284" y="36" width="170" height="50" rx="8"/>
+  <text x="369" y="66" text-anchor="middle" class="label">Python exits</text>
+  <path class="arrow-bad" d="M454,61 H520"/>
+  <rect class="box-warn" x="522" y="36" width="222" height="50" rx="8"/>
+  <text x="633" y="58" text-anchor="middle" class="label">run 2: starts empty</text>
+  <text x="633" y="76" text-anchor="middle" class="small">earlier turns are gone</text>
+  <text x="16" y="128" class="title">SqliteSaver (this step)</text>
+  <rect class="box" x="16" y="140" width="200" height="50" rx="8"/>
+  <text x="116" y="162" text-anchor="middle" class="label">run 1: 4 messages</text>
+  <text x="116" y="180" text-anchor="middle" class="small">written to disk</text>
+  <path class="arrow-ok" d="M216,165 H282"/>
+  <rect class="box-info" x="284" y="140" width="170" height="50" rx="8"/>
+  <text x="369" y="162" text-anchor="middle" class="mono">checkpoints.sqlite</text>
+  <text x="369" y="180" text-anchor="middle" class="small">survives the exit</text>
+  <path class="arrow-ok" d="M454,165 H520"/>
+  <rect class="box-ok" x="522" y="140" width="222" height="50" rx="8"/>
+  <text x="633" y="162" text-anchor="middle" class="label">run 2: loads 4, adds 4</text>
+  <text x="633" y="180" text-anchor="middle" class="small">8 messages (verified)</text>
+  <text x="380" y="222" text-anchor="middle" class="small">Same graph, same thread ID. Only the place where checkpoints are stored changes.</text>
+</svg>
+<figcaption>Top: the in-memory checkpointer forgets everything when the program stops. Bottom: the SQLite checkpointer writes each checkpoint to a file. <strong>Swapping the checkpointer is the only change the graph needs.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to SQLite? A database in a single file</summary>
+<p>A <strong>database</strong> stores data in tables (rows and columns) and lets programs read and write it safely. Most databases (PostgreSQL, MySQL) run as a separate server you have to install. <a class="term" href="glossary.html#sqlite">SQLite</a> is different: the whole database is <strong>one ordinary file</strong>, and the code to read it ships with Python as the <code>sqlite3</code> module. Nothing to install, nothing to start.</p>
+<p>That makes it perfect for learning and for small local apps. For a web app with many users writing at the same time, you would switch to PostgreSQL (LangGraph has a <code>langgraph-checkpoint-postgres</code> package for that), but the graph code stays the same.</p>
+</details>
+
+<h2>Install the SQLite checkpointer</h2>
+<ol class="steps">
+<li><strong>Add the package</strong>
+<pre data-lang="ps" data-tag="terminal"><code>uv add langgraph-checkpoint-sqlite</code></pre>
+<p><code>uv add</code> puts <code>"langgraph-checkpoint-sqlite&gt;=3.1.1"</code> into <code>pyproject.toml</code> (line 13 of the file in step 15), updates <code>uv.lock</code> and installs it. It's the official package from the LangGraph team (MIT licence, source in the <code>langchain-ai/langgraph</code> repository under <code>libs/checkpoint-sqlite</code>). It isn't part of <code>langgraph</code> itself so that people who don't need SQLite don't have to install it.</p></li>
+<li><strong>Create <code>module1/11_graph_sqlite_memory.py</code></strong>
+<p>New file in the <code>module1</code> folder, with the code below. It doesn't copy the agent: it <em>reuses</em> the graph from <code>8_graph_agent.py</code> (as fixed in step 15).</p></li>
+<li><strong>Ignore the database file (recommended)</strong>
+<p>The program creates <code>checkpoints.sqlite</code> holding your whole chat history. Add a line <code>checkpoints.sqlite</code> to <code>.gitignore</code> so it never ends up on GitHub.</p></li>
+</ol>
+
+<pre data-file="module1/11_graph_sqlite_memory.py" data-lang="py" data-tag="extension"><code>import sqlite3
+import sys
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langchain.messages import HumanMessage
+
+# reuse the agent we already built in 8_graph_agent.py (file names start with a digit,
+# so we load the module by path instead of a normal import)
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("agent8", Path(__file__).with_name("8_graph_agent.py"))
+agent8 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(agent8)
+
+# a real file on disk: the conversation survives when the program stops
+connection = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
+memory = SqliteSaver(connection)
+graph = agent8.builder.compile(checkpointer=memory)
+
+thread_id = sys.argv[1] if len(sys.argv) &gt; 1 else "student-1"
+config = {"configurable": {"thread_id": thread_id}}
+
+print(f"Thread '{thread_id}'. Type a question, or q to quit.")
+while True:
+    question = input("You: ").strip()
+    if question.lower() in {"q", "quit", "exit"}:
+        break
+    if not question:
+        continue
+    result = graph.invoke({"messages": [HumanMessage(content=question)]}, config)
+    print("Teacher:", result["messages"][-1].content)
+
+saved = graph.get_state(config).values.get("messages", [])
+print(f"{len(saved)} messages saved for thread '{thread_id}' in checkpoints.sqlite")
+connection.close()</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Code map: 11_graph_sqlite_memory.py loads 8_graph_agent.py by path, takes its builder, compiles it with a SqliteSaver backed by checkpoints.sqlite, then runs a chat loop">
+  <rect class="box2" x="16" y="20" width="250" height="210" rx="8"/>
+  <text x="141" y="44" text-anchor="middle" class="mono">8_graph_agent.py</text>
+  <rect class="box" x="32" y="60" width="218" height="34" rx="8"/><text x="141" y="82" text-anchor="middle" class="label">tools + model</text>
+  <rect class="box" x="32" y="104" width="218" height="34" rx="8"/><text x="141" y="126" text-anchor="middle" class="mono">builder</text>
+  <rect class="box2" x="32" y="148" width="218" height="34" rx="8"/><text x="141" y="170" text-anchor="middle" class="small">graph (no checkpointer, unused)</text>
+  <rect class="box-solid" x="340" y="20" width="404" height="34" rx="8"/>
+  <text x="542" y="42" text-anchor="middle" class="on-solid">11_graph_sqlite_memory.py</text>
+  <rect class="box" x="340" y="66" width="404" height="34" rx="8"/><text x="542" y="88" text-anchor="middle" class="label">lines 12–14: load file 8 by path (importlib)</text>
+  <rect class="box-info" x="340" y="112" width="404" height="34" rx="8"/><text x="542" y="134" text-anchor="middle" class="label">lines 17–19: SqliteSaver + compile(builder)</text>
+  <rect class="box" x="340" y="158" width="404" height="34" rx="8"/><text x="542" y="180" text-anchor="middle" class="label">lines 21–32: thread from argv, chat loop</text>
+  <rect class="box" x="340" y="204" width="404" height="34" rx="8"/><text x="542" y="226" text-anchor="middle" class="label">lines 34–36: count saved messages, close</text>
+  <path class="arrow-accent" d="M250,121 C300,121 300,129 338,129"/>
+  <text x="270" y="112" class="small">used</text>
+</svg>
+<figcaption>File 11 borrows the <em>builder</em> (the uncompiled graph) from file 8 and compiles its own copy with a different checkpointer. <strong>One agent definition, two ways to run it</strong>: without memory in Studio, with a database in the terminal.</figcaption>
+</figure>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import sqlite3</code></td><td>Python's built-in SQLite module. No install needed.</td></tr>
+<tr><td>2</td><td><code>import sys</code></td><td>Gives access to <code>sys.argv</code>, the words typed after the file name on the command line (line 21).</td></tr>
+<tr><td>4</td><td><code>from langgraph.checkpoint.sqlite import SqliteSaver</code></td><td>The checkpointer from the package you just added. Same job as <code>MemorySaver</code>, but it reads and writes a SQLite database.</td></tr>
+<tr><td>5</td><td><code>from langchain.messages import HumanMessage</code></td><td>To wrap what you type as a <a class="term" href="glossary.html#human-message">human message</a> (line 31).</td></tr>
+<tr><td>7–8</td><td><code># reuse the agent we already built in 8_graph_agent.py ...</code></td><td>A comment explaining the unusual import below.</td></tr>
+<tr><td>9</td><td><code>import importlib.util</code></td><td>The part of Python's import system that can load a module <em>from a file path</em>. Needed because the course files' names start with a digit (see the primer below).</td></tr>
+<tr><td>10</td><td><code>from pathlib import Path</code></td><td>A convenient way to build file paths that works on Windows, macOS and Linux.</td></tr>
+<tr><td>12</td><td><code>spec = importlib.util.spec_from_file_location("agent8", Path(__file__).with_name("8_graph_agent.py"))</code></td><td><code>__file__</code> is the path of this file; <code>.with_name("8_graph_agent.py")</code> swaps the file name, giving <code>module1/8_graph_agent.py</code> no matter which folder you run from. <code>spec_from_file_location</code> creates a "spec", a description of a module to load, and gives it a valid name, <code>"agent8"</code>.</td></tr>
+<tr><td>13</td><td><code>agent8 = importlib.util.module_from_spec(spec)</code></td><td>Creates an empty module object from that spec.</td></tr>
+<tr><td>14</td><td><code>spec.loader.exec_module(agent8)</code></td><td>Runs <code>8_graph_agent.py</code> top to bottom inside that module: <code>load_dotenv()</code>, the tools, the model, the <code>builder</code> and <code>graph</code>. Afterwards <code>agent8.builder</code> works like any imported name.</td></tr>
+<tr><td>16</td><td><code># a real file on disk: the conversation survives when the program stops</code></td><td>The point of this step, in one comment.</td></tr>
+<tr><td>17</td><td><code>connection = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)</code></td><td>Opens the database file, and creates it if it doesn't exist. The path is relative, so the file lands in the folder you run the command from (the project root). <code>check_same_thread=False</code> is explained below.</td></tr>
+<tr><td>18</td><td><code>memory = SqliteSaver(connection)</code></td><td>Wraps the connection in a checkpointer. On first use it creates its tables (<code>checkpoints</code> and <code>writes</code>).</td></tr>
+<tr><td>19</td><td><code>graph = agent8.builder.compile(checkpointer=memory)</code></td><td>Compiles graph 8's builder again, this time with the SQLite checkpointer. Same nodes and edges as graph 8; now every step is saved to the file.</td></tr>
+<tr><td>21</td><td><code>thread_id = sys.argv[1] if len(sys.argv) &gt; 1 else "student-1"</code></td><td><code>sys.argv[0]</code> is the script path, <code>sys.argv[1]</code> the first word after it. If you typed one, it becomes the <a class="term" href="glossary.html#thread-id">thread ID</a>; otherwise the default <code>"student-1"</code>. This is a one-line <code>if</code>/<code>else</code> (a "conditional expression").</td></tr>
+<tr><td>22</td><td><code>config = {"configurable": {"thread_id": thread_id}}</code></td><td>The same config shape as graph 9. All saved checkpoints are filed under this thread ID.</td></tr>
+<tr><td>24</td><td><code>print(f"Thread '{thread_id}'. Type a question, or q to quit.")</code></td><td>An <a class="term" href="glossary.html#f-string">f-string</a> that tells you which conversation you're in.</td></tr>
+<tr><td>25</td><td><code>while True:</code></td><td>Repeat forever, until a <code>break</code> (line 28). This is the chat loop.</td></tr>
+<tr><td>26</td><td><code>question = input("You: ").strip()</code></td><td><code>input</code> shows <code>You: </code>, waits for you to type and press <kbd>Enter</kbd>, and returns the text. <code>.strip()</code> removes stray spaces.</td></tr>
+<tr><td>27–28</td><td><code>if question.lower() in {"q", "quit", "exit"}:</code> / <code>break</code></td><td><code>.lower()</code> makes <code>Q</code> and <code>QUIT</code> work too. <code>{...}</code> is a set of accepted words. <code>break</code> leaves the loop.</td></tr>
+<tr><td>29–30</td><td><code>if not question:</code> / <code>continue</code></td><td>An empty line (just <kbd>Enter</kbd>) is skipped: <code>continue</code> jumps back to line 26 without calling the model.</td></tr>
+<tr><td>31</td><td><code>result = graph.invoke({"messages": [HumanMessage(content=question)]}, config)</code></td><td>Runs the agent with only the <em>new</em> question. Before the first node runs, the checkpointer loads the thread's saved messages from the file, and <code>add_messages</code> appends the new one.</td></tr>
+<tr><td>32</td><td><code>print("Teacher:", result["messages"][-1].content)</code></td><td>Prints the last message, the model's final answer.</td></tr>
+<tr><td>34</td><td><code>saved = graph.get_state(config).values.get("messages", [])</code></td><td><code>get_state(config)</code> reads the latest saved checkpoint for this thread without running anything. <code>.values</code> is the state dictionary; <code>.get("messages", [])</code> returns an empty list for a thread that has nothing saved yet, instead of raising <code>KeyError</code>.</td></tr>
+<tr><td>35</td><td><code>print(f"{len(saved)} messages saved for thread '{thread_id}' in checkpoints.sqlite")</code></td><td>Proof that the history is there: the number of messages stored for this thread.</td></tr>
+<tr><td>36</td><td><code>connection.close()</code></td><td>Closes the database cleanly. Everything was already written after each step, so this is tidiness, not a "save" button.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to module names? Why <code>import 8_graph_agent</code> is a SyntaxError</summary>
+<p>An <code>import</code> statement takes a Python <strong>identifier</strong>: letters, digits and underscores, and it <strong>can't start with a digit</strong> (the same rule as variable names). Python reads <code>8_graph_agent</code> as a number that went wrong. Verified:</p>
+<pre data-lang="text" data-tag="verified error"><code>    import 8_graph_agent
+            ^
+SyntaxError: invalid decimal literal</code></pre>
+<p><code>from module1 import 8_graph_agent</code> fails the same way. The course numbers its files so they sort in order, which is great for learning but means you need another way to load them:</p>
+<ul>
+<li><code>importlib.import_module("module1.8_graph_agent")</code> takes the name as a <em>string</em>, so the digit is fine. That's what the README's <code>python -c</code> commands use. But it only works when Python can find the <code>module1</code> folder, i.e. when you run from the project root (from inside <code>module1</code> we got <code>ModuleNotFoundError: No module named 'module1'</code>).</li>
+<li><code>importlib.util.spec_from_file_location(...)</code> (lines 12–14) loads by <strong>file path</strong>, built from <code>__file__</code>, so it works from any folder. That's why this file uses it.</li>
+</ul>
+<p>In your own projects, just give modules normal names like <code>agent.py</code>, and <code>from agent import builder</code> works.</p>
+</details>
+
+<details class="primer"><summary>New to threads? What <code>check_same_thread=False</code> means</summary>
+<p>Here "thread" means an <strong>operating-system thread</strong>: a separate line of execution inside one program. That's a different idea from a LangGraph conversation thread (the <code>thread_id</code>); the same word, two meanings.</p>
+<p>By default Python's <code>sqlite3</code> refuses to let a connection be used by any thread other than the one that created it, and raises an error if that happens. LangGraph runs graph steps in background worker threads, so the checkpointer does use the connection from another thread (verified: without the flag the first question fails with <code>ProgrammingError</code>). <code>check_same_thread=False</code> turns that safety check off. It's safe here because <code>SqliteSaver</code> guards the connection with its own lock; the package's own documentation uses exactly this line.</p>
+<p>There's also a shorter form that opens and closes the connection for you:</p>
+<pre data-lang="py" data-tag="illustrative"><code>with SqliteSaver.from_conn_string("checkpoints.sqlite") as memory:
+    graph = agent8.builder.compile(checkpointer=memory)
+    ...  # use the graph inside the with block</code></pre>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Chat loop flowchart: input; if q, quit or exit then break and print the saved count; if empty, continue; otherwise invoke the graph with the thread config, print the teacher's answer and loop">
+  <rect class="box-solid" x="16" y="100" width="150" height="44" rx="8"/>
+  <text x="91" y="127" text-anchor="middle" class="on-solid">input("You: ")</text>
+  <path class="arrow" d="M166,122 H210"/>
+  <rect class="box-warn" x="212" y="100" width="150" height="44" rx="8"/>
+  <text x="287" y="120" text-anchor="middle" class="label">q / quit / exit?</text>
+  <text x="287" y="136" text-anchor="middle" class="small">yes → break</text>
+  <path class="arrow" d="M287,144 V172"/>
+  <rect class="box2" x="212" y="174" width="150" height="56" rx="8"/>
+  <text x="287" y="196" text-anchor="middle" class="label">get_state → count</text>
+  <text x="287" y="214" text-anchor="middle" class="small">close connection</text>
+  <path class="arrow" d="M362,122 H406"/>
+  <text x="372" y="114" class="small">no</text>
+  <rect class="box-warn" x="408" y="100" width="120" height="44" rx="8"/>
+  <text x="468" y="120" text-anchor="middle" class="label">empty?</text>
+  <text x="468" y="136" text-anchor="middle" class="small">yes → continue</text>
+  <path class="arrow" d="M528,122 H572"/>
+  <text x="536" y="114" class="small">no</text>
+  <rect class="box-info" x="574" y="100" width="170" height="44" rx="8"/>
+  <text x="659" y="120" text-anchor="middle" class="label">graph.invoke(...,</text>
+  <text x="659" y="136" text-anchor="middle" class="mono">config)</text>
+  <path class="arrow" d="M659,100 V60 H91 V98"/>
+  <text x="380" y="52" text-anchor="middle" class="small">print("Teacher:", ...) and ask again</text>
+  <path class="arrow dashed" d="M468,100 C468,80 120,80 110,98"/>
+</svg>
+<figcaption>Lines 25–32 as a flowchart. The dashed arrow is <code>continue</code> (skip empty lines). <strong>Only the top path calls the model; every call is saved under the same thread ID.</strong></figcaption>
+</figure>
+
+<h2>Run it twice</h2>
+<p>From the project root (with the virtual environment active, or put <code>uv run</code> in front):</p>
+<pre data-lang="ps" data-tag="terminal"><code>python module1/11_graph_sqlite_memory.py student-1</code></pre>
+<p>Ask one question, then type <code>q</code>. Then run <strong>the same command again</strong>, a brand-new Python process, and ask a follow-up.</p>
+
+<div class="callout ok"><p><strong>What you should see.</strong> Our two offline runs (fake model; the lines after <code>You:</code> are what we typed):</p>
+<pre data-lang="text" data-tag="verified output, run 1"><code>Thread 'student-1'. Type a question, or q to quit.
+You: What is 12 multiplied by 7?
+Teacher: (fake model) The answer is 84.
+You: q
+4 messages saved for thread 'student-1' in checkpoints.sqlite</code></pre>
+<pre data-lang="text" data-tag="verified output, run 2 (new process)"><code>Thread 'student-1'. Type a question, or q to quit.
+You: Add 3 and 4
+Teacher: (fake model) The answer is 7.
+You: q
+8 messages saved for thread 'student-1' in checkpoints.sqlite</code></pre>
+<p>Run 2 started with nothing in memory, yet ended with 8 messages: the 4 from run 1 were loaded from the file. A different thread is a separate conversation: <code>python module1/11_graph_sqlite_memory.py student-2</code> with one question ended with <code>2 messages saved for thread 'student-2'</code>. With a real key, try "My name is Sam" in run 1 and "What is my name?" in run 2.</p></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Timeline of the verified two-process run: process 1 writes four messages to the file and exits; process 2 reads them, adds four more and saves eight">
+  <rect class="zone" x="16" y="16" width="230" height="200" rx="8"/>
+  <text x="131" y="38" text-anchor="middle" class="title">process 1</text>
+  <rect class="box" x="32" y="52" width="198" height="28" rx="6"/><text x="131" y="71" text-anchor="middle" class="small">human: 12 multiplied by 7?</text>
+  <rect class="box" x="32" y="86" width="198" height="28" rx="6"/><text x="131" y="105" text-anchor="middle" class="small">ai: tool call multiply</text>
+  <rect class="box" x="32" y="120" width="198" height="28" rx="6"/><text x="131" y="139" text-anchor="middle" class="small">tool: 84</text>
+  <rect class="box" x="32" y="154" width="198" height="28" rx="6"/><text x="131" y="173" text-anchor="middle" class="small">ai: The answer is 84.</text>
+  <text x="131" y="204" text-anchor="middle" class="small">exits: RAM is wiped</text>
+  <path class="arrow-ok" d="M246,116 H290"/>
+  <rect class="box-info" x="292" y="80" width="176" height="72" rx="8"/>
+  <text x="380" y="108" text-anchor="middle" class="mono">checkpoints.sqlite</text>
+  <text x="380" y="128" text-anchor="middle" class="small">thread "student-1"</text>
+  <text x="380" y="144" text-anchor="middle" class="small">4 messages</text>
+  <path class="arrow-ok" d="M468,116 H512"/>
+  <rect class="zone" x="514" y="16" width="230" height="200" rx="8"/>
+  <text x="629" y="38" text-anchor="middle" class="title">process 2</text>
+  <rect class="box2" x="530" y="52" width="198" height="28" rx="6"/><text x="629" y="71" text-anchor="middle" class="small">4 loaded messages</text>
+  <rect class="box-ok" x="530" y="86" width="198" height="28" rx="6"/><text x="629" y="105" text-anchor="middle" class="small">human: Add 3 and 4</text>
+  <rect class="box-ok" x="530" y="120" width="198" height="28" rx="6"/><text x="629" y="139" text-anchor="middle" class="small">ai: tool call addition</text>
+  <rect class="box-ok" x="530" y="154" width="198" height="28" rx="6"/><text x="629" y="173" text-anchor="middle" class="small">tool: 7 · ai: The answer is 7.</text>
+  <text x="629" y="204" text-anchor="middle" class="small">saves: 8 messages</text>
+</svg>
+<figcaption>The verified run, message by message. The file is the only thing the two processes share. <strong>That's exactly what "persistent" means: the state outlives the program.</strong></figcaption>
+</figure>
+
+<h3>What's inside the file</h3>
+<p>You don't need to open the database, but it helps to know what's there. We looked after the runs above: <code>SqliteSaver</code> created two tables, <code>checkpoints</code> and <code>writes</code>. The <code>checkpoints</code> table had <strong>10 rows</strong> for <code>student-1</code> and <strong>3</strong> for <code>student-2</code>. LangGraph saves a checkpoint after <em>every step</em> of the graph (input, model, tools, model…), not once per question. That's what makes "time travel" possible: <code>graph.get_state_history(config)</code> lists all of them, newest first. The handbook chapter <a href="lg-06-persistence-and-memory.html">Persistence, Memory &amp; Time Travel</a> goes further.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 186" role="img" aria-label="Inside checkpoints.sqlite: a checkpoints table with rows per thread, 10 for student-1 and 3 for student-2, and a writes table">
+  <rect class="box2" x="16" y="16" width="728" height="154" rx="8"/>
+  <text x="32" y="40" class="mono">checkpoints.sqlite</text>
+  <rect class="box-info" x="32" y="54" width="430" height="100" rx="8"/>
+  <text x="48" y="76" class="title">checkpoints</text>
+  <text x="48" y="98" class="mono">thread_id</text><text x="160" y="98" class="mono">rows</text>
+  <text x="48" y="118" class="mono">student-1</text><text x="160" y="118" class="mono">10</text><text x="210" y="118" class="small">two questions</text>
+  <text x="48" y="138" class="mono">student-2</text><text x="160" y="138" class="mono">3</text><text x="210" y="138" class="small">one question, no tool</text>
+  <rect class="box" x="482" y="54" width="246" height="100" rx="8"/>
+  <text x="498" y="76" class="title">writes</text>
+  <text x="498" y="98" class="small">pending updates from each step,</text>
+  <text x="498" y="116" class="small">used to resume a run that was</text>
+  <text x="498" y="134" class="small">interrupted part-way</text>
+</svg>
+<figcaption>Row counts are from our verified run. <strong>One checkpoint per graph step</strong>; the latest one per thread is what <code>get_state</code> returns.</figcaption>
+</figure>
+
+<h2>Why this isn't registered in langgraph dev</h2>
+<p>Two reasons, one technical and one practical:</p>
+<ol>
+<li><strong>The server refuses a custom checkpointer.</strong> This is the same rule you met in step 15, fix 7: registering graph 9 made <code>langgraph dev</code> stop with "Heads up! Your graph ... includes a custom checkpointer ... With LangGraph API, persistence is handled automatically by the platform". A graph compiled with <code>SqliteSaver</code> is in the same situation.</li>
+<li><strong>This file is a program, not just a graph.</strong> Importing it starts the chat loop and waits for <code>input()</code>, which a server can't answer.</li>
+</ol>
+<p>And it isn't needed: in Studio the server already saves each thread (locally under <code>.langgraph_api</code>, which is why that folder is in <code>.gitignore</code>). So the rule of thumb is: <strong>plain Python, you choose the checkpointer; LangGraph server, it chooses for you.</strong></p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Who provides persistence: in plain Python your code passes a checkpointer to compile; under langgraph dev the server provides persistence and rejects graphs that bring their own">
+  <rect class="zone" x="16" y="16" width="350" height="168" rx="8"/>
+  <text x="191" y="40" text-anchor="middle" class="title">Plain Python (this step)</text>
+  <rect class="box" x="36" y="56" width="310" height="40" rx="8"/>
+  <text x="191" y="81" text-anchor="middle" class="mono">builder.compile(checkpointer=...)</text>
+  <path class="arrow" d="M191,96 V118"/>
+  <rect class="box-ok" x="36" y="120" width="310" height="44" rx="8"/>
+  <text x="191" y="140" text-anchor="middle" class="label">you pick: MemorySaver or SqliteSaver</text>
+  <text x="191" y="156" text-anchor="middle" class="small">graphs 9 and 11</text>
+  <rect class="zone" x="394" y="16" width="350" height="168" rx="8"/>
+  <text x="569" y="40" text-anchor="middle" class="title">langgraph dev / Studio</text>
+  <rect class="box" x="414" y="56" width="310" height="40" rx="8"/>
+  <text x="569" y="81" text-anchor="middle" class="mono">builder.compile()</text>
+  <path class="arrow" d="M569,96 V118"/>
+  <rect class="box-info" x="414" y="120" width="310" height="44" rx="8"/>
+  <text x="569" y="140" text-anchor="middle" class="label">server adds persistence itself</text>
+  <text x="569" y="156" text-anchor="middle" class="small">graphs 0–8 and 10; custom ones refused</text>
+</svg>
+<figcaption>Same builder, two environments. <strong>Never compile with a checkpointer in a file you register in <code>langgraph.json</code>.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong><code>ModuleNotFoundError: No module named 'langgraph.checkpoint.sqlite'</code></strong>: the package isn't installed. Run <code>uv add langgraph-checkpoint-sqlite</code> (the package name uses dashes, the import uses dots).</li>
+<li><strong>Running from a different folder each time.</strong> <code>checkpoints.sqlite</code> is created in the <em>current</em> folder. Run once from the project root and once from <code>module1</code>, and you get two separate files, so the "memory" seems lost. Always run from the project root.</li>
+<li><strong>Using a different thread name.</strong> <code>student-1</code> and <code>Student-1</code> are different threads. No argument means <code>student-1</code>.</li>
+<li><strong>Trying <code>import 8_graph_agent</code>.</strong> That's a <code>SyntaxError</code>; use the importlib lines as written.</li>
+<li><strong>Deleting <code>check_same_thread=False</code>.</strong> We tried: the very first question fails with <code>sqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread.</code> LangGraph ran a step in a worker thread.</li>
+<li><strong>Committing the database.</strong> It contains every message you typed. Add it to <code>.gitignore</code>.</li>
+<li><strong>Forgetting <code>config</code> in <code>invoke</code>.</strong> With a checkpointer, LangGraph needs a thread ID to know where to save. Verified error: <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id</code>.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>MemorySaver</code> lives in RAM and forgets everything when Python exits; <code>SqliteSaver</code> writes checkpoints to a file (README exercise 7).</li>
+<li>Install the official <code>langgraph-checkpoint-sqlite</code> package, open <code>sqlite3.connect("checkpoints.sqlite", check_same_thread=False)</code>, wrap it in <code>SqliteSaver</code>, and compile with it.</li>
+<li>File names starting with a digit can't be imported with <code>import</code>; <code>importlib.util.spec_from_file_location</code> loads them by path.</li>
+<li>A <code>while True</code> loop with <code>input()</code> makes a chat; the thread ID comes from <code>sys.argv</code>; <code>get_state</code> shows what's saved.</li>
+<li>Verified: a second process on the same thread continued from 4 to 8 messages.</li>
+<li><code>langgraph dev</code> provides its own persistence and refuses custom checkpointers, so this file stays a terminal program.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="16-division-tool-and-errors.html"><small>← Previous · Step 16</small>Add a Division Tool &amp; Handle Tool Errors</a>
+<a class="next" href="18-testing-graphs.html"><small>Next · Step 18 →</small>Test Your Graphs Without an API Key</a>
+</nav>
+</main>
+</body>
+</html>

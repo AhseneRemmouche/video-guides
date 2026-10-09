@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 10 · Shipping a React App</title>
+<meta name="description" content="Production builds, environment variables, bundle size, deployment, monitoring and security.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 10/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">React Handbook · Chapter 10 of 10</div>
+  <h1>Shipping a React App</h1>
+  <p class="lead">Production builds, environment variables, bundle size, deployment, monitoring and security.</p>
+</section>
+<p>The video ends with a dashboard that runs on <code>localhost</code>. Getting it in front of real users is a separate skill: building optimised files, understanding what your environment variables really do, keeping the download small, putting the files on a host, serving everything over HTTPS, finding out when something breaks, and not leaking keys. <a href="28-ship-it.html">Step 28</a> did the hands-on part for this app. This chapter explains the background, using what we measured on this project, and ends with a checklist you can reuse for any React app.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> Several problems in this app only appear after <code>npm run build</code> or after deploying: the broken map marker (production build only), blocked <code>http://</code> requests (HTTPS sites only), a 2 MB JavaScript file, and API keys that end up readable by anyone. None of them shows up on the dev server. Shipping safely means knowing where the dev server and the real world differ.</div>
+
+<p>Facts below were checked in the installed <code>vite</code> 7.1.11 and in builds of the project (the original repo and the fixed version from steps 25–28). Hosting is described in general terms; check each provider's own documentation, since their dashboards and offers change.</p>
+
+<h2>Dev server versus production build</h2>
+<p><code>npm run dev</code> starts Vite's <a class="term" href="glossary.html#dev-server">dev server</a>. It serves your source files almost as they are, transforms each one when the browser asks for it, and pushes changes instantly (<a class="term" href="glossary.html#hmr">HMR</a>). That is great for development and useless for users: it is slow to load over the internet, unminified, and needs Node running.</p>
+<p><code>npm run build</code> runs the project's script <code>tsc -b &amp;&amp; vite build</code>. First TypeScript checks every file (any type error stops the build). Then Vite <a class="term" href="glossary.html#bundle">bundles</a> your code and all dependencies into a few optimised files in <code>dist/</code>. The result for the fixed app (step 28):</p>
+<pre class="tree"><code>dist/
+├── index.html                 tiny: just loads the two files below
+├── vite.svg                   copied from public/
+└── assets/
+    ├── index-[hash].js        about 623 kB: React, TanStack Query, Zod, your cards
+    ├── index-[hash].css       about 36 kB: Tailwind output
+    ├── Map-[hash].js          about 1,384 kB: Leaflet + MapTiler SDK, loaded later
+    └── Map-[hash].css         about 16 kB: Leaflet styles</code></pre>
+<p>The <code>[hash]</code> is a short fingerprint of the file's content, for example <code>index-EqZpLb9q.js</code>. When the content changes, the name changes. That lets a host tell browsers "cache files in <code>assets/</code> forever": a new deploy produces new names, so nobody gets stuck with old code. <code>index.html</code> itself must <em>not</em> be cached for long, since it is the file that points to the current names.</p>
+<p>Always test the build locally with <code>npm run preview</code>, which serves <code>dist/</code> like a real host. The broken marker described in <a href="rw-08-maps-on-the-web.html">chapter 8</a> was invisible in <code>npm run dev</code> and obvious in <code>npm run preview</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Build pipeline: src files and node_modules go through tsc type checking, then vite build bundling, minifying and hashing, producing the dist folder which is uploaded to a static host">
+  <rect class="box" x="10" y="40" width="140" height="40" rx="8"/>
+  <text x="80" y="65" text-anchor="middle" class="label">src/ (TS, TSX, CSS)</text>
+  <rect class="box" x="10" y="100" width="140" height="40" rx="8"/>
+  <text x="80" y="125" text-anchor="middle" class="label">node_modules</text>
+  <rect class="box" x="10" y="160" width="140" height="40" rx="8"/>
+  <text x="80" y="185" text-anchor="middle" class="label">.env (VITE_*)</text>
+  <rect class="box-warn" x="200" y="90" width="120" height="60" rx="8"/>
+  <text x="260" y="116" text-anchor="middle" class="label">tsc -b</text>
+  <text x="260" y="134" text-anchor="middle" class="small">type check</text>
+  <rect class="box-solid" x="360" y="80" width="170" height="80" rx="8"/>
+  <text x="445" y="108" text-anchor="middle" class="on-solid">vite build</text>
+  <text x="445" y="126" text-anchor="middle" class="on-solid">bundle, minify,</text>
+  <text x="445" y="143" text-anchor="middle" class="on-solid">hash, inline env</text>
+  <rect class="box-ok" x="570" y="90" width="80" height="60" rx="8"/>
+  <text x="610" y="125" text-anchor="middle" class="label">dist/</text>
+  <rect class="box-info" x="670" y="90" width="80" height="60" rx="8"/>
+  <text x="710" y="116" text-anchor="middle" class="label">static</text>
+  <text x="710" y="133" text-anchor="middle" class="label">host</text>
+  <path class="arrow" d="M150,60 L198,108"/>
+  <path class="arrow" d="M150,120 H198"/>
+  <path class="arrow" d="M150,180 C300,200 400,190 445,162"/>
+  <path class="arrow" d="M320,120 H358"/>
+  <path class="arrow-ok" d="M530,120 H568"/>
+  <path class="arrow" d="M650,120 H668"/>
+</svg>
+<figcaption><code>npm run build</code> from left to right. Note the <code>.env</code> arrow: <strong>environment values are copied into the bundle at build time</strong>, which is the key fact for the next section.</figcaption>
+</figure>
+
+<h2>Environment variables: what VITE_ really means</h2>
+<p>The project reads its OpenWeather key with <code>import.meta.env.VITE_API_KEY</code> (in <code>api.ts</code> and <code>Map.tsx</code>). Vite loads <a class="term" href="glossary.html#env-variable">environment variables</a> from files in the project root, in this order, later files winning (from <code>getEnvFilesForMode</code> in Vite's source):</p>
+<div class="table-wrap"><table>
+<tr><th>File</th><th>Loaded when</th><th>Commit it?</th></tr>
+<tr><td><code>.env</code></td><td>always</td><td>only if it has no secrets</td></tr>
+<tr><td><code>.env.local</code></td><td>always</td><td>no (<code>*.local</code> is in the default <code>.gitignore</code>)</td></tr>
+<tr><td><code>.env.[mode]</code>, e.g. <code>.env.production</code></td><td>in that mode (<code>vite build</code> = production)</td><td>only if it has no secrets</td></tr>
+<tr><td><code>.env.[mode].local</code></td><td>in that mode</td><td>no</td></tr>
+</table></div>
+<p>Only names starting with the <code>envPrefix</code>, <code>'VITE_'</code> by default, are exposed to your code. Vite also provides built-ins: <code>import.meta.env.MODE</code>, <code>DEV</code>, <code>PROD</code>, <code>BASE_URL</code> and <code>SSR</code>. Env files are read when Vite starts, so <strong>restart the dev server after editing <code>.env</code></strong>.</p>
+<p>Here is the part that surprises people. <a class="term" href="glossary.html#vite-env"><code>import.meta.env.VITE_*</code></a> is not read at run time from a secure place. During the build, Vite <em>replaces</em> each use with the literal value. We verified this: building with <code>VITE_API_KEY=TESTKEY</code> put the text <code>TESTKEY</code> twice into <code>dist/assets/*.js</code>, once per file that reads it. Anyone can open the browser's developer tools, look at the JavaScript, and read your key. The <code>VITE_</code> prefix exists precisely to stop you exposing variables <em>by accident</em>; it does not hide the ones you do expose. Step 28's <code>.env.example</code> says it plainly:</p>
+<pre data-lang="env" data-tag="verified"><code># Copy this file to .env and fill in your own keys. Never commit .env.
+# VITE_ variables are built into the JavaScript the browser downloads: anyone can read them.
+VITE_API_KEY=your-openweather-key
+VITE_MAPTILER_KEY=your-maptiler-key</code></pre>
+<p>Two more details from this project. The original <code>.gitignore</code> ignores <code>*.local</code> but not <code>.env</code>, so a key in <code>.env</code> could be committed by accident; step 28 adds <code>.env</code> to it. And the repo's <code>Map.tsx</code> had a real MapTiler key typed directly into the source (replaced by <code>"YOUR_MAPTILER_KEY"</code> in this guide). A key committed to a public repo stays in its git history even after you delete the line, so the only real fix is to <strong>revoke it and create a new one</strong> in the provider's dashboard.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Before build, source code says import.meta.env.VITE_API_KEY; after build, the JavaScript file contains the literal key string, which any visitor can download and read">
+  <rect class="box" x="10" y="40" width="300" height="60" rx="8"/>
+  <text x="160" y="64" text-anchor="middle" class="label">src/api.ts</text>
+  <text x="160" y="86" text-anchor="middle" class="mono">import.meta.env.VITE_API_KEY</text>
+  <rect class="box-bad" x="450" y="40" width="300" height="60" rx="8"/>
+  <text x="600" y="64" text-anchor="middle" class="label">dist/assets/index-[hash].js</text>
+  <text x="600" y="86" text-anchor="middle" class="mono">..."TESTKEY"...</text>
+  <path class="arrow-accent" d="M310,70 H448"/>
+  <text x="380" y="60" text-anchor="middle" class="small">vite build</text>
+  <text x="380" y="88" text-anchor="middle" class="small">replaces it</text>
+  <rect class="ui-window" x="450" y="125" width="300" height="60" rx="8"/>
+  <text x="600" y="150" text-anchor="middle" class="label">any visitor's browser</text>
+  <text x="600" y="170" text-anchor="middle" class="small">DevTools: Sources or Network tab</text>
+  <path class="arrow-bad" d="M600,100 V123"/>
+</svg>
+<figcaption>Verified with a test value. <strong>A <code>VITE_</code> variable is public the moment you build.</strong> Treat it like text printed on your website.</figcaption>
+</figure>
+
+<h2>Keeping API keys safe (as safe as possible)</h2>
+<p>If every key in a browser app is public, what can you do? It depends on the provider:</p>
+<ul>
+<li><strong>Restrict the key.</strong> Some providers let you limit a key to certain websites. MapTiler keys can be restricted to allowed origins in the MapTiler dashboard; then a copied key does not work on someone else's site. This is the right approach for keys that are <em>designed</em> to live in the browser, like map keys.</li>
+<li><strong>Proxy the request.</strong> For a key that must stay secret, the browser should never see it. You put a tiny server (often a "serverless function" offered by the same host) between the browser and the API. The browser calls <em>your</em> endpoint; the function adds the key on the server and forwards the request. The key lives in the host's server-side environment settings, not in a <code>VITE_</code> variable. This is what protecting the OpenWeather key would need.</li>
+<li><strong>Accept and limit.</strong> For a personal demo, you may decide a public key is acceptable. Then use a separate key just for the demo, watch its usage, and know how to rotate it.</li>
+</ul>
+<p>One catch for this app: the OpenWeather weather-map tiles are loaded by Leaflet straight from <code>tile.openweathermap.org</code> with <code>?appid=</code> in the URL. Even with a proxy for the JSON calls, the tiles would also have to go through your proxy for the key to stay hidden.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Two architectures. Direct: the browser holds the key and calls OpenWeather. Proxy: the browser calls your function without a key, the function adds the secret key and calls OpenWeather">
+  <text x="380" y="20" text-anchor="middle" class="title">Direct (this app today)</text>
+  <rect class="ui-window" x="20" y="35" width="200" height="50" rx="8"/>
+  <text x="120" y="57" text-anchor="middle" class="label">Browser</text>
+  <text x="120" y="74" text-anchor="middle" class="small">has the key in its JS</text>
+  <rect class="box-info" x="540" y="35" width="200" height="50" rx="8"/>
+  <text x="640" y="65" text-anchor="middle" class="label">OpenWeather</text>
+  <path class="arrow-bad" d="M220,60 H538"/>
+  <text x="380" y="52" text-anchor="middle" class="small">?appid=KEY visible to everyone</text>
+  <text x="380" y="130" text-anchor="middle" class="title">With a proxy</text>
+  <rect class="ui-window" x="20" y="150" width="190" height="50" rx="8"/>
+  <text x="115" y="172" text-anchor="middle" class="label">Browser</text>
+  <text x="115" y="189" text-anchor="middle" class="small">no key</text>
+  <rect class="box-ok" x="285" y="150" width="190" height="50" rx="8"/>
+  <text x="380" y="172" text-anchor="middle" class="label">Your function</text>
+  <text x="380" y="189" text-anchor="middle" class="small">server-side secret</text>
+  <rect class="box-info" x="550" y="150" width="190" height="50" rx="8"/>
+  <text x="645" y="180" text-anchor="middle" class="label">OpenWeather</text>
+  <path class="arrow" d="M210,175 H283"/>
+  <path class="arrow-ok" d="M475,175 H548"/>
+  <text x="246" y="222" text-anchor="middle" class="small">/api/weather?lat=..</text>
+  <text x="512" y="222" text-anchor="middle" class="small">adds appid=KEY</text>
+</svg>
+<figcaption><strong>A secret can only stay secret on a server.</strong> A proxy also lets you add caching and rate limits so one visitor cannot use up your quota.</figcaption>
+</figure>
+
+<h2>Bundle size and lazy loading</h2>
+<p>Every visitor downloads your JavaScript before the app can start, and on a phone with a weak connection every megabyte costs seconds. The repo's build produced <strong>one JavaScript file of 2,005.92 kB</strong> (558.90 kB after gzip compression), and Vite printed a warning, because its <code>chunkSizeWarningLimit</code> defaults to 500 kB.</p>
+<p>Most of that weight is the map: Leaflet plus the MapTiler SDK, which includes a full vector-map renderer. Step 28 applies <a class="term" href="glossary.html#code-splitting">code splitting</a> with <a class="term" href="glossary.html#lazy-loading">lazy loading</a>: the map's code goes into its own file that the browser fetches separately, so the cards can render first.</p>
+<pre data-lang="tsx" data-tag="verified"><code>// The map pulls in Leaflet and MapTiler (most of the JavaScript). Loading it lazily lets
+// the cards appear first while the map code downloads in a separate file.
+const Map = lazy(() =&gt; import("./components/Map"))
+// ...
+&lt;Suspense fallback={&lt;div className="size-full rounded-xl bg-muted animate-pulse" /&gt;}&gt;
+  {coords &amp;&amp; &lt;Map coords={coords} onMapClick={onMapClick} mapType={mapType} /&gt;}
+&lt;/Suspense&gt;</code></pre>
+<p><code>import("./components/Map")</code> with parentheses is a <em>dynamic import</em>: Vite sees it and creates a separate chunk. <code>lazy</code> turns that promise into a component that suspends until the code arrives, and the <code>&lt;Suspense&gt;</code> fallback (a pulsing grey box) fills the space meanwhile. The result: the main file dropped to <strong>623.35 kB</strong> (177.48 kB gzipped) and the map chunk is <strong>1,383.59 kB</strong> (385.67 kB gzipped). The total is similar, but the part needed for the first paint is less than a third.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Bar comparison: before, one 2006 kB file; after, a 623 kB main file plus a 1384 kB map chunk loaded separately">
+  <text x="10" y="45" class="label">repo</text>
+  <rect class="box-bad" x="110" y="28" width="602" height="28" rx="4"/>
+  <text x="411" y="47" text-anchor="middle" class="label">index.js 2,005.92 kB (gzip 558.90)</text>
+  <text x="10" y="105" class="label">step 28</text>
+  <rect class="box-ok" x="110" y="88" width="187" height="28" rx="4"/>
+  <text x="188" y="107" text-anchor="middle" class="label">index.js 623.35 kB</text>
+  <rect class="box2" x="299" y="88" width="415" height="28" rx="4"/>
+  <text x="506" y="107" text-anchor="middle" class="label">Map chunk 1,383.59 kB (later)</text>
+  <path class="line dashed" d="M260,20 V130"/>
+  <text x="260" y="150" text-anchor="middle" class="small">500 kB warning limit</text>
+  <text x="380" y="185" text-anchor="middle" class="small">bar length to scale (0.3 px per kB); sizes before gzip, from the vite build output</text>
+</svg>
+<figcaption>Measured build sizes. <strong>Lazy loading does not make the app smaller; it makes the first screen arrive sooner.</strong></figcaption>
+</figure>
+<p>Good candidates for lazy loading are big pieces that are not needed at first: maps, charts, rich editors, admin pages, rarely opened dialogs. Do not lazy-load tiny components; every chunk is an extra request.</p>
+
+<h2>Hosting a static single-page app</h2>
+<p>After the build, this app is just files: no Node server, no database. Any <strong>static host</strong> can serve it. Vite's deployment guide covers many (Netlify, Vercel, Cloudflare Pages, GitHub Pages and others, at the time of writing). The settings are almost always the same three:</p>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>Value for this project</th><th>Why</th></tr>
+<tr><td>Build command</td><td><code>npm run build</code></td><td>runs <code>tsc -b &amp;&amp; vite build</code> on the host</td></tr>
+<tr><td>Output (publish) directory</td><td><code>dist</code></td><td>where Vite writes the files</td></tr>
+<tr><td>Environment variables</td><td><code>VITE_API_KEY</code>, <code>VITE_MAPTILER_KEY</code></td><td>set in the host's dashboard; your <code>.env</code> is not committed, and they are needed <em>at build time</em></td></tr>
+</table></div>
+<p>Two common traps. If the site lives in a sub-folder (for example a GitHub Pages project site at <code>/repo-name/</code>), set Vite's <code>base</code> option to that path, or the browser will look for <code>/assets/...</code> at the domain root and get 404s; the built <code>index.html</code> currently points to <code>/assets/index-[hash].js</code>. And apps with client-side routing need a "rewrite everything to <code>index.html</code>" rule; this dashboard has no routes, so it does not.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Sequence: the browser requests index.html from the static host, then the hashed JS and CSS, then the cards call OpenWeather directly, then the map chunk and tiles load">
+  <text x="100" y="20" text-anchor="middle" class="label">Browser</text>
+  <text x="380" y="20" text-anchor="middle" class="label">Static host</text>
+  <text x="660" y="20" text-anchor="middle" class="label">APIs and tile servers</text>
+  <path class="line dashed" d="M100,28 V210"/>
+  <path class="line dashed" d="M380,28 V210"/>
+  <path class="line dashed" d="M660,28 V210"/>
+  <path class="arrow" d="M100,50 H378"/>
+  <text x="240" y="44" text-anchor="middle" class="small">1. GET index.html</text>
+  <path class="arrow" d="M100,85 H378"/>
+  <text x="240" y="79" text-anchor="middle" class="small">2. GET assets/index-[hash].js, .css</text>
+  <path class="arrow-accent" d="M100,120 H658"/>
+  <text x="520" y="114" text-anchor="middle" class="small">3. geocode, One Call, Air Pollution (HTTPS)</text>
+  <path class="arrow" d="M100,155 H378"/>
+  <text x="240" y="149" text-anchor="middle" class="small">4. GET assets/Map-[hash].js (lazy)</text>
+  <path class="arrow-accent" d="M100,190 H658"/>
+  <text x="520" y="184" text-anchor="middle" class="small">5. MapTiler data, OpenWeather tiles</text>
+</svg>
+<figcaption>Simplified order of requests for the deployed fixed app. <strong>The host only serves files; all data comes straight from the APIs to the visitor's browser.</strong></figcaption>
+</figure>
+
+<h2>HTTPS and mixed content</h2>
+<p>Every serious host serves your site over <a class="term" href="glossary.html#https">HTTPS</a>. Browsers then block <a class="term" href="glossary.html#mixed-content">mixed content</a>: an HTTPS page is not allowed to <code>fetch</code> from a plain <code>http://</code> address, because that request could be read or changed on the way. The repo's <code>api.ts</code> uses <code>http://</code> for two of its three APIs:</p>
+<pre data-lang="ts" data-tag="verified"><code>    `http://api.openweathermap.org/geo/1.0/direct?q=${location}&amp;limit=1&amp;appid=${API_KEY}`
+// ...
+    `http://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&amp;lon=${lon}&amp;appid=${API_KEY}`</code></pre>
+<p>On <code>http://localhost</code> this works, so nobody notices. Once deployed on HTTPS, geocoding and air pollution would fail (this was explained from the code and browser rules, not tested on a deployed site). <a href="25-fix-the-bugs.html">Step 25</a> uses one <code>BASE_URL = "https://api.openweathermap.org"</code> for all three. Rule: <strong>write <code>https://</code> for every external URL from day one</strong>; the One Call URL and the tile URLs in the repo already do.</p>
+
+<h2>Knowing when it breaks: errors and monitoring</h2>
+<p>On your machine you see errors in the console. In production, errors happen on other people's devices and you never see them unless you collect them. Three layers help:</p>
+<ol>
+<li><strong>Catch them in the UI.</strong> React <a class="term" href="glossary.html#error-boundary">error boundaries</a> stop one failing component from blanking the whole page. Step 26's <code>WeatherErrorBoundary</code> shows a message and a "Try again" button per card.</li>
+<li><strong>Report them.</strong> The boundary's <code>componentDidCatch</code> is the natural place to send an error to a monitoring service. Step 26 logs it with <code>console.error(`${this.props.title} failed`, error, info.componentStack)</code>; in production you would replace or add a call to your service's SDK there. Errors outside React (event handlers, timers) are caught with the browser's <code>window</code> <code>error</code> and <code>unhandledrejection</code> events. Hosted error-monitoring services (Sentry is a well-known example at the time of writing) do this setup for you.</li>
+<li><strong>Make the reports readable.</strong> Production code is minified, so a stack trace says <code>a.b is undefined at index-EqZpLb9q.js:1:48213</code>. <em>Source maps</em> translate that back to your files. Vite's <code>build.sourcemap</code> defaults to <code>false</code>; <code>'hidden'</code> creates the maps without linking them from the bundle, so you can upload them to your monitoring service without publishing your source.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Error flow: an error in a card is caught by the error boundary, which shows a message to the user and reports it to a monitoring service; source maps turn the minified stack trace into file names and lines">
+  <rect class="box-bad" x="10" y="70" width="140" height="50" rx="8"/>
+  <text x="80" y="92" text-anchor="middle" class="label">error in a card</text>
+  <text x="80" y="109" text-anchor="middle" class="small">e.g. 401, ZodError</text>
+  <rect class="box-warn" x="200" y="70" width="170" height="50" rx="8"/>
+  <text x="285" y="92" text-anchor="middle" class="label">error boundary</text>
+  <text x="285" y="109" text-anchor="middle" class="small">componentDidCatch</text>
+  <rect class="box-ok" x="430" y="15" width="150" height="50" rx="8"/>
+  <text x="505" y="37" text-anchor="middle" class="label">user sees message</text>
+  <text x="505" y="54" text-anchor="middle" class="small">+ Try again</text>
+  <rect class="box-info" x="430" y="125" width="150" height="50" rx="8"/>
+  <text x="505" y="147" text-anchor="middle" class="label">monitoring</text>
+  <text x="505" y="164" text-anchor="middle" class="small">service</text>
+  <rect class="box2" x="620" y="125" width="130" height="50" rx="8"/>
+  <text x="685" y="147" text-anchor="middle" class="label">source maps</text>
+  <text x="685" y="164" text-anchor="middle" class="small">readable trace</text>
+  <path class="arrow-bad" d="M150,95 H198"/>
+  <path class="arrow-ok" d="M370,85 L428,45"/>
+  <path class="arrow" d="M370,105 L428,145"/>
+  <path class="arrow" d="M620,150 H582"/>
+</svg>
+<figcaption><strong>Show the user something useful, and tell yourself what happened.</strong> Step 26 does the first half; a monitoring service does the second.</figcaption>
+</figure>
+
+<h2>Pre-launch checklist</h2>
+<p>Run through this before you share the link. Each line points to where this guide covers it.</p>
+<div class="table-wrap"><table>
+<tr><th>Check</th><th>How</th><th>In this project</th></tr>
+<tr><td>Build passes with no type errors</td><td><code>npm run build</code></td><td>passes as committed</td></tr>
+<tr><td>Lint is clean</td><td><code>npm run lint</code></td><td>15 errors in the repo, 0 after step 27</td></tr>
+<tr><td>Production build tested</td><td><code>npm run preview</code>, click everything</td><td>found the broken marker</td></tr>
+<tr><td>No wasted or wrong requests</td><td>DevTools Network tab on first load and after a map click</td><td>found 0,0 requests, and a geocode lookup for "custom" (fixed with <code>enabled</code>, step 25)</td></tr>
+<tr><td>All URLs are <code>https://</code></td><td>search the code for <code>http://</code></td><td>two in <code>api.ts</code>, fixed in step 25</td></tr>
+<tr><td>Errors are handled and readable</td><td>use a wrong key, block a request, try an unknown city</td><td>steps 25 and 26</td></tr>
+<tr><td>No secrets in git</td><td><code>.env</code> in <code>.gitignore</code>; search the code for keys</td><td>hard-coded MapTiler key: revoke and rotate</td></tr>
+<tr><td>Public keys restricted</td><td>provider dashboard (allowed origins)</td><td>MapTiler; OpenWeather would need a proxy</td></tr>
+<tr><td>Bundle size reasonable</td><td>read the <code>vite build</code> output</td><td>map lazy-loaded in step 28</td></tr>
+<tr><td>Works on a phone and with a keyboard</td><td>DevTools device mode, Tab key, both themes</td><td><a href="rw-09-responsive-accessible.html">chapter 9</a></td></tr>
+<tr><td>Attribution visible</td><td>look at the map corner</td><td>MapTiler/OSM credited; consider OpenWeather</td></tr>
+<tr><td>Page title and icon</td><td><code>index.html</code></td><td>still <code>weather-project</code> and the Vite logo</td></tr>
+</table></div>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"Environment variables are secret."</em> On a server, yes. In a Vite browser app, <code>VITE_*</code> values are pasted into the public JavaScript.</li>
+<li><em>"If it works in <code>npm run dev</code>, it works in production."</em> The marker and mixed-content bugs prove otherwise. Test the build.</li>
+<li><em>"Deleting a committed key from the code removes it."</em> Git history keeps it. Revoke and rotate.</li>
+<li><em>"Lazy loading reduces total size."</em> It moves code out of the first download; the total stays about the same.</li>
+<li><em>"I need a Node server to host a React app."</em> Not for a client-only Vite app: <code>dist/</code> is static files.</li>
+<li><em>"Changing <code>.env</code> on the host updates the live site."</em> Values are baked in at build time; you must rebuild and redeploy.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>npm run build</code> type-checks, bundles, minifies and fingerprints into <code>dist/</code>; test it with <code>npm run preview</code>.</li>
+<li>Vite loads <code>.env</code>, <code>.env.local</code>, <code>.env.[mode]</code>, <code>.env.[mode].local</code>; only <code>VITE_</code> names reach your code, and they are replaced with their values at build time: public.</li>
+<li>Restrict browser keys by origin, proxy secret keys through a server, rotate any key that was committed.</li>
+<li>Lazy-load heavy parts with <code>lazy(() =&gt; import(...))</code> + <code>&lt;Suspense&gt;</code>: 2,006 kB became 623 kB + a 1,384 kB map chunk.</li>
+<li>Static hosts need a build command, an output folder and build-time env vars; set <code>base</code> for sub-folder hosting.</li>
+<li>Use <code>https://</code> everywhere; browsers block <code>http://</code> requests from HTTPS pages.</li>
+<li>Catch errors with boundaries, report them to a monitoring service, and keep (hidden) source maps to read them.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://vite.dev/guide/build">Vite: Building for production</a> and <a href="https://vite.dev/config/build-options">Build options (sourcemap, chunkSizeWarningLimit)</a></li>
+<li><a href="https://vite.dev/guide/env-and-mode">Vite: Env variables and modes</a></li>
+<li><a href="https://vite.dev/guide/static-deploy">Vite: Deploying a static site</a></li>
+<li><a href="https://react.dev/reference/react/lazy">React: lazy</a>, <a href="https://react.dev/reference/react/Suspense">Suspense</a> and <a href="https://react.dev/reference/react/Component">Component (error boundaries)</a></li>
+<li><a href="https://developer.mozilla.org/en-US/docs/Web/Security/Mixed_content">MDN: Mixed content</a></li>
+<li><a href="https://docs.maptiler.com/cloud/api/authentication-key/">MapTiler: API key authentication</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="rw-09-responsive-accessible.html"><small>← Chapter 9</small>Responsive &amp; Accessible Interfaces</a>
+<a class="next" href="index.html"><small>Done →</small>Contents</a>
+</nav>
+</main>
+</body>
+</html>

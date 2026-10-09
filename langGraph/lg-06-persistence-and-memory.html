@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 6 · Persistence, Memory &amp; Time Travel</title>
+<meta name="description" content="Checkpointers, threads, get_state, state history, long-term memory stores.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 6/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangGraph Handbook · Chapter 6 of 10</div>
+  <h1>Persistence, Memory &amp; Time Travel</h1>
+  <p class="lead">Checkpointers, threads, get_state, state history, long-term memory stores.</p>
+</section>
+<p>In <a href="14-graph-9-memory.html">step 14</a> the presenter added two things to the agent: a <code>MemorySaver()</code> passed to <code>compile(checkpointer=...)</code>, and a <code>config</code> with a <code>thread_id</code>. After that, the agent remembered earlier turns. In <a href="17-persistent-memory-sqlite.html">step 17</a> you swapped the memory for a SQLite file so the conversation survived a restart. This chapter explains what is really going on underneath: what a <a class="term" href="glossary.html#checkpointer">checkpointer</a> saves and when, what a <a class="term" href="glossary.html#thread-id">thread</a> is, how to read the saved state back, how to go back in time and try a different path, how to remember facts <em>across</em> conversations with a store, and how to stop a long conversation from growing forever.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> Every feature in the next chapters is built on the same saved state. Human approval (<a href="lg-07-human-in-the-loop.html">chapter 7</a>) pauses a graph and resumes it later, which only works because the state was saved. Studio's thread list (<a href="lg-08-streaming-debugging-studio.html">chapter 8</a>) is a view of saved checkpoints. If you understand checkpoints, those features stop feeling like magic.</div>
+
+<h2>Persistence in one sentence</h2>
+<p><a class="term" href="glossary.html#persistence">Persistence</a> means "saving data so it is still there later". In <a class="term" href="glossary.html#langgraph">LangGraph</a>, persistence works like this: <strong>after every step of the graph, the checkpointer writes a snapshot of the whole state, called a checkpoint, under a thread id.</strong> The next time you run the graph with the same thread id, LangGraph loads the newest checkpoint first and continues from there.</p>
+<p>A "step" here is a <a class="term" href="glossary.html#superstep">superstep</a>: one round in which every node that is ready runs. In the simple straight-line graphs from the course, one superstep is simply one node.</p>
+<p>To see this clearly, here is a tiny graph with no model at all. It has two nodes that each add a word to a string. Every snippet in this chapter marked <em>verified</em> was run against LangGraph 1.2.11 (the version locked in the repo), and the printed output shown is the real output.</p>
+
+<pre data-lang="py" data-tag="verified"><code>from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+
+
+class State(TypedDict):
+    text: str
+
+
+def add_hello(state: State) -&gt; State:
+    return {"text": state["text"] + " hello"}
+
+
+def add_world(state: State) -&gt; State:
+    return {"text": state["text"] + " world"}
+
+
+builder = StateGraph(State)
+builder.add_node("add_hello", add_hello)
+builder.add_node("add_world", add_world)
+builder.add_edge(START, "add_hello")
+builder.add_edge("add_hello", "add_world")
+builder.add_edge("add_world", END)
+graph = builder.compile(checkpointer=InMemorySaver())
+
+config = {"configurable": {"thread_id": "demo"}}
+print(graph.invoke({"text": "say:"}, config))
+# {'text': 'say: hello world'}</code></pre>
+
+<p>The result looks exactly like a graph without a checkpointer. The difference is hidden: four checkpoints now exist for the thread <code>"demo"</code>. The diagram shows them.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Four checkpoints saved during one invoke: step -1 empty, step 0 before add_hello, step 1 before add_world, step 2 final">
+  <text x="380" y="22" text-anchor="middle" class="title">One invoke, four checkpoints (thread "demo")</text>
+  <rect class="box2" x="10" y="45" width="175" height="80" rx="8"/>
+  <text x="97" y="68" text-anchor="middle" class="label">step -1</text>
+  <text x="97" y="88" text-anchor="middle" class="small">next: __start__</text>
+  <text x="97" y="108" text-anchor="middle" class="small">values: {}</text>
+  <rect class="box" x="200" y="45" width="175" height="80" rx="8"/>
+  <text x="287" y="68" text-anchor="middle" class="label">step 0</text>
+  <text x="287" y="88" text-anchor="middle" class="small">next: add_hello</text>
+  <text x="287" y="108" text-anchor="middle" class="small">text: "say:"</text>
+  <rect class="box" x="390" y="45" width="175" height="80" rx="8"/>
+  <text x="477" y="68" text-anchor="middle" class="label">step 1</text>
+  <text x="477" y="88" text-anchor="middle" class="small">next: add_world</text>
+  <text x="477" y="108" text-anchor="middle" class="small">text: "say: hello"</text>
+  <rect class="box-ok" x="580" y="45" width="170" height="80" rx="8"/>
+  <text x="665" y="68" text-anchor="middle" class="label">step 2 (latest)</text>
+  <text x="665" y="88" text-anchor="middle" class="small">next: (nothing)</text>
+  <text x="665" y="108" text-anchor="middle" class="small">"say: hello world"</text>
+  <path class="arrow" d="M185,85 H198"/>
+  <path class="arrow" d="M375,85 H388"/>
+  <path class="arrow" d="M565,85 H578"/>
+  <text x="287" y="155" text-anchor="middle" class="small">input written</text>
+  <text x="477" y="155" text-anchor="middle" class="small">after add_hello ran</text>
+  <text x="665" y="155" text-anchor="middle" class="small">after add_world ran</text>
+  <rect class="box-info" x="200" y="170" width="550" height="30" rx="8"/>
+  <text x="475" y="190" text-anchor="middle" class="label">all saved under thread_id "demo" by the InMemorySaver</text>
+</svg>
+<figcaption>Real output of <code>get_state_history</code> for the tiny graph, oldest on the left. Each box records the state <em>and</em> which node runs next. <strong>A checkpoint is a bookmark: "here is the state, and here is where we were going".</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to "snapshot"? What a checkpoint really is</summary>
+<p>Think of a video game save. When you save, the game writes down everything needed to continue: your position, your inventory, which level you are on. If the game crashes, you load the save and carry on. A checkpoint is the same idea for a graph. It stores the values of every state field, plus "which nodes should run next", plus some bookkeeping (a step number, an id, the id of the previous checkpoint). Because each checkpoint points to the one before it, the saves form a chain you can walk backwards. That chain is what makes "time travel" possible later in this chapter.</p>
+</details>
+
+<h2>The checkpointers you can choose</h2>
+<p>A checkpointer is just "where the snapshots are written". The graph code stays the same; only the object you pass to <code>compile</code> changes. These are the options you will meet as a beginner:</p>
+<div class="table-wrap"><table>
+<tr><th>Checkpointer</th><th>Install</th><th>Where data lives</th><th>Survives a restart?</th><th>In this course</th></tr>
+<tr><td><code>InMemorySaver</code> (also importable as <code>MemorySaver</code>)</td><td>part of <code>langgraph</code></td><td>a Python dictionary in RAM</td><td>No</td><td>graph 9, <a href="14-graph-9-memory.html">step 14</a></td></tr>
+<tr><td><code>SqliteSaver</code></td><td><code>langgraph-checkpoint-sqlite</code></td><td>a <a class="term" href="glossary.html#sqlite">SQLite</a> file on disk</td><td>Yes</td><td><a href="17-persistent-memory-sqlite.html">step 17</a></td></tr>
+<tr><td><code>PostgresSaver</code></td><td><code>langgraph-checkpoint-postgres</code></td><td>a PostgreSQL database server</td><td>Yes, and many processes can share it</td><td>not used; production option</td></tr>
+<tr><td>The LangGraph server's own persistence</td><td>comes with <code>langgraph dev</code> / deployments</td><td>managed by the server</td><td>depends on how the server is run</td><td>Studio threads in the video</td></tr>
+</table></div>
+<p>Two facts from the course code are worth knowing. First, <code>MemorySaver</code> and <code>InMemorySaver</code> are the same class: in LangGraph 1.2.11 <code>MemorySaver is InMemorySaver</code> prints <code>True</code>. The presenter's graph 9 uses the older name; the official docs now use <code>InMemorySaver</code>. Second, the SQLite version from step 17 only changes three lines:</p>
+<pre data-lang="py" data-tag="verified"><code>import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+connection = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
+graph = agent8.builder.compile(checkpointer=SqliteSaver(connection))</code></pre>
+<p>That is a shortened excerpt of <code>11_graph_sqlite_memory.py</code>. Run 1 saved four messages; a brand-new process on the same thread continued to eight. A context-manager form also exists and was checked to work: <code>with SqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer: ...</code>.</p>
+<p>For PostgreSQL, the package <code>langgraph-checkpoint-postgres</code> is published on PyPI by the LangGraph team (MIT licence, source in the <code>langchain-ai/langgraph</code> repository). Its own README shows this shape. It was not run for this guide because it needs a running Postgres server, so treat it as a sketch and check the current docs:</p>
+<pre data-lang="py" data-tag="illustrative"><code># uv add langgraph-checkpoint-postgres
+from langgraph.checkpoint.postgres import PostgresSaver
+
+DB_URI = "postgresql://user:password@localhost:5432/mydb"
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    checkpointer.setup()          # creates the tables the first time
+    graph = builder.compile(checkpointer=checkpointer)
+    graph.invoke(inputs, {"configurable": {"thread_id": "user-42"}})</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Decision tree for choosing a checkpointer: learning goes to InMemorySaver, single machine restarts go to SqliteSaver, several servers go to PostgresSaver, langgraph dev uses the server's persistence">
+  <rect class="box-solid" x="10" y="100" width="170" height="50" rx="8"/>
+  <text x="95" y="122" text-anchor="middle" class="on-solid">Where does the</text>
+  <text x="95" y="139" text-anchor="middle" class="on-solid">graph run?</text>
+  <rect class="box" x="250" y="15" width="230" height="40" rx="8"/>
+  <text x="365" y="40" text-anchor="middle" class="label">plain Python, just learning</text>
+  <rect class="box" x="250" y="75" width="230" height="40" rx="8"/>
+  <text x="365" y="100" text-anchor="middle" class="label">plain Python, keep it after exit</text>
+  <rect class="box" x="250" y="135" width="230" height="40" rx="8"/>
+  <text x="365" y="160" text-anchor="middle" class="label">your own app on several servers</text>
+  <rect class="box" x="250" y="195" width="230" height="40" rx="8"/>
+  <text x="365" y="220" text-anchor="middle" class="label">langgraph dev / a deployment</text>
+  <rect class="box-ok" x="540" y="15" width="210" height="40" rx="8"/>
+  <text x="645" y="40" text-anchor="middle" class="mono">InMemorySaver()</text>
+  <rect class="box-ok" x="540" y="75" width="210" height="40" rx="8"/>
+  <text x="645" y="100" text-anchor="middle" class="mono">SqliteSaver(conn)</text>
+  <rect class="box-ok" x="540" y="135" width="210" height="40" rx="8"/>
+  <text x="645" y="160" text-anchor="middle" class="mono">PostgresSaver</text>
+  <rect class="box-warn" x="540" y="195" width="210" height="40" rx="8"/>
+  <text x="645" y="214" text-anchor="middle" class="label">no checkpointer:</text>
+  <text x="645" y="229" text-anchor="middle" class="small">the server provides it</text>
+  <path class="arrow" d="M180,115 L248,37"/>
+  <path class="arrow" d="M180,121 L248,95"/>
+  <path class="arrow" d="M180,130 L248,153"/>
+  <path class="arrow" d="M180,138 L248,212"/>
+  <path class="arrow" d="M480,35 H538"/>
+  <path class="arrow" d="M480,95 H538"/>
+  <path class="arrow" d="M480,155 H538"/>
+  <path class="arrow" d="M480,215 H538"/>
+</svg>
+<figcaption>Choose by where the graph runs. The bottom row is the surprise from <a href="17-persistent-memory-sqlite.html">step 17</a>: <strong><code>langgraph dev</code> refuses a graph compiled with its own checkpointer</strong>, because the server already saves threads for you.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>The <code>langgraph dev</code> trap.</strong> The repo README suggests registering <code>9_graph_agent_memory.py</code> in <code>langgraph.json</code>. With langgraph-api 0.13.2 this makes the server fail at startup with <code>ValueError: Heads up! Your graph 'graph' from './module1/9_graph_agent_memory.py' includes a custom checkpointer (type &lt;class 'langgraph.checkpoint.memory.InMemorySaver'&gt;). With LangGraph API, persistence is handled automatically by the platform ...</code> followed by "Application startup failed". Keep graph 9 for plain-Python runs, and register graphs compiled <em>without</em> a checkpointer (like graph 8) for Studio.</div>
+
+<h2>Threads: one notebook per conversation</h2>
+<p>A <strong>thread</strong> is a named sequence of checkpoints. The name is the <code>thread_id</code> you put in the config. You can picture the checkpointer as a shelf of notebooks: each thread is one notebook, and each checkpoint is one page in it. Different thread ids never see each other's pages.</p>
+<pre data-lang="py" data-tag="verified"><code>config = {"configurable": {"thread_id": "1"}}
+graph.invoke({"messages": [HumanMessage(content="Add 3 and 4.")]}, config)
+graph.invoke({"messages": [HumanMessage(content="Now multiply that by 10.")]}, config)   # remembers 7
+
+other = {"configurable": {"thread_id": "2"}}
+graph.invoke({"messages": [HumanMessage(content="What was my last result?")]}, other)  # empty memory</code></pre>
+<p>That is the demo from the fixed graph 9 (<a href="15-fix-and-harden.html">step 15</a>). The step 18 test <code>test_memory_keeps_threads_apart</code> checks exactly this: after two turns thread <code>"a"</code> holds 4 messages, while a first turn on thread <code>"b"</code> returns only 2.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="One checkpointer holding two threads; thread 1 has several saved pages, thread 2 has its own separate pages">
+  <rect class="zone" x="10" y="10" width="740" height="210" rx="10"/>
+  <text x="30" y="34" class="title">checkpointer (the shelf)</text>
+  <rect class="box" x="40" y="55" width="320" height="150" rx="8"/>
+  <text x="200" y="78" text-anchor="middle" class="label">thread_id "1"</text>
+  <rect class="box2" x="60" y="92" width="280" height="28" rx="6"/>
+  <text x="200" y="111" text-anchor="middle" class="small">turn 1: Human "Add 3 and 4." + AI answer</text>
+  <rect class="box2" x="60" y="126" width="280" height="28" rx="6"/>
+  <text x="200" y="145" text-anchor="middle" class="small">turn 2: Human "Now multiply that by 10."</text>
+  <rect class="box-ok" x="60" y="160" width="280" height="28" rx="6"/>
+  <text x="200" y="179" text-anchor="middle" class="small">latest checkpoint: loaded on next invoke</text>
+  <rect class="box" x="400" y="55" width="320" height="150" rx="8"/>
+  <text x="560" y="78" text-anchor="middle" class="label">thread_id "2"</text>
+  <rect class="box-ok" x="420" y="92" width="280" height="28" rx="6"/>
+  <text x="560" y="111" text-anchor="middle" class="small">turn 1: Human "What was my last result?"</text>
+  <text x="560" y="150" text-anchor="middle" class="small">knows nothing about thread "1"</text>
+</svg>
+<figcaption>Threads are isolated. <strong>Same thread id = same memory; new thread id = blank memory.</strong> Studio's "New Thread" button does exactly this.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to the config dictionary? Why <code>{"configurable": {...}}</code></summary>
+<p><code>invoke</code> and <code>stream</code> take an optional second argument called the <strong>config</strong>. It is a plain <a class="term" href="glossary.html#dict">dictionary</a> for "settings of this run" that are not part of the state. Inside it, the <code>"configurable"</code> key holds values that components look up by name: the checkpointer looks for <code>thread_id</code> (and optionally <code>checkpoint_id</code> to load an older page). Other top-level keys exist too, such as <code>"recursion_limit"</code> (<a href="lg-03-control-flow.html">chapter 3</a>). If you compile with a checkpointer and forget the config, LangGraph 1.2.11 stops with <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id</code>.</p>
+</details>
+
+<div class="callout"><strong>Rule of thumb for real apps.</strong> A thread id is only a label, not a password. Build it on the server from something you trust, such as the logged-in user's id plus a conversation number. Never let a browser send any thread id it likes, or one user could read another user's conversation.</div>
+
+<h2>Reading the saved state: <code>get_state</code></h2>
+<p>Once a graph has a checkpointer you can ask "what does this thread look like right now?" without running anything. <code>graph.get_state(config)</code> returns a <code>StateSnapshot</code> object. Continuing the tiny graph from above:</p>
+<pre data-lang="py" data-tag="verified"><code>snapshot = graph.get_state(config)
+print(snapshot.values)            # {'text': 'say: hello world'}
+print(snapshot.next)              # ()   empty: the graph finished
+print(snapshot.metadata["step"])  # 2
+print(snapshot.config["configurable"]["checkpoint_id"])   # a long id, different every run</code></pre>
+<div class="table-wrap"><table>
+<tr><th>Field</th><th>What it holds</th><th>When you use it</th></tr>
+<tr><td><code>values</code></td><td>the state dictionary at that checkpoint</td><td>show the conversation, count messages (step 17 prints how many were saved)</td></tr>
+<tr><td><code>next</code></td><td>a tuple of node names that will run next; empty when finished</td><td>"is this thread paused?" (see <a href="lg-07-human-in-the-loop.html">chapter 7</a>)</td></tr>
+<tr><td><code>config</code></td><td>the config that points to <em>this exact</em> checkpoint (includes <code>checkpoint_id</code>)</td><td>replay or fork from here</td></tr>
+<tr><td><code>metadata</code></td><td>bookkeeping, including <code>step</code></td><td>debugging, ordering</td></tr>
+<tr><td><code>tasks</code></td><td>the pending tasks, including any interrupts waiting for an answer</td><td>human-in-the-loop</td></tr>
+</table></div>
+<p>The step 17 chat loop ends with exactly this call: <code>graph.get_state(config).values.get("messages", [])</code> to print how many messages are stored for the thread.</p>
+
+<h2>History, replay and time travel</h2>
+<p>Because every checkpoint points to the previous one, you can list them all with <code>graph.get_state_history(config)</code>. It yields snapshots <strong>newest first</strong>. Real output for the tiny graph:</p>
+<pre data-lang="py" data-tag="verified"><code>for s in graph.get_state_history(config):
+    print(s.metadata["step"], s.next, s.values)
+
+# 2 () {'text': 'say: hello world'}
+# 1 ('add_world',) {'text': 'say: hello'}
+# 0 ('add_hello',) {'text': 'say:'}
+# -1 ('__start__',) {}</code></pre>
+<p>"Time travel" is LangGraph's name for two things you can do with an old checkpoint:</p>
+<ol class="steps">
+<li><strong>Replay.</strong> Pass an old checkpoint's <code>config</code> to <code>invoke</code> with <code>None</code> as the input. LangGraph loads that page and runs the nodes that were "next" from there. Useful to reproduce a bug: "run again from just before the tool call".</li>
+<li><strong>Fork.</strong> First change the old state with <code>update_state</code>, which writes a <em>new</em> checkpoint branching off the old one, then continue from the config it returns. Useful for "what if the user had said something else?"</li>
+</ol>
+<pre data-lang="py" data-tag="verified"><code>history = list(graph.get_state_history(config))
+before_world = next(s for s in history if s.next == ("add_world",))
+
+# replay: run add_world again from that bookmark
+print(graph.invoke(None, before_world.config))
+# {'text': 'say: hello world'}
+
+# fork: change the past, then continue
+fork_config = graph.update_state(before_world.config, {"text": "say: hi"})
+print(graph.invoke(None, fork_config))
+# {'text': 'say: hi world'}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Time travel: the original timeline of checkpoints, a replay from step 1, and a fork where the state is edited at step 1 and continues on a new branch">
+  <text x="20" y="30" class="title">Original run</text>
+  <rect class="box2" x="130" y="12" width="110" height="32" rx="8"/><text x="185" y="33" text-anchor="middle" class="label">step 0</text>
+  <rect class="box" x="290" y="12" width="140" height="32" rx="8"/><text x="360" y="33" text-anchor="middle" class="label">step 1 "say: hello"</text>
+  <rect class="box2" x="480" y="12" width="230" height="32" rx="8"/><text x="595" y="33" text-anchor="middle" class="label">step 2 "say: hello world"</text>
+  <path class="arrow" d="M240,28 H288"/><path class="arrow" d="M430,28 H478"/>
+  <text x="20" y="110" class="title">Replay</text>
+  <path class="arrow-accent" d="M360,44 V80 H478"/>
+  <rect class="box-info" x="480" y="64" width="230" height="32" rx="8"/><text x="595" y="85" text-anchor="middle" class="label">add_world runs again</text>
+  <text x="595" y="114" text-anchor="middle" class="small">same input, same result (no model here)</text>
+  <text x="20" y="180" class="title">Fork</text>
+  <path class="arrow-ok" d="M340,44 V170 H368"/>
+  <rect class="box-warn" x="370" y="152" width="140" height="36" rx="8"/><text x="440" y="175" text-anchor="middle" class="label">update_state</text>
+  <rect class="box-ok" x="560" y="152" width="190" height="36" rx="8"/><text x="655" y="175" text-anchor="middle" class="label">"say: hi world"</text>
+  <path class="arrow-ok" d="M510,170 H558"/>
+  <text x="440" y="210" text-anchor="middle" class="small">text set to "say: hi"</text>
+  <text x="655" y="210" text-anchor="middle" class="small">a new branch; old pages stay</text>
+</svg>
+<figcaption>Nothing is ever overwritten. Replay re-runs the later nodes; a fork adds a new branch next to the old one. <strong>With a real model, a replay can give a different answer</strong>, because the model is called again.</figcaption>
+</figure>
+
+<p>One detail surprises people: after the replay and the fork above, the thread's history was 8 checkpoints long, not 4. Every run and every <code>update_state</code> adds pages; none are deleted. And <code>get_state(config)</code> (without a <code>checkpoint_id</code>) now returns the fork's result, because it is the newest page.</p>
+
+<h2>Changing state by hand: <code>update_state</code></h2>
+<p><code>graph.update_state(config, values, as_node=None)</code> writes a new checkpoint as if a node had returned <code>values</code>. Three things to know:</p>
+<ul>
+<li><strong>Reducers still apply.</strong> The update is merged exactly like a node's return value. For a plain field it overwrites; for <code>messages</code> in <code>MessagesState</code> the <a class="term" href="glossary.html#add-messages">add_messages</a> <a class="term" href="glossary.html#reducer">reducer</a> appends, or replaces a message that has the same id.</li>
+<li><strong><code>as_node</code> decides what runs next.</strong> LangGraph pretends the update came from that node, so the next step follows that node's outgoing edges. In the tiny graph, <code>update_state(config, {"text": "edited"}, as_node="add_world")</code> left <code>next</code> empty, because <code>add_world</code> leads to <code>END</code>.</li>
+<li><strong>It returns a config</strong> pointing at the new checkpoint, which you can pass to <code>invoke(None, ...)</code>.</li>
+</ul>
+<p>To <em>delete</em> messages from a <code>MessagesState</code> thread, send <code>RemoveMessage</code> objects; <code>add_messages</code> understands them. Verified on a thread with 6 messages:</p>
+<pre data-lang="py" data-tag="verified"><code>from langchain.messages import RemoveMessage
+
+messages = graph.get_state(config).values["messages"]      # 6 messages
+graph.update_state(config, {"messages": [RemoveMessage(id=m.id) for m in messages[:2]]})
+print([m.content for m in graph.get_state(config).values["messages"]])
+# ['two', 'ok', 'three', 'ok']</code></pre>
+
+<h2>Short-term vs long-term memory</h2>
+<p>Everything so far is <strong>short-term memory</strong>: it belongs to one thread. Start a new thread and it is gone. Often you also want <strong>long-term memory</strong>: facts about a user (their name, their level, what they prefer) that every future conversation can use. LangGraph keeps that in a separate object called a <strong>store</strong>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Threads hold per-conversation checkpoints while a store holds facts organised by namespace that every thread can read">
+  <rect class="zone" x="10" y="10" width="360" height="220" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">Checkpointer: short-term</text>
+  <rect class="box" x="30" y="50" width="320" height="34" rx="8"/><text x="190" y="72" text-anchor="middle" class="label">thread "luca-chat-1": messages ...</text>
+  <rect class="box" x="30" y="92" width="320" height="34" rx="8"/><text x="190" y="114" text-anchor="middle" class="label">thread "luca-chat-2": messages ...</text>
+  <rect class="box" x="30" y="134" width="320" height="34" rx="8"/><text x="190" y="156" text-anchor="middle" class="label">thread "ana-chat-1": messages ...</text>
+  <text x="190" y="200" text-anchor="middle" class="small">per conversation, saved after every step</text>
+  <rect class="zone" x="390" y="10" width="360" height="220" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">Store: long-term</text>
+  <rect class="box-ok" x="410" y="50" width="320" height="50" rx="8"/>
+  <text x="570" y="70" text-anchor="middle" class="mono">("users", "luca") / "profile"</text>
+  <text x="570" y="89" text-anchor="middle" class="small">{"name": "Luca", "likes": "fractions"}</text>
+  <rect class="box-ok" x="410" y="110" width="320" height="50" rx="8"/>
+  <text x="570" y="130" text-anchor="middle" class="mono">("users", "ana") / "profile"</text>
+  <text x="570" y="149" text-anchor="middle" class="small">{...}</text>
+  <text x="570" y="200" text-anchor="middle" class="small">per user (or team, or app), you decide when to write</text>
+  <path class="arrow-accent" d="M350,67 C380,67 380,75 408,75"/>
+  <path class="arrow-accent" d="M350,109 C380,109 380,80 408,80"/>
+</svg>
+<figcaption>Both Luca threads can read Luca's profile in the store. <strong>The checkpointer saves automatically; the store only holds what your code puts in it.</strong></figcaption>
+</figure>
+
+<p>A store organises items by a <strong>namespace</strong> (a tuple of strings, like a folder path) and a <strong>key</strong> (like a file name). The value is a dictionary. LangGraph 1.2.11 ships <code>InMemoryStore</code> for learning; like <code>InMemorySaver</code> it forgets everything when Python exits.</p>
+<pre data-lang="py" data-tag="verified"><code>from langgraph.store.memory import InMemoryStore
+
+store = InMemoryStore()
+store.put(("users", "luca"), "profile", {"name": "Luca", "likes": "fractions"})
+
+item = store.get(("users", "luca"), "profile")
+print(item.value)          # {'name': 'Luca', 'likes': 'fractions'}
+print([i.value for i in store.search(("users", "luca"))])   # every item in that namespace</code></pre>
+<p>To use the store inside nodes, pass it to <code>compile(store=store)</code>. A node can then read it through the <strong>runtime</strong>. The runtime also carries a <code>context</code>: per-run data such as "which user is this", passed with <code>invoke(..., context=...)</code> and described by <code>context_schema</code>. This was run with two users:</p>
+<pre data-lang="py" data-tag="verified"><code>from dataclasses import dataclass
+from langgraph.graph import StateGraph, START, MessagesState
+from langgraph.runtime import Runtime
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain.messages import AIMessage, HumanMessage
+
+
+@dataclass
+class Context:
+    user_id: str
+
+
+def greet(state: MessagesState, runtime: Runtime[Context]):
+    profile = runtime.store.get(("users", runtime.context.user_id), "profile")
+    name = profile.value["name"] if profile else "stranger"
+    return {"messages": [AIMessage(content=f"Hello {name}")]}
+
+
+builder = StateGraph(MessagesState, context_schema=Context)
+builder.add_node("greet", greet)
+builder.add_edge(START, "greet")
+graph = builder.compile(checkpointer=InMemorySaver(), store=store)
+
+graph.invoke({"messages": [HumanMessage(content="hi")]},
+             {"configurable": {"thread_id": "x"}}, context=Context(user_id="luca"))  # Hello Luca
+graph.invoke({"messages": [HumanMessage(content="hi")]},
+             {"configurable": {"thread_id": "y"}}, context=Context(user_id="ana"))   # Hello stranger</code></pre>
+<p>In a real agent, a node like <code>greet</code> would put the profile into the <a class="term" href="glossary.html#system-message">system message</a> before calling the model, and a later node (or a tool) would call <code>store.put</code> when the user says something worth remembering. Deciding <em>what</em> to remember is the hard part, and is a design decision, not a library feature. Stores can also be configured for meaning-based (semantic) search; see "Memory" in the docs linked below if you need that.</p>
+
+<details class="primer"><summary>New to "namespace"? Why the key is a tuple</summary>
+<p>A namespace groups related items so they do not collide, the way folders keep two files called <code>notes.txt</code> apart. <code>("users", "luca")</code> and <code>("users", "ana")</code> are two folders inside <code>"users"</code>; both can hold an item called <code>"profile"</code>. Putting the user id in the namespace also makes it easy to delete everything about one user, which matters if someone asks you to remove their data.</p>
+</details>
+
+<h2>When the history gets long</h2>
+<p>With <code>MessagesState</code>, every turn adds at least two messages, and an agent turn with tools adds four or more (Human, AI tool call, Tool, AI answer, as in <a href="13-graph-8-agent-loop.html">step 13</a>). The whole list is sent to the model on every call. Over time that means slower answers, higher cost (you pay per <a class="term" href="glossary.html#token">token</a>) and finally an error when the list no longer fits in the model's context window. Three common fixes:</p>
+<div class="table-wrap"><table>
+<tr><th>Approach</th><th>What changes</th><th>Trade-off</th></tr>
+<tr><td><strong>Trim before calling the model</strong></td><td>the node sends only the last part of the history; the saved thread keeps everything</td><td>simple; the model forgets old details</td></tr>
+<tr><td><strong>Delete old messages</strong></td><td><code>RemoveMessage</code> removes them from the saved state</td><td>smaller checkpoints; the data is gone from the latest state</td></tr>
+<tr><td><strong>Summarise</strong></td><td>a node asks the model to summarise old messages, stores the summary, deletes the originals</td><td>keeps the gist; costs an extra model call; summaries can lose facts</td></tr>
+</table></div>
+<p><code>trim_messages</code> from <code>langchain_core.messages</code> does the first one. This verified call keeps the last messages that fit a budget, and makes sure the kept part starts with a human message (a model is confused by a history that starts with a tool result). Here <code>token_counter=len</code> counts <em>messages</em> instead of tokens, which keeps the example simple; in a real app you would pass the model so it counts real tokens.</p>
+<pre data-lang="py" data-tag="verified"><code>from langchain_core.messages import trim_messages
+
+# messages = [Human 'one', AI 'ok', Human 'two', AI 'ok', Human 'three', AI 'ok']
+trimmed = trim_messages(messages, strategy="last", token_counter=len,
+                        max_tokens=3, start_on="human")
+print([m.content for m in trimmed])    # ['three', 'ok']</code></pre>
+<p>Inside graph 8 you would apply it in <code>chat_with_tools</code> just before the model call, for example <code>model_llm_with_tools.invoke([system_message] + trim_messages(state["messages"], ...))</code>. Be careful with agents: never cut between an AI message that asked for a tool and the matching tool message, or the model provider will reject the request. Trimming on whole turns (<code>start_on="human"</code>) avoids that.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Context bar: the full saved history is long, but only the last turns plus the system message are sent to the model">
+  <text x="20" y="30" class="title">Saved in the thread</text>
+  <rect class="box2" x="200" y="14" width="70" height="26" rx="4"/><text x="235" y="32" text-anchor="middle" class="small">turn 1</text>
+  <rect class="box2" x="275" y="14" width="70" height="26" rx="4"/><text x="310" y="32" text-anchor="middle" class="small">turn 2</text>
+  <rect class="box2" x="350" y="14" width="70" height="26" rx="4"/><text x="385" y="32" text-anchor="middle" class="small">turn 3</text>
+  <rect class="box2" x="425" y="14" width="70" height="26" rx="4"/><text x="460" y="32" text-anchor="middle" class="small">...</text>
+  <rect class="box" x="500" y="14" width="80" height="26" rx="4"/><text x="540" y="32" text-anchor="middle" class="small">turn 40</text>
+  <rect class="box" x="585" y="14" width="80" height="26" rx="4"/><text x="625" y="32" text-anchor="middle" class="small">turn 41</text>
+  <rect class="box-ok" x="670" y="14" width="80" height="26" rx="4"/><text x="710" y="32" text-anchor="middle" class="small">new turn</text>
+  <path class="arrow-accent" d="M580,42 V92"/>
+  <text x="20" y="120" class="title">Sent to the model</text>
+  <rect class="box-info" x="200" y="100" width="150" height="30" rx="4"/><text x="275" y="120" text-anchor="middle" class="small">system message</text>
+  <rect class="box" x="500" y="100" width="80" height="30" rx="4"/><text x="540" y="120" text-anchor="middle" class="small">turn 40</text>
+  <rect class="box" x="585" y="100" width="80" height="30" rx="4"/><text x="625" y="120" text-anchor="middle" class="small">turn 41</text>
+  <rect class="box-ok" x="670" y="100" width="80" height="30" rx="4"/><text x="710" y="120" text-anchor="middle" class="small">new turn</text>
+  <text x="380" y="170" text-anchor="middle" class="small">trim_messages picks the tail; turns 1 to 39 stay in the checkpoint but are not resent</text>
+</svg>
+<figcaption>Trimming changes what the model <em>sees</em>, not what the thread <em>stores</em>. <strong>Trim on turn boundaries so a tool call and its result are never split.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"The model remembers the conversation."</em> It does not. LangGraph loads the saved messages and sends them again on every call.</li>
+<li><em>"MemorySaver saves to disk."</em> It does not; it is RAM only. Use <code>SqliteSaver</code> or Postgres to survive a restart (<a href="17-persistent-memory-sqlite.html">step 17</a>).</li>
+<li><em>"I should add a checkpointer for Studio."</em> No. <code>langgraph dev</code> refuses graphs that bring their own checkpointer; the server persists threads for you.</li>
+<li><em>"Replay gives the same answer."</em> Only for code without randomness. A model is called again and may answer differently.</li>
+<li><em>"Time travel deletes the later history."</em> It never deletes; forks are new branches.</li>
+<li><em>"The store is filled automatically."</em> Only the checkpointer is automatic. The store contains exactly what your code writes.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A checkpointer saves a checkpoint (state + "what runs next") after every superstep, under a <code>thread_id</code>.</li>
+<li><code>InMemorySaver</code> (= <code>MemorySaver</code>) is RAM only; <code>SqliteSaver</code> (<code>langgraph-checkpoint-sqlite</code>) and <code>PostgresSaver</code> (<code>langgraph-checkpoint-postgres</code>) persist. <code>langgraph dev</code> brings its own.</li>
+<li>Pass <code>{"configurable": {"thread_id": ...}}</code> on every call; without it you get a <code>ValueError</code>.</li>
+<li><code>get_state</code> shows the latest snapshot (<code>values</code>, <code>next</code>, <code>config</code>, <code>tasks</code>); <code>get_state_history</code> lists all of them, newest first.</li>
+<li>Replay = <code>invoke(None, old_config)</code>; fork = <code>update_state(old_config, ...)</code> then invoke. Nothing is deleted.</li>
+<li>A store (<code>InMemoryStore</code>, <code>compile(store=...)</code>, <code>runtime.store</code>) holds long-term facts across threads.</li>
+<li>Long histories: trim before the model call, remove with <code>RemoveMessage</code>, or summarise.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/persistence">LangGraph docs: Persistence (checkpointers, threads, stores)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/add-memory">LangGraph docs: Add memory</a> and <a href="https://docs.langchain.com/oss/python/langgraph/memory">Memory overview</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/use-time-travel">LangGraph docs: Use time travel</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/durable-execution">LangGraph docs: Durable execution</a></li>
+<li><a href="https://pypi.org/project/langgraph-checkpoint-sqlite/">PyPI: langgraph-checkpoint-sqlite</a> and <a href="https://pypi.org/project/langgraph-checkpoint-postgres/">langgraph-checkpoint-postgres</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lg-05-agent-architectures.html"><small>← Chapter 5</small>Agent Architectures</a>
+<a class="next" href="lg-07-human-in-the-loop.html"><small>Chapter 7 →</small>Human-in-the-Loop &amp; Interrupts</a>
+</nav>
+</main>
+</body>
+</html>

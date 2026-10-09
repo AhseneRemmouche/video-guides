@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 4 · Agents Under the Hood</title>
+<meta name="description" content="The agent loop, how create_agent builds a LangGraph graph, and when an agent is the right tool.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 4/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangChain &amp; Agents Handbook · Chapter 4 of 10</div>
+  <h1>Agents Under the Hood</h1>
+  <p class="lead">The agent loop, how create_agent builds a LangGraph graph, and when an agent is the right tool.</p>
+</section>
+<h2>What you will learn</h2>
+<p>From <a href="05-first-agent.html">step 5</a> on, every program calls <code>create_agent(...)</code> and then <code>agent.invoke(...)</code>. That one call can make several model calls, run tools in between, and stop by itself. This chapter opens the box. You will see that <code>create_agent</code> builds a small <a class="term" href="glossary.html#langgraph">LangGraph</a> graph, what that graph's <em>state</em> is, what limits keep it from looping forever, and when you should <em>not</em> use an agent at all.</p>
+<p>The companion page <a href="agent-loop-explained.html">How an Agent Thinks</a> walks through the loop message by message. This chapter focuses on the machinery.</p>
+<p>You will learn:</p>
+<ul>
+<li>what makes an <a class="term" href="glossary.html#agent">agent</a> different from a single model call;</li>
+<li>the graph <code>create_agent</code> builds: a <code>model</code> node, a <code>tools</code> node and a conditional edge (verified in <code>langchain/agents/factory.py</code>);</li>
+<li>the agent's state: the <code>messages</code> list and how it grows;</li>
+<li>the recursion limit: what it counts, its value in these versions, and how to set your own;</li>
+<li>how the same loop looks when written by hand in LangGraph;</li>
+<li>agents versus fixed workflows, and how LangChain and LangGraph relate.</li>
+</ul>
+<div class="callout ok"><strong>Why this matters for your project.</strong> The chef is an agent: it decides on its own whether to search, what to search for, and how many times. Knowing the loop explains why the trace has an empty <code>AIMessage</code> (46:12), why answers with searches take longer and cost more, what <code>stream_mode="messages"</code> is streaming, and what <a class="term" href="glossary.html#checkpointer">checkpointers</a> save in <a href="10-short-term-memory.html">step 10</a>.</div>
+
+<h2>What makes something an agent</h2>
+<p>A plain model call is one request and one response: text in, text out. An <strong>agent</strong> is a model that is allowed to <em>act</em>. You give it tools, and it runs in a loop. On each turn the model looks at everything so far and decides: call a tool (and which, with what arguments), or answer and stop. The important shift is <strong>who controls the flow</strong>. In ordinary code, you decide what happens next. In an agent, the model decides, within the tools and limits you give it.</p>
+<p>That's the <a class="term" href="glossary.html#agent-loop">agent loop</a>:</p>
+<ol class="steps">
+<li><strong>Call the model</strong> with the system prompt, the messages so far, and the tool descriptions.</li>
+<li><strong>Inspect the reply.</strong> If the <code>AIMessage</code> contains <code>tool_calls</code>, go to 3. If not, it is the final answer: stop.</li>
+<li><strong>Run the requested tools</strong> and add one <code>ToolMessage</code> per call to the messages.</li>
+<li><strong>Go back to 1.</strong> The model now sees the tool results and decides again.</li>
+</ol>
+
+<h2>The graph that <code>create_agent</code> builds</h2>
+<p><code>create_agent</code> doesn't run a hidden <code>while</code> loop. It builds a LangGraph <strong>state graph</strong>: a set of <em>nodes</em> (functions that do work) joined by <em>edges</em> (what runs next), all sharing one <em>state</em>. It then compiles the graph and returns it. The object you call <code>.invoke</code> on is a <code>CompiledStateGraph</code>. Reading <code>factory.py</code> in the installed LangChain 1.3.12, and inspecting <code>agent.get_graph()</code>, gives exactly this shape:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Left: the graph with tools, START to model, then a conditional edge to tools or END, and tools back to model. Right: without tools, START to model to END">
+  <rect class="zone" x="10" y="10" width="460" height="280" rx="10"/>
+  <text x="240" y="32" text-anchor="middle" class="title">create_agent(model, tools=[web_search])</text>
+  <rect class="box2" x="40" y="120" width="90" height="40" rx="20"/>
+  <text x="85" y="145" text-anchor="middle" class="mono">START</text>
+  <rect class="box-solid" x="180" y="115" width="120" height="50" rx="8"/>
+  <text x="240" y="145" text-anchor="middle" class="on-solid">model</text>
+  <rect class="box-info" x="180" y="215" width="120" height="50" rx="8"/>
+  <text x="240" y="245" text-anchor="middle" class="mono">tools</text>
+  <rect class="box2" x="360" y="120" width="90" height="40" rx="20"/>
+  <text x="405" y="145" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M130,140 H178"/>
+  <path class="arrow-accent dashed" d="M300,140 H358"/>
+  <text x="330" y="110" text-anchor="middle" class="small">no tool_calls</text>
+  <path class="arrow-accent dashed" d="M220,165 V213"/>
+  <text x="212" y="194" text-anchor="end" class="small">tool_calls</text>
+  <path class="arrow dashed" d="M260,215 V167"/>
+  <text x="268" y="194" class="small">results back</text>
+  <text x="240" y="70" text-anchor="middle" class="small">dashed = conditional edge, decided at runtime</text>
+  <rect class="zone" x="490" y="10" width="260" height="280" rx="10"/>
+  <text x="620" y="32" text-anchor="middle" class="title">create_agent(model)</text>
+  <rect class="box2" x="575" y="70" width="90" height="40" rx="20"/>
+  <text x="620" y="95" text-anchor="middle" class="mono">START</text>
+  <rect class="box-solid" x="560" y="140" width="120" height="50" rx="8"/>
+  <text x="620" y="170" text-anchor="middle" class="on-solid">model</text>
+  <rect class="box2" x="575" y="220" width="90" height="40" rx="20"/>
+  <text x="620" y="245" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M620,110 V138"/>
+  <path class="arrow" d="M620,190 V218"/>
+  <text x="620" y="280" text-anchor="middle" class="small">steps 5–7: one model call</text>
+</svg>
+<figcaption>The two graphs <code>create_agent</code> builds in LangChain 1.3.12 (verified with <code>agent.get_graph()</code>). <strong>With tools, the conditional edge after <code>model</code> is the whole agent loop</strong>: tool calls go to <code>tools</code>, a plain answer goes to <code>END</code>. Without tools, an "agent" is a single model call in a graph.</figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<tr><th>Piece</th><th>What it does</th></tr>
+<tr><td><code>model</code> node</td><td>Sends the system prompt plus <code>state["messages"]</code> to the chat model (with the tools bound), and returns the new <code>AIMessage</code> to add to the state.</td></tr>
+<tr><td><code>tools</code> node</td><td>A <code>ToolNode</code>. For each tool call in the last <code>AIMessage</code> it runs the matching tool and returns a <code>ToolMessage</code> with the same <code>tool_call_id</code>. When the model asks for several tools at once, each call is dispatched separately, so they can run in parallel.</td></tr>
+<tr><td>Edge <code>START → model</code></td><td>Every run begins with a model call.</td></tr>
+<tr><td>Conditional edge after <code>model</code></td><td>Looks at the last <code>AIMessage</code>: pending tool calls → <code>tools</code>; none → <code>END</code>.</td></tr>
+<tr><td>Edge <code>tools → model</code></td><td>Results always go back to the model (unless a tool is marked <code>return_direct=True</code>, which can end the run right after the tool).</td></tr>
+</table></div>
+<p>You can print the graph yourself. <code>print(agent.get_graph().draw_mermaid())</code> outputs a diagram in Mermaid syntax that you can paste into any Mermaid viewer. When you add <a class="term" href="glossary.html#middleware">middleware</a> (an advanced topic from the video's roadmap, <a href="lc-10-roadmap.html">chapter 10</a>), extra nodes such as <code>SomeMiddleware.before_model</code> are inserted around these two. The core loop stays the same.</p>
+
+<h2>A run, step by step</h2>
+<p>Here is the <a href="08-first-tool.html">step 8</a> run as it travels between your code, the graph, the OpenAI API and your tool function:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 390" role="img" aria-label="Sequence diagram: your code invokes the agent; the model node calls the OpenAI API and gets a tool call; the tools node runs print_document; the model node calls the API again and gets the answer; the agent returns all messages">
+  <rect class="box2" x="10" y="10" width="150" height="36" rx="6"/>
+  <text x="85" y="33" text-anchor="middle">your code</text>
+  <rect class="box" x="210" y="10" width="150" height="36" rx="6"/>
+  <text x="285" y="33" text-anchor="middle">agent graph</text>
+  <rect class="box2" x="410" y="10" width="150" height="36" rx="6"/>
+  <text x="485" y="33" text-anchor="middle">OpenAI API</text>
+  <rect class="box-info" x="600" y="10" width="150" height="36" rx="6"/>
+  <text x="675" y="33" text-anchor="middle">print_document</text>
+  <path class="line dashed" d="M85,46 V380"/>
+  <path class="line dashed" d="M285,46 V380"/>
+  <path class="line dashed" d="M485,46 V380"/>
+  <path class="line dashed" d="M675,46 V380"/>
+  <text x="185" y="74" text-anchor="middle" class="small">1 · invoke({"messages": [Human]})</text>
+  <path class="arrow" d="M85,80 H283"/>
+  <text x="385" y="114" text-anchor="middle" class="small">2 · system + Human + tools</text>
+  <path class="arrow" d="M285,120 H483"/>
+  <text x="385" y="154" text-anchor="middle" class="small">3 · AI: tool_calls, no text</text>
+  <path class="arrow" d="M485,160 H287"/>
+  <text x="580" y="194" text-anchor="middle" class="small">4 · run(name="Luca")</text>
+  <path class="arrow" d="M285,200 H673"/>
+  <text x="580" y="234" text-anchor="middle" class="small">5 · result → ToolMessage</text>
+  <path class="arrow" d="M675,240 H287"/>
+  <text x="385" y="274" text-anchor="middle" class="small">6 · all 3 messages</text>
+  <path class="arrow" d="M285,280 H483"/>
+  <text x="385" y="314" text-anchor="middle" class="small">7 · AI: answer, no tool_calls</text>
+  <path class="arrow" d="M485,320 H287"/>
+  <text x="185" y="354" text-anchor="middle" class="small">8 · {"messages": [H, AI, Tool, AI]}</text>
+  <path class="arrow-ok" d="M285,360 H87"/>
+</svg>
+<figcaption>One <code>agent.invoke</code>, two model calls, one tool call. <strong>The model never runs <code>print_document</code></strong>; it only asks (message 3), and the graph's <code>tools</code> node runs it on your machine (messages 4–5).</figcaption>
+</figure>
+
+<h2>State: the <code>messages</code> list</h2>
+<p>Every node reads and updates a shared <strong>state</strong>. For <code>create_agent</code> the state schema is <code>AgentState</code>, a typed dict whose main key is <code>messages</code>. A second key, <code>structured_response</code>, is filled when you use <code>response_format</code> (<a href="17-structured-recipe.html">step 17</a>). The installed source declares:</p>
+<pre data-lang="py" data-tag="from langchain/agents/middleware/types.py (installed 1.3.12), simplified"><code>class AgentState(TypedDict, Generic[ResponseT]):
+    messages: Required[Annotated[list[AnyMessage], add_messages]]
+    jump_to: NotRequired[...]              # private, used by middleware
+    structured_response: NotRequired[...]  # only with response_format</code></pre>
+<p>The interesting part is <code>Annotated[…, add_messages]</code>. <code>add_messages</code> is a <em>reducer</em>: it says how a node's output is merged into the state. Nodes don't return the whole list. They return only their new messages, such as <code>{"messages": [ai_message]}</code>, and <code>add_messages</code> <strong>appends</strong> them (or replaces a message that has the same <code>id</code>). That's why the list only ever grows during a run, and why the result you get back contains the whole conversation.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The messages list after each step: after model the list has Human and AI with tool call; after tools a ToolMessage is appended; after the second model call the final AIMessage is appended">
+  <text x="10" y="34" class="mono">input</text>
+  <rect class="box2" x="130" y="16" width="120" height="28" rx="6"/>
+  <text x="190" y="35" text-anchor="middle" class="label">Human</text>
+  <text x="10" y="94" class="mono">after model</text>
+  <rect class="box2" x="130" y="76" width="120" height="28" rx="6"/>
+  <text x="190" y="95" text-anchor="middle" class="label">Human</text>
+  <rect class="box" x="260" y="76" width="160" height="28" rx="6"/>
+  <text x="340" y="95" text-anchor="middle" class="label">AI · tool_calls</text>
+  <text x="10" y="154" class="mono">after tools</text>
+  <rect class="box2" x="130" y="136" width="120" height="28" rx="6"/>
+  <text x="190" y="155" text-anchor="middle" class="label">Human</text>
+  <rect class="box2" x="260" y="136" width="160" height="28" rx="6"/>
+  <text x="340" y="155" text-anchor="middle" class="label">AI · tool_calls</text>
+  <rect class="box-info" x="430" y="136" width="120" height="28" rx="6"/>
+  <text x="490" y="155" text-anchor="middle" class="label">Tool</text>
+  <text x="10" y="214" class="mono">after model</text>
+  <rect class="box2" x="130" y="196" width="120" height="28" rx="6"/>
+  <text x="190" y="215" text-anchor="middle" class="label">Human</text>
+  <rect class="box2" x="260" y="196" width="160" height="28" rx="6"/>
+  <text x="340" y="215" text-anchor="middle" class="label">AI · tool_calls</text>
+  <rect class="box2" x="430" y="196" width="120" height="28" rx="6"/>
+  <text x="490" y="215" text-anchor="middle" class="label">Tool</text>
+  <rect class="box-ok" x="560" y="196" width="120" height="28" rx="6"/>
+  <text x="620" y="215" text-anchor="middle" class="label">AI · answer</text>
+  <text x="690" y="95" class="small">+1 new</text>
+  <text x="690" y="155" class="small">+1 new</text>
+  <text x="690" y="215" class="small">+1 new</text>
+</svg>
+<figcaption>The state's <code>messages</code> after each node of the step 8 run. Coloured boxes are what that node returned; <strong><code>add_messages</code> appends them to what was already there</strong>. <code>response["messages"][-1]</code> is therefore always the newest message.</figcaption>
+</figure>
+
+<p>You can watch this happen with <code>stream_mode="updates"</code>, which yields each node's output as soon as it finishes (verified):</p>
+<pre data-lang="py" data-tag="illustrative · output shape verified with a fake model"><code>for update in agent.stream({"messages": [HumanMessage("Hello I am a student and my name is Luca")]},
+                           stream_mode="updates"):
+    print(update)
+
+# {'model': {'messages': [AIMessage(content='', tool_calls=[...])]}}
+# {'tools': {'messages': [ToolMessage(content='this is the document of Luca', ...)]}}
+# {'model': {'messages': [AIMessage(content='This is the document of Luca.')]}}</code></pre>
+<p>The modes you are most likely to use: <code>"messages"</code> streams tokens from the model as they are generated (what <a href="07-streaming.html">step 7</a> uses), <code>"updates"</code> gives one entry per finished node, and <code>"values"</code> gives the full state after each step. With a checkpointer (<a href="10-short-term-memory.html">step 10</a>), the state is saved after each step under your <a class="term" href="glossary.html#thread-id">thread_id</a>. The next <code>invoke</code> on the same thread starts from the saved <code>messages</code> and appends your new <code>HumanMessage</code>. That's all short-term memory is.</p>
+
+<h2>The recursion limit: how the loop is stopped</h2>
+<p>Nothing in the loop itself guarantees it ends. A confused model could call tools forever. LangGraph protects you with a <strong>recursion limit</strong>: the maximum number of <em>steps</em> (one step is one round of nodes running, such as one <code>model</code> or one <code>tools</code> execution) in a single run. When the limit is reached before <code>END</code>, LangGraph raises <code>GraphRecursionError</code>.</p>
+<p>The value has changed across versions, so check rather than trust a tutorial. Here is what the installed versions do:</p>
+<ul>
+<li><code>create_agent</code> attaches <code>{"recursion_limit": 9_999}</code> to the graph it returns (in <code>factory.py</code>, with a comment linking a LangGraph issue). <code>agent.config</code> shows it.</li>
+<li>LangGraph 1.2.9's own default for graphs is <code>10007</code>, and can be changed with the <code>LANGGRAPH_DEFAULT_RECURSION_LIMIT</code> environment variable. Older LangGraph versions used <strong>25</strong>, which is the number many older articles mention.</li>
+</ul>
+<p>So with the project's versions, a runaway agent can make thousands of model calls before it's stopped. Every call costs money. For anything beyond experiments, set your own limit per call in the config:</p>
+<pre data-lang="py" data-tag="illustrative · verified with a fake model that always calls a tool"><code>from langgraph.errors import GraphRecursionError
+
+try:
+    response = agent.invoke(
+        {"messages": [message]},
+        {"recursion_limit": 10},     # at most 10 steps: about 4 search rounds + the answer
+    )
+except GraphRecursionError:
+    print("The chef took too many steps. Try a clearer photo or question.")</code></pre>
+<p>Each tool round uses two steps (<code>model</code>, then <code>tools</code>), plus one for the final model call. The config dict is the same one that carries <code>configurable.thread_id</code>, so with memory you'd pass <code>{"configurable": {"thread_id": "1"}, "recursion_limit": 10}</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Steps counted against a recursion limit of 5: model, tools, model, tools, model; the next step would be the sixth, so GraphRecursionError is raised">
+  <text x="10" y="24" class="label">recursion_limit = 5, and the model keeps asking for tools</text>
+  <rect class="box-solid" x="10" y="44" width="100" height="40" rx="8"/>
+  <text x="60" y="69" text-anchor="middle" class="on-solid">1 · model</text>
+  <rect class="box-info" x="130" y="44" width="100" height="40" rx="8"/>
+  <text x="180" y="69" text-anchor="middle" class="label">2 · tools</text>
+  <rect class="box-solid" x="250" y="44" width="100" height="40" rx="8"/>
+  <text x="300" y="69" text-anchor="middle" class="on-solid">3 · model</text>
+  <rect class="box-info" x="370" y="44" width="100" height="40" rx="8"/>
+  <text x="420" y="69" text-anchor="middle" class="label">4 · tools</text>
+  <rect class="box-solid" x="490" y="44" width="100" height="40" rx="8"/>
+  <text x="540" y="69" text-anchor="middle" class="on-solid">5 · model</text>
+  <rect class="box-bad" x="610" y="38" width="140" height="52" rx="8"/>
+  <text x="680" y="60" text-anchor="middle" class="mono">GraphRecursion</text>
+  <text x="680" y="78" text-anchor="middle" class="mono">Error</text>
+  <path class="arrow" d="M110,64 H128"/>
+  <path class="arrow" d="M230,64 H248"/>
+  <path class="arrow" d="M350,64 H368"/>
+  <path class="arrow" d="M470,64 H488"/>
+  <path class="arrow-bad" d="M590,64 H608"/>
+  <text x="10" y="126" class="small">"Recursion limit of 5 reached without hitting a stop condition. You can increase the limit</text>
+  <text x="10" y="142" class="small">by setting the `recursion_limit` config key." (message from the installed LangGraph)</text>
+  <text x="10" y="166" class="small">create_agent's own default here is 9,999 steps, so set a smaller limit for real apps.</text>
+</svg>
+<figcaption>What the limit counts. <strong>One node execution is one step</strong>; a tool round costs two. When the model still wants tools at the limit, the run stops with an error instead of an answer, so catch it and tell the user something useful.</figcaption>
+</figure>
+
+<h2>The same loop, written by hand</h2>
+<p>Seeing the loop built from LangGraph pieces makes <code>create_agent</code> much less mysterious. This sketch builds a working version of the step 8 agent. It's not how you should build agents normally, because <code>create_agent</code> adds structured output, middleware, error handling and more. But it shows that there is no magic:</p>
+<pre data-lang="py" data-tag="illustrative · runs with langgraph 1.2.9"><code>from langgraph.graph import StateGraph, MessagesState, START
+from langgraph.prebuilt import ToolNode, tools_condition
+from langchain.chat_models import init_chat_model
+
+model = init_chat_model("openai:gpt-5-nano").bind_tools([print_document])
+
+def call_model(state: MessagesState):
+    return {"messages": [model.invoke(state["messages"])]}   # add_messages appends it
+
+builder = StateGraph(MessagesState)
+builder.add_node("model", call_model)
+builder.add_node("tools", ToolNode([print_document]))
+builder.add_edge(START, "model")
+builder.add_conditional_edges("model", tools_condition)   # tool_calls → "tools", else END
+builder.add_edge("tools", "model")
+graph = builder.compile()
+
+graph.invoke({"messages": [HumanMessage("Hello I am a student and my name is Luca")]})</code></pre>
+<p><code>bind_tools</code> attaches the tool schemas to every request so the model knows the tools exist. <code>tools_condition</code> is LangGraph's ready-made version of the conditional edge. <code>MessagesState</code> is a state with just a <code>messages</code> key using <code>add_messages</code>. This is the level where LangGraph shines: you can add your own nodes (a "check the photo" step, a human approval step), branches and loops.</p>
+
+<h2>When not to use an agent</h2>
+<p>Agents are flexible because the model decides the steps. That same flexibility makes them less predictable, slower and more expensive than code that follows fixed steps. A <strong>workflow</strong> is a sequence you define in code. It may still call models, but <em>you</em> decide the order.</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>Workflow (fixed steps)</th><th>Agent (model decides)</th></tr>
+<tr><td>Control flow</td><td>Your code</td><td>The model, within limits</td></tr>
+<tr><td>Predictability</td><td>High: same steps every time</td><td>Lower: steps vary per input</td></tr>
+<tr><td>Cost and latency</td><td>Known in advance</td><td>Varies with the number of tool rounds</td></tr>
+<tr><td>Debugging</td><td>Like ordinary code</td><td>Read the message trace (<a href="lc-08-debugging-observability.html">chapter 8</a>)</td></tr>
+<tr><td>Good for</td><td>Known procedures: "extract, then search, then format"</td><td>Open-ended tasks where the path depends on what is found</td></tr>
+</table></div>
+<p>The chef could be written either way. As a workflow: one vision call that returns the ingredient list, one Tavily search built from that list in code, and one final call that writes the recipe. That's exactly three calls, always. As an agent (the video's choice), the model may search zero, one or several times. For a learning project, and for tasks where you can't predict the steps, the agent is great. When the steps are always the same, a workflow is usually the better engineering choice. Many real apps mix both: a fixed workflow with an agent inside one step.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Decision tree: if one model call answers it, use a model call; if the steps are always the same, use a workflow; if the model must choose actions based on results, use an agent, with limits and approval for risky actions">
+  <rect class="box" x="250" y="10" width="260" height="44" rx="8"/>
+  <text x="380" y="37" text-anchor="middle">Can one model call answer it?</text>
+  <rect class="box-ok" x="10" y="90" width="200" height="50" rx="8"/>
+  <text x="110" y="112" text-anchor="middle" class="label">model.invoke(...)</text>
+  <text x="110" y="129" text-anchor="middle" class="small">steps 4–7</text>
+  <path class="arrow-ok" d="M250,40 L212,100"/>
+  <text x="206" y="66" text-anchor="end" class="small">yes</text>
+  <rect class="box" x="250" y="96" width="260" height="44" rx="8"/>
+  <text x="380" y="123" text-anchor="middle">Are the steps always the same?</text>
+  <path class="arrow" d="M380,54 V94"/>
+  <text x="388" y="80" class="small">no</text>
+  <rect class="box-ok" x="10" y="176" width="200" height="50" rx="8"/>
+  <text x="110" y="198" text-anchor="middle" class="label">workflow in code</text>
+  <text x="110" y="215" text-anchor="middle" class="small">or a LangGraph graph</text>
+  <path class="arrow-ok" d="M250,126 L212,186"/>
+  <text x="206" y="152" text-anchor="end" class="small">yes</text>
+  <rect class="box" x="250" y="182" width="260" height="44" rx="8"/>
+  <text x="380" y="209" text-anchor="middle">Model must choose actions?</text>
+  <path class="arrow" d="M380,140 V180"/>
+  <text x="388" y="166" class="small">no / unsure</text>
+  <rect class="box-info" x="550" y="176" width="200" height="50" rx="8"/>
+  <text x="650" y="198" text-anchor="middle" class="label">agent (create_agent)</text>
+  <text x="650" y="215" text-anchor="middle" class="small">steps 8–18, the chef</text>
+  <path class="arrow" d="M510,204 H548"/>
+  <text x="529" y="196" text-anchor="middle" class="small">yes</text>
+  <rect class="box-warn" x="550" y="250" width="200" height="40" rx="8"/>
+  <text x="650" y="275" text-anchor="middle" class="label">+ limits, approval if risky</text>
+  <path class="line dashed" d="M650,226 V248"/>
+</svg>
+<figcaption>A rule of thumb, not a law. <strong>Use the simplest thing that works</strong>, and reach for an agent when the path really depends on what the model finds along the way.</figcaption>
+</figure>
+
+<h2>LangChain versus LangGraph</h2>
+<p>The two names appear together everywhere, and the course imports from both (<code>from langchain.agents import create_agent</code>, <code>from langgraph.checkpoint.memory import InMemorySaver</code>). They are layers of one stack from the same company:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Layers: langchain-core at the bottom with messages, Runnables and tools; provider packages like langchain-openai; LangGraph with graphs, state and checkpointers; LangChain on top with init_chat_model, create_agent and middleware; your app at the top; LangSmith on the side for tracing">
+  <rect class="box-ok" x="10" y="10" width="560" height="40" rx="8"/>
+  <text x="290" y="35" text-anchor="middle" class="label">your app: main.py, tools.py, prompt.py, photo_decoder.py</text>
+  <rect class="box" x="10" y="62" width="560" height="50" rx="8"/>
+  <text x="24" y="84" class="title">langchain</text>
+  <text x="24" y="102" class="small">init_chat_model, create_agent, @tool, middleware, langchain.messages</text>
+  <rect class="box-info" x="10" y="124" width="560" height="50" rx="8"/>
+  <text x="24" y="146" class="title">langgraph</text>
+  <text x="24" y="164" class="small">StateGraph, nodes and edges, state, checkpointers (InMemorySaver), streaming</text>
+  <rect class="box2" x="10" y="186" width="270" height="50" rx="8"/>
+  <text x="24" y="208" class="title">langchain-core</text>
+  <text x="24" y="226" class="small">messages, Runnable, tool base classes</text>
+  <rect class="box2" x="300" y="186" width="270" height="50" rx="8"/>
+  <text x="314" y="208" class="title">langchain-openai, …</text>
+  <text x="314" y="226" class="small">ChatOpenAI and other providers</text>
+  <rect class="box-warn" x="590" y="62" width="160" height="174" rx="8"/>
+  <text x="670" y="130" text-anchor="middle" class="title">LangSmith</text>
+  <text x="670" y="150" text-anchor="middle" class="small">tracing, evaluation</text>
+  <text x="670" y="166" text-anchor="middle" class="small">(optional service)</text>
+  <text x="290" y="258" text-anchor="middle" class="small">each layer uses the ones below it</text>
+</svg>
+<figcaption>How the packages stack in this project. <strong><code>create_agent</code> is LangChain's high-level helper; what it returns is a LangGraph graph.</strong> <a class="term" href="glossary.html#langsmith">LangSmith</a> sits beside the stack and records runs if you enable it.</figcaption>
+</figure>
+<ul>
+<li><strong>LangChain</strong> (<code>langchain</code> plus <code>langchain-core</code> and provider packages) gives you the building blocks: a standard chat model interface, messages, tools, and ready-made agents through <code>create_agent</code>. Start here.</li>
+<li><strong>LangGraph</strong> is the lower-level runtime for stateful, multi-step programs: graphs of nodes, state with reducers, checkpointing, interrupts for human approval, streaming. Every LangChain agent runs on it. Reach for it directly when <code>create_agent</code> isn't flexible enough, for example for custom workflows or multi-agent systems.</li>
+</ul>
+<p>You don't have to choose one. Most projects start with <code>create_agent</code> and only drop to raw LangGraph for the parts that need it.</p>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+<li><code>AttributeError: 'function' object has no attribute 'invoke'</code>: calling <code>create_agent.invoke(...)</code> instead of <code>agent.invoke(...)</code> (70:11). <code>create_agent</code> is the factory; the graph it returns is what you invoke.</li>
+<li>Expecting the agent to "just know" to stop. It stops when the model replies without tool calls, or at the recursion limit. Set a sensible limit.</li>
+<li>Reading <code>response["messages"][0]</code> for the answer. Index 0 is your own message; the answer is <code>[-1]</code>.</li>
+<li>Building a new agent inside a loop for every question. Build it once and invoke it many times; with memory, reuse the same <code>thread_id</code>.</li>
+<li>Using an agent for a fixed procedure, then fighting the model to follow the steps. Write the steps in code.</li>
+</ul></div>
+
+<div class="callout"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"The agent is a smarter model."</em> It's the same model called in a loop, with tools.</li>
+<li><em>"The model executes the tools."</em> The graph's <code>tools</code> node runs them in your Python process.</li>
+<li><em>"The recursion limit is 25."</em> That was LangGraph's old default. With these versions, <code>create_agent</code> sets 9,999.</li>
+<li><em>"LangGraph replaces LangChain."</em> LangChain's agents are built on LangGraph; they work together.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>An agent is a model in a loop: model → tools → model … until a reply without tool calls.</li>
+<li><code>create_agent</code> compiles a LangGraph graph: <code>START → model</code>, a conditional edge to <code>tools</code> or <code>END</code>, and <code>tools → model</code>. Without tools it's just <code>START → model → END</code>.</li>
+<li>State is <code>AgentState</code>; <code>messages</code> uses the <code>add_messages</code> reducer, so each node's new messages are appended.</li>
+<li><code>stream_mode</code>: <code>"messages"</code> for tokens, <code>"updates"</code> per node, <code>"values"</code> for full state.</li>
+<li>Each node execution is one step. <code>create_agent</code> sets <code>recursion_limit</code> 9,999 in these versions. Pass a smaller one in the config and catch <code>GraphRecursionError</code>.</li>
+<li>Prefer a fixed workflow when the steps never change. Use an agent when the path depends on the results.</li>
+<li>LangChain gives high-level building blocks; LangGraph is the runtime beneath them.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langchain/agents">LangChain docs: Agents</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/overview">LangGraph docs: Overview</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/graph-api">LangGraph docs: Graph API (state, nodes, edges, reducers)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/workflows-agents">LangGraph docs: Workflows and agents</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/errors/GRAPH_RECURSION_LIMIT">LangGraph docs: GRAPH_RECURSION_LIMIT error</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/streaming">LangChain docs: Streaming (stream modes)</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lc-03-messages-and-prompts.html"><small>← Chapter 3</small>Messages, Roles &amp; Prompts</a>
+<a class="next" href="lc-05-tools-in-depth.html"><small>Chapter 5 →</small>Designing Good Tools</a>
+</nav>
+</main>
+</body>
+</html>

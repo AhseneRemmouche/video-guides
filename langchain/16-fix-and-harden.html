@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16 · Fix &amp; Harden the Chef</title>
+<meta name="description" content="Fix the two prompt bugs, use the official Tavily SDK, accept an image path, and handle missing keys and search errors.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 16/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 16 of 19 · Extra, not in the video</div>
+  <h1>Fix &amp; Harden the Chef</h1>
+  <p class="lead">Fix the two prompt bugs, use the official Tavily SDK, accept an image path, and handle missing keys and search errors.</p>
+  <span class="video-link extra">Extension · verified against LangChain 1.3.12</span>
+</section>
+<div class="callout"><p><strong>About steps 16–19.</strong> These steps are <strong>not in the video</strong>. They fix problems found in the repo (commit <code>ea320de</code>) and add features the video's roadmap points to. Every file on these pages was <strong>run end-to-end</strong> against the repo's locked versions (LangChain 1.3.12, langchain-core 1.4.9, LangGraph 1.2.9, langchain-openai 1.3.4) with an <strong>offline test harness</strong>: the chat model was replaced by a fake one with the same LangChain interfaces, the Tavily search returned a canned result, and the file picker was skipped. All 13 checked files passed.</p>
+<p>What that proves: the imports, APIs, message flow, tool calling, error handling and image messages work with these versions. What it does not prove: the exact wording a real model will answer with. Test with your own keys.</p></div>
+
+<h2>Goal</h2>
+<p>The chef from steps 12–14 works, but reading the code closely shows two small bugs that change what the model actually receives, one questionable package, and a few rough edges. In this step you fix all of them, one file at a time, and you see the <strong>before</strong> and the <strong>after</strong> for each change. Nothing here changes how the chef works from the outside: you still run one command, pick a photo and get a recipe. It just gets more correct and harder to break.</p>
+
+<div class="table-wrap"><table>
+<tr><th>File</th><th>Problem in the repo</th><th>Fix</th></tr>
+<tr><td><code>photo_decoder.py</code></td><td>Sends the word <code>"prompt"</code> instead of your request; imports it never uses</td><td><code>"text": prompt</code>, unused imports removed, <code>prompt: str</code> type hint</td></tr>
+<tr><td><code>prompt.py</code></td><td>Two sentences glued together as <code>photo.once</code></td><td>Parentheses and a space at the end of each piece</td></tr>
+<tr><td><code>pyproject.toml</code></td><td>Depends on <code>tavily</code> (not Tavily's own package) and on the <code>dotenv</code> shim</td><td><code>tavily-python</code> and <code>python-dotenv</code></td></tr>
+<tr><td><code>tools.py</code></td><td>A failed search crashes the whole run; up to the default number of results; vague docstring</td><td><code>try</code>/<code>except</code> returning an error dict, <code>max_results=5</code>, clearer docstring</td></tr>
+<tr><td><code>main.py</code></td><td>Always opens the file picker; a missing key fails late with a long error</td><td>Optional image path on the command line; friendly check for both keys</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="main.py imports photo_decoder.py, prompt.py and tools.py; each file is tagged with the fix applied in this step, and pyproject.toml sits underneath as the list of packages">
+  <rect class="box-solid" x="300" y="20" width="160" height="56" rx="8"/>
+  <text x="380" y="44" text-anchor="middle" class="on-solid">main.py</text>
+  <text x="380" y="62" text-anchor="middle" class="on-solid">argv + key check</text>
+  <rect class="box" x="20" y="130" width="220" height="64" rx="8"/>
+  <text x="130" y="154" text-anchor="middle" class="title">photo_decoder.py</text>
+  <text x="130" y="176" text-anchor="middle" class="label">"text": prompt (bug 1)</text>
+  <rect class="box" x="270" y="130" width="220" height="64" rx="8"/>
+  <text x="380" y="154" text-anchor="middle" class="title">prompt.py</text>
+  <text x="380" y="176" text-anchor="middle" class="label">missing space (bug 2)</text>
+  <rect class="box" x="520" y="130" width="220" height="64" rx="8"/>
+  <text x="630" y="154" text-anchor="middle" class="title">tools.py</text>
+  <text x="630" y="176" text-anchor="middle" class="label">try/except, max_results=5</text>
+  <path class="arrow" d="M330,76 L134,128"/>
+  <path class="arrow" d="M380,76 V128"/>
+  <path class="arrow" d="M430,76 L626,128"/>
+  <text x="200" y="98" class="small">imports</text>
+  <text x="530" y="98" class="small">imports</text>
+  <rect class="box-info" x="20" y="232" width="720" height="52" rx="8"/>
+  <text x="380" y="254" text-anchor="middle" class="title">pyproject.toml</text>
+  <text x="380" y="273" text-anchor="middle" class="label">tavily → tavily-python · dotenv → python-dotenv (same import names)</text>
+</svg>
+<figcaption>The four Python files you edit and the project file underneath them. <code>main.py</code> is the entry point that imports the other three. <strong>Every box gets exactly one kind of fix</strong>, so you can do them in any order.</figcaption>
+</figure>
+
+<h2>Before you start</h2>
+<ol class="steps">
+<li><strong>Open the chef project</strong>
+<p>Open the project folder from steps 12–15 in <a class="term" href="glossary.html#vscode">VS Code</a> and open a <a class="term" href="glossary.html#terminal">terminal</a> in it (<kbd>Ctrl</kbd>+<kbd>`</kbd>).</p></li>
+<li><strong>Activate the virtual environment</strong>
+<p>Run <code>.venv\Scripts\activate</code> on Windows PowerShell, or <code>source .venv/bin/activate</code> on macOS and Linux. Your prompt should start with the environment's name in brackets. See <a class="term" href="glossary.html#venv-activate">activating a virtual environment</a>.</p></li>
+<li><strong>Commit what you have</strong>
+<p>Run <code>git add .</code> and <code>git commit -m "before fixes"</code>. If something goes wrong you can always compare with, or go back to, the working version. This uses <a class="term" href="glossary.html#git">Git</a>, which you already set up in step 15.</p></li>
+</ol>
+
+<h2>Fix 1: the chef never sees your request (photo_decoder.py)</h2>
+<p>This is the most important fix. Look at line 52 of the repo's <code>photo_decoder.py</code>:</p>
+
+<pre data-lang="py" data-tag="before (repo, lines 49–55)"><code>def build_image_message(image_path: Path, prompt) -&gt; HumanMessage:
+    return HumanMessage(
+        content=[
+            {"type": "text", "text": "prompt"},
+            {"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}},
+        ]
+    )</code></pre>
+
+<p>The function receives your request in the parameter <code>prompt</code>. But line 52 writes <code>"prompt"</code> <em>with quotes</em>. In Python, quotes make a <strong>string literal</strong>: the letters p-r-o-m-p-t. So the text block the model receives is literally the six-letter word <strong>prompt</strong>, not "please find me a good recipe to cook". The offline harness confirmed this: the fake model recorded the text <code>prompt</code>.</p>
+
+<details class="primer"><summary>New to variables vs strings? Why the quotes change everything</summary>
+<p>A <strong>variable</strong> is a name that points to a value. Inside <code>build_image_message</code>, the name <code>prompt</code> points to whatever text the caller passed in, here <code>CHEF_PROMPT</code> from <code>prompt.py</code>.</p>
+<p>A <strong>string literal</strong> is text written directly in the code between quotes. <code>"prompt"</code> is always the same six letters, <code>p r o m p t</code>, no matter what. It has nothing to do with the variable of the same name.</p>
+<pre data-lang="py" data-tag="illustrative"><code>prompt = "please find me a good recipe to cook"
+print(prompt)     # please find me a good recipe to cook
+print("prompt")   # prompt</code></pre>
+<p>Python cannot warn you here, because both lines are valid code. Editors help a little: VS Code shows an unused parameter (like <code>prompt</code> in the buggy version) in a faded colour. That faded colour is a hint that something is off.</p>
+</details>
+
+<p><strong>Why did it still "work" in the video?</strong> The <a class="term" href="glossary.html#system-prompt">system prompt</a> already tells the model to look at the photo, find the ingredients and search for a recipe. So even with a meaningless user text, the model has enough instructions to do the job. The bug only shows when you change <code>CHEF_PROMPT</code>, for example to "find me a vegetarian dessert", and nothing changes in the answers.</p>
+<p><strong>How it happened.</strong> In step 11 the text block held a fixed sentence, <code>"tell me what is the image about"</code>, so quotes were correct there. When the presenter added a <code>prompt</code> parameter for the chef (at 83:30), the quotes stayed around the new name. It's an easy slip to make.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Before the fix the model receives the text prompt plus the image; after the fix it receives please find me a good recipe to cook plus the image">
+  <text x="190" y="28" text-anchor="middle" class="title">Before ("text": "prompt")</text>
+  <text x="570" y="28" text-anchor="middle" class="title">After ("text": prompt)</text>
+  <rect class="box-bad" x="20" y="44" width="340" height="190" rx="8"/>
+  <text x="40" y="70" class="label">HumanMessage content:</text>
+  <rect class="box2" x="40" y="82" width="300" height="56" rx="8"/>
+  <text x="56" y="104" class="mono">{"type": "text",</text>
+  <text x="56" y="124" class="mono"> "text": "prompt"}</text>
+  <rect class="box2" x="40" y="150" width="300" height="40" rx="8"/>
+  <text x="190" y="175" text-anchor="middle" class="mono">{"type": "image_url", ...}</text>
+  <text x="190" y="218" text-anchor="middle" class="bad">model reads: "prompt" + photo</text>
+  <rect class="box-ok" x="400" y="44" width="340" height="190" rx="8"/>
+  <text x="420" y="70" class="label">HumanMessage content:</text>
+  <rect class="box2" x="420" y="82" width="300" height="56" rx="8"/>
+  <text x="436" y="104" class="mono">{"type": "text",</text>
+  <text x="436" y="124" class="mono"> "text": "please find me a good…"}</text>
+  <rect class="box2" x="420" y="150" width="300" height="40" rx="8"/>
+  <text x="570" y="175" text-anchor="middle" class="mono">{"type": "image_url", ...}</text>
+  <text x="570" y="218" text-anchor="middle" class="ok">model reads: your request + photo</text>
+</svg>
+<figcaption>The same message before and after. The image part is identical; <strong>only the text part changes from a fixed word to your real request</strong>.</figcaption>
+</figure>
+
+<p>While you are in this file, remove three lines it doesn't need, and add a type hint to <code>prompt</code>:</p>
+<pre data-lang="py" data-tag="before (repo, lines 5–9)"><code>from langchain.messages import HumanMessage
+from langchain.agents import create_agent
+from dotenv import load_dotenv
+
+load_dotenv()</code></pre>
+<p><code>create_agent</code> is never used in this file, and this file never reads an <a class="term" href="glossary.html#env-file">.env</a> value, so <code>load_dotenv()</code> has nothing to do here. Unused <a class="term" href="glossary.html#import">imports</a> slow down start-up a little and, more importantly, confuse the next reader ("why does the photo helper create agents?"). Each file should import only what it uses.</p>
+
+<ol class="steps">
+<li><strong>Edit <code>photo_decoder.py</code></strong>
+<p>Delete the lines <code>from langchain.agents import create_agent</code>, <code>from dotenv import load_dotenv</code> and <code>load_dotenv()</code>. On the <code>build_image_message</code> line, change <code>prompt)</code> to <code>prompt: str)</code>. In the text block, remove the quotes around <code>prompt</code>. Save. The complete file should look like this:</p></li>
+</ol>
+
+<pre data-file="photo_decoder.py" data-lang="py" data-tag="fixed"><code>import base64
+import mimetypes
+from pathlib import Path
+from tkinter import TclError, Tk, filedialog
+from langchain.messages import HumanMessage
+
+
+def choose_image_file() -&gt; Path:
+    """Open a local file picker when no image path is passed on the command line."""
+    root = None
+    try:
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        filename = filedialog.askopenfilename(
+            title="Choose an image",
+            filetypes=[
+                ("Images", "*.png *.jpg *.jpeg *.webp"),
+                ("All files", "*.*"),
+            ],
+        )
+    except TclError:
+        filename = input("Image path: ").strip().strip('"').strip("'")
+    finally:
+        if root is not None:
+            root.destroy()
+
+    if not filename:
+        raise SystemExit("No image selected.")
+
+    return Path(filename).expanduser()
+
+def image_to_data_url(image_path: Path) -&gt; str:
+    image_path = image_path.expanduser().resolve()
+
+    if not image_path.is_file():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    mime_type, _ = mimetypes.guess_type(str(image_path))
+    if not mime_type or not mime_type.startswith("image/"):
+        raise ValueError(f"Not an image file: {image_path}")
+
+    image_b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    return f"data:{mime_type};base64,{image_b64}"
+
+def build_image_message(image_path: Path, prompt: str) -&gt; HumanMessage:
+    return HumanMessage(
+        content=[
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}},
+        ]
+    )</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import base64</code></td><td>Standard-library <a class="term" href="glossary.html#module">module</a> that turns raw bytes into <a class="term" href="glossary.html#base64">base64</a> text. Needed because a message can only carry text, not raw image bytes.</td></tr>
+<tr><td>2</td><td><code>import mimetypes</code></td><td>Guesses a file's type (<code>image/jpeg</code>, <code>image/png</code>…) from its extension. The <a class="term" href="glossary.html#mime-type">MIME type</a> goes into the data URL so the model knows how to decode the bytes.</td></tr>
+<tr><td>3</td><td><code>from pathlib import Path</code></td><td><code>Path</code> represents a file path as an object with handy methods (<code>.is_file()</code>, <code>.read_bytes()</code>). It works the same on Windows and macOS.</td></tr>
+<tr><td>4</td><td><code>from tkinter import TclError, Tk, filedialog</code></td><td>Tkinter is Python's built-in window toolkit. <code>Tk</code> creates the (hidden) main window, <code>filedialog</code> shows the "open file" dialog, <code>TclError</code> is the error raised when no screen is available.</td></tr>
+<tr><td>5</td><td><code>from langchain.messages import HumanMessage</code></td><td>The <a class="term" href="glossary.html#human-message">HumanMessage</a> class this file builds. This is now the only LangChain import in the file.</td></tr>
+<tr><td>6–7</td><td>(blank)</td><td>The two unused imports and <code>load_dotenv()</code> used to be here. Two blank lines before a top-level <a class="term" href="glossary.html#function">function</a> is the usual Python style.</td></tr>
+<tr><td>8</td><td><code>def choose_image_file() -&gt; Path:</code></td><td>Defines the picker function. <code>-&gt; Path</code> is a <a class="term" href="glossary.html#type-hint">type hint</a>: it promises the function returns a <code>Path</code>.</td></tr>
+<tr><td>9</td><td><code>"""Open a local file picker when no image path is passed on the command line."""</code></td><td>The <a class="term" href="glossary.html#docstring">docstring</a>. It mentioned a command-line path even in the repo, but nothing read one. Fix 5 makes this sentence true.</td></tr>
+<tr><td>10</td><td><code>root = None</code></td><td>Starts with "no window yet", so the <code>finally</code> block on line 24 can safely check whether there is a window to close.</td></tr>
+<tr><td>11–13</td><td><code>try:</code> / <code>root = Tk()</code> / <code>root.withdraw()</code></td><td>Creates the Tk main window and immediately hides it. Only the dialog should be visible, not an empty grey window.</td></tr>
+<tr><td>14</td><td><code>root.attributes("-topmost", True)</code></td><td>Keeps the dialog in front of VS Code. Without it the picker can open <em>behind</em> your editor and the program seems frozen.</td></tr>
+<tr><td>15–21</td><td><code>filename = filedialog.askopenfilename(title=…, filetypes=[…])</code></td><td>Shows the "open file" dialog with the title "Choose an image". <code>filetypes</code> fills the type drop-down: images first, then "All files". It returns the chosen path as text, or an empty string if you press Cancel.</td></tr>
+<tr><td>22–23</td><td><code>except TclError:</code> / <code>filename = input("Image path: ").strip().strip('"').strip("'")</code></td><td>If no window can open (for example on a server with no screen), ask for the path in the terminal instead. The <code>.strip</code> calls remove spaces and the quotes Windows adds when you "Copy as path".</td></tr>
+<tr><td>24–26</td><td><code>finally:</code> / <code>if root is not None:</code> / <code>root.destroy()</code></td><td><code>finally</code> runs whether or not an error happened. It closes the hidden window so it doesn't stay open in the background.</td></tr>
+<tr><td>28–29</td><td><code>if not filename:</code> / <code>raise SystemExit("No image selected.")</code></td><td>If you cancelled, stop the program with a short message instead of a long <a class="term" href="glossary.html#traceback">traceback</a>.</td></tr>
+<tr><td>31</td><td><code>return Path(filename).expanduser()</code></td><td>Turns the text into a <code>Path</code>. <code>expanduser()</code> turns <code>~</code> into your home folder if you typed one.</td></tr>
+<tr><td>33</td><td><code>def image_to_data_url(image_path: Path) -&gt; str:</code></td><td>Converts an image file into a <a class="term" href="glossary.html#data-url">data URL</a> string.</td></tr>
+<tr><td>34</td><td><code>image_path = image_path.expanduser().resolve()</code></td><td>Makes the path absolute (full path from the drive root), so error messages show exactly which file was meant.</td></tr>
+<tr><td>36–37</td><td><code>if not image_path.is_file():</code> / <code>raise FileNotFoundError(…)</code></td><td>Stops early with a clear message if the file doesn't exist, for example after a typo in the command-line path.</td></tr>
+<tr><td>39</td><td><code>mime_type, _ = mimetypes.guess_type(str(image_path))</code></td><td><code>guess_type</code> returns two values (type and encoding). The <code>_</code> name means "I don't need the second one".</td></tr>
+<tr><td>40–41</td><td><code>if not mime_type or not mime_type.startswith("image/"):</code> / <code>raise ValueError(…)</code></td><td>Refuses files that aren't images (a PDF, a <code>.txt</code>), so you don't pay to send something the model can't use.</td></tr>
+<tr><td>43</td><td><code>image_b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")</code></td><td>Reads the file's bytes, encodes them as base64 bytes, then <code>.decode("utf-8")</code> turns those into a normal Python string.</td></tr>
+<tr><td>44</td><td><code>return f"data:{mime_type};base64,{image_b64}"</code></td><td>Builds the data URL with an <a class="term" href="glossary.html#f-string">f-string</a>, for example <code>data:image/jpeg;base64,/9j/4AAQ…</code>.</td></tr>
+<tr><td>46</td><td><code>def build_image_message(image_path: Path, prompt: str) -&gt; HumanMessage:</code></td><td><strong>Changed.</strong> <code>prompt: str</code> documents that the request must be text. Editors now autocomplete string methods on it, and type checkers can warn if you pass something else.</td></tr>
+<tr><td>47–48</td><td><code>return HumanMessage(</code> / <code>content=[</code></td><td>The message's content is a <a class="term" href="glossary.html#list">list</a> of blocks instead of a single string. That's how one message carries text <em>and</em> an image (<a class="term" href="glossary.html#multimodal">multimodal</a>).</td></tr>
+<tr><td>49</td><td><code>{"type": "text", "text": prompt},</code></td><td><strong>The fix.</strong> No quotes: the value of the variable goes in, so the model reads your real request.</td></tr>
+<tr><td>50</td><td><code>{"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}},</code></td><td>The image block. A <a class="term" href="glossary.html#dict">dict</a> inside a dict: LangChain and OpenAI expect the URL under <code>image_url.url</code>.</td></tr>
+<tr><td>51–52</td><td><code>]</code> / <code>)</code></td><td>Close the list and the <code>HumanMessage(…)</code> call.</td></tr>
+</table></div>
+
+<h2>Fix 2: the missing space (prompt.py)</h2>
+<p>The repo's <code>prompt.py</code> builds the system prompt from two strings joined with a backslash at the end of the line:</p>
+<pre data-lang="py" data-tag="before (repo)"><code>CHEF_PROMPT= "please find me a good recipe to cook"
+
+SYSTEM_CHEF_PROMPT = "You are the best chef in the world. your mission is to look and understand what are the ingredients in the photo." \
+"once you do that search online for a recipe that only need these ingredients"</code></pre>
+<p>When Python sees two string literals next to each other, it glues them together <strong>exactly as they are</strong>, with nothing in between. The first string ends with <code>photo.</code> and the second starts with <code>once</code>, so the model receives <code>…ingredients in the photo.once you do that…</code>. Models are forgiving, so it still worked, but prompts are instructions: sloppy instructions give less predictable results.</p>
+
+<details class="primer"><summary>New to long strings in Python? Backslashes vs parentheses</summary>
+<p>Python lets you split one long string across several lines in two ways:</p>
+<ul>
+<li><strong>A backslash <code>\</code> at the end of a line</strong> means "this statement continues on the next line". It works, but it's fragile: a single space after the backslash is a syntax error, and the second line looks like it isn't part of anything.</li>
+<li><strong>Parentheses <code>( … )</code></strong> around the pieces. Inside brackets Python ignores line breaks, so you can put each piece on its own indented line. This is the style most Python code uses (PEP 8, the official style guide, recommends it).</li>
+</ul>
+<p>Either way, the pieces are joined with <em>nothing</em> in between. You must put the space yourself, at the end of each piece (or at the start of the next one). Ending each piece with a space is the easiest habit to check by eye.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Two string pieces joined without a space produce photo.once; the fixed version ends each piece with a space and produces photo. Once">
+  <text x="20" y="28" class="title">How Python joins neighbouring strings</text>
+  <rect class="box2" x="20" y="44" width="250" height="40" rx="8"/>
+  <text x="145" y="69" text-anchor="middle" class="mono">"…ingredients in the photo."</text>
+  <rect class="box2" x="300" y="44" width="200" height="40" rx="8"/>
+  <text x="400" y="69" text-anchor="middle" class="mono">"once you do that…"</text>
+  <path class="arrow" d="M500,64 H548"/>
+  <rect class="box-bad" x="550" y="44" width="190" height="40" rx="8"/>
+  <text x="645" y="69" text-anchor="middle" class="mono">…photo.once you…</text>
+  <text x="285" y="69" text-anchor="middle" class="label">+</text>
+  <rect class="box2" x="20" y="124" width="250" height="40" rx="8"/>
+  <text x="145" y="149" text-anchor="middle" class="mono">"…ingredients are in it. "</text>
+  <rect class="box2" x="300" y="124" width="200" height="40" rx="8"/>
+  <text x="400" y="149" text-anchor="middle" class="mono">"Once you know them…"</text>
+  <path class="arrow" d="M500,144 H548"/>
+  <rect class="box-ok" x="550" y="124" width="190" height="40" rx="8"/>
+  <text x="645" y="149" text-anchor="middle" class="mono">…in it. Once you…</text>
+  <text x="285" y="149" text-anchor="middle" class="label">+</text>
+  <text x="20" y="194" class="small">Top: repo version. Bottom: fixed version. The trailing space inside the quotes is what makes the difference.</text>
+</svg>
+<figcaption>Python adds <strong>no</strong> space when it joins two string literals. The fix puts a space at the end of each piece, inside the quotes.</figcaption>
+</figure>
+
+<ol class="steps">
+<li><strong>Replace the contents of <code>prompt.py</code></strong>
+<p>Rewrite the file as below. Besides the spacing, the sentences now start with capitals and read naturally ("Your mission is to look at the photo and understand which ingredients are in it"). The meaning is the same as the presenter's prompt.</p></li>
+</ol>
+
+<pre data-file="prompt.py" data-lang="py" data-tag="fixed"><code>CHEF_PROMPT = "please find me a good recipe to cook"
+
+SYSTEM_CHEF_PROMPT = (
+    "You are the best chef in the world. Your mission is to look at the photo "
+    "and understand which ingredients are in it. "
+    "Once you know them, search online for a recipe that only needs these ingredients."
+)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>CHEF_PROMPT = "please find me a good recipe to cook"</code></td><td>The user request sent with the photo. Unchanged except a space before <code>=</code> (standard Python style). Upper-case names are a convention for "constant: set once, never changed".</td></tr>
+<tr><td>3</td><td><code>SYSTEM_CHEF_PROMPT = (</code></td><td>Opens parentheses so the string can span several lines without backslashes. This is the <a class="term" href="glossary.html#system-prompt">system prompt</a>: the chef's standing instructions.</td></tr>
+<tr><td>4</td><td><code>"You are the best chef in the world. Your mission is to look at the photo "</code></td><td>First piece: the role and the first task. Note the <strong>space before the closing quote</strong>.</td></tr>
+<tr><td>5</td><td><code>"and understand which ingredients are in it. "</code></td><td>Continues the same sentence, again ending with a space, so it joins cleanly with line 6.</td></tr>
+<tr><td>6</td><td><code>"Once you know them, search online for a recipe that only needs these ingredients."</code></td><td>Second instruction: search for a recipe. "Search online" nudges the model to call the <code>web_search</code> <a class="term" href="glossary.html#tool">tool</a>.</td></tr>
+<tr><td>7</td><td><code>)</code></td><td>Closes the parentheses. Python joins lines 4–6 into one string at this point.</td></tr>
+</table></div>
+
+<div class="callout ok"><p><strong>Check it yourself.</strong> In the terminal run <code>python -c "from prompt import SYSTEM_CHEF_PROMPT; print(SYSTEM_CHEF_PROMPT)"</code>. You should see one clean paragraph: <code>You are the best chef in the world. Your mission is to look at the photo and understand which ingredients are in it. Once you know them, search online for a recipe that only needs these ingredients.</code></p></div>
+
+<h2>Fix 3: use the official Tavily package</h2>
+<p>In the video (at 49:54) the presenter runs <code>uv add tavily</code>, and the repo's <code>pyproject.toml</code> depends on <code>tavily&gt;=1.1.0</code>. On PyPI, the package named <code>tavily</code> (version 1.1.0, described as "Simple API TAVILY") is published by an individual, <strong>not by Tavily</strong>. Tavily's own SDK is called <strong><code>tavily-python</code></strong> (author Tavily AI, source on github.com/tavily-ai/tavily-python, version 0.8.5 when this guide was checked). Both are imported the same way: <code>from tavily import TavilyClient</code>. That's why the mix-up is so easy.</p>
+<p>The source of the installed <code>tavily</code> 1.1.0 was read while writing this guide: it only calls <code>https://api.tavily.com</code> with your key, so it isn't harmful <em>in that version</em>. But it isn't maintained by Tavily, and any future version could do something else with the key it receives. The safe habit is to install packages from the company that runs the service.</p>
+
+<details class="primer"><summary>New to supply-chain risks? Why the package name matters</summary>
+<p>When you run <code>uv add something</code>, uv downloads <em>whatever</em> package currently has that name on PyPI, the public Python package index. Anyone can publish a package with any free name. Attackers use this: they publish look-alike names (<code>reqeusts</code> instead of <code>requests</code>, or a short name a real company never claimed) and wait for developers to install them. This is called a <a class="term" href="glossary.html#supply-chain">supply-chain</a> attack, because the danger comes in through your <a class="term" href="glossary.html#dependency">dependencies</a> rather than your own code.</p>
+<p>Your <a class="term" href="glossary.html#api-key">API keys</a> are in your environment, and every package you import runs with full access to them. So before installing a package that handles keys, check three things on its PyPI page: who the author is, which GitHub repository it links to, and whether the service's own documentation names it. Tavily's docs install <code>tavily-python</code>.</p>
+</details>
+
+<p>The same applies, more mildly, to <code>dotenv</code>. The PyPI package <code>dotenv</code> is a deprecated shim: an almost empty package whose only job is to depend on <strong><code>python-dotenv</code></strong>, the real library. It works, but it adds a middle-man. Depend on <code>python-dotenv</code> directly. Your code doesn't change: the import is still <code>from dotenv import load_dotenv</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Before: tavily 1.1.0 by an individual and the dotenv shim that pulls in python-dotenv. After: tavily-python by Tavily AI and python-dotenv directly. Your code imports tavily and dotenv in both cases">
+  <text x="190" y="28" text-anchor="middle" class="title">Before (repo)</text>
+  <text x="570" y="28" text-anchor="middle" class="title">After (this step)</text>
+  <rect class="box-warn" x="20" y="44" width="340" height="50" rx="8"/>
+  <text x="190" y="66" text-anchor="middle" class="mono">tavily 1.1.0</text>
+  <text x="190" y="84" text-anchor="middle" class="small">published by an individual</text>
+  <rect class="box-warn" x="20" y="110" width="160" height="50" rx="8"/>
+  <text x="100" y="132" text-anchor="middle" class="mono">dotenv 0.9.9</text>
+  <text x="100" y="150" text-anchor="middle" class="small">deprecated shim</text>
+  <path class="arrow" d="M180,135 H198"/>
+  <rect class="box2" x="200" y="110" width="160" height="50" rx="8"/>
+  <text x="280" y="132" text-anchor="middle" class="mono">python-dotenv</text>
+  <text x="280" y="150" text-anchor="middle" class="small">pulled in indirectly</text>
+  <rect class="box-ok" x="400" y="44" width="340" height="50" rx="8"/>
+  <text x="570" y="66" text-anchor="middle" class="mono">tavily-python 0.8.5+</text>
+  <text x="570" y="84" text-anchor="middle" class="small">published by Tavily AI</text>
+  <rect class="box-ok" x="400" y="110" width="340" height="50" rx="8"/>
+  <text x="570" y="132" text-anchor="middle" class="mono">python-dotenv 1.2.4+</text>
+  <text x="570" y="150" text-anchor="middle" class="small">the real library, direct</text>
+  <rect class="box" x="20" y="190" width="720" height="44" rx="8"/>
+  <text x="380" y="217" text-anchor="middle" class="mono">from tavily import TavilyClient   ·   from dotenv import load_dotenv</text>
+</svg>
+<figcaption>Package names (what you install) and module names (what you import) are different things. <strong>The imports at the bottom stay the same; only who publishes the code changes.</strong></figcaption>
+</figure>
+
+<ol class="steps">
+<li><strong>Remove the old packages</strong>
+<pre data-lang="sh" data-tag="terminal"><code>uv remove tavily dotenv</code></pre>
+<p>Remove them <em>first</em>: <code>tavily</code> and <code>tavily-python</code> both install a folder called <code>tavily</code> into <code>.venv</code>. Having both would make it unclear whose code <code>import tavily</code> loads.</p></li>
+<li><strong>Add the official packages</strong>
+<pre data-lang="sh" data-tag="terminal"><code>uv add tavily-python python-dotenv</code></pre></li>
+<li><strong>Check the result</strong>
+<p>Open <code>pyproject.toml</code>; the <code>dependencies</code> list should match the file below (your version numbers may be newer). <code>uv.lock</code> changes too: commit both files so teammates get the same packages with <code>uv sync</code>.</p></li>
+</ol>
+
+<h3>Line by line: the two commands</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>uv remove tavily dotenv</code></td><td><a class="term" href="glossary.html#uv">uv</a>'s <code>remove</code> subcommand deletes the named packages from <code>pyproject.toml</code>, updates the <a class="term" href="glossary.html#lockfile">lockfile</a> <code>uv.lock</code>, and uninstalls them from <code>.venv</code>. You can list several names separated by spaces.</td></tr>
+<tr><td>2</td><td><code>uv add tavily-python python-dotenv</code></td><td><code>add</code> looks up the latest compatible versions, writes them to <code>pyproject.toml</code> with a <code>&gt;=</code> lower bound, updates <code>uv.lock</code> and installs them. Note the hyphen in both names: they are the PyPI names, not the import names.</td></tr>
+</table></div>
+
+<pre data-file="pyproject.toml" data-lang="toml" data-tag="after the package swap"><code>[project]
+name = "acl-fasteat-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "&gt;=3.12"
+dependencies = [
+    "langchain&gt;=1.3.12",
+    "langchain-openai&gt;=1.3.4",
+    "python-dotenv&gt;=1.2.4",
+    "tavily-python&gt;=0.8.5",
+]</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>[project]</code></td><td>A TOML section header. Everything below it, until the next header, describes your project. See <a class="term" href="glossary.html#pyproject">pyproject.toml</a>.</td></tr>
+<tr><td>2–3</td><td><code>name = "acl-fasteat-agent"</code> / <code>version = "0.1.0"</code></td><td>The project's name and version, written by <code>uv init</code>. Unchanged.</td></tr>
+<tr><td>4–5</td><td><code>description = …</code> / <code>readme = "README.md"</code></td><td>Placeholder description and the readme file. You can write a real one-line description here.</td></tr>
+<tr><td>6</td><td><code>requires-python = "&gt;=3.12"</code></td><td>The project needs Python 3.12 or newer. uv refuses to install it into an older Python.</td></tr>
+<tr><td>7</td><td><code>dependencies = [</code></td><td>Starts the list of packages your code needs. uv keeps it sorted alphabetically.</td></tr>
+<tr><td>8–9</td><td><code>"langchain&gt;=1.3.12",</code> / <code>"langchain-openai&gt;=1.3.4",</code></td><td>Unchanged: LangChain itself and its OpenAI integration. <code>&gt;=</code> means "this version or newer"; the exact versions are pinned in <code>uv.lock</code>.</td></tr>
+<tr><td>10</td><td><code>"python-dotenv&gt;=1.2.4",</code></td><td><strong>New.</strong> The real <code>.env</code> loader, replacing the <code>dotenv</code> shim.</td></tr>
+<tr><td>11</td><td><code>"tavily-python&gt;=0.8.5",</code></td><td><strong>New.</strong> Tavily's official SDK, replacing <code>tavily</code>.</td></tr>
+<tr><td>12</td><td><code>]</code></td><td>Ends the list.</td></tr>
+</table></div>
+
+<h2>Fix 4: a search error shouldn't crash the chef (tools.py)</h2>
+<p>A web search can fail for reasons that have nothing to do with your code: no internet, a wrong or expired key, the free monthly credits used up, a timeout. In the repo, <code>web_search</code> simply calls <code>tavily_client.search(query)</code>. If that raises an <a class="term" href="glossary.html#exception">exception</a>, it travels up through the <a class="term" href="glossary.html#agent">agent</a> and the whole program stops with a traceback.</p>
+<p>That's not a guess: in LangGraph 1.2.9 the tool runner's default error handler only turns <em>argument</em> errors (the model sent bad arguments) into messages. Every other exception is re-raised. So the tool has to catch its own errors.</p>
+
+<details class="primer"><summary>New to try / except? Catching errors so the program can continue</summary>
+<p>When something goes wrong at run time, Python <em>raises</em> an exception. If no code catches it, the program stops and prints a traceback. A <code>try</code> block lets you say "attempt this, and if it fails, do that instead":</p>
+<pre data-lang="py" data-tag="illustrative"><code>try:
+    result = risky_call()
+except Exception as error:
+    result = f"failed: {error}"</code></pre>
+<p><code>except Exception</code> catches almost every error type. <code>as error</code> stores the exception in a variable, so you can log or show its message. In application code you usually catch narrower types, but a tool is a special case: <em>any</em> failure should become a message for the model, not a crash.</p>
+</details>
+
+<p>The fixed tool catches the error, logs a warning, and <strong>returns</strong> a small <a class="term" href="glossary.html#dict">dict</a> with an <code>"error"</code> key. LangChain turns that return value into a <a class="term" href="glossary.html#tool-message">ToolMessage</a>, exactly like a successful result. The model reads "Search failed… Answer from what you already know." and writes a recipe from its own knowledge instead. The user gets an answer, and your log shows what went wrong.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Sequence: the agent calls web_search, Tavily fails. Without try/except the exception reaches main.py and the program stops. With try/except the tool returns an error dict, the agent receives a ToolMessage and the model answers anyway">
+  <text x="100" y="26" text-anchor="middle" class="title">Agent</text>
+  <text x="300" y="26" text-anchor="middle" class="title">web_search</text>
+  <text x="500" y="26" text-anchor="middle" class="title">Tavily API</text>
+  <text x="680" y="26" text-anchor="middle" class="title">Model</text>
+  <path class="line dashed" d="M100,36 V296"/>
+  <path class="line dashed" d="M300,36 V296"/>
+  <path class="line dashed" d="M500,36 V296"/>
+  <path class="line dashed" d="M680,36 V296"/>
+  <path class="arrow" d="M100,62 H296"/>
+  <text x="200" y="56" text-anchor="middle" class="label">1. tool call</text>
+  <path class="arrow" d="M300,92 H496"/>
+  <text x="400" y="86" text-anchor="middle" class="label">2. search(query)</text>
+  <path class="arrow-bad dashed" d="M500,122 H304"/>
+  <text x="400" y="116" text-anchor="middle" class="bad">3. error (timeout, bad key…)</text>
+  <rect class="box-bad" x="20" y="142" width="250" height="50" rx="8"/>
+  <text x="145" y="163" text-anchor="middle" class="bad">Repo: exception escapes</text>
+  <text x="145" y="181" text-anchor="middle" class="small">traceback, program stops</text>
+  <rect class="box-ok" x="330" y="142" width="250" height="50" rx="8"/>
+  <text x="455" y="163" text-anchor="middle" class="ok">Fixed: except → return</text>
+  <text x="455" y="181" text-anchor="middle" class="small">{"error": "Search failed: …"}</text>
+  <path class="arrow-ok" d="M300,222 H104"/>
+  <text x="200" y="216" text-anchor="middle" class="label">4. ToolMessage</text>
+  <path class="arrow-ok" d="M100,252 H676"/>
+  <text x="390" y="246" text-anchor="middle" class="label">5. history + error text</text>
+  <path class="arrow-ok" d="M680,282 H104"/>
+  <text x="400" y="276" text-anchor="middle" class="label">6. recipe anyway</text>
+  <text x="390" y="318" text-anchor="middle" class="small">Time flows down. Messages 4–6 only happen in the fixed version.</text>
+</svg>
+<figcaption>What happens when Tavily fails. In the repo the error escapes at step 3 and the run ends. With the fix, <strong>the failure becomes an ordinary tool result</strong> and the agent loop carries on.</figcaption>
+</figure>
+
+<ol class="steps">
+<li><strong>Replace the contents of <code>tools.py</code></strong>
+<p>Note that the <code>logging.basicConfig(…)</code> block is gone from this file. <code>main.py</code> already configures logging, and configuring it in two places is confusing: only the first call to <code>basicConfig</code> takes effect, so the result depends on which file happens to be imported first. Configure logging once, in the entry point.</p></li>
+</ol>
+
+<pre data-file="tools.py" data-lang="py" data-tag="fixed"><code>from tavily import TavilyClient
+from dotenv import load_dotenv
+from langchain.tools import tool
+from typing import Dict, Any
+import logging
+
+load_dotenv()
+
+tavily_client = TavilyClient()
+
+
+@tool
+def web_search(query: str) -&gt; Dict[str, Any]:
+    """Search the web for recipes and cooking information. Use short, specific queries."""
+    logging.info(f"searching for {query}")
+    try:
+        return tavily_client.search(query, max_results=5)
+    except Exception as error:
+        logging.warning(f"search failed: {error}")
+        return {"error": f"Search failed: {error}. Answer from what you already know."}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>from tavily import TavilyClient</code></td><td>Same import as before; it now comes from <code>tavily-python</code>. <code>TavilyClient</code> is the class that talks to the Tavily API.</td></tr>
+<tr><td>2</td><td><code>from dotenv import load_dotenv</code></td><td>Imports the function that reads <code>.env</code> (now from <code>python-dotenv</code>).</td></tr>
+<tr><td>3</td><td><code>from langchain.tools import tool</code></td><td>The <code>@tool</code> <a class="term" href="glossary.html#decorator">decorator</a> that turns a plain function into a LangChain tool.</td></tr>
+<tr><td>4</td><td><code>from typing import Dict, Any</code></td><td>Type-hint helpers: <code>Dict[str, Any]</code> means "a dictionary with text keys and values of any type".</td></tr>
+<tr><td>5</td><td><code>import logging</code></td><td>Python's built-in <a class="term" href="glossary.html#logging">logging</a> module, used on lines 15 and 19.</td></tr>
+<tr><td>7</td><td><code>load_dotenv()</code></td><td>Loads <code>.env</code> into the environment. It must run <em>before</em> line 9, because <code>main.py</code> imports this file before its own <code>load_dotenv()</code> runs.</td></tr>
+<tr><td>9</td><td><code>tavily_client = TavilyClient()</code></td><td>Creates one client for the whole program. With no argument it reads <code>TAVILY_API_KEY</code> from the environment. (In tavily-python 0.8.5, creating the client doesn't fail when the key is missing; that's why <code>main.py</code> checks the key itself.)</td></tr>
+<tr><td>12</td><td><code>@tool</code></td><td>Registers the function below as a tool. LangChain builds the tool's schema from the function name, the type hints and the docstring.</td></tr>
+<tr><td>13</td><td><code>def web_search(query: str) -&gt; Dict[str, Any]:</code></td><td>The model must send one text argument, <code>query</code>. The space after the comma in <code>Dict[str, Any]</code> is just style.</td></tr>
+<tr><td>14</td><td><code>"""Search the web for recipes and cooking information. Use short, specific queries."""</code></td><td><strong>Changed.</strong> The docstring is the description the model reads to decide when and how to use the tool. The repo's "tool to search the web for information" is vague; this one says what it's for and how to write good queries.</td></tr>
+<tr><td>15</td><td><code>logging.info(f"searching for {query}")</code></td><td>Logs each search, like in the video (e.g. "searching for recipe using oyster sauce").</td></tr>
+<tr><td>16</td><td><code>try:</code></td><td>Starts the protected block.</td></tr>
+<tr><td>17</td><td><code>return tavily_client.search(query, max_results=5)</code></td><td>Runs the search and returns Tavily's result dict (a <code>results</code> list with title, url and content for each page). <strong><code>max_results=5</code></strong> caps the number of pages. Every result is pasted into the conversation as tokens, so fewer results means a shorter, cheaper prompt and less noise for the model.</td></tr>
+<tr><td>18</td><td><code>except Exception as error:</code></td><td>Catches any failure from line 17: network problems, invalid key, usage limit, timeout.</td></tr>
+<tr><td>19</td><td><code>logging.warning(f"search failed: {error}")</code></td><td>Records the real error at WARNING level, so you can see it in the terminal even though the chef carries on.</td></tr>
+<tr><td>20</td><td><code>return {"error": f"Search failed: {error}. Answer from what you already know."}</code></td><td>Returns a normal value instead of crashing. The second sentence tells the model what to do next, so it doesn't just apologise or call the tool again and again.</td></tr>
+</table></div>
+
+<h2>Fix 5: pass the photo on the command line, and check the keys (main.py)</h2>
+<p>Two small usability improvements. First, opening a file dialog every time is slow when you test the same photo again and again, and it doesn't work at all on a machine without a screen. The fixed <code>main.py</code> accepts an optional path:</p>
+<pre data-lang="sh" data-tag="terminal"><code>python main.py path/to/photo.jpg</code></pre>
+<p>If you don't give a path, the file picker opens as before. Second, if a key is missing from <code>.env</code>, the repo fails deep inside the OpenAI client with a long traceback (<code>openai.OpenAIError: Missing credentials…</code>), or worse, only when the search runs. The fix checks both keys at start-up and stops with one clear sentence.</p>
+
+<details class="primer"><summary>New to sys.argv? How a program reads what you type after its name</summary>
+<p>When you run <code>python main.py photos/fridge.jpg</code>, Python stores the words after <code>python</code> in a list called <code>sys.argv</code> ("argument vector"):</p>
+<ul>
+<li><code>sys.argv[0]</code> is the script name, <code>"main.py"</code>. It's always there.</li>
+<li><code>sys.argv[1]</code> is the first extra word, <code>"photos/fridge.jpg"</code>. It only exists if you typed one.</li>
+</ul>
+<p>So <code>len(sys.argv) &gt; 1</code> means "the user typed something after the script name". Reading <code>sys.argv[1]</code> without that check would crash with <code>IndexError</code> when no path was given.</p>
+<p>Words are split on spaces. If your path contains spaces, wrap it in quotes: <code>python main.py "C:\Users\me\My Photos\fridge.jpg"</code>. For bigger command-line interfaces Python has the <code>argparse</code> module; for one optional value, <code>sys.argv</code> is enough.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="The command python main.py photos/fridge.jpg becomes the list sys.argv with main.py at index 0 and photos/fridge.jpg at index 1">
+  <rect class="box2" x="20" y="20" width="720" height="44" rx="8"/>
+  <text x="40" y="47" class="mono">&gt; python  main.py  photos/fridge.jpg</text>
+  <text x="560" y="47" class="small">what you type</text>
+  <path class="arrow" d="M200,64 V96"/>
+  <path class="arrow" d="M340,64 V96"/>
+  <rect class="box" x="140" y="98" width="140" height="44" rx="8"/>
+  <text x="210" y="118" text-anchor="middle" class="mono">"main.py"</text>
+  <text x="210" y="134" text-anchor="middle" class="small">sys.argv[0]</text>
+  <rect class="box-ok" x="290" y="98" width="200" height="44" rx="8"/>
+  <text x="390" y="118" text-anchor="middle" class="mono">"photos/fridge.jpg"</text>
+  <text x="390" y="134" text-anchor="middle" class="small">sys.argv[1]</text>
+  <text x="80" y="125" text-anchor="middle" class="label">sys.argv =</text>
+  <text x="510" y="118" class="label">len(sys.argv) == 2</text>
+  <text x="510" y="134" class="small">so the picker is skipped</text>
+  <text x="20" y="174" class="small">"python" itself is not in the list; it is the program that runs main.py.</text>
+</svg>
+<figcaption>How the command line becomes <code>sys.argv</code>. <strong>Index 1 exists only when you typed a path</strong>, which is why line 30 checks the length first.</figcaption>
+</figure>
+
+<p><strong>About <code>SystemExit</code>.</strong> <code>raise SystemExit("message")</code> stops the program, prints <code>message</code> to the terminal, and returns a non-zero exit code (which tells scripts and CI tools "this failed"). Unlike other exceptions, Python doesn't print a traceback for it. That makes it the right choice for errors the <em>user</em> can fix, like a missing key: they need one clear instruction, not 30 lines of library internals.</p>
+
+<ol class="steps">
+<li><strong>Replace the contents of <code>main.py</code></strong>
+<p>The imports are also tidied: standard-library imports first, then third-party packages, then your own files, each group sorted. That's the usual Python order. The unused <code>HumanMessage</code> import is removed.</p></li>
+</ol>
+
+<pre data-file="main.py" data-lang="py" data-tag="fixed"><code>import logging
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+from langchain.agents import create_agent
+
+from photo_decoder import build_image_message, choose_image_file
+from prompt import CHEF_PROMPT, SYSTEM_CHEF_PROMPT
+from tools import web_search
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+load_dotenv()
+
+for key in ("OPENAI_API_KEY", "TAVILY_API_KEY"):
+    if not os.getenv(key):
+        raise SystemExit(f"{key} is missing. Add it to your .env file.")
+
+logging.info("creating our agent...")
+agent = create_agent(model="gpt-5-nano",
+                     tools=[web_search],
+                     system_prompt=SYSTEM_CHEF_PROMPT)
+
+logging.info("choosing our image...")
+path = Path(sys.argv[1]) if len(sys.argv) &gt; 1 else choose_image_file()
+message = build_image_message(path, CHEF_PROMPT)
+
+logging.info("invoking our agent...")
+response = agent.invoke(
+    {"messages": [message]}
+)
+
+print(response["messages"][-1].content)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import logging</code></td><td>Built-in logging, used for the progress messages. Moved to the top with the other standard-library imports.</td></tr>
+<tr><td>2</td><td><code>import os</code></td><td><strong>New.</strong> Gives access to environment variables through <code>os.getenv</code> (line 21).</td></tr>
+<tr><td>3</td><td><code>import sys</code></td><td><strong>New.</strong> Gives access to <code>sys.argv</code>, the command-line words (line 30).</td></tr>
+<tr><td>4</td><td><code>from pathlib import Path</code></td><td><strong>New.</strong> Needed to turn the command-line text into a <code>Path</code>, the type <code>build_image_message</code> expects.</td></tr>
+<tr><td>6–7</td><td><code>from dotenv import load_dotenv</code> / <code>from langchain.agents import create_agent</code></td><td>Third-party imports: the <code>.env</code> loader and LangChain's agent builder.</td></tr>
+<tr><td>9–11</td><td><code>from photo_decoder import …</code> / <code>from prompt import …</code> / <code>from tools import web_search</code></td><td>Your own modules. Importing <code>tools</code> runs that file's top-level code, which creates the Tavily client.</td></tr>
+<tr><td>13–16</td><td><code>logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")</code></td><td>Configures logging once for the whole program: show INFO and above, each line with time, level and message. The search logs from <code>tools.py</code> use this setup too.</td></tr>
+<tr><td>18</td><td><code>load_dotenv()</code></td><td>Reads <code>.env</code> into the environment, so line 21 can find the keys.</td></tr>
+<tr><td>20</td><td><code>for key in ("OPENAI_API_KEY", "TAVILY_API_KEY"):</code></td><td><strong>New.</strong> Loops over the two names the program needs. A tuple in round brackets is a fixed list of values.</td></tr>
+<tr><td>21</td><td><code>if not os.getenv(key):</code></td><td><code>os.getenv</code> returns the value, or <code>None</code> if the variable doesn't exist. <code>not</code> is true for <code>None</code> <em>and</em> for an empty string, so <code>OPENAI_API_KEY=</code> with nothing after it is caught too.</td></tr>
+<tr><td>22</td><td><code>raise SystemExit(f"{key} is missing. Add it to your .env file.")</code></td><td>Stops with a one-line message that names the missing key. It never prints the key's value, so nothing secret ends up in your terminal history or screenshots.</td></tr>
+<tr><td>24–27</td><td><code>logging.info("creating our agent...")</code> / <code>agent = create_agent(model="gpt-5-nano", tools=[web_search], system_prompt=SYSTEM_CHEF_PROMPT)</code></td><td>Unchanged: builds the chef agent with the model name, the search tool and the system prompt.</td></tr>
+<tr><td>29</td><td><code>logging.info("choosing our image...")</code></td><td>Progress log, unchanged.</td></tr>
+<tr><td>30</td><td><code>path = Path(sys.argv[1]) if len(sys.argv) &gt; 1 else choose_image_file()</code></td><td><strong>New.</strong> A one-line <code>if/else</code> (a "conditional expression"): if a path was typed, use it; otherwise open the picker. Both branches give a <code>Path</code>.</td></tr>
+<tr><td>31</td><td><code>message = build_image_message(path, CHEF_PROMPT)</code></td><td>Builds the text + image message. Thanks to Fix 1, <code>CHEF_PROMPT</code> now really reaches the model.</td></tr>
+<tr><td>33–36</td><td><code>logging.info("invoking our agent...")</code> / <code>response = agent.invoke({"messages": [message]})</code></td><td>Runs the <a class="term" href="glossary.html#agent-loop">agent loop</a> until the model gives a final answer. <a class="term" href="glossary.html#invoke">invoke</a> waits for the whole run and returns the final state.</td></tr>
+<tr><td>38</td><td><code>print(response["messages"][-1].content)</code></td><td>Prints the last message's text: the chef's final recipe. <code>[-1]</code> means "the last item of the list".</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Start-up decision flow of main.py: load .env, check both keys, stop with a message if one is missing, then use the command-line path if given or open the picker, then invoke the agent">
+  <rect class="box" x="20" y="20" width="150" height="44" rx="8"/>
+  <text x="95" y="47" text-anchor="middle">load_dotenv()</text>
+  <path class="arrow" d="M170,42 H208"/>
+  <rect class="box-info" x="210" y="20" width="200" height="44" rx="8"/>
+  <text x="310" y="40" text-anchor="middle">both keys set?</text>
+  <text x="310" y="56" text-anchor="middle" class="small">OPENAI_API_KEY, TAVILY_API_KEY</text>
+  <path class="arrow-bad" d="M410,42 H478"/>
+  <text x="444" y="34" text-anchor="middle" class="small">no</text>
+  <rect class="box-bad" x="480" y="20" width="260" height="44" rx="8"/>
+  <text x="610" y="40" text-anchor="middle" class="bad">SystemExit</text>
+  <text x="610" y="56" text-anchor="middle" class="small">"OPENAI_API_KEY is missing. Add it…"</text>
+  <path class="arrow-ok" d="M310,64 V108"/>
+  <text x="324" y="90" class="small">yes</text>
+  <rect class="box" x="210" y="110" width="200" height="44" rx="8"/>
+  <text x="310" y="137" text-anchor="middle">create_agent(…)</text>
+  <path class="arrow" d="M310,154 V188"/>
+  <rect class="box-info" x="210" y="190" width="200" height="44" rx="8"/>
+  <text x="310" y="210" text-anchor="middle">path typed?</text>
+  <text x="310" y="226" text-anchor="middle" class="small">len(sys.argv) &gt; 1</text>
+  <path class="arrow" d="M210,212 H112"/>
+  <text x="160" y="204" text-anchor="middle" class="small">no</text>
+  <rect class="box2" x="20" y="190" width="90" height="44" rx="8"/>
+  <text x="65" y="210" text-anchor="middle" class="label">file picker</text>
+  <text x="65" y="226" text-anchor="middle" class="small">as before</text>
+  <path class="arrow" d="M410,212 H478"/>
+  <text x="444" y="204" text-anchor="middle" class="small">yes</text>
+  <rect class="box-ok" x="480" y="190" width="260" height="44" rx="8"/>
+  <text x="610" y="217" text-anchor="middle" class="mono">Path(sys.argv[1])</text>
+  <path class="arrow" d="M65,234 V262 H278"/>
+  <path class="arrow" d="M610,234 V262 H422"/>
+  <rect class="box-solid" x="280" y="248" width="140" height="36" rx="8"/>
+  <text x="350" y="271" text-anchor="middle" class="on-solid">agent.invoke</text>
+</svg>
+<figcaption>The order of checks in the new <code>main.py</code>. <strong>Problems you can fix yourself (a missing key) are caught before any paid API call is made.</strong></figcaption>
+</figure>
+
+<h2>Run the fixed chef</h2>
+<ol class="steps">
+<li><strong>With the picker</strong>
+<pre data-lang="sh" data-tag="terminal"><code>python main.py</code></pre>
+<p>Pick a photo of some ingredients, as in the video.</p></li>
+<li><strong>With a path</strong>
+<pre data-lang="sh" data-tag="terminal"><code>python main.py images/fridge.jpg</code></pre>
+<p>Use any image path that exists on your machine; it can be relative to the project folder or absolute.</p></li>
+<li><strong>Test the request fix</strong>
+<p>Change <code>CHEF_PROMPT</code> in <code>prompt.py</code> to something specific, such as <code>"find me a quick vegetarian dinner"</code>, and run again. The answer should now follow your request. With the repo's bug, this change had no effect.</p></li>
+<li><strong>Test the error handling (optional)</strong>
+<p>In <code>.env</code>, temporarily change one character of <code>TAVILY_API_KEY</code>. Run again: you should see a <code>WARNING | search failed: …</code> line, and the chef should still answer. Put the real key back afterwards.</p></li>
+<li><strong>Commit</strong>
+<p><code>git add .</code> then <code>git commit -m "fix prompt bugs, official tavily sdk, cli path"</code>.</p></li>
+</ol>
+
+<div class="callout ok"><p><strong>What you should see</strong></p>
+<p>The same three INFO lines as in step 14 (creating, choosing, invoking), one or more <code>searching for …</code> lines, then the recipe. When you pass a path, no dialog opens. If you removed a key, you see only <code>TAVILY_API_KEY is missing. Add it to your .env file.</code> and the program stops. Answers vary from run to run, because the model's wording isn't fixed.</p></div>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Leaving the quotes in</strong>: <code>"text": "prompt"</code> still runs without any error. Search the file for <code>"prompt"</code> to be sure it's gone.</li>
+<li><strong>A space after the backslash</strong> if you kept the backslash style in <code>prompt.py</code>: <code>SyntaxError: unexpected character after line continuation character</code>. Use parentheses instead.</li>
+<li><strong><code>uv add tavily</code> out of habit</strong>: check <code>pyproject.toml</code> for the exact name <code>tavily-python</code>.</li>
+<li><strong><code>ModuleNotFoundError: No module named 'tavily'</code></strong> after the swap: the virtual environment isn't active, or <code>uv add</code> failed. Activate <code>.venv</code> and run <code>uv sync</code>.</li>
+<li><strong>A path with spaces without quotes</strong>: only the first word reaches <code>sys.argv[1]</code>, and you get <code>FileNotFoundError: Image not found</code>. Wrap the path in quotes.</li>
+<li><strong>"OPENAI_API_KEY is missing" although it's in <code>.env</code></strong>: <code>load_dotenv()</code> looks for <code>.env</code> in the script's folder and its parent folders. Check that the file sits next to <code>main.py</code>, is named exactly <code>.env</code> (Windows sometimes saves it as <code>.env.txt</code>), and that the variable name is spelled exactly as in the error.</li>
+<li><strong>Catching the error but returning nothing</strong> (<code>except: pass</code>): the tool returns <code>None</code>, and the model gets no explanation. Always return a message.</li>
+</ul></div>
+
+<div class="callout"><p><strong>Video vs repo vs this step.</strong> The video and the repo match each other; this step is the only place the code differs. The repo is left unchanged in steps 12–15 so you can follow the video exactly, and this page is where you improve it.</p></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>"prompt"</code> with quotes is a fixed word; <code>prompt</code> without quotes is your variable. The fix makes the chef actually read your request.</li>
+<li>Python joins neighbouring strings with no space; use parentheses and end each piece with a space.</li>
+<li>Install Tavily's official <code>tavily-python</code> and the real <code>python-dotenv</code>: same imports, trusted publishers.</li>
+<li>A tool should catch its own errors and return a message, so one failed search doesn't end the whole run.</li>
+<li><code>sys.argv[1]</code> lets you pass the photo on the command line; a start-up key check gives a clear message instead of a traceback.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="15-commit-and-next.html"><small>← Previous · Step 15</small>Commit, Push &amp; What&#x27;s Next</a>
+<a class="next" href="17-structured-recipe.html"><small>Next · Step 17 →</small>A Typed Recipe with Structured Output</a>
+</nav>
+</main>
+</body>
+</html>

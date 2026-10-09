@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 8 · Maps on the Web: Leaflet, Tiles &amp; Layers</title>
+<meta name="description" content="Coordinates, zoom levels, tile servers, overlays and how react-leaflet wraps Leaflet.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">React Weather App · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 8/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">React Handbook · Chapter 8 of 10</div>
+  <h1>Maps on the Web: Leaflet, Tiles &amp; Layers</h1>
+  <p class="lead">Coordinates, zoom levels, tile servers, overlays and how react-leaflet wraps Leaflet.</p>
+</section>
+<p>The map is the biggest thing on the dashboard. In <a href="11-map-leaflet-setup.html">step 11</a> the presenter added a <a class="term" href="glossary.html#leaflet">Leaflet</a> map with <a class="term" href="glossary.html#react-leaflet">react-leaflet</a>. In <a href="15-map-follows-dropdown.html">step 15</a> they made it follow the dropdown, in <a href="16-weather-map-layers.html">step 16</a> they laid OpenWeather's weather tiles over it, in <a href="17-maptiler.html">step 17</a> they swapped the base map for a <a class="term" href="glossary.html#maptiler">MapTiler</a> style, and in <a href="18-map-legend.html">step 18</a> they added a legend. This chapter explains the ideas underneath: how positions are written, how a round Earth becomes a flat square, why maps are cut into tiles, how layers stack, how react-leaflet wraps an older non-React library, and two production details: the broken marker image and attribution.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> Two of the bugs found in testing live in <code>Map.tsx</code>: a click listener added on every render, and a default marker that shows as a broken image in the production build. Both come from the gap between Leaflet's imperative style and React's way of thinking. Knowing how tiles and layers work also lets you add your own overlays, change the zoom sensibly and credit the map data correctly.</div>
+
+<p>Library facts below were read from the installed <code>leaflet</code> 1.9.4, <code>react-leaflet</code> 5.0.0-rc.2 and <code>@maptiler/leaflet-maptilersdk</code> 4.1.1. Tile numbers were computed with the standard formula and are marked as such.</p>
+
+<h2>Latitude and longitude</h2>
+<p>Every position on Earth is two angles, in degrees. <a class="term" href="glossary.html#latitude-longitude">Latitude</a> says how far north or south of the equator you are: from -90 (South Pole) to 90 (North Pole). Longitude says how far east or west of the line through Greenwich, London: from -180 to 180. Tokyo is about latitude 35.68, longitude 139.69: a bit more than a third of the way to the North Pole, and well to the east.</p>
+<p>The point 0, 0 is in the Atlantic Ocean, in the Gulf of Guinea, south of Ghana. That is why the committed app "flickers to the middle of the ocean" before showing Tokyo (the presenter notices it around 2:28:00): it requests weather for <code>lat: 0, lon: 0</code> while the city is still being looked up (see <a href="rw-06-tanstack-query.html">chapter 6</a>).</p>
+<div class="table-wrap"><table>
+<tr><th>Where</th><th>Order</th><th>Names</th></tr>
+<tr><td>Leaflet / react-leaflet (<code>center</code>, <code>position</code>, <code>panTo</code>)</td><td><code>[lat, lng]</code></td><td><code>e.latlng.lat</code>, <code>e.latlng.lng</code></td></tr>
+<tr><td>OpenWeather URLs and responses</td><td>separate parameters</td><td><code>lat</code>, <code>lon</code></td></tr>
+<tr><td>This project's <code>Coords</code> type</td><td>object</td><td><code>{ lat, lon }</code></td></tr>
+<tr><td>GeoJSON files (common elsewhere)</td><td><code>[lon, lat]</code> (reversed!)</td><td></td></tr>
+</table></div>
+<p>The project translates between the two spellings when the user clicks: <code>const { lat, lng } = e.latlng</code> then <code>onMapClick(lat, lng)</code>, and <code>App.tsx</code> stores it as <code>{ lat, lon }</code>. Mixing up the order is the classic map bug: your marker lands in the wrong hemisphere, or in Antarctica.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="A flat world grid: horizontal axis longitude from -180 to 180, vertical axis latitude from -90 to 90; point 0,0 in the centre and Tokyo at 35.68, 139.69 to the upper right">
+  <rect class="box2" x="80" y="20" width="600" height="200" rx="4"/>
+  <path class="line dashed" d="M380,20 V220"/>
+  <path class="line dashed" d="M80,120 H680"/>
+  <text x="80" y="238" text-anchor="middle" class="small">-180</text>
+  <text x="380" y="238" text-anchor="middle" class="small">0 (Greenwich)</text>
+  <text x="680" y="238" text-anchor="middle" class="small">180</text>
+  <text x="70" y="25" text-anchor="end" class="small">90 N</text>
+  <text x="70" y="124" text-anchor="end" class="small">0</text>
+  <text x="70" y="220" text-anchor="end" class="small">90 S</text>
+  <circle class="dot-bad" cx="380" cy="120" r="7"/>
+  <text x="392" y="145" class="label">0, 0: Gulf of Guinea</text>
+  <circle class="dot-ok" cx="613" cy="80" r="7"/>
+  <text x="600" y="66" text-anchor="middle" class="label">Tokyo 35.68, 139.69</text>
+  <text x="720" y="124" class="small">equator</text>
+</svg>
+<figcaption>Latitude is up/down, longitude is left/right (simple equirectangular sketch, not to scale). <strong>Leaflet wants <code>[lat, lng]</code>: up/down first.</strong></figcaption>
+</figure>
+
+<h2>From a globe to a square: Web Mercator</h2>
+<p>A screen is flat, so the globe must be <em>projected</em>. Almost every web map, including Leaflet's default, uses <strong>Web Mercator</strong> (code name EPSG:3857; Leaflet's map options default to <code>crs: EPSG3857</code>). It turns the whole world into one square. Two side effects you will notice:</p>
+<ul>
+<li>Areas far from the equator look much bigger than they are (Greenland looks as large as Africa).</li>
+<li>The poles cannot be shown. Leaflet's projection stops at latitude ±85.0511287798 (<code>MAX_LATITUDE</code> in the source), the value that makes the world exactly square.</li>
+</ul>
+<p>You rarely compute this yourself; Leaflet converts between <code>[lat, lng]</code> and screen pixels for you. But it explains the next idea: since the world is a square, it can be cut into smaller squares.</p>
+
+<h2>Zoom levels and tiles</h2>
+<p>Downloading one huge picture of the world would be impossible. Instead, map servers cut the square world into <strong>tiles</strong>: small images, 256 × 256 pixels in Leaflet by default (<code>tileSize: 256</code>). At zoom 0 the whole world is one tile. Each zoom level doubles the width and height, so zoom <em>z</em> has 2<sup>z</sup> × 2<sup>z</sup> tiles. The browser only downloads the handful of tiles that cover the visible area.</p>
+<div class="table-wrap"><table>
+<tr><th>Zoom</th><th>Tiles across</th><th>Tiles in total</th><th>About how many metres one pixel covers at the equator</th></tr>
+<tr><td>0</td><td>1</td><td>1</td><td>156,543</td></tr>
+<tr><td>5 (this app's starting zoom)</td><td>32</td><td>1,024</td><td>4,892</td></tr>
+<tr><td>10</td><td>1,024</td><td>1,048,576</td><td>153</td></tr>
+<tr><td>18 (Leaflet's default <code>maxZoom</code> for a TileLayer)</td><td>262,144</td><td>about 68.7 billion</td><td>0.6</td></tr>
+</table></div>
+<p>(Computed: tiles = 4<sup>z</sup>; metres per pixel = Earth's circumference ÷ (256 × 2<sup>z</sup>).) At 1:39:04 the presenter lowers the example's zoom from 13 to 5, which is why the dashboard opens showing a whole region rather than a few streets.</p>
+<p>A tile is named by three numbers: zoom <code>z</code>, column <code>x</code> (from the left, starting at 0) and row <code>y</code> (from the top). That is what the <code>{z}/{x}/{y}</code> placeholders in a tile URL mean. Leaflet fills them in for every tile it needs. The weather overlay in <code>Map.tsx</code> uses exactly this pattern:</p>
+<pre data-lang="tsx" data-tag="verified"><code>&lt;TileLayer
+  opacity={0.7}
+  url={`https://tile.openweathermap.org/map/${mapType}/{z}/{x}/{y}.png?appid=${API_KEY}`}
+/&gt;</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Tile pyramid: zoom 0 has one tile, zoom 1 has four, zoom 2 has sixteen; each level doubles width and height">
+  <rect class="box-info" x="60" y="80" width="80" height="80" rx="2"/>
+  <text x="100" y="125" text-anchor="middle" class="mono">0/0/0</text>
+  <text x="100" y="185" text-anchor="middle" class="label">zoom 0: 1 tile</text>
+  <rect class="box" x="240" y="60" width="60" height="60" rx="2"/>
+  <rect class="box" x="300" y="60" width="60" height="60" rx="2"/>
+  <rect class="box" x="240" y="120" width="60" height="60" rx="2"/>
+  <rect class="box" x="300" y="120" width="60" height="60" rx="2"/>
+  <text x="270" y="94" text-anchor="middle" class="small">1/0/0</text>
+  <text x="330" y="94" text-anchor="middle" class="small">1/1/0</text>
+  <text x="270" y="154" text-anchor="middle" class="small">1/0/1</text>
+  <text x="330" y="154" text-anchor="middle" class="small">1/1/1</text>
+  <text x="300" y="205" text-anchor="middle" class="label">zoom 1: 4 tiles</text>
+  <rect class="box2" x="460" y="40" width="160" height="160" rx="2"/>
+  <path class="line" d="M500,40 V200 M540,40 V200 M580,40 V200 M460,80 H620 M460,120 H620 M460,160 H620"/>
+  <rect class="box-ok" x="580" y="80" width="40" height="40" rx="2"/>
+  <text x="540" y="220" text-anchor="middle" class="label">zoom 2: 16 tiles</text>
+  <text x="640" y="104" class="small">2/3/1</text>
+  <text x="640" y="120" class="small">(x=3, y=1)</text>
+  <path class="arrow" d="M150,120 H228"/>
+  <path class="arrow" d="M370,120 H448"/>
+</svg>
+<figcaption>Every zoom step splits each tile into four. <strong><code>x</code> counts columns from the left, <code>y</code> counts rows from the top.</strong> Tokyo at zoom 5 is in tile 5/28/12 (computed).</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="The OpenWeather tile URL split into its parts: host, layer name from mapType, z x y filled by Leaflet, and the appid key">
+  <rect class="box2" x="10" y="20" width="230" height="40" rx="6"/>
+  <text x="125" y="45" text-anchor="middle" class="mono">tile.openweathermap.org</text>
+  <rect class="box-info" x="250" y="20" width="160" height="40" rx="6"/>
+  <text x="330" y="45" text-anchor="middle" class="mono">/map/clouds_new</text>
+  <rect class="box-ok" x="420" y="20" width="160" height="40" rx="6"/>
+  <text x="500" y="45" text-anchor="middle" class="mono">/{z}/{x}/{y}.png</text>
+  <rect class="box-warn" x="590" y="20" width="160" height="40" rx="6"/>
+  <text x="670" y="45" text-anchor="middle" class="mono">?appid=KEY</text>
+  <text x="125" y="85" text-anchor="middle" class="small">the tile server</text>
+  <text x="330" y="85" text-anchor="middle" class="small">${mapType} from the dropdown</text>
+  <text x="500" y="85" text-anchor="middle" class="small">filled in by Leaflet</text>
+  <text x="500" y="101" text-anchor="middle" class="small">for each visible tile</text>
+  <text x="670" y="85" text-anchor="middle" class="small">your OpenWeather key,</text>
+  <text x="670" y="101" text-anchor="middle" class="small">visible in every request</text>
+  <text x="380" y="135" text-anchor="middle" class="small">one request per visible tile, repeated whenever you pan, zoom or switch layer</text>
+</svg>
+<figcaption>One tile URL, taken apart. <strong>Changing <code>mapType</code> changes only the layer part</strong>, so Leaflet requests a new set of tiles for the same view.</figcaption>
+</figure>
+
+<h2>Base map, overlays and opacity</h2>
+<p>A web map is a stack of transparent sheets. The bottom sheet is the <strong>base map</strong> (land, sea, borders, labels). Above it you can put <strong>overlays</strong>: weather tiles, markers, shapes. In this app the stack is:</p>
+<ol>
+<li><strong>MapTiler base map</strong>, added by <code>MapTileLayer</code> with the style <code>"basic-dark"</code>. It is a <em>vector</em> map: the SDK downloads map data and draws it in the browser, instead of downloading finished pictures.</li>
+<li><strong>OpenWeather weather tiles</strong> (<code>clouds_new</code>, <code>precipitation_new</code>, <code>pressure_new</code>, <code>wind_new</code>, <code>temp_new</code>): PNG images with transparent areas. At 2:49:43 the presenter finds the white clouds "kind of harsh" and adds <code>opacity={0.7}</code>, so the base map shows through.</li>
+<li><strong>The marker</strong> at the selected coordinates.</li>
+<li><strong>Controls and the legend</strong>: Leaflet's zoom buttons and attribution, plus the project's <code>MapLegend</code>, an ordinary absolutely positioned <code>div</code> with <code>z-1000</code> so it floats above Leaflet's panes.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Layer stack from bottom to top: MapTiler base map, OpenWeather weather tiles at opacity 0.7, the marker, then controls and the legend">
+  <path class="box2" d="M200,210 L560,210 L620,240 L140,240 Z"/>
+  <text x="380" y="230" text-anchor="middle" class="label">MapTiler base map (vector, basic-dark)</text>
+  <path class="box-info" d="M200,160 L560,160 L620,190 L140,190 Z"/>
+  <text x="380" y="180" text-anchor="middle" class="label">OpenWeather tiles, opacity 0.7</text>
+  <path class="box-ok" d="M200,110 L560,110 L620,140 L140,140 Z"/>
+  <text x="380" y="130" text-anchor="middle" class="label">Marker at [lat, lon]</text>
+  <path class="box-warn" d="M200,60 L560,60 L620,90 L140,90 Z"/>
+  <text x="380" y="80" text-anchor="middle" class="label">zoom control, attribution, MapLegend</text>
+  <text x="380" y="35" text-anchor="middle" class="title">What you see = all sheets seen from above</text>
+  <text x="660" y="230" class="small">bottom</text>
+  <text x="660" y="80" class="small">top</text>
+</svg>
+<figcaption>The layers in <code>Map.tsx</code> plus the legend from <code>App.tsx</code>. <strong>Overlays need transparency (or <code>opacity</code>) so the base map stays readable.</strong></figcaption>
+</figure>
+
+<h2>Leaflet is imperative; React is declarative</h2>
+<p>Leaflet was written before React became popular. You use it by giving <em>commands</em> to a map object: <code>map.panTo(...)</code>, <code>map.on("click", ...)</code>, <code>layer.addTo(map)</code>, <code>map.removeLayer(layer)</code>. That style is called <strong>imperative</strong>. React is <strong>declarative</strong>: you describe what the screen should look like for the current state, and React works out the changes.</p>
+<p>react-leaflet bridges the two. <code>&lt;MapContainer&gt;</code> creates one Leaflet map object when it first appears and puts it in a React <a class="term" href="glossary.html#context">context</a>. Child components such as <code>&lt;TileLayer&gt;</code> and <code>&lt;Marker&gt;</code> read the map from that context and call Leaflet's commands for you when their props change. Your own children can get the same map object with the <code>useMap()</code> hook, which in the installed source is literally <code>return useLeafletContext().map</code>.</p>
+<p>One rule surprises everyone: <strong><code>MapContainer</code>'s <code>center</code> and <code>zoom</code> are only read once.</strong> In <code>react-leaflet/lib/MapContainer.js</code>, <code>map.setView(center, zoom)</code> runs inside the callback that creates the map, and never again. Changing the <code>center</code> prop later does nothing. That is why, in <a href="15-map-follows-dropdown.html">step 15</a>, the map did not follow the dropdown. The presenter first forced a brand-new map with a changing <code>key</code> (which caused flicker, 2:28:23), then switched to calling <code>map.panTo</code> from a child component: the imperative way.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="MapContainer creates one Leaflet map object and shares it through context; TileLayer, Marker, MapClick and MapTileLayer read it with useMap and call Leaflet methods">
+  <rect class="box-solid" x="270" y="15" width="220" height="44" rx="8"/>
+  <text x="380" y="35" text-anchor="middle" class="on-solid">MapContainer</text>
+  <text x="380" y="51" text-anchor="middle" class="on-solid">new L.Map(...) once</text>
+  <rect class="box-info" x="270" y="85" width="220" height="34" rx="8"/>
+  <text x="380" y="107" text-anchor="middle" class="label">context: the map object</text>
+  <path class="arrow" d="M380,59 V83"/>
+  <rect class="box" x="10" y="160" width="170" height="44" rx="8"/>
+  <text x="95" y="180" text-anchor="middle" class="label">TileLayer</text>
+  <text x="95" y="196" text-anchor="middle" class="small">built-in wrapper</text>
+  <rect class="box" x="200" y="160" width="170" height="44" rx="8"/>
+  <text x="285" y="180" text-anchor="middle" class="label">Marker</text>
+  <text x="285" y="196" text-anchor="middle" class="small">built-in wrapper</text>
+  <rect class="box-warn" x="390" y="160" width="170" height="44" rx="8"/>
+  <text x="475" y="180" text-anchor="middle" class="label">MapClick</text>
+  <text x="475" y="196" text-anchor="middle" class="small">useMap / useMapEvents</text>
+  <rect class="box-warn" x="580" y="160" width="170" height="44" rx="8"/>
+  <text x="665" y="180" text-anchor="middle" class="label">MapTileLayer</text>
+  <text x="665" y="196" text-anchor="middle" class="small">useMap + useEffect</text>
+  <path class="arrow" d="M330,119 L110,158"/>
+  <path class="arrow" d="M360,119 L290,158"/>
+  <path class="arrow" d="M400,119 L470,158"/>
+  <path class="arrow" d="M430,119 L650,158"/>
+  <text x="95" y="230" text-anchor="middle" class="mono">addTo, setUrl</text>
+  <text x="285" y="230" text-anchor="middle" class="mono">setLatLng</text>
+  <text x="475" y="230" text-anchor="middle" class="mono">on, off, panTo</text>
+  <text x="665" y="230" text-anchor="middle" class="mono">addTo, removeLayer</text>
+  <text x="380" y="258" text-anchor="middle" class="small">Leaflet commands each component ends up calling</text>
+</svg>
+<figcaption>Built-in components (left) call Leaflet for you; the project's own components (right, highlighted) call it directly. <strong>Direct calls belong in effects with cleanup.</strong></figcaption>
+</figure>
+
+<h3>Imperative calls need effects and cleanup</h3>
+<p><code>MapTileLayer</code> in the repo does this correctly: it adds the MapTiler layer inside <code>useEffect</code> and removes it in the cleanup function. <code>MapClick</code> does not. It calls Leaflet straight in the render body:</p>
+<pre data-lang="tsx" data-tag="verified"><code>  const map = useMap()
+  map.panTo([coords.lat, coords.lon])
+
+  map.on("click", (e) =&gt; {
+    const { lat, lng } = e.latlng
+    onMapClick(lat, lng)
+  })</code></pre>
+<p>Every render adds <em>another</em> click listener and none is ever removed, so after many renders one click runs the handler many times. (This was reasoned from the code and Leaflet's API, not counted in the browser.) The fix in <a href="25-fix-the-bugs.html">step 25</a> uses react-leaflet's <code>useMapEvents</code>, whose installed source calls <code>map.on(handlers)</code> inside <code>useEffect</code> and <code>map.off(handlers)</code> in the cleanup, and moves <code>panTo</code> into an effect that runs only when the coordinates change:</p>
+<pre data-lang="tsx" data-tag="verified"><code>  const map = useMapEvents({
+    click(e) {
+      onMapClick(e.latlng.lat, e.latlng.lng)
+    },
+  })
+
+  // pan only when the coordinates change, not on every render
+  useEffect(() =&gt; {
+    map.panTo([coords.lat, coords.lon])
+  }, [map, coords.lat, coords.lon])</code></pre>
+<p>A small detail: because the <code>{ click }</code> object is new on every render, <code>useMapEvents</code> removes the old listener and adds the new one each time. That is fine: there is always exactly one.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Before: three renders leave three click listeners. After: each render's cleanup removes the previous listener so only one remains">
+  <text x="190" y="22" text-anchor="middle" class="title">Repo: map.on in render</text>
+  <text x="570" y="22" text-anchor="middle" class="title">Step 25: useMapEvents</text>
+  <rect class="box2" x="20" y="40" width="100" height="30" rx="6"/><text x="70" y="60" text-anchor="middle" class="label">render 1</text>
+  <rect class="box2" x="140" y="40" width="100" height="30" rx="6"/><text x="190" y="60" text-anchor="middle" class="label">render 2</text>
+  <rect class="box2" x="260" y="40" width="100" height="30" rx="6"/><text x="310" y="60" text-anchor="middle" class="label">render 3</text>
+  <rect class="box-bad" x="20" y="90" width="340" height="30" rx="6"/><text x="190" y="110" text-anchor="middle" class="label">3 listeners attached</text>
+  <rect class="box-bad" x="20" y="140" width="340" height="30" rx="6"/><text x="190" y="160" text-anchor="middle" class="label">1 click = handler runs 3 times</text>
+  <rect class="box2" x="400" y="40" width="100" height="30" rx="6"/><text x="450" y="60" text-anchor="middle" class="label">render 1</text>
+  <rect class="box2" x="520" y="40" width="100" height="30" rx="6"/><text x="570" y="60" text-anchor="middle" class="label">render 2</text>
+  <rect class="box2" x="640" y="40" width="100" height="30" rx="6"/><text x="690" y="60" text-anchor="middle" class="label">render 3</text>
+  <rect class="box-ok" x="400" y="90" width="340" height="30" rx="6"/><text x="570" y="110" text-anchor="middle" class="label">cleanup: off(old), then on(new)</text>
+  <rect class="box-ok" x="400" y="140" width="340" height="30" rx="6"/><text x="570" y="160" text-anchor="middle" class="label">1 click = handler runs once</text>
+  <path class="arrow-bad" d="M190,70 V88"/>
+  <path class="arrow-bad" d="M190,120 V138"/>
+  <path class="arrow-ok" d="M570,70 V88"/>
+  <path class="arrow-ok" d="M570,120 V138"/>
+</svg>
+<figcaption>Illustrative count of three renders. <strong>Any <code>on</code> needs a matching <code>off</code></strong>; effects with cleanup guarantee it.</figcaption>
+</figure>
+
+<h2>The broken marker in production builds</h2>
+<p>In the browser test, the committed app showed a perfect blue pin with <code>npm run dev</code> but a broken image (alt text "Marker") in the production build:</p>
+<figure class="shot"><img src="img/marker-prod-dev-fixed.webp" alt="Three map crops side by side: production build with a broken image icon labelled Marker, dev server with the blue Leaflet pin, and the fixed build with the blue pin" width="880" height="240" loading="lazy"><figcaption>Left: production build of the repo. Middle: dev server. Right: after the step 25 fix. Our own test render (test data, not real weather; base map tiles blocked in the test).</figcaption></figure>
+<p>Here is the chain of cause and effect, each link checked in the installed packages:</p>
+<ol>
+<li>Leaflet's default icon does not import its images. Its CSS has a rule <code>.leaflet-default-icon-path</code> whose background is <code>url(images/marker-icon.png)</code>. At run time <code>_detectIconPath</code> reads that background URL and keeps everything before <code>marker-icon.png</code> as the folder for the images.</li>
+<li>Vite inlines small assets as <code>data:</code> URLs in production builds. The default limit (<code>assetsInlineLimit</code>) is 4096 bytes, and Leaflet's <code>marker-icon.png</code> is 1,466 bytes. So in the built CSS the background is a long <code>data:image/png;base64,...</code> string, which no longer ends in <code>marker-icon.png</code>.</li>
+<li>The path detection fails, Leaflet falls back to looking for a <code>&lt;link href$="leaflet.css"&gt;</code> (there is none: Vite bundles all CSS into one hashed file), and builds an image URL that does not exist.</li>
+</ol>
+<p>The dev server does not inline the CSS images the same way, which is why it only breaks after <code>npm run build</code>. The reliable fix is to stop relying on detection: import the three images so Vite handles them, and hand Leaflet an explicit icon. From <code>ext25/src/components/Map.tsx</code>:</p>
+<pre data-lang="tsx" data-tag="verified"><code>import markerIconUrl from "leaflet/dist/images/marker-icon.png"
+import markerIcon2xUrl from "leaflet/dist/images/marker-icon-2x.png"
+import markerShadowUrl from "leaflet/dist/images/marker-shadow.png"
+
+const markerIcon = L.icon({
+  iconUrl: markerIconUrl,
+  iconRetinaUrl: markerIcon2xUrl,
+  shadowUrl: markerShadowUrl,
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  shadowSize: [41, 41],
+})
+// ...
+&lt;Marker position={[lat, lon]} icon={markerIcon} /&gt;</code></pre>
+<p>The sizes are Leaflet's own defaults for <code>Icon.Default</code>. <code>iconAnchor: [12, 41]</code> says "the tip of the pin is 12 px from the left and 41 px from the top", so the point, not the middle of the image, sits on the coordinates.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Mistake, symptom, fix: relying on Leaflet's icon path detection leads to a broken marker after vite build; importing the images and passing L.icon fixes it">
+  <rect class="box-warn" x="10" y="40" width="230" height="110" rx="8"/>
+  <text x="125" y="65" text-anchor="middle" class="title">Mistake</text>
+  <text x="125" y="90" text-anchor="middle" class="label">&lt;Marker&gt; with no icon:</text>
+  <text x="125" y="108" text-anchor="middle" class="label">Leaflet guesses the</text>
+  <text x="125" y="126" text-anchor="middle" class="label">image folder from CSS</text>
+  <rect class="box-bad" x="265" y="40" width="230" height="110" rx="8"/>
+  <text x="380" y="65" text-anchor="middle" class="title">Symptom</text>
+  <text x="380" y="90" text-anchor="middle" class="label">fine in npm run dev,</text>
+  <text x="380" y="108" text-anchor="middle" class="label">broken image after</text>
+  <text x="380" y="126" text-anchor="middle" class="label">vite build (data: URL)</text>
+  <rect class="box-ok" x="520" y="40" width="230" height="110" rx="8"/>
+  <text x="635" y="65" text-anchor="middle" class="title">Fix</text>
+  <text x="635" y="90" text-anchor="middle" class="label">import the 3 PNGs,</text>
+  <text x="635" y="108" text-anchor="middle" class="label">L.icon({...}),</text>
+  <text x="635" y="126" text-anchor="middle" class="label">&lt;Marker icon={...}&gt;</text>
+  <path class="arrow" d="M240,95 H263"/>
+  <path class="arrow" d="M495,95 H518"/>
+  <text x="380" y="178" text-anchor="middle" class="small">always test the production build (npm run build, npm run preview) before shipping</text>
+</svg>
+<figcaption>A bug that only exists after bundling. <strong>Explicit imports beat run-time guessing.</strong></figcaption>
+</figure>
+
+<h2>Attribution: crediting the map data</h2>
+<p>Map data and tiles are created by someone, and their licences usually require a visible credit. Leaflet shows an attribution box in the bottom-right corner by default (<code>attributionControl: true</code> in the map options). Layers add their own text to it. In this project:</p>
+<ul>
+<li>The MapTiler SDK layer adds the credit itself. Its installed source calls <code>attributionControl.addAttribution(...)</code> with links to "© MapTiler" and "© OpenStreetMap contributors". Our test screenshots show the line <em>Leaflet | © MapTiler © OpenStreetMap contributors</em>.</li>
+<li>The OpenWeather <code>&lt;TileLayer&gt;</code> has no <code>attribution</code> prop, so OpenWeather is not credited on the map. Check OpenWeather's terms for what they require, and if a credit is needed, add it with the prop:</li>
+</ul>
+<pre data-lang="tsx" data-tag="illustrative"><code>&lt;TileLayer
+  opacity={0.7}
+  attribution='Weather data &amp;copy; &lt;a href="https://openweathermap.org/"&gt;OpenWeather&lt;/a&gt;'
+  url={`https://tile.openweathermap.org/map/${mapType}/{z}/{x}/{y}.png?appid=${API_KEY}`}
+/&gt;</code></pre>
+<p>Two rules of thumb. Never hide the attribution control with CSS to "clean up" the design; it is often a licence condition, not decoration. And if you ever point a <code>TileLayer</code> at OpenStreetMap's own tile servers (many react-leaflet examples do), read the OpenStreetMap Foundation's tile usage policy first: those servers are a shared community resource with rules for apps.</p>
+
+<h2>The base map follows the theme</h2>
+<p>The repo hard-codes the dark MapTiler style <code>"basic-dark"</code>, so the map stays dark in light mode. <a href="27-remember-theme.html">Step 27</a> picks the style from the theme using the SDK's constants (<code>MapStyle.BASIC.DARK</code> is <code>"basic-v2-dark"</code>, <code>MapStyle.BASIC.LIGHT</code> is <code>"basic-v2-light"</code>); the browser test confirmed the style request switched when toggling. Constants are safer than typed strings because a typo becomes a TypeScript error instead of a blank map.</p>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"Changing <code>center</code> on <code>MapContainer</code> moves the map."</em> It is read once. Use <code>map.panTo</code> / <code>setView</code> in an effect, as step 25 does.</li>
+<li><em>"Coordinates are always <code>[lat, lon]</code>."</em> Leaflet yes; GeoJSON is <code>[lon, lat]</code>, and Leaflet calls it <code>lng</code>, not <code>lon</code>.</li>
+<li><em>"A higher zoom just enlarges the picture."</em> Each zoom level is a new set of tiles with more detail, and four times as many of them.</li>
+<li><em>"Overlays replace the base map."</em> They are stacked on top; use transparent tiles or <code>opacity</code>.</li>
+<li><em>"If the marker works in dev, it works in production."</em> Not for Leaflet's default icon with Vite. Test <code>npm run build</code> + <code>npm run preview</code>.</li>
+<li><em>"Attribution is optional decoration."</em> It is usually required by the data licence.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Latitude is north/south (-90 to 90), longitude east/west (-180 to 180). Leaflet uses <code>[lat, lng]</code>.</li>
+<li>Web maps use Web Mercator (EPSG:3857): the world becomes a square, clipped at about ±85°.</li>
+<li>Zoom <em>z</em> = 2<sup>z</sup> × 2<sup>z</sup> tiles of 256 px, addressed by <code>{z}/{x}/{y}</code>.</li>
+<li>The map is a stack: MapTiler base, OpenWeather overlay at <code>opacity 0.7</code>, marker, controls and legend.</li>
+<li>react-leaflet shares one Leaflet map via context; get it with <code>useMap</code>. <code>center</code>/<code>zoom</code> are initial values only. Put direct Leaflet calls in effects with cleanup (<code>useMapEvents</code>).</li>
+<li>Pass an explicit <code>L.icon</code> with imported images, or the default marker breaks after <code>vite build</code>.</li>
+<li>Keep the attribution visible and credit every data source you use.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://leafletjs.com/examples/quick-start/">Leaflet: Quick Start Guide</a> and the <a href="https://leafletjs.com/reference.html">Leaflet API reference</a></li>
+<li><a href="https://react-leaflet.js.org/docs/start-introduction/">React Leaflet: Introduction</a> and <a href="https://react-leaflet.js.org/docs/api-map/">Map creation and interactions (MapContainer, useMap, useMapEvents)</a></li>
+<li><a href="https://wiki.openstreetmap.org/wiki/Slippy_map_tilenames">OpenStreetMap Wiki: Slippy map tilenames (the z/x/y scheme)</a></li>
+<li><a href="https://www.openstreetmap.org/copyright">OpenStreetMap: Copyright and licence</a> and the <a href="https://operations.osmfoundation.org/policies/tiles/">OSMF tile usage policy</a></li>
+<li><a href="https://docs.maptiler.com/leaflet/">MapTiler: Leaflet documentation</a></li>
+<li><a href="https://openweathermap.org/api/weathermaps">OpenWeather: Weather maps (tile layers)</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="rw-07-zod-validation.html"><small>← Chapter 7</small>Validating Data with Zod</a>
+<a class="next" href="rw-09-responsive-accessible.html"><small>Chapter 9 →</small>Responsive &amp; Accessible Interfaces</a>
+</nav>
+</main>
+</body>
+</html>

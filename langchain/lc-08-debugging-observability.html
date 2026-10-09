@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 8 · Debugging, Logging &amp; LangSmith</title>
+<meta name="description" content="Reading tracebacks, logging, inspecting the messages list, and tracing runs.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 8/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangChain &amp; Agents Handbook · Chapter 8 of 10</div>
+  <h1>Debugging, Logging &amp; LangSmith</h1>
+  <p class="lead">Reading tracebacks, logging, inspecting the messages list, and tracing runs.</p>
+</section>
+<p>Agents fail in two ways. Some failures are loud: Python stops and prints a red <a class="term" href="glossary.html#traceback">traceback</a>. Others are silent: the program runs, the chef answers, and the answer is quietly worse than it should be because the model never received your instruction. The video hits both kinds, and the chef repo contains two silent bugs (found while preparing this guide, fixed in <a href="16-fix-and-harden.html">step 16</a>). This chapter gives you a toolkit for both: how to read a traceback, the errors you will meet most often, how to look inside the agent's <code>messages</code> list, how to use Python <a class="term" href="glossary.html#logging">logging</a> well, the <code>debug=True</code> switch, <a class="term" href="glossary.html#langsmith">LangSmith</a> tracing, and how to test an agent without spending money on a real model.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> An agent is a loop with a model, tools and a web service in it (<a href="lc-04-agents-under-the-hood.html">chapter 4</a>). When something goes wrong you need to know <em>which</em> step went wrong: your Python code, the message you built, the model's choice, the tool, or the network. Every technique here answers "what actually happened?".</div>
+
+<h2>Reading a Python traceback</h2>
+<p>When an <a class="term" href="glossary.html#exception">exception</a> is not handled, Python prints a traceback: the chain of calls that led to the error, then the error itself. Beginners often read it from the top and get lost in library code. Read it <strong>from the bottom up</strong>.</p>
+<p>At 70:11 in the video, the presenter's code called <code>create_agent.invoke(...)</code> instead of <code>agent.invoke(...)</code>. The traceback had this shape (paths shortened; illustrative layout from Python 3.12):</p>
+<pre data-lang="text" data-tag="illustrative"><code>Traceback (most recent call last):
+  File "...\Beginner\multi_model_messages.py", line 62, in &lt;module&gt;
+    response = create_agent.invoke(
+               ^^^^^^^^^^^^^^^^^^^
+AttributeError: 'function' object has no attribute 'invoke'</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="How to read a traceback: start with the last line for the error type and message, then the line above for your file and line number">
+  <rect class="box2" x="10" y="20" width="470" height="34" rx="6"/><text x="20" y="42" class="mono">Traceback (most recent call last):</text>
+  <rect class="box-info" x="10" y="62" width="470" height="34" rx="6"/><text x="20" y="84" class="mono">File "...multi_model_messages.py", line 62</text>
+  <rect class="box2" x="10" y="104" width="470" height="34" rx="6"/><text x="20" y="126" class="mono">response = create_agent.invoke(</text>
+  <rect class="box-bad" x="10" y="146" width="470" height="34" rx="6"/><text x="20" y="168" class="mono">AttributeError: 'function' object has no ...</text>
+  <rect class="box-bad" x="520" y="146" width="230" height="34" rx="8"/><text x="635" y="168" text-anchor="middle" class="label">1. read this first</text>
+  <rect class="box-info" x="520" y="62" width="230" height="34" rx="8"/><text x="635" y="84" text-anchor="middle" class="label">2. which file and line</text>
+  <rect class="box" x="520" y="104" width="230" height="34" rx="8"/><text x="635" y="126" text-anchor="middle" class="label">3. the code that ran</text>
+  <path class="arrow" d="M518,163 H482"/><path class="arrow" d="M518,79 H482"/><path class="arrow" d="M518,121 H482"/>
+  <text x="245" y="214" text-anchor="middle" class="small">error type = what kind of problem; message = the details</text>
+  <text x="245" y="234" text-anchor="middle" class="small">look for the last "File" line that is YOUR file, not site-packages</text>
+</svg>
+<figcaption>The bottom line names the problem; the <strong>last frame in your own file</strong> tells you where to fix it. Long tracebacks just have more "File" lines from LangChain or OpenAI in between.</figcaption>
+</figure>
+
+<p>Here the message says <code>create_agent</code> is a function, and functions have no <code>invoke</code>. The fix is to call <code>create_agent(...)</code> once to <em>build</em> an agent, store it in <code>agent</code>, and call <code>agent.invoke(...)</code>. When a traceback is long, everything inside <code>.venv\Lib\site-packages</code> is library code. Libraries can have bugs, but in beginner projects the cause is almost always in the last frame of your own file or in how you called the library.</p>
+
+<details class="primer"><summary>New to exceptions? What "raise" and "catch" mean</summary>
+<p>An <strong>exception</strong> is Python's way of saying "I can't continue". Code <em>raises</em> it (for example <code>raise ValueError("Not an image file")</code> in <code>photo_decoder.py</code>). If nothing <em>catches</em> it with <code>try</code>/<code>except</code>, the program stops and prints the traceback. Each exception has a type (<code>ValueError</code>, <code>FileNotFoundError</code>...) that tells you the category of problem, and a message with the details.</p>
+</details>
+
+<h2>The errors you will meet most often</h2>
+<p>These all appear in the video or were reproduced while verifying the code for this guide:</p>
+<div class="table-wrap"><table>
+<tr><th>Error (last line)</th><th>What it means</th><th>Fix</th></tr>
+<tr><td><code>ModuleNotFoundError: No module named 'langchain_openai'</code>, followed in LangChain 1.3.12 by <code>ImportError: Initializing ChatOpenAI requires the langchain-openai package...</code></td><td>The package is not installed in the active <a class="term" href="glossary.html#virtual-environment">virtual environment</a> (18:59 and 89:15 in the video). The second error is LangChain adding a hint; a traceback can contain several chained errors, joined by "The above exception was the direct cause of the following exception".</td><td><code>uv add langchain-openai</code>; check the venv is active (the prompt shows its name).</td></tr>
+<tr><td><code>openai.OpenAIError: Missing credentials. Please pass an api_key ... or set the OPENAI_API_KEY environment variable</code></td><td>No <a class="term" href="glossary.html#api-key">API key</a> was found (69:24).</td><td>Call <code>load_dotenv()</code> before creating the model; check the <a class="term" href="glossary.html#env-file">.env file</a> name and location.</td></tr>
+<tr><td><code>AttributeError: 'function' object has no attribute 'invoke'</code></td><td>Called <code>create_agent.invoke</code> (70:11).</td><td>Build the agent first, then call <code>agent.invoke</code>.</td></tr>
+<tr><td><code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, ...</code></td><td>A checkpointer is set but no <code>config</code> was passed.</td><td>Pass <code>{"configurable": {"thread_id": "1"}}</code> to every call (<a href="lc-06-memory-and-state.html">chapter 6</a>).</td></tr>
+<tr><td><code>FileNotFoundError: Image not found: ...</code></td><td>Raised by <code>image_to_data_url</code> for a wrong path.</td><td>Check the path; quotes around pasted paths are stripped by the fallback prompt.</td></tr>
+<tr><td><code>OPENSSL_Uplink ... no OPENSSL_Applink</code> (Windows, rare)</td><td>The <code>SSLKEYLOGFILE</code> environment variable is set and clashes with the import of <code>langchain_openai</code>.</td><td>Unset <code>SSLKEYLOGFILE</code> and run again.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Decision guide: the kind of error points to where the problem lives: environment, keys, your code, or configuration">
+  <rect class="box-solid" x="10" y="80" width="150" height="50" rx="8"/><text x="85" y="102" text-anchor="middle" class="on-solid">Last line of</text><text x="85" y="119" text-anchor="middle" class="on-solid">the traceback</text>
+  <rect class="box" x="220" y="10" width="230" height="36" rx="8"/><text x="335" y="33" text-anchor="middle" class="mono">ModuleNotFoundError</text>
+  <rect class="box" x="220" y="60" width="230" height="36" rx="8"/><text x="335" y="83" text-anchor="middle" class="mono">OpenAIError: Missing...</text>
+  <rect class="box" x="220" y="110" width="230" height="36" rx="8"/><text x="335" y="133" text-anchor="middle" class="mono">AttributeError</text>
+  <rect class="box" x="220" y="160" width="230" height="36" rx="8"/><text x="335" y="183" text-anchor="middle" class="mono">ValueError: Checkpointer...</text>
+  <rect class="box-ok" x="510" y="10" width="240" height="36" rx="8"/><text x="630" y="33" text-anchor="middle" class="label">environment: venv, uv add</text>
+  <rect class="box-ok" x="510" y="60" width="240" height="36" rx="8"/><text x="630" y="83" text-anchor="middle" class="label">secrets: .env, load_dotenv()</text>
+  <rect class="box-ok" x="510" y="110" width="240" height="36" rx="8"/><text x="630" y="133" text-anchor="middle" class="label">your code: wrong object used</text>
+  <rect class="box-ok" x="510" y="160" width="240" height="36" rx="8"/><text x="630" y="183" text-anchor="middle" class="label">config: pass thread_id</text>
+  <path class="arrow" d="M160,95 L218,30"/><path class="arrow" d="M160,100 L218,78"/><path class="arrow" d="M160,110 L218,128"/><path class="arrow" d="M160,118 L218,176"/>
+  <path class="arrow" d="M450,28 H508"/><path class="arrow" d="M450,78 H508"/><path class="arrow" d="M450,128 H508"/><path class="arrow" d="M450,178 H508"/>
+</svg>
+<figcaption>The <strong>error type</strong> already tells you which part of the project to look at, before you read anything else.</figcaption>
+</figure>
+
+<h2>Silent bugs: when nothing crashes</h2>
+<p>The hardest bugs in this project raise no error at all:</p>
+<ul>
+<li><strong>The chef never sees the request.</strong> <code>photo_decoder.py</code> sends the literal text <code>"prompt"</code> instead of the variable <code>prompt</code>. The run "works" because the system prompt explains the task.</li>
+<li><strong>A missing space.</strong> <code>prompt.py</code> joins two strings with a <code>\</code> line continuation, so the model reads "...in the photo.once you do that...".</li>
+<li><strong>A setting that is ignored.</strong> <code>temperature=1.0</code> with <code>gpt-5-nano</code>: <code>langchain-openai</code> 1.3.4 drops any other value for <code>gpt-5*</code> reasoning models, so changing it would make no difference (see <a href="lc-02-llms-and-chat-models.html">chapter 2</a>).</li>
+<li><strong>The model ignores a tool.</strong> At 43:19–45:25 the model did not call the simple tool until the <a class="term" href="glossary.html#system-prompt">system prompt</a> was made strict.</li>
+</ul>
+<p>Tracebacks cannot find these. You find them by <strong>looking at what was actually sent and received</strong>, which is what the rest of this chapter is about.</p>
+
+<h2>Look inside: print the messages</h2>
+<p>The single most useful debugging habit with LangChain agents: print the whole <code>messages</code> list, not just the last answer. At 26:45 the presenter printed <code>response["messages"]</code> to show the AIMessage with its token counts and metadata. Raw printing is hard to read, so use a loop or <code>pretty_print()</code> (a method on every LangChain message):</p>
+<pre data-lang="py" data-tag="illustrative"><code>response = agent.invoke({"messages": [message]})
+
+for m in response["messages"]:
+    m.pretty_print()
+
+last = response["messages"][-1]
+print("tool calls:", getattr(last, "tool_calls", None))
+print("tokens:", last.usage_metadata)</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3–4</td><td><code>for m in response["messages"]: m.pretty_print()</code></td><td>Prints every message with a header like <code>==== Human Message ====</code>, <code>==== Ai Message ====</code> or <code>==== Tool Message ====</code>. You see the whole conversation, including tool calls and tool results.</td></tr>
+<tr><td>6</td><td><code>last = response["messages"][-1]</code></td><td>The final <a class="term" href="glossary.html#ai-message">AIMessage</a>, the answer.</td></tr>
+<tr><td>7</td><td><code>getattr(last, "tool_calls", None)</code></td><td>The tools the model asked for in that message. Empty for a final answer. <code>getattr</code> with a default avoids an error on message types without this attribute.</td></tr>
+<tr><td>8</td><td><code>last.usage_metadata</code></td><td>Input and output token counts reported by the provider (it can be <code>None</code>, for example with a fake model). Useful for spotting cost growth.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Annotated messages list of a chef run: the human message with text and image blocks, an AI message with a tool call, a tool message with search results, and the final AI answer, each with what to check">
+  <rect class="box2" x="10" y="15" width="330" height="44" rx="8"/><text x="175" y="34" text-anchor="middle" class="label">HumanMessage</text><text x="175" y="51" text-anchor="middle" class="small">text block + image block</text>
+  <rect class="box" x="10" y="75" width="330" height="44" rx="8"/><text x="175" y="94" text-anchor="middle" class="label">AIMessage (content empty)</text><text x="175" y="111" text-anchor="middle" class="small">tool_calls: web_search(query=...)</text>
+  <rect class="box-info" x="10" y="135" width="330" height="44" rx="8"/><text x="175" y="154" text-anchor="middle" class="label">ToolMessage</text><text x="175" y="171" text-anchor="middle" class="small">Tavily results (dict as text)</text>
+  <rect class="box-ok" x="10" y="195" width="330" height="44" rx="8"/><text x="175" y="214" text-anchor="middle" class="label">AIMessage</text><text x="175" y="231" text-anchor="middle" class="small">the recipe + usage_metadata</text>
+  <path class="arrow" d="M175,59 V73"/><path class="arrow" d="M175,119 V133"/><path class="arrow" d="M175,179 V193"/>
+  <text x="380" y="41" class="small">check: is the text block your real prompt?</text>
+  <text x="380" y="101" class="small">check: did it call a tool? with which query?</text>
+  <text x="380" y="161" class="small">check: did the tool return data or an error?</text>
+  <text x="380" y="221" class="small">check: tokens used, answer uses the results?</text>
+  <path class="line dashed" d="M342,37 H374"/><path class="line dashed" d="M342,97 H374"/><path class="line dashed" d="M342,157 H374"/><path class="line dashed" d="M342,217 H374"/>
+</svg>
+<figcaption>A typical chef run as the messages list (shape from the verified trace, contents simplified). <strong>Each message answers one debugging question</strong>; the first check would have caught the <code>"prompt"</code> bug.</figcaption>
+</figure>
+
+<h3>See every step as it happens</h3>
+<p>Printing after the run shows the end result. To watch the steps one by one, stream <strong>updates</strong>. Each item is a dictionary keyed by the step (node) that just ran, such as <code>"model"</code> or <code>"tools"</code>, with the messages it added. Checked with LangGraph 1.2.9:</p>
+<pre data-lang="py" data-tag="illustrative"><code>for update in agent.stream({"messages": [message]}, stream_mode="updates"):
+    for step_name, data in update.items():
+        print(f"--- {step_name} ---")
+        for m in data["messages"]:
+            m.pretty_print()</code></pre>
+<p>This complements <code>stream_mode="messages"</code> from <a href="07-streaming.html">step 7</a>: "messages" streams tokens for the user, "updates" streams whole steps for you, the developer.</p>
+
+<h2>The debug switch</h2>
+<p><code>create_agent</code> has a <code>debug</code> parameter (default <code>False</code>). With <code>debug=True</code> the underlying LangGraph graph prints its internal events while it runs: lines starting with <code>[values]</code> show the full state, lines starting with <code>[updates]</code> show what each step changed. Verified with LangChain 1.3.12:</p>
+<pre data-lang="py" data-tag="illustrative"><code>agent = create_agent(model="gpt-5-nano",
+                     tools=[web_search],
+                     system_prompt=SYSTEM_CHEF_PROMPT,
+                     debug=True)</code></pre>
+<p>It is very verbose (each <code>[values]</code> line repeats the whole state, including your base64 photo), so switch it on for one run, read, and switch it off again.</p>
+
+<h2>Logging: a diary for your program</h2>
+<p><code>print</code> is fine for a quick look. For anything you keep, use Python's <code>logging</code> module, as the presenter does in <a href="14-chef-agent-and-logging.html">step 14</a> (<code>main.py</code>, lines 9–12):</p>
+<pre data-lang="py" data-file="main.py"><code>logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)</code></pre>
+<p>Each log line gets a time, a level and your message, and in the real run (100:24) you could watch the agent search for "recipe using oyster sauce" and "garlic fried...". The <strong>level</strong> is the key idea: every message has a severity, and the configured level is a threshold.</p>
+<div class="table-wrap"><table>
+<tr><th>Level</th><th>Use it for</th><th>Example in the chef</th></tr>
+<tr><td><code>DEBUG</code></td><td>Details only useful while debugging</td><td>The full text block sent to the model</td></tr>
+<tr><td><code>INFO</code></td><td>Normal milestones</td><td><code>logging.info("invoking our agent...")</code></td></tr>
+<tr><td><code>WARNING</code></td><td>Something odd, but the program continues</td><td><code>logging.warning(f"search failed: {error}")</code> in step 16's <code>tools.py</code></td></tr>
+<tr><td><code>ERROR</code></td><td>An operation failed</td><td>The agent call raised an exception</td></tr>
+<tr><td><code>CRITICAL</code></td><td>The program cannot continue</td><td>No API key at all</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Logging levels as a ladder; with level INFO, DEBUG messages are hidden and INFO and above are shown">
+  <rect class="box2" x="10" y="150" width="140" height="36" rx="6"/><text x="80" y="173" text-anchor="middle" class="mono">DEBUG</text>
+  <rect class="box" x="160" y="120" width="140" height="66" rx="6"/><text x="230" y="158" text-anchor="middle" class="mono">INFO</text>
+  <rect class="box-warn" x="310" y="90" width="140" height="96" rx="6"/><text x="380" y="143" text-anchor="middle" class="mono">WARNING</text>
+  <rect class="box-bad" x="460" y="60" width="140" height="126" rx="6"/><text x="530" y="128" text-anchor="middle" class="mono">ERROR</text>
+  <rect class="box-bad" x="610" y="30" width="140" height="156" rx="6"/><text x="680" y="113" text-anchor="middle" class="mono">CRITICAL</text>
+  <path class="line dashed" d="M155,20 V195"/>
+  <text x="80" y="135" text-anchor="middle" class="small">hidden</text>
+  <text x="300" y="22" text-anchor="middle" class="ok">level=logging.INFO: shown from here</text>
+</svg>
+<figcaption>The configured level is a <strong>threshold</strong>: with <code>level=logging.INFO</code>, debug messages are skipped and everything from INFO up is printed. Set <code>logging.DEBUG</code> while investigating.</figcaption>
+</figure>
+
+<p>Three practical tips:</p>
+<ul>
+<li><strong>Configure once, in the entry file.</strong> The repo calls <code>logging.basicConfig</code> in both <code>main.py</code> and <code>tools.py</code>. Only the first call has an effect (later calls do nothing once logging is set up), which is why <a href="16-fix-and-harden.html">step 16</a> keeps it only in <code>main.py</code>. In library-style files, you can use <code>logger = logging.getLogger(__name__)</code> and <code>logger.info(...)</code>, so each line can show which <a class="term" href="glossary.html#module">module</a> wrote it.</li>
+<li><strong>Turn up a library's logs only when needed.</strong> For example <code>logging.getLogger("httpx").setLevel(logging.WARNING)</code> hides the HTTP request lines that some libraries log at INFO.</li>
+<li><strong>Never log secrets or whole images.</strong> Don't log API keys or headers; log the length of a data URL, not the data URL itself. Logs are often copied into issues and chats.</li>
+</ul>
+
+<h2>Tracing with LangSmith</h2>
+<p><a class="term" href="glossary.html#langsmith">LangSmith</a> is LangChain's hosted platform for observability. When tracing is on, every agent run is recorded as a <strong>trace</strong>: a tree of every model call and tool call, with inputs, outputs, token counts, timings and errors, viewable in a web UI. It is the same information as the messages list, but organised, searchable and kept across runs. The <code>langsmith</code> Python package is already installed as a <a class="term" href="glossary.html#dependency">dependency</a> of <code>langchain</code> (0.10.2 in the locked environment), so no code change is needed: you turn tracing on with <strong>environment variables</strong>, for example in your <code>.env</code> file:</p>
+<pre data-lang="env" data-tag="illustrative"><code>LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your-langsmith-key-here
+LANGSMITH_PROJECT=personal-chef</code></pre>
+<p><code>LANGSMITH_TRACING</code> switches tracing on, <code>LANGSMITH_API_KEY</code> is a key you create in your LangSmith account, and <code>LANGSMITH_PROJECT</code> (optional) groups runs under a project name. These are the names in the official quickstart at the time of writing; older tutorials use <code>LANGCHAIN_TRACING_V2</code> and <code>LANGCHAIN_API_KEY</code>, which the SDK still reads. Because the chef calls <code>load_dotenv()</code> at start-up, the variables are picked up automatically. Check the LangSmith docs for current plans and limits.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="With tracing on, your program still calls OpenAI and Tavily, and additionally sends a copy of each step to LangSmith, where you view the trace tree">
+  <rect class="zone" x="10" y="10" width="300" height="200" rx="10"/><text x="160" y="32" text-anchor="middle" class="title">Your computer</text>
+  <rect class="box" x="40" y="60" width="240" height="60" rx="8"/><text x="160" y="85" text-anchor="middle" class="mono">python main.py</text><text x="160" y="104" text-anchor="middle" class="small">LANGSMITH_TRACING=true</text>
+  <rect class="box2" x="40" y="140" width="240" height="50" rx="8"/><text x="160" y="170" text-anchor="middle" class="label">you, in the browser</text>
+  <rect class="box-solid" x="420" y="20" width="150" height="44" rx="8"/><text x="495" y="47" text-anchor="middle" class="on-solid">OpenAI</text>
+  <rect class="box-info" x="600" y="20" width="150" height="44" rx="8"/><text x="675" y="47" text-anchor="middle">Tavily</text>
+  <rect class="box-warn" x="420" y="120" width="330" height="70" rx="8"/><text x="585" y="146" text-anchor="middle" class="title">LangSmith</text><text x="585" y="168" text-anchor="middle" class="small">trace tree: model, tool, model, timings, tokens</text>
+  <path class="arrow" d="M280,75 L418,45"/><path class="arrow" d="M280,80 C420,90 560,80 640,66"/>
+  <path class="arrow-accent dashed" d="M280,105 L418,145"/><text x="430" y="114" text-anchor="middle" class="small">copy of each step</text>
+  <path class="arrow" d="M418,170 L282,168"/>
+</svg>
+<figcaption>Tracing adds a <strong>third destination</strong> for your data. Prompts, tool results and photos are sent to LangSmith too, so think about privacy before tracing real users' data.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Tracing sends your data to a third party.</strong> A trace contains everything the agent saw: prompts, search results and the base64 photo. That is great for debugging and a problem for private data. Use a separate project for experiments, don't trace sensitive data unless your organisation allows it, and keep <code>LANGSMITH_API_KEY</code> in <code>.env</code> like any other key (<a href="lc-09-security-cost.html">chapter 9</a>).</div>
+
+<h2>Testing without spending money</h2>
+<p>Every real run costs tokens, needs network access and gives a slightly different answer each time. That makes real models bad for automated tests. The code in this guide was verified the other way: an offline harness replaced the chat model with a <strong>fake model</strong> that returns prepared answers, replaced Tavily's <code>search</code> with a canned result and replaced the file picker. No API keys were used.</p>
+<p><code>langchain_core</code> includes fake chat models for exactly this. <code>GenericFakeChatModel</code> (in <code>langchain_core.language_models.fake_chat_models</code>) returns the messages you give it, one per call, and supports streaming. You can pass it to <code>create_agent</code> instead of a model name. This test was run against LangChain 1.3.12:</p>
+<pre data-lang="py" data-file="test_memory.py" data-tag="illustrative"><code>from langchain.agents import create_agent
+from langchain.messages import HumanMessage
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langgraph.checkpoint.memory import InMemorySaver
+
+
+def test_agent_remembers_the_thread():
+    fake = GenericFakeChatModel(messages=iter(["Nice!", "Green, you told me."]))
+    agent = create_agent(model=fake, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "test"}}
+
+    agent.invoke({"messages": [HumanMessage("My favorite color is green")]}, config)
+    response = agent.invoke({"messages": [HumanMessage("what is my favorite color")]}, config)
+
+    assert [m.type for m in response["messages"]] == ["human", "ai", "human", "ai"]</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3</td><td><code>from langchain_core.language_models.fake_chat_models import GenericFakeChatModel</code></td><td>The fake model. It has the same interface as a real chat model, so the agent cannot tell the difference.</td></tr>
+<tr><td>7</td><td><code>def test_agent_remembers_the_thread():</code></td><td>A test <a class="term" href="glossary.html#function">function</a>. Test runners such as pytest run every function whose name starts with <code>test_</code> (pytest is not part of the project; install it if you want to use it).</td></tr>
+<tr><td>8</td><td><code>GenericFakeChatModel(messages=iter([...]))</code></td><td>The two answers it will give, in order. <code>iter(...)</code> turns the list into an iterator, which is what the class expects.</td></tr>
+<tr><td>9–10</td><td><code>create_agent(model=fake, checkpointer=InMemorySaver())</code></td><td>The same agent setup as step 10, with the fake model passed as an object instead of a string.</td></tr>
+<tr><td>12–13</td><td><code>agent.invoke(..., config)</code></td><td>Two turns on the same thread. No network, no key, no cost; it runs in a fraction of a second.</td></tr>
+<tr><td>15</td><td><code>assert [m.type for m in ...] == [...]</code></td><td>Checks <em>your</em> logic (the memory works: four messages), not the model's wording, which a test could never pin down anyway.</td></tr>
+</table></div>
+<p>Limits: in this version <code>GenericFakeChatModel</code> does not implement <code>bind_tools</code> (it raises <code>NotImplementedError</code>), so for an agent <strong>with tools</strong> you need a small subclass or another fake that accepts tools and returns prepared AIMessages with <code>tool_calls</code>. That is what the harness for this guide did. Test tools on their own with <code>tool.invoke({...})</code>, as in <a href="08-first-tool.html">step 8</a>, and replace network calls (like Tavily) with canned data so tests never depend on the internet.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Real run versus offline harness: the agent code is the same, but the model, Tavily and the file picker are swapped for fakes">
+  <rect class="box" x="290" y="85" width="180" height="50" rx="8"/><text x="380" y="106" text-anchor="middle" class="label">your agent code</text><text x="380" y="124" text-anchor="middle" class="small">unchanged</text>
+  <text x="140" y="24" text-anchor="middle" class="title">Real run</text>
+  <rect class="box-warn" x="10" y="40" width="260" height="36" rx="8"/><text x="140" y="63" text-anchor="middle" class="label">gpt-5-nano (costs tokens)</text>
+  <rect class="box-warn" x="10" y="92" width="260" height="36" rx="8"/><text x="140" y="115" text-anchor="middle" class="label">Tavily search (uses credits)</text>
+  <rect class="box-warn" x="10" y="144" width="260" height="36" rx="8"/><text x="140" y="167" text-anchor="middle" class="label">file picker (needs a person)</text>
+  <text x="620" y="24" text-anchor="middle" class="title">Offline harness</text>
+  <rect class="box-ok" x="490" y="40" width="260" height="36" rx="8"/><text x="620" y="63" text-anchor="middle" class="label">fake model (prepared answers)</text>
+  <rect class="box-ok" x="490" y="92" width="260" height="36" rx="8"/><text x="620" y="115" text-anchor="middle" class="label">canned search result</text>
+  <rect class="box-ok" x="490" y="144" width="260" height="36" rx="8"/><text x="620" y="167" text-anchor="middle" class="label">fixed image path</text>
+  <path class="line dashed" d="M270,58 L290,95"/><path class="line dashed" d="M270,110 H290"/><path class="line dashed" d="M270,162 L290,125"/>
+  <path class="line dashed" d="M490,58 L470,95"/><path class="line dashed" d="M490,110 H470"/><path class="line dashed" d="M490,162 L470,125"/>
+  <text x="380" y="205" text-anchor="middle" class="small">proves imports, message flow, tools, memory; not the real model's wording</text>
+</svg>
+<figcaption>Swap the outside world, keep your code. The harness is how this guide checked <strong>13 of 13</strong> files without one real API call.</figcaption>
+</figure>
+
+<h2>A debugging routine</h2>
+<ol class="steps">
+<li><strong>Reproduce it.</strong> Find the smallest input that shows the problem (one photo, one question).</li>
+<li><strong>Read the last line</strong> of the traceback, then the last frame in your own file.</li>
+<li><strong>No traceback?</strong> Print the messages list (or stream "updates") and check each message against what you expected.</li>
+<li><strong>Add logging</strong> around the suspicious step, at DEBUG level, then raise the level back.</li>
+<li><strong>Trace</strong> with LangSmith if the run has many steps or you need timings and token counts.</li>
+<li><strong>Fix, then lock it in</strong> with a small fake-model test so the bug cannot come back silently.</li>
+</ol>
+
+<div class="callout warn"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"Read the traceback from the top."</em> Start at the bottom: error type and message, then your own file's line.</li>
+<li><em>"No error means it works."</em> The <code>"prompt"</code> bug ran without errors in the video. Look at the messages.</li>
+<li><em>"debug=True is a logging level."</em> It is a LangGraph switch that prints graph events; Python logging is separate.</li>
+<li><em>"I can test an agent by checking its exact answer."</em> Real answers vary. Test your logic with fakes; judge real answers by hand or with evaluations.</li>
+<li><em>"Tracing is private."</em> Traces are stored on LangSmith's servers. Treat them like any other place your data goes.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Read tracebacks bottom-up: error type and message, then your last frame.</li>
+<li>Most beginner errors point to the environment (venv, packages), secrets (<code>.env</code>, <code>load_dotenv</code>), your code, or config (<code>thread_id</code>).</li>
+<li>Silent bugs need inspection: <code>pretty_print()</code> every message, check tool calls, tool results and <code>usage_metadata</code>.</li>
+<li><code>stream_mode="updates"</code> and <code>create_agent(..., debug=True)</code> show each step as it runs.</li>
+<li>Use logging levels, configure once, never log keys or whole images.</li>
+<li>LangSmith tracing is switched on with <code>LANGSMITH_TRACING=true</code> and <code>LANGSMITH_API_KEY</code>; it sends your data to LangSmith.</li>
+<li><code>GenericFakeChatModel</code> lets you test agent logic offline for free; fake tools and network calls too.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.python.org/3/tutorial/errors.html">Python tutorial: Errors and exceptions</a></li>
+<li><a href="https://docs.python.org/3/howto/logging.html">Python Logging HOWTO</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/observability">LangChain docs: Observability</a></li>
+<li><a href="https://docs.langchain.com/langsmith/observability-quickstart">LangSmith docs: Tracing quickstart</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/test">LangChain docs: Testing</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/streaming">LangChain docs: Streaming (stream modes)</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lc-07-multimodal-and-structured.html"><small>← Chapter 7</small>Multimodal Input &amp; Structured Output</a>
+<a class="next" href="lc-09-security-cost.html"><small>Chapter 9 →</small>Security, Secrets &amp; Cost</a>
+</nav>
+</main>
+</body>
+</html>

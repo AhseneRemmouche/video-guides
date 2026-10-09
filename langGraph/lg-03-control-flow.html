@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 3 · Control Flow: Edges, Routing, Loops &amp; Parallelism</title>
+<meta name="description" content="Conditional edges, Command, Send, parallel branches, loops and the recursion limit.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 3/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">LangGraph Handbook · Chapter 3 of 10</div>
+  <h1>Control Flow: Edges, Routing, Loops &amp; Parallelism</h1>
+  <p class="lead">Conditional edges, Command, Send, parallel branches, loops and the recursion limit.</p>
+</section>
+<h2>What you will learn</h2>
+<p>The course uses two kinds of edges: <code>add_edge</code> for "always go here next" and <code>add_conditional_edges</code> for "decide at run time". Graph 2 routes on the first word of a string, graph 3 routes on a number the model picked, and graphs 6–9 route with the prebuilt <code>tools_condition</code>. This chapter covers every way LangGraph lets you control what runs next, including the tools the course doesn't use: <code>Command</code>, <code>Send</code>, parallel branches and the recursion limit. Every snippet was run with LangGraph 1.2.11.</p>
+<ul>
+<li>plain edges, fan-in edges and <code>add_sequence</code>;</li>
+<li>conditional edges, path maps, and why <code>Literal</code> return hints change the drawing;</li>
+<li><code>Command</code>: update the state and choose the next node in one return value;</li>
+<li>parallel branches (fan-out / fan-in) and map-reduce with <code>Send</code>;</li>
+<li>loops, the recursion limit (default and how to set it) and <code>GraphRecursionError</code>.</li>
+</ul>
+<div class="callout ok"><strong>Why this matters for your project.</strong> The agent in graph 8 (<a href="13-graph-8-agent-loop.html">step 13</a>) is nothing more than one conditional edge and one edge that points back. The bug the presenter hit in graph 6 (<a href="12-graph-6-toolnode.html">step 12</a>), <code>Found edge ending at unknown node</code>, came from using the wrong one of these two methods. Once you know all the routing tools, you can build any workflow shape the later chapters describe.</div>
+
+<h2>Plain edges</h2>
+<p>An <a class="term" href="glossary.html#edge">edge</a> added with <code>builder.add_edge("a", "b")</code> means "every time <code>a</code> finishes, run <code>b</code>". Both ends are node <strong>names</strong> (strings), or the special <code>START</code> and <code>END</code> constants. Three useful variations:</p>
+<ul>
+<li><strong>Several edges out of one node</strong> make the targets run in parallel in the next <a class="term" href="glossary.html#superstep">superstep</a> (see "Parallel branches" below).</li>
+<li><strong>A list as the start</strong>, <code>builder.add_edge(["search_web", "search_docs"], "write")</code>, means "run <code>write</code> once, after <em>all</em> of these have finished". That's a fan-in or join.</li>
+<li><strong><code>add_sequence</code></strong> adds several nodes and chains them in order, in one call. It exists in 1.2.11 (verified). Each node gets its function's name: <code>builder.add_sequence([step_1, step_2])</code> creates nodes <code>"step_1"</code> and <code>"step_2"</code> with an edge between them. You still connect <code>START</code> and <code>END</code> yourself.</li>
+</ul>
+<pre data-lang="py" data-tag="verified"><code>from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class State(TypedDict):
+    x: int
+
+def step_1(state: State) -&gt; dict:
+    return {"x": state["x"] + 1}
+
+def step_2(state: State) -&gt; dict:
+    return {"x": state["x"] * 10}
+
+builder = StateGraph(State)
+builder.add_sequence([step_1, step_2])     # nodes "step_1" -&gt; "step_2"
+builder.add_edge(START, "step_1")
+builder.add_edge("step_2", END)
+print(builder.compile().invoke({"x": 1}))  # {'x': 20}
+</code></pre>
+
+<h2>Conditional edges</h2>
+<p>A <a class="term" href="glossary.html#conditional-edge">conditional edge</a> has a <a class="term" href="glossary.html#routing-function">routing function</a> instead of a fixed target. After the source node finishes, LangGraph calls the function with the current state; whatever it returns names the next node. Graph 2 (<a href="08-graph-2-conditional-edges.html">step 8</a>):</p>
+<pre data-lang="py" data-tag="from the repo"><code># edges
+def next_step(state: State) -&gt; Literal["node2", "node3"]:
+    """guide the state/graph to next node"""
+    state_str = state["graph_str"]
+    array_state_str = state_str.split(" ")
+
+    if array_state_str[0] == "hello":
+        return "node2"
+
+    return "node3"
+</code></pre>
+<p>and later <code>builder.add_conditional_edges("node1", next_step)</code>. The presenter's summary at 55:25: edges "guide the state", they don't do the logic. A routing function should only <em>read</em> the state and return a name. Any change to the data belongs in a node.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="node1 finishes, the state goes to the routing function next_step, which returns node2 if the first word is hello and node3 otherwise">
+  <rect class="box" x="10" y="80" width="110" height="46" rx="8"/>
+  <text x="65" y="108" text-anchor="middle" class="mono">node1</text>
+  <rect class="box-warn" x="190" y="70" width="190" height="66" rx="33"/>
+  <text x="285" y="98" text-anchor="middle" class="mono">next_step(state)</text>
+  <text x="285" y="118" text-anchor="middle" class="small">reads, never writes</text>
+  <rect class="box" x="470" y="30" width="120" height="46" rx="8"/>
+  <text x="530" y="58" text-anchor="middle" class="mono">node2</text>
+  <rect class="box" x="470" y="130" width="120" height="46" rx="8"/>
+  <text x="530" y="158" text-anchor="middle" class="mono">node3</text>
+  <rect class="box2" x="650" y="80" width="100" height="46" rx="23"/>
+  <text x="700" y="108" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M120,103 H186"/>
+  <path class="arrow-accent dashed" d="M380,90 L466,56"/>
+  <path class="arrow-accent dashed" d="M380,116 L466,150"/>
+  <text x="420" y="58" text-anchor="middle" class="small">"hello ..."</text>
+  <text x="420" y="160" text-anchor="middle" class="small">anything else</text>
+  <path class="arrow" d="M590,58 L648,94"/>
+  <path class="arrow" d="M590,150 L648,114"/>
+</svg>
+<figcaption>Graph 2's routing. The check is case-sensitive: "Hello" goes to <code>node3</code> (verified). <strong>The routing function is the diamond in a flowchart: it picks a road, it doesn't carry cargo.</strong></figcaption>
+</figure>
+
+<h3>What a routing function may return</h3>
+<ul>
+<li><strong>A node name</strong>: <code>"node2"</code>.</li>
+<li><strong><code>END</code></strong> (or the string <code>"__end__"</code>, which is what <code>END</code> contains): stop the run. Graph 3's <code>next_step</code> returns <code>END</code> when the model's number is neither 2 nor 3.</li>
+<li><strong>A list of names</strong>: all of them run in parallel in the next step (verified: returning <code>["a", "b"]</code> ran both).</li>
+<li><strong>A list of <code>Send</code> objects</strong>: map-reduce, covered below.</li>
+<li><strong>A label</strong> that a <em>path map</em> translates into a node name.</li>
+</ul>
+
+<h3>Path maps</h3>
+<p><code>add_conditional_edges(source, path, path_map=None)</code> takes an optional third argument. As a dict, it maps whatever the routing function returns to a node name. This keeps the routing function independent of your node names, and labels the arrows in drawings:</p>
+<pre data-lang="py" data-tag="verified"><code>from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class State(TypedDict):
+    score: int
+    verdict: str
+
+def grade(state: State) -&gt; dict:
+    return {}                                   # the score arrives in the input
+
+def pass_or_fail(state: State) -&gt; str:          # routing function: returns a label
+    return "high" if state["score"] &gt;= 50 else "low"
+
+def passed(state: State) -&gt; dict:
+    return {"verdict": "pass"}
+
+def failed(state: State) -&gt; dict:
+    return {"verdict": "fail"}
+
+builder = StateGraph(State)
+builder.add_node("grade", grade)
+builder.add_node("passed", passed)
+builder.add_node("failed", failed)
+builder.add_edge(START, "grade")
+builder.add_conditional_edges("grade", pass_or_fail, {"high": "passed", "low": "failed"})
+builder.add_edge("passed", END)
+builder.add_edge("failed", END)
+graph = builder.compile()
+
+print(graph.invoke({"score": 72}))   # {'score': 72, 'verdict': 'pass'}
+print(graph.invoke({"score": 30}))   # {'score': 30, 'verdict': 'fail'}
+</code></pre>
+<p>A path map can also be a plain list of possible targets, like <code>["summarize"]</code> in the <code>Send</code> example below. That doesn't translate anything; it just tells LangGraph where the edge may lead.</p>
+
+<h3>Why the course writes <code>Literal[...]</code></h3>
+<p>LangGraph can't run your routing function at compile time to discover where it might go. It needs a hint to draw the graph: either a path map, or a return type such as <code>-&gt; Literal["node2", "node3"]</code>. The presenter imports <code>Literal</code> for graph 2 at 51:20 for exactly this reason. Without either, the graph still <em>runs</em> correctly, but its picture is wrong. We checked with <code>get_graph()</code>:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Left: with a Literal hint or path map, the drawing shows dashed arrows from a to b and a to c. Right: without any hint, the drawing shows a going straight to END and b and c disconnected">
+  <rect class="zone" x="10" y="10" width="360" height="230" rx="10"/>
+  <text x="190" y="34" text-anchor="middle" class="title">With Literal hint or path map</text>
+  <rect class="box" x="140" y="54" width="100" height="36" rx="8"/>
+  <text x="190" y="77" text-anchor="middle" class="mono">a</text>
+  <rect class="box" x="50" y="124" width="100" height="36" rx="8"/>
+  <text x="100" y="147" text-anchor="middle" class="mono">b</text>
+  <rect class="box" x="230" y="124" width="100" height="36" rx="8"/>
+  <text x="280" y="147" text-anchor="middle" class="mono">c</text>
+  <rect class="box2" x="145" y="190" width="90" height="34" rx="17"/>
+  <text x="190" y="212" text-anchor="middle" class="mono">END</text>
+  <path class="arrow-accent dashed" d="M170,90 L118,122"/>
+  <path class="arrow-accent dashed" d="M210,90 L262,122"/>
+  <path class="arrow" d="M110,160 L165,189"/>
+  <path class="arrow" d="M270,160 L215,189"/>
+  <rect class="zone" x="390" y="10" width="360" height="230" rx="10"/>
+  <text x="570" y="34" text-anchor="middle" class="title">No hint at all</text>
+  <rect class="box" x="520" y="54" width="100" height="36" rx="8"/>
+  <text x="570" y="77" text-anchor="middle" class="mono">a</text>
+  <rect class="box-bad" x="430" y="124" width="100" height="36" rx="8"/>
+  <text x="480" y="147" text-anchor="middle" class="mono">b</text>
+  <rect class="box-bad" x="610" y="124" width="100" height="36" rx="8"/>
+  <text x="660" y="147" text-anchor="middle" class="mono">c</text>
+  <rect class="box2" x="525" y="190" width="90" height="34" rx="17"/>
+  <text x="570" y="212" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M570,90 V188"/>
+  <text x="480" y="112" text-anchor="middle" class="small">not connected</text>
+  <text x="660" y="112" text-anchor="middle" class="small">not connected</text>
+</svg>
+<figcaption>Two <code>get_graph()</code> drawings of the same running graph (verified). <strong>Type hints don't change what runs, only what LangGraph can show you</strong>: in Studio and in <code>draw_mermaid()</code>.</figcaption>
+</figure>
+
+<p>LangGraph Studio draws the same information. In the presenter's graph 2 (around 1:01:40), the two arrows out of <code>node1</code> are dashed curves, the usual sign of a conditional edge, and the one actually taken is highlighted.</p>
+
+<div class="callout warn"><strong>The graph 6 mistake, explained.</strong> <code>builder.add_edge("chat_with_tool", tools_condition)</code> passes a <em>function</em> where a node name is expected, so <code>compile()</code> complains: <code>ValueError: Found edge ending at unknown node `&lt;function tools_condition at 0x…&gt;`</code>. Routing functions go to <code>add_conditional_edges</code>. Also note that <code>tools_condition</code> returns the string <code>"tools"</code> (or <code>END</code>), so the tool node must be named exactly <code>"tools"</code>, as the presenter says at 114:56.</div>
+
+<h2><code>Command</code>: update and route in one step</h2>
+<p>Sometimes the node that does the work also knows best where to go next. Instead of writing a node <em>and</em> a separate routing function, the node can return a <code>Command</code> from <code>langgraph.types</code>. Its two main fields are <code>update</code> (a normal state update) and <code>goto</code> (the next node, a list of nodes, or <code>Send</code> objects):</p>
+<pre data-lang="py" data-tag="verified"><code>import operator
+from typing import Annotated, Literal
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Command
+
+class State(TypedDict):
+    n: int
+    log: Annotated[list[str], operator.add]
+
+def decide(state: State) -&gt; Command[Literal["even", "odd"]]:
+    target = "even" if state["n"] % 2 == 0 else "odd"
+    return Command(update={"log": ["decide"]}, goto=target)   # update AND route
+
+def even(state: State) -&gt; dict:
+    return {"log": ["even"]}
+
+def odd(state: State) -&gt; dict:
+    return {"log": ["odd"]}
+
+builder = StateGraph(State)
+builder.add_node("decide", decide)
+builder.add_node("even", even)
+builder.add_node("odd", odd)
+builder.add_edge(START, "decide")          # no edges out of "decide": Command routes
+builder.add_edge("even", END)
+builder.add_edge("odd", END)
+graph = builder.compile()
+
+print(graph.invoke({"n": 3, "log": []}))   # {'n': 3, 'log': ['decide', 'odd']}
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>5</td><td><code>from langgraph.types import Command</code></td><td><code>Command</code> lives in <code>langgraph.types</code>, next to <code>Send</code>, <code>RetryPolicy</code> and <code>interrupt</code>.</td></tr>
+<tr><td>11</td><td><code>-&gt; Command[Literal["even", "odd"]]</code></td><td>The return hint lists the possible targets. Like <code>Literal</code> on a routing function, it's needed for a correct drawing: without it, <code>get_graph()</code> showed <code>decide</code> going straight to <code>END</code> (verified).</td></tr>
+<tr><td>13</td><td><code>Command(update=..., goto=target)</code></td><td><code>update</code> is merged into the state exactly like a returned dict (here appended by the reducer). <code>goto</code> picks the next node.</td></tr>
+<tr><td>25</td><td><code>builder.add_edge(START, "decide")</code></td><td>No <code>add_edge</code> or <code>add_conditional_edges</code> leaves <code>decide</code>. The <code>Command</code> does the routing.</td></tr>
+</table></div>
+
+<div class="table-wrap"><table>
+<tr><th>Use a conditional edge when…</th><th>Use <code>Command</code> when…</th></tr>
+<tr><td>The decision is a simple check on the state (<code>tools_condition</code>, graph 2's first word)</td><td>The node computes something and the route depends on it, so splitting them would mean storing a temporary key just for routing</td></tr>
+<tr><td>You want to reuse the same router after several nodes</td><td>A node must hand off to another agent or graph (<a href="lg-10-multi-agent-and-roadmap.html">chapter 10</a>)</td></tr>
+<tr><td>You want the graph's shape visible from the edges alone</td><td>You resume a paused graph: <code>Command(resume=...)</code> (<a href="lg-07-human-in-the-loop.html">chapter 7</a>)</td></tr>
+</table></div>
+<p><code>Command</code> also has a <code>graph</code> field (send the command to the parent graph from inside a <a class="term" href="glossary.html#subgraph">subgraph</a>) and a <code>resume</code> field; both appear in later chapters.</p>
+
+<h2>Parallel branches: fan-out and fan-in</h2>
+<p>When two edges leave the same node, both targets run in the <strong>same superstep</strong>, in parallel. A list-start edge joins them again:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Fan-out and fan-in: plan has edges to search_web and search_docs, which both lead to write via a single list edge; the list edge waits for both">
+  <rect class="box2" x="10" y="80" width="80" height="40" rx="20"/>
+  <text x="50" y="105" text-anchor="middle" class="mono">START</text>
+  <rect class="box" x="130" y="78" width="100" height="44" rx="8"/>
+  <text x="180" y="105" text-anchor="middle" class="mono">plan</text>
+  <rect class="box-info" x="300" y="20" width="150" height="44" rx="8"/>
+  <text x="375" y="47" text-anchor="middle" class="mono">search_web</text>
+  <rect class="box-info" x="300" y="136" width="150" height="44" rx="8"/>
+  <text x="375" y="163" text-anchor="middle" class="mono">search_docs</text>
+  <rect class="box" x="530" y="78" width="100" height="44" rx="8"/>
+  <text x="580" y="105" text-anchor="middle" class="mono">write</text>
+  <rect class="box2" x="670" y="80" width="80" height="40" rx="20"/>
+  <text x="710" y="105" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M90,100 H126"/>
+  <path class="arrow-accent" d="M230,92 L296,48"/>
+  <path class="arrow-accent" d="M230,108 L296,152"/>
+  <path class="arrow" d="M450,48 L526,92"/>
+  <path class="arrow" d="M450,152 L526,108"/>
+  <path class="arrow" d="M630,100 H666"/>
+  <text x="250" y="190" text-anchor="middle" class="small">fan-out: 2 edges</text>
+  <text x="510" y="190" text-anchor="middle" class="small">fan-in: add_edge([...], "write")</text>
+</svg>
+<figcaption>The graph from <a href="lg-01-graphs-and-state-machines.html">chapter 1</a>'s superstep example. <strong>Both searches run in step 2; <code>write</code> runs once, in step 3, after both finish.</strong></figcaption>
+</figure>
+
+<p>Parallel nodes that write the <strong>same key</strong> need a <a class="term" href="glossary.html#reducer">reducer</a> on that key. Without one, LangGraph refuses to pick a winner:</p>
+<pre data-lang="text" data-tag="verified"><code>langgraph.errors.InvalidUpdateError: At key 'v': Can receive only one value per step.
+Use an Annotated key to handle multiple values.
+</code></pre>
+<p>The fix is <code>Annotated[list[str], operator.add]</code> (or another reducer) on that key; see <a href="lg-02-designing-state.html">chapter 2</a>. Parallel nodes writing <em>different</em> keys are fine without one.</p>
+
+<h3>Map-reduce with <code>Send</code></h3>
+<p>Fixed edges are fine when you know the branches in advance. But what if the number of branches depends on the data, such as "summarise each of the N documents the user uploaded"? A routing function can return a list of <code>Send</code> objects. Each <code>Send(node_name, payload)</code> starts one run of that node with <strong>its own input</strong>, and all of them run in parallel. This is the <em>map</em> step. A normal edge then collects the results: the <em>reduce</em> step.</p>
+<pre data-lang="py" data-tag="verified"><code>import operator
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+
+class State(TypedDict):
+    topics: list[str]
+    summaries: Annotated[list[str], operator.add]   # parallel writes need a reducer
+    report: str
+
+class TopicState(TypedDict):        # what each parallel worker receives
+    topic: str
+
+def fan_out(state: State) -&gt; list[Send]:
+    return [Send("summarize", {"topic": t}) for t in state["topics"]]
+
+def summarize(state: TopicState) -&gt; dict:
+    return {"summaries": [f"summary of {state['topic']}"]}   # a model call in real life
+
+def combine(state: State) -&gt; dict:
+    return {"report": " | ".join(state["summaries"])}
+
+builder = StateGraph(State)
+builder.add_node("summarize", summarize)
+builder.add_node("combine", combine)
+builder.add_conditional_edges(START, fan_out, ["summarize"])
+builder.add_edge("summarize", "combine")
+builder.add_edge("combine", END)
+graph = builder.compile()
+
+result = graph.invoke({"topics": ["cats", "dogs", "owls"], "summaries": []})
+print(result["report"])   # summary of cats | summary of dogs | summary of owls
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>9</td><td><code>summaries: Annotated[..., operator.add]</code></td><td>Three <code>summarize</code> runs write this key in the same step. The reducer appends all three.</td></tr>
+<tr><td>12–13</td><td><code>class TopicState</code></td><td>Each worker gets a small private input (<code>{"topic": ...}</code>), not the whole state. That's the main difference from a fixed fan-out.</td></tr>
+<tr><td>15–16</td><td><code>fan_out</code> returns <code>[Send(...), ...]</code></td><td>One <code>Send</code> per topic. Three topics, three parallel runs; ten topics, ten runs.</td></tr>
+<tr><td>27</td><td><code>add_conditional_edges(START, fan_out, ["summarize"])</code></td><td>A conditional edge can start at <code>START</code>. The list path map tells LangGraph (and the drawing) that the edge leads to <code>summarize</code>.</td></tr>
+<tr><td>28</td><td><code>add_edge("summarize", "combine")</code></td><td>The reduce step. <code>combine</code> runs once after all <code>summarize</code> runs have finished, and sees all summaries.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Map-reduce: fan_out creates one Send per topic; three summarize runs execute in parallel with their own inputs; combine collects all results">
+  <rect class="box-warn" x="10" y="85" width="130" height="56" rx="28"/>
+  <text x="75" y="110" text-anchor="middle" class="mono">fan_out</text>
+  <text x="75" y="127" text-anchor="middle" class="small">3 topics</text>
+  <rect class="box-info" x="230" y="20" width="220" height="44" rx="8"/>
+  <text x="340" y="47" text-anchor="middle" class="mono">summarize {topic: cats}</text>
+  <rect class="box-info" x="230" y="91" width="220" height="44" rx="8"/>
+  <text x="340" y="118" text-anchor="middle" class="mono">summarize {topic: dogs}</text>
+  <rect class="box-info" x="230" y="162" width="220" height="44" rx="8"/>
+  <text x="340" y="189" text-anchor="middle" class="mono">summarize {topic: owls}</text>
+  <rect class="box-ok" x="560" y="85" width="190" height="56" rx="8"/>
+  <text x="655" y="110" text-anchor="middle" class="mono">combine</text>
+  <text x="655" y="127" text-anchor="middle" class="small">sees all 3 summaries</text>
+  <path class="arrow-accent dashed" d="M140,105 L226,44"/>
+  <path class="arrow-accent dashed" d="M140,113 H226"/>
+  <path class="arrow-accent dashed" d="M140,121 L226,182"/>
+  <path class="arrow" d="M450,42 L556,100"/>
+  <path class="arrow" d="M450,113 H556"/>
+  <path class="arrow" d="M450,184 L556,126"/>
+  <text x="183" y="222" text-anchor="middle" class="small">map (Send)</text>
+  <text x="505" y="222" text-anchor="middle" class="small">reduce (reducer + edge)</text>
+</svg>
+<figcaption>Verified example. <strong>The number of parallel branches is decided at run time</strong>, one per <code>Send</code>; the reducer gathers their results.</figcaption>
+</figure>
+
+<h2>Loops and the recursion limit</h2>
+<p>A loop is just an edge to a node that already ran. In graph 8, <code>builder.add_edge("tools", "chat_with_tools")</code> sends tool results back to the model, and <code>tools_condition</code> is the exit: when the model replies without <a class="term" href="glossary.html#tool-call">tool calls</a>, the conditional edge goes to <code>END</code>.</p>
+<p>What if the exit never fires? A model could keep asking for tools, or a "rewrite until good" loop could never be satisfied. LangGraph protects you with the <a class="term" href="glossary.html#recursion-limit">recursion limit</a>: the maximum number of supersteps one run may take. When a run reaches it, LangGraph stops and raises <code>GraphRecursionError</code> (from <code>langgraph.errors</code>).</p>
+
+<pre data-lang="py" data-tag="verified"><code>from typing import Literal
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.errors import GraphRecursionError
+
+class State(TypedDict):
+    count: int
+
+def increment(state: State) -&gt; dict:
+    return {"count": state["count"] + 1}
+
+def again(state: State) -&gt; Literal["increment", "__end__"]:
+    return "increment" if state["count"] &lt; 1_000_000 else END   # practically never ends
+
+builder = StateGraph(State)
+builder.add_node("increment", increment)
+builder.add_edge(START, "increment")
+builder.add_conditional_edges("increment", again)
+graph = builder.compile()
+
+try:
+    graph.invoke({"count": 0}, config={"recursion_limit": 5})
+except GraphRecursionError as error:
+    print("Stopped:", error)
+</code></pre>
+<p>Output (LangGraph 1.2.11):</p>
+<pre data-lang="text" data-tag="verified"><code>Stopped: Recursion limit of 5 reached without hitting a stop condition. You can increase the limit by setting the `recursion_limit` config key.
+For troubleshooting, visit: https://docs.langchain.com/oss/python/langgraph/errors/GRAPH_RECURSION_LIMIT
+</code></pre>
+
+<div class="table-wrap"><table>
+<tr><th>Fact (checked in the installed packages)</th><th>Value</th></tr>
+<tr><td>Default limit for a graph you build yourself, LangGraph 1.2.11</td><td><strong>10007</strong>. Source: <code>DEFAULT_RECURSION_LIMIT = int(getenv("LANGGRAPH_DEFAULT_RECURSION_LIMIT", "10007"))</code> in <code>langgraph/_internal/_config.py</code>. We confirmed it by running an endless loop with no config.</td></tr>
+<tr><td>Override for one run</td><td><code>graph.invoke(input, config={"recursion_limit": 5})</code></td></tr>
+<tr><td>Override for the whole process</td><td>The environment variable <code>LANGGRAPH_DEFAULT_RECURSION_LIMIT</code></td></tr>
+<tr><td>Agents made by LangChain's <code>create_agent</code></td><td>Their config sets <code>recursion_limit</code> to 9999 (verified, <a href="lg-05-agent-architectures.html">chapter 5</a>)</td></tr>
+<tr><td>What it counts</td><td>Supersteps. With a limit of 3, the loop node above ran 3 times, then the error was raised.</td></tr>
+</table></div>
+<p>Many tutorials and older LangGraph versions say the default is 25. That number still exists in <code>langchain_core</code> as its own default, but it's not what a 1.2.11 graph uses. With a default of 10007, an endless loop calling a paid model could make thousands of calls before the safety net catches it. Set a limit that fits your graph.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Two layers of protection for a loop: your own stopping rule in the routing function, such as attempts at most 3, and the recursion limit as a safety net that raises GraphRecursionError">
+  <rect class="box" x="20" y="70" width="140" height="50" rx="8"/>
+  <text x="90" y="100" text-anchor="middle" class="mono">work node</text>
+  <rect class="box-warn" x="240" y="62" width="200" height="66" rx="33"/>
+  <text x="340" y="90" text-anchor="middle" class="label">done, or attempts</text>
+  <text x="340" y="108" text-anchor="middle" class="label">at the cap?</text>
+  <rect class="box-ok" x="530" y="20" width="200" height="44" rx="8"/>
+  <text x="630" y="47" text-anchor="middle" class="mono">END</text>
+  <rect class="box-bad" x="530" y="140" width="200" height="56" rx="8"/>
+  <text x="630" y="163" text-anchor="middle" class="label">recursion limit hit:</text>
+  <text x="630" y="181" text-anchor="middle" class="mono">GraphRecursionError</text>
+  <path class="arrow" d="M160,95 H236"/>
+  <path class="arrow-ok" d="M440,85 L526,46"/>
+  <text x="480" y="52" text-anchor="middle" class="small">yes</text>
+  <path class="arrow dashed" d="M290,128 C250,175 130,175 95,124"/>
+  <text x="190" y="182" text-anchor="middle" class="small">no: loop again</text>
+  <path class="arrow-bad dashed" d="M400,125 L526,160"/>
+  <text x="470" y="128" class="small">safety net</text>
+</svg>
+<figcaption>Design every loop with <strong>your own exit rule first</strong> (a done flag, an attempt counter); treat the recursion limit as the backstop, not the plan. <a href="lg-05-agent-architectures.html">Chapter 5</a> shows a reflection loop with a counter.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Pitfalls</strong>
+<ul>
+<li>Using <code>add_edge</code> with a routing function (the graph 6 mistake). Routing functions go to <code>add_conditional_edges</code>.</li>
+<li>Returning a name that isn't a node, such as <code>"tool_node"</code> when the node is called <code>"tools"</code>. In 1.2.11 this doesn't raise an error: LangGraph logs <code>wrote to unknown channel branch:to:tool_node, ignoring it</code> and the run quietly stops after that node (verified). Watch the log, and test each route.</li>
+<li>Leaving out the <code>Literal</code> hint or path map: the graph runs, but Studio and <code>draw_mermaid()</code> show the wrong shape.</li>
+<li>Adding both a normal edge and a <code>Command</code> goto out of the same node: both fire, so two nodes run next.</li>
+<li>Parallel branches writing one key without a reducer: <code>InvalidUpdateError</code>.</li>
+<li>Relying on "25" as the safety net. In 1.2.11 the default is 10007; set your own limit.</li>
+</ul></div>
+
+<div class="callout"><strong>Common misconceptions</strong>
+<ul>
+<li><em>"A conditional edge can change the state."</em> Routing functions only read. Use a node, or <code>Command(update=...)</code>.</li>
+<li><em>"Parallel nodes run one after another."</em> They run in the same superstep and see the same starting state.</li>
+<li><em>"<code>Send</code> needs a special node."</em> It targets any normal node; the node just receives the payload you sent instead of the full state.</li>
+<li><em>"The recursion limit counts loops."</em> It counts supersteps of the whole run, loop or not.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>add_edge(a, b)</code>: always next. <code>add_edge([a, b], c)</code>: join. <code>add_sequence([f, g])</code>: a chain in one call.</li>
+<li><code>add_conditional_edges(source, router, path_map)</code>: the router reads the state and returns a node name, <code>END</code>, a list, or <code>Send</code>s. Give it a <code>Literal</code> hint or a path map so the graph draws correctly.</li>
+<li><code>Command(update=..., goto=...)</code> lets one node both update and route; annotate it with <code>Command[Literal[...]]</code>.</li>
+<li>Several edges out of a node run their targets in parallel; shared keys need a reducer. <code>Send</code> creates a run-time number of parallel branches (map-reduce).</li>
+<li>Loops are edges back. Give each loop your own exit rule; the recursion limit (10007 by default in 1.2.11) raises <code>GraphRecursionError</code> as a last resort.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/graph-api">LangGraph docs: Graph API (edges, Send, Command)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/use-graph-api">LangGraph docs: Use the Graph API (branches, loops, map-reduce)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/errors/GRAPH_RECURSION_LIMIT">LangGraph docs: GRAPH_RECURSION_LIMIT error</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/errors/INVALID_CONCURRENT_GRAPH_UPDATE">LangGraph docs: INVALID_CONCURRENT_GRAPH_UPDATE error</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="lg-02-designing-state.html"><small>← Chapter 2</small>Designing State</a>
+<a class="next" href="lg-04-models-in-graphs.html"><small>Chapter 4 →</small>Models Inside Graphs</a>
+</nav>
+</main>
+</body>
+</html>
