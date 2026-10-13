@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 2 · Chat models, structured output and prompts</title>
+<meta name="description" content="Messages, model parameters, providers, structured output strategies and prompt templates. Read with book Part II (chapters 3-5).">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 2/6</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 2 of 6</div>
+  <h1>Chat models, structured output and prompts</h1>
+  <p class="lead">Messages, model parameters, providers, structured output strategies and prompt templates. Read with book Part II (chapters 3-5).</p>
+</section>
+<div class="callout">Read with <strong>Part II · Integrations and Utilities for LLMs in LangChain (chapters 3–5)</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p class="lead">Every LangChain program, however clever, ends up doing the same thing: build a list of messages, send
+it to a chat model, and turn what comes back into something your code can use. This chapter covers those three moves —
+the chat-model interface, structured output, and prompt templates — and the settings that decide whether a small local
+model behaves.</p>
+
+<p>You will learn:</p>
+<ul>
+<li>the chat-model interface: <code>invoke</code>, <code>stream</code>, <code>batch</code> and their async twins;</li>
+<li>the four kinds of <a class="term" href="glossary.html#message">messages</a> and what an
+<a class="term" href="glossary.html#ai-message">AI message</a> carries besides its text;</li>
+<li>how provider packages and <code>init_chat_model("provider:model")</code> pick the model;</li>
+<li>the settings that matter most locally: temperature, output cap, context size and reasoning;</li>
+<li>how <a class="term" href="glossary.html#structured-output">structured output</a> works, the three strategies
+behind it, and why a schema constrains shape but not truth;</li>
+<li>how <a class="term" href="glossary.html#prompt-template">prompt templates</a> build messages from variables, chat
+history and examples, and how <code>prompt | model | parser</code> joins it all up.</li>
+</ul>
+
+<div class="callout"><strong>Why this matters for your project.</strong> The Harbor City Library assistant needs to
+talk to readers (<a href="01-chat-models.html">lab 01</a>), turn a vague request into data a catalog search can use
+(<a href="02-structured-output.html">lab 02</a>), and reuse the same carefully written instructions everywhere
+(<a href="03-prompt-templates.html">lab 03</a>). Every later lab — RAG chains, tools, agents — is built from these
+pieces.</div>
+
+<h2>The chat-model interface</h2>
+
+<p>A <a class="term" href="glossary.html#chat-model">chat model</a> in LangChain is an object with a small, fixed set
+of methods. Whether it talks to Ollama on your laptop or to a hosted service, the methods are the same. That is the
+point of the interface: you can swap the model and keep the code.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Method</th><th>Input</th><th>Returns</th><th>Use it when</th></tr>
+<tr><td><code>invoke(x)</code></td><td>a string, a list of messages, or a prompt value</td><td>one
+<code>AIMessage</code></td><td>you want the whole answer at once</td></tr>
+<tr><td><code>stream(x)</code></td><td>same</td><td>an iterator of <code>AIMessageChunk</code> pieces</td><td>a person is
+watching and should see text appear as it is written</td></tr>
+<tr><td><code>batch([x1, x2, …])</code></td><td>a list of inputs</td><td>a list of <code>AIMessage</code>, in the same
+order</td><td>you have several independent questions</td></tr>
+<tr><td><code>ainvoke</code>, <code>astream</code>, <code>abatch</code></td><td>same</td><td>same, but must be
+awaited</td><td>your program is <a class="term" href="glossary.html#async">async</a> (a web server, an MCP client)</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Three timelines: invoke returns the whole answer at the end; stream returns pieces as they are generated; batch sends several prompts in parallel and returns a list">
+  <text x="20" y="28" class="title">Same model, three ways to call it</text>
+  <text x="20" y="70" class="mono">invoke</text>
+  <path class="line" d="M 100,66 H 560"/>
+  <rect x="562" y="50" width="178" height="32" rx="8" class="box-ok"/>
+  <text x="651" y="71" text-anchor="middle" class="label">whole AIMessage</text>
+  <text x="330" y="58" text-anchor="middle" class="small">you wait while every token is generated</text>
+  <text x="20" y="130" class="mono">stream</text>
+  <rect x="100" y="114" width="60" height="28" rx="6" class="box-info"/>
+  <text x="130" y="133" text-anchor="middle" class="mono">Read</text>
+  <rect x="170" y="114" width="40" height="28" rx="6" class="box-info"/>
+  <text x="190" y="133" text-anchor="middle" class="mono">,</text>
+  <rect x="220" y="114" width="70" height="28" rx="6" class="box-info"/>
+  <text x="255" y="133" text-anchor="middle" class="mono"> study</text>
+  <rect x="300" y="114" width="40" height="28" rx="6" class="box-info"/>
+  <text x="320" y="133" text-anchor="middle" class="mono">,</text>
+  <rect x="350" y="114" width="60" height="28" rx="6" class="box-info"/>
+  <text x="380" y="133" text-anchor="middle" class="mono"> and</text>
+  <text x="430" y="133" class="small">… each chunk printed as soon as it arrives</text>
+  <text x="20" y="196" class="mono">batch</text>
+  <rect x="100" y="172" width="300" height="26" rx="6" class="box2"/>
+  <text x="250" y="190" text-anchor="middle" class="small">"Translate 'library' into French."</text>
+  <rect x="100" y="204" width="300" height="26" rx="6" class="box2"/>
+  <text x="250" y="222" text-anchor="middle" class="small">"Translate 'library' into Spanish."</text>
+  <path class="arrow" d="M 402,185 H 470 V 198 H 520"/>
+  <path class="arrow" d="M 402,217 H 470 V 204 H 520"/>
+  <rect x="522" y="182" width="218" height="40" rx="8" class="box-ok"/>
+  <text x="631" y="207" text-anchor="middle" class="label">list of 2 AIMessages</text>
+</svg>
+<figcaption>The streamed pieces are the real ones from lab 01. <strong>Streaming does not make the answer faster to
+finish; it makes the first words appear sooner.</strong></figcaption>
+</figure>
+
+<p><a href="01-chat-models.html">Lab 01</a> calls all three synchronous methods. A
+<a class="term" href="glossary.html#batch">batch</a> runs its inputs in parallel threads, but on a small local machine
+the model server may still answer them one after another, so do not expect a speed-up there.
+<a class="term" href="glossary.html#streaming">Streaming</a> is about how it feels to the reader. The async versions
+look like this:</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>import asyncio
+
+from harbor.config import get_model
+
+
+async def main():
+    model = get_model()
+    reply = await model.ainvoke("What is a public library? Answer in one sentence.")
+    print(reply.content)
+    async for chunk in model.astream("Name three things people do in a library."):
+        print(chunk.content, end="", flush=True)
+
+
+asyncio.run(main())</code></pre>
+
+<details class="primer"><summary>New to async? Why there are two versions of every method</summary>
+<p>A normal (synchronous) call blocks: your program waits doing nothing until the model answers. In an
+<a class="term" href="glossary.html#async">async</a> program, <code>await</code> says "while this waits, run other
+work". A web server answering many readers at once, or <a href="10-mcp.html">lab 10</a>'s MCP client, needs that.
+The rule: inside an <code>async def</code> function use the <code>a…</code> methods with <code>await</code>; in a plain
+script use the normal ones. Mixing them up gives a coroutine object instead of an answer, or blocks everything.</p>
+</details>
+
+<h2>Messages: who says what</h2>
+
+<p>Chat models take a list of messages, each with a role. LangChain has a class for each role, in
+<code>langchain_core.messages</code>.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Class</th><th>Role</th><th>Written by</th><th>Example from the labs</th></tr>
+<tr><td><code>SystemMessage</code></td><td><a class="term" href="glossary.html#system-message">system</a></td><td>you,
+the developer</td><td>"You are the assistant of Harbor City Library. Be brief and friendly."</td></tr>
+<tr><td><code>HumanMessage</code></td><td>user</td><td>the person (or your code on their behalf)</td><td>"Hi! Can you
+help me find a book about the sea?"</td></tr>
+<tr><td><code>AIMessage</code></td><td>assistant</td><td>the model</td><td>its answer, or a request to call tools</td></tr>
+<tr><td><code>ToolMessage</code></td><td>tool</td><td>your code, after running a tool</td><td>"The Quiet Engine: 1 of 2
+copies available at Central Library." (lab 09)</td></tr>
+</table></div>
+
+<p>Passing a plain string to <code>invoke</code> is a shortcut for a list with one <code>HumanMessage</code>. The
+system message comes first and sets the rules for the whole conversation; the model is trained to give it more weight
+than the user's text, but not absolute obedience.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="A conversation as a list of messages: system, human, AI message with a tool call, tool message with the result linked by id, and a final AI message with the answer">
+  <text x="20" y="28" class="title">A conversation is just a growing list</text>
+  <rect x="20" y="44" width="140" height="40" rx="8" class="box-info"/>
+  <text x="90" y="69" text-anchor="middle" class="mono">SystemMessage</text>
+  <text x="176" y="69" class="small">"You are the assistant of Harbor City Library…"</text>
+  <rect x="20" y="96" width="140" height="40" rx="8" class="box"/>
+  <text x="90" y="121" text-anchor="middle" class="mono">HumanMessage</text>
+  <text x="176" y="121" class="small">"Is The Quiet Engine on the shelf? Its id is B004." (lab 09)</text>
+  <rect x="20" y="148" width="140" height="40" rx="8" class="box2"/>
+  <text x="90" y="173" text-anchor="middle" class="mono">AIMessage</text>
+  <text x="176" y="166" class="small">content: ""</text>
+  <text x="176" y="182" class="small mono">tool_calls: [check_availability(item_id='B004'), id=…]</text>
+  <rect x="20" y="200" width="140" height="40" rx="8" class="box-warn"/>
+  <text x="90" y="225" text-anchor="middle" class="mono">ToolMessage</text>
+  <text x="176" y="218" class="small">"The Quiet Engine: 1 of 2 copies available at Central Library."</text>
+  <text x="176" y="234" class="small mono">tool_call_id = the same id</text>
+  <rect x="20" y="252" width="140" height="40" rx="8" class="box-ok"/>
+  <text x="90" y="277" text-anchor="middle" class="mono">AIMessage</text>
+  <text x="176" y="277" class="small">the final answer, written from the tool result</text>
+  <text x="380" y="316" text-anchor="middle" class="small">The whole list is sent again on every call: the model itself remembers nothing between calls.</text>
+</svg>
+<figcaption>The tool request and the tool result are paired by id. <strong>Chat "memory" is simply your code
+re-sending the list</strong>; labs 11–12 automate that with checkpointers.</figcaption>
+</figure>
+
+<h3>What comes back: content and metadata</h3>
+
+<p>An <code>AIMessage</code> is more than its text. The fields you will use most:</p>
+<ul>
+<li><code>content</code> — the answer. Usually a string; with some providers and multimodal models it can be a list of
+typed blocks (text, images, reasoning). <code>.text</code> always gives you the plain text, and
+<code>.content_blocks</code> gives the blocks in LangChain's standard format.</li>
+<li><code>tool_calls</code> — the tools the model asked for, as name, arguments and id (empty when it just answered).</li>
+<li><code>usage_metadata</code> — token counts, the same keys for every provider. Lab 01 printed
+<code>{'input_tokens': 36, 'output_tokens': 40, 'total_tokens': 76}</code>.</li>
+<li><code>response_metadata</code> — provider-specific details, such as the model name and why generation stopped.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Anatomy of the AIMessage returned in lab 01: content, tool_calls, usage_metadata with 36 input, 40 output and 76 total tokens, and response_metadata">
+  <text x="20" y="28" class="title">Inside reply = model.invoke(...)</text>
+  <rect x="20" y="44" width="720" height="170" rx="8" class="zone"/>
+  <text x="36" y="66" class="label mono">AIMessage</text>
+  <rect x="36" y="78" width="330" height="56" rx="8" class="box-ok"/>
+  <text x="50" y="100" class="label mono">content</text>
+  <text x="50" y="120" class="small">"A public library is a free, publicly funded…"</text>
+  <rect x="380" y="78" width="344" height="56" rx="8" class="box2"/>
+  <text x="394" y="100" class="label mono">tool_calls</text>
+  <text x="394" y="120" class="small">[]  (empty: the model just answered)</text>
+  <rect x="36" y="146" width="330" height="56" rx="8" class="box-info"/>
+  <text x="50" y="168" class="label mono">usage_metadata</text>
+  <text x="50" y="188" class="small mono">input 36 · output 40 · total 76</text>
+  <rect x="380" y="146" width="344" height="56" rx="8" class="box"/>
+  <text x="394" y="168" class="label mono">response_metadata</text>
+  <text x="394" y="188" class="small">provider details: model name, stop reason…</text>
+</svg>
+<figcaption>Numbers from lab 01's real run. <strong>Read <code>usage_metadata</code> to know how many tokens a call
+used; it has the same keys whatever the provider.</strong></figcaption>
+</figure>
+
+<h2>Providers and init_chat_model</h2>
+
+<p>Each model provider has its own LangChain package — <code>langchain-ollama</code> here; other providers publish
+their own — containing a chat-model class that speaks that provider's API. You can create the class directly, as
+<code>harbor/config.py</code> does:</p>
+
+<pre data-lang="py" data-tag="excerpt · harbor/config.py"><code>    return ChatOllama(model=MODEL, temperature=temperature, num_ctx=NUM_CTX, num_predict=num_predict,
+                      reasoning=False, **kwargs)</code></pre>
+
+<p>Or you can let LangChain pick the class from a string. <code>init_chat_model</code> (from
+<code>langchain.chat_models</code>) reads a <code>"provider:model"</code> string, imports the matching provider package
+and creates its class. Lab 01 does it and prints the class it got:</p>
+
+<pre data-lang="text" data-tag="excerpt · out/01_chat_models.txt"><code>5) init_chat_model: ChatOllama -&gt; ready</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="init_chat_model splits the string ollama:llama3.2 into provider and model, imports langchain-ollama and returns a ChatOllama object; another provider string would load another package">
+  <text x="20" y="28" class="title">From a string to a model object</text>
+  <rect x="20" y="60" width="200" height="56" rx="8" class="box"/>
+  <text x="120" y="84" text-anchor="middle" class="mono">"ollama:llama3.2"</text>
+  <text x="120" y="102" text-anchor="middle" class="small">provider : model</text>
+  <path class="arrow" d="M 222,88 H 266"/>
+  <rect x="268" y="60" width="150" height="56" rx="8" class="box-solid"/>
+  <text x="343" y="84" text-anchor="middle" class="label on-solid">init_chat_model</text>
+  <text x="343" y="102" text-anchor="middle" class="small on-solid">looks up provider</text>
+  <path class="arrow" d="M 420,88 H 464"/>
+  <rect x="466" y="60" width="140" height="56" rx="8" class="box-info"/>
+  <text x="536" y="84" text-anchor="middle" class="label">langchain-ollama</text>
+  <text x="536" y="102" text-anchor="middle" class="small">must be installed</text>
+  <path class="arrow" d="M 608,88 H 636"/>
+  <rect x="638" y="60" width="102" height="56" rx="8" class="box-ok"/>
+  <text x="689" y="92" text-anchor="middle" class="mono">ChatOllama</text>
+  <text x="20" y="150" class="small">Another provider: a different string, a different package to install — the rest of your code stays the same.</text>
+  <text x="20" y="170" class="small">Missing package? init_chat_model raises an ImportError naming the package to install.</text>
+</svg>
+<figcaption><strong>The string only chooses the class; settings like temperature are passed as keyword arguments,
+exactly as for the class itself.</strong></figcaption>
+</figure>
+
+<pre data-lang="py" data-tag="illustrative"><code>from langchain.chat_models import init_chat_model
+
+local = init_chat_model("ollama:llama3.2", temperature=0, num_ctx=8192)
+# A hosted provider works the same way once its package is installed and its API key is set:
+# hosted = init_chat_model("&lt;provider&gt;:&lt;model name&gt;", temperature=0)</code></pre>
+
+<p>Use the class directly when you need provider-specific options and want your editor to autocomplete them; use
+<code>init_chat_model</code> when the model should be chosen by configuration (an environment variable, a settings
+file). The labs do the first in <code>harbor/config.py</code>, but still let you change the model with the
+<code>HARBOR_MODEL</code> environment variable.</p>
+
+<h2>Model settings that matter</h2>
+
+<p>Settings are passed when you create the model. These four decided how the labs behaved on our machine:</p>
+
+<div class="table-wrap"><table>
+<tr><th>Setting (ChatOllama)</th><th>Lab value</th><th>What it does</th><th>What we saw</th></tr>
+<tr><td><code>temperature</code></td><td>0</td><td>How random the choice of each next token is. 0 = almost always
+the most likely token.</td><td>More repeatable runs — but not identical ones; your output will still differ.</td></tr>
+<tr><td><code>num_predict</code></td><td>512</td><td>Maximum number of tokens the model may write in one answer.
+Hosted providers usually call this <code>max_tokens</code>.</td><td>Added after a generation in lab 02 never stopped
+and blocked the Ollama server; we had to stop its stuck process.</td></tr>
+<tr><td><code>num_ctx</code></td><td>8192</td><td>Size of the <a class="term" href="glossary.html#context-window">context
+window</a> Ollama reserves for the model.</td><td>With Ollama's larger default, most of the model ran on the CPU of our
+4 GB GPU. With 8192: 3.4 GB, 32 % CPU / 68 % GPU, a 76-token answer in about 4.5 s warm.</td></tr>
+<tr><td><code>reasoning</code></td><td>False</td><td>Turns hidden "thinking" on or off for models that support it.
+With <code>True</code> the thinking is returned separately (in <code>additional_kwargs</code>).</td><td>Off, because
+thinking made gemma4 much slower here; llama3.2 does not think anyway.</td></tr>
+</table></div>
+
+<h3>Local or hosted?</h3>
+
+<p>The labs run locally with <a class="term" href="glossary.html#ollama">Ollama</a>: free per call, nothing leaves
+your machine, and it works offline once the model is downloaded. The price is your hardware's limits — a 3B model
+that sometimes ignores instructions, and settings you must tune yourself, as above. A hosted model removes the hardware
+problem and is usually much larger, but costs money per token, needs an API key kept out of your code, and sends your
+data to the provider. Because both sit behind the same interface, a sensible path is to develop locally and switch
+only the model line if you need more quality.</p>
+
+<h2>Structured output</h2>
+
+<p>Free text is fine for a person but awkward for a program. If the next step is a catalog search, you want
+<code>{"topic": "harbor history", "audience": "adults", "formats": ["audiobook"]}</code>, not a friendly paragraph.
+<a class="term" href="glossary.html#structured-output">Structured output</a> means asking the model for data in a
+fixed shape and getting back a checked Python object.</p>
+
+<p>In LangChain you describe the shape as a <a class="term" href="glossary.html#pydantic">Pydantic</a> model (or a
+TypedDict, or a raw <a class="term" href="glossary.html#json-schema">JSON schema</a>) and call
+<code>model.with_structured_output(Schema)</code>. That returns a new Runnable that, when invoked, returns an instance
+of your class. <a href="02-structured-output.html">Lab 02</a> uses this schema:</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/02_structured_output.py · lines 9–14"><code>class BookRequest(BaseModel):
+    """What a library visitor is looking for."""
+    topic: str = Field(description="The subject, in two to four words")
+    audience: Literal["children", "teens", "adults"] = Field(description="Who the book is for")
+    formats: list[Literal["book", "e-book", "audiobook", "DVD"]] = Field(description="Formats the visitor accepts")
+    max_pages: int | None = Field(default=None, description="Maximum length if the visitor gives one, else null")</code></pre>
+
+<p>Each part of the class does a job. The docstring and the <code>description</code> texts are sent to the model as
+instructions. <code>Literal[...]</code> restricts a field to a fixed list of values. <code>int | None</code> with a
+default makes a field optional. <code>Field</code> can also add limits — <code>ge</code>/<code>le</code> for numbers,
+<code>min_length</code>/<code>max_length</code> for strings and lists — and every limit is written into the JSON schema
+the model receives.</p>
+
+<details class="primer"><summary>New to Pydantic? Classes that check their own data</summary>
+<p><a class="term" href="glossary.html#pydantic">Pydantic</a> lets you declare a class with
+<a class="term" href="glossary.html#type-hint">type hints</a>; when you create an instance, it checks every value and
+raises a <code>ValidationError</code> if something does not fit (a string where an int belongs, a value outside a
+<code>Literal</code>). It can also export the class as a JSON schema with
+<code>BookRequest.model_json_schema()</code> — which is exactly what LangChain sends to the model. So one class does
+two jobs: it tells the model what to produce and it checks what the model produced.</p>
+</details>
+
+<h3>Three strategies, one method</h3>
+
+<p>How does the model get pushed into the right shape? There are three strategies, chosen with the
+<code>method=</code> argument. For <code>ChatOllama</code> the default is <code>"json_schema"</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Three columns comparing json_schema, function_calling and json_mode strategies; all three end in the same parser that builds the Pydantic object">
+  <text x="20" y="28" class="title">method= picks how the shape is enforced</text>
+  <rect x="20" y="44" width="230" height="150" rx="8" class="box-ok"/>
+  <text x="135" y="68" text-anchor="middle" class="mono">"json_schema"</text>
+  <text x="135" y="88" text-anchor="middle" class="small">default for ChatOllama</text>
+  <text x="135" y="116" text-anchor="middle" class="small">schema sent to the server;</text>
+  <text x="135" y="134" text-anchor="middle" class="small">it only lets the model pick</text>
+  <text x="135" y="152" text-anchor="middle" class="small">tokens that fit the schema</text>
+  <text x="135" y="178" text-anchor="middle" class="small ok">strongest guarantee</text>
+  <rect x="265" y="44" width="230" height="150" rx="8" class="box-info"/>
+  <text x="380" y="68" text-anchor="middle" class="mono">"function_calling"</text>
+  <text x="380" y="88" text-anchor="middle" class="small">uses tool calling</text>
+  <text x="380" y="116" text-anchor="middle" class="small">schema offered as a "tool";</text>
+  <text x="380" y="134" text-anchor="middle" class="small">the model "calls" it with</text>
+  <text x="380" y="152" text-anchor="middle" class="small">the data as arguments</text>
+  <text x="380" y="178" text-anchor="middle" class="small">works with tool-capable models</text>
+  <rect x="510" y="44" width="230" height="150" rx="8" class="box-warn"/>
+  <text x="625" y="68" text-anchor="middle" class="mono">"json_mode"</text>
+  <text x="625" y="88" text-anchor="middle" class="small">any valid JSON</text>
+  <text x="625" y="116" text-anchor="middle" class="small">output must be JSON, but</text>
+  <text x="625" y="134" text-anchor="middle" class="small">you describe the fields</text>
+  <text x="625" y="152" text-anchor="middle" class="small">in the prompt yourself</text>
+  <text x="625" y="178" text-anchor="middle" class="small warn">weakest guarantee</text>
+  <path class="line" d="M 135,196 V 216 H 625 V 196"/>
+  <path class="line" d="M 380,196 V 216"/>
+  <path class="arrow" d="M 380,216 V 234"/>
+  <rect x="240" y="236" width="280" height="48" rx="8" class="box-solid"/>
+  <text x="380" y="258" text-anchor="middle" class="label on-solid">parse + validate with Pydantic</text>
+  <text x="380" y="274" text-anchor="middle" class="small on-solid">→ BookRequest(...)</text>
+</svg>
+<figcaption>Whatever the strategy, the reply is parsed and checked the same way. <strong>Constrained decoding
+(json_schema) makes the shape very likely; Pydantic validation is what makes it certain.</strong></figcaption>
+</figure>
+
+<p>"Constrained decoding" means the server, at each step of next-token prediction, removes every token that would
+break the schema. The model cannot write <code>"audience": "pirates"</code> because the tokens for it are not allowed.
+That is why lab 02's two clear requests came back perfectly shaped:</p>
+
+<pre data-lang="text" data-tag="excerpt · out/02_structured_output.txt"><code>BookRequest {'topic': 'crab books for kids', 'audience': 'children', 'formats': ['e-book', 'book'], 'max_pages': 40}
+BookRequest {'topic': 'harbor history', 'audience': 'adults', 'formats': ['audiobook'], 'max_pages': 200}</code></pre>
+
+<p>Look closely at the second line: the reader never mentioned a page limit, and the schema said "else null", yet
+the model filled in <code>200</code>. Keep that in mind.</p>
+
+<h3>The runaway list, and include_raw</h3>
+
+<p>The third request in lab 02 was deliberately vague: "Something fun to read." The model started a valid object,
+then wrote <code>"e-book"</code> into the <code>formats</code> list again and again. The schema allowed a list of any
+length, so constrained decoding never forced it to close the list. Before the labs had an output cap, this generation
+simply never ended and froze the Ollama server. With <code>num_predict=512</code> it stops at 512 tokens — in the middle
+of the JSON, which then cannot be parsed.</p>
+
+<p>Normally a parsing failure raises an exception. With <code>include_raw=True</code> you get a dictionary instead,
+with the raw <code>AIMessage</code>, the parsed object (or <code>None</code>) and the error (or <code>None</code>), so
+your code can log the raw text and decide what to do:</p>
+
+<pre data-lang="text" data-tag="excerpt · out/02_structured_output.txt"><code>include_raw keys: ['raw', 'parsing_error', 'parsed']
+parsed: None
+parsing_error: Failed to parse BookRequest from completion {"topic": "funny stories", "audience": "adults", "formats": ["book", "audiobook", "e-book", "e-book", "e-book", "e-book", "e-book", "e-book", "e-book", "e-b
+output tokens: 512</code></pre>
+
+<p>The fix lives in the schema. <code>Field(max_length=4)</code> on the list becomes <code>"maxItems": 4</code> in the
+JSON schema, Ollama enforces it during decoding, and the list must close after four items:</p>
+
+<pre data-lang="text" data-tag="excerpt · out/02_structured_output.txt"><code>with max_length=4: topic='funny stories' audience='adults' formats=['book', 'audiobook', 'e-book', 'e-book'] max_pages=2000 | error: None</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Three stages of the lab 02 story: no cap freezes the server; a 512 token cap gives a parsing error; maxItems 4 parses but still contains a duplicate and an invented max_pages of 2000">
+  <text x="20" y="28" class="title">"Something fun to read." — three versions</text>
+  <rect x="20" y="44" width="230" height="170" rx="8" class="box-bad"/>
+  <text x="135" y="68" text-anchor="middle" class="label">1. No output cap</text>
+  <text x="135" y="96" text-anchor="middle" class="small mono">"e-book", "e-book", …</text>
+  <text x="135" y="122" text-anchor="middle" class="small">never stops</text>
+  <text x="135" y="140" text-anchor="middle" class="small">Ollama server blocked;</text>
+  <text x="135" y="158" text-anchor="middle" class="small">stuck process stopped</text>
+  <text x="135" y="196" text-anchor="middle" class="small bad">symptom: frozen lab</text>
+  <path class="arrow" d="M 252,129 H 263"/>
+  <rect x="265" y="44" width="230" height="170" rx="8" class="box-warn"/>
+  <text x="380" y="68" text-anchor="middle" class="label">2. num_predict=512</text>
+  <text x="380" y="96" text-anchor="middle" class="small">stops at 512 tokens,</text>
+  <text x="380" y="114" text-anchor="middle" class="small">mid-JSON</text>
+  <text x="380" y="140" text-anchor="middle" class="small mono">parsed: None</text>
+  <text x="380" y="158" text-anchor="middle" class="small">+ parsing_error</text>
+  <text x="380" y="196" text-anchor="middle" class="small warn">safe failure (include_raw)</text>
+  <path class="arrow" d="M 497,129 H 508"/>
+  <rect x="510" y="44" width="230" height="170" rx="8" class="box-ok"/>
+  <text x="625" y="68" text-anchor="middle" class="label">3. Field(max_length=4)</text>
+  <text x="625" y="96" text-anchor="middle" class="small mono">"maxItems": 4</text>
+  <text x="625" y="122" text-anchor="middle" class="small">parses fine, but:</text>
+  <text x="625" y="140" text-anchor="middle" class="small">'e-book' listed twice</text>
+  <text x="625" y="158" text-anchor="middle" class="small">max_pages=2000 invented</text>
+  <text x="625" y="196" text-anchor="middle" class="small ok">valid shape, doubtful content</text>
+  <text x="380" y="246" text-anchor="middle" class="small">Lesson: a schema constrains the shape of the answer, not its truth.</text>
+</svg>
+<figcaption>All three are real behaviours of the same code on llama3.2. <strong>Cap the output, bound every list,
+and still check the values</strong> — the visitor never asked for 2000 pages.</figcaption>
+</figure>
+
+<div class="callout"><strong>Shape, not truth.</strong> Structured output guarantees that <code>formats</code> is a
+list of allowed words of at most four items. It cannot guarantee the list makes sense (a duplicate), or that
+<code>max_pages</code> came from the reader (2000 was invented; so was the 200 earlier). Treat structured output like
+any user input: validate the values that matter in your own code (for example, set <code>max_pages</code> to
+<code>None</code> unless a number appears in the request, or remove duplicates with a Pydantic validator).</div>
+
+<h2>Prompt templates</h2>
+
+<p>The text you send to a model is the <a class="term" href="glossary.html#prompt">prompt</a>. Real prompts are
+mostly fixed instructions with a few changing parts: the branch, the language, the reader's question. A
+<a class="term" href="glossary.html#prompt-template">prompt template</a> stores the fixed part once and fills in the
+variables on every call, so the wording is consistent and you never glue strings together by hand.</p>
+
+<h3>Variables and from_messages</h3>
+
+<p><code>ChatPromptTemplate.from_messages</code> takes a list of <code>(role, text)</code> pairs; each
+<code>{name}</code> in the text is a variable. <a href="03-prompt-templates.html">Lab 03</a> fills one in and prints
+exactly what the model would receive:</p>
+
+<pre data-lang="text" data-tag="excerpt · out/03_prompt_templates.txt"><code>system: You are the assistant of Harbor City Library's Lighthouse Branch. Answer in French, in one sentence.
+ human: When is story time?</code></pre>
+
+<p>Calling <code>prompt.format_messages(...)</code> like this is the best debugging tool for prompts: you see the real
+messages, not what you think you wrote. If you forget a variable, the template raises an error (a <code>KeyError</code> naming the missing
+variable) instead of sending a half-filled prompt.</p>
+
+<h3>Partial variables</h3>
+
+<p>Sometimes a variable is known early and stays the same — the branch for a kiosk installed at the Lighthouse
+Branch, say. <code>partial()</code> fills some variables now and returns a new template that only asks for the rest:</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>from langchain_core.prompts import ChatPromptTemplate
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are the assistant of Harbor City Library's {branch}. Answer in {language}, in one sentence."),
+    ("human", "{question}"),
+])
+kiosk = prompt.partial(branch="Lighthouse Branch", language="English")
+print(kiosk.input_variables)  # ['question']</code></pre>
+
+<h3>MessagesPlaceholder: room for a whole conversation</h3>
+
+<p>A variable holds one string. A <code>MessagesPlaceholder("history")</code> holds a whole <em>list of
+messages</em>, inserted at that point. That is how a template carries a chat history. In lab 03 the history said
+"My name is Lea and I love science fiction", and the model answered "Your name is Lea, and your favourite genre is
+science fiction!" — it "remembered" only because the history was pasted in.</p>
+
+<h3>Few-shot templates</h3>
+
+<p>Describing an output format in words is hard; showing it is easy. A
+<a class="term" href="glossary.html#few-shot">few-shot</a> prompt includes a few example inputs with the exact outputs
+you want. <code>FewShotChatMessagePromptTemplate</code> turns a list of example dictionaries into pairs of human/AI
+messages. Lab 03 gave two examples of catalog tags such as <code>science fiction · adults · 2021</code>, and the model
+tagged a new title in the same style: <code>historical fiction · adults · 2019</code>. The format was copied
+perfectly; the content (genre, year) was a guess, since the model knows nothing about that book.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="How the lab 03 templates expand: a system message, few-shot example pairs, the history placeholder filled with earlier messages, and the human question become one list of messages">
+  <text x="20" y="28" class="title">Template parts → the messages the model receives</text>
+  <rect x="20" y="50" width="250" height="40" rx="8" class="box-info"/>
+  <text x="145" y="75" text-anchor="middle" class="mono">("system", "…{branch}…")</text>
+  <rect x="20" y="104" width="250" height="40" rx="8" class="box2"/>
+  <text x="145" y="129" text-anchor="middle" class="mono">FewShotChatMessage…</text>
+  <rect x="20" y="158" width="250" height="40" rx="8" class="box-warn"/>
+  <text x="145" y="183" text-anchor="middle" class="mono">MessagesPlaceholder("history")</text>
+  <rect x="20" y="212" width="250" height="40" rx="8" class="box"/>
+  <text x="145" y="237" text-anchor="middle" class="mono">("human", "{question}")</text>
+  <path class="arrow-accent" d="M 272,70 H 436"/>
+  <path class="arrow-accent" d="M 272,124 H 436"/>
+  <path class="arrow-accent" d="M 272,178 H 436"/>
+  <path class="arrow-accent" d="M 272,232 H 436"/>
+  <text x="354" y="62" text-anchor="middle" class="small">fill variables</text>
+  <text x="354" y="116" text-anchor="middle" class="small">one pair per example</text>
+  <text x="354" y="170" text-anchor="middle" class="small">insert a list</text>
+  <text x="354" y="224" text-anchor="middle" class="small">fill variables</text>
+  <rect x="438" y="50" width="302" height="40" rx="8" class="box-info"/>
+  <text x="452" y="75" class="small">System: You are the assistant of … Branch.</text>
+  <rect x="438" y="104" width="302" height="40" rx="8" class="box2"/>
+  <text x="452" y="121" class="small">Human: The Quiet Engine</text>
+  <text x="452" y="137" class="small">AI: science fiction · adults · 2021   (× 2)</text>
+  <rect x="438" y="158" width="302" height="40" rx="8" class="box-warn"/>
+  <text x="452" y="175" class="small">Human: My name is Lea and I love…</text>
+  <text x="452" y="191" class="small">AI: Nice to meet you, Lea!</text>
+  <rect x="438" y="212" width="302" height="40" rx="8" class="box"/>
+  <text x="452" y="237" class="small">Human: What's my name and favourite genre?</text>
+  <text x="380" y="282" text-anchor="middle" class="small">Lab 03 uses these parts in three separate templates; here they are stacked to show each one.</text>
+</svg>
+<figcaption>Left: what you write; right: what is sent. <strong>Every template, however complex, ends as a plain list of
+messages</strong> — the same list you could have built by hand in lab 01.</figcaption>
+</figure>
+
+<h3>prompt | model | parser</h3>
+
+<p>A template, a model and an <a class="term" href="glossary.html#output-parser">output parser</a> are all
+<a class="term" href="glossary.html#runnable">Runnables</a>, so the <code>|</code> operator of
+<a class="term" href="glossary.html#lcel">LCEL</a> can join them into a <a class="term" href="glossary.html#chain">chain</a>.
+Calling the chain runs them in order, each output feeding the next input:</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/03_prompt_templates.py · line 20"><code>chain = prompt | model | StrOutputParser()</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Data flowing through prompt, model and StrOutputParser: a dictionary of variables becomes a prompt value of messages, then an AIMessage, then a plain string">
+  <text x="20" y="28" class="title">What travels between the pieces</text>
+  <rect x="20" y="60" width="140" height="56" rx="8" class="box"/>
+  <text x="90" y="84" text-anchor="middle" class="label">dict</text>
+  <text x="90" y="102" text-anchor="middle" class="small mono">{"branch": …}</text>
+  <path class="arrow" d="M 162,88 H 190"/>
+  <rect x="192" y="60" width="110" height="56" rx="8" class="box-info"/>
+  <text x="247" y="92" text-anchor="middle" class="mono">prompt</text>
+  <path class="arrow" d="M 304,88 H 332"/>
+  <text x="318" y="140" text-anchor="middle" class="small">messages</text>
+  <rect x="334" y="60" width="110" height="56" rx="8" class="box-solid"/>
+  <text x="389" y="92" text-anchor="middle" class="on-solid">model</text>
+  <path class="arrow" d="M 446,88 H 474"/>
+  <text x="460" y="140" text-anchor="middle" class="small">AIMessage</text>
+  <rect x="476" y="60" width="140" height="56" rx="8" class="box2"/>
+  <text x="546" y="92" text-anchor="middle" class="mono">StrOutputParser</text>
+  <path class="arrow" d="M 618,88 H 646"/>
+  <rect x="648" y="60" width="92" height="56" rx="8" class="box-ok"/>
+  <text x="694" y="84" text-anchor="middle" class="label">str</text>
+  <text x="694" y="102" text-anchor="middle" class="small">the answer</text>
+  <text x="380" y="172" text-anchor="middle" class="small">chain.invoke(dict) runs all three; chain.stream(dict) streams the final string piece by piece.</text>
+</svg>
+<figcaption><strong>Each piece's output type must match the next piece's input type</strong>; when a chain fails,
+check the types at each arrow first.</figcaption>
+</figure>
+
+<p>Lab 03's chain also shows the limit of prompting alone: asked "Do you have a maker space?", the chain answered
+with a detailed description of an "Innovation Studio" that does not exist. A good template makes the answer
+<em>well-formed</em>; only real data — retrieval in labs 04–07, tools in labs 09–15 — makes it <em>true</em>.</p>
+
+<div class="callout warn"><strong>Pitfalls</strong>
+<ul>
+<li><strong>No output cap.</strong> Without <code>num_predict</code> (or <code>max_tokens</code>), one runaway
+generation can block a local server. Set it in the one function that creates your model.</li>
+<li><strong>Unbounded lists in schemas.</strong> Add <code>max_length</code> to every list field you send as a
+structured-output schema.</li>
+<li><strong>Trusting valid output.</strong> A parsed object can still hold invented values (<code>max_pages=200</code>,
+<code>2000</code>). Validate what matters.</li>
+<li><strong>Exceptions you did not expect.</strong> Without <code>include_raw=True</code>, a parse failure raises.
+Use it where a bad answer must not crash the program, and log <code>raw</code>.</li>
+<li><strong>Literal braces in templates.</strong> <code>{</code> and <code>}</code> mark variables; to put real braces
+(for example a JSON example) in a template, double them: <code>{{</code> and <code>}}</code>.</li>
+<li><strong>Mixing sync and async.</strong> <code>model.ainvoke(...)</code> without <code>await</code> returns a
+coroutine, not an answer.</li>
+<li><strong>Assuming the model remembers.</strong> It only sees the messages in this call; pass history explicitly
+(<code>MessagesPlaceholder</code>) or use a checkpointer.</li>
+<li><strong>Huge context by default.</strong> On a small GPU, a large <code>num_ctx</code> pushes the model onto the
+CPU and makes every call slow. Choose the size you need.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Every chat model has <code>invoke</code>, <code>stream</code>, <code>batch</code> and async versions; it takes
+messages and returns an <code>AIMessage</code> with content, tool calls and <code>usage_metadata</code>.</li>
+<li>Four message roles: system (your rules), human, AI, tool; the whole list is resent on every call.</li>
+<li>Provider packages hold the model classes; <code>init_chat_model("ollama:llama3.2")</code> picks one from a
+string.</li>
+<li>The labs set <code>temperature=0</code>, <code>num_predict=512</code>, <code>num_ctx=8192</code> and
+<code>reasoning=False</code> in one place, each for a reason we hit in practice.</li>
+<li><code>with_structured_output</code> returns validated Pydantic objects; <code>method=</code> chooses json_schema
+(default for Ollama), function_calling or json_mode; <code>include_raw=True</code> turns failures into data.</li>
+<li><code>Field(max_length=4)</code> fixed lab 02's runaway list — but schemas constrain shape, not truth.</li>
+<li>Templates fill variables, accept partial values, insert histories with <code>MessagesPlaceholder</code> and teach
+formats with few-shot examples; <code>prompt | model | parser</code> is your first chain.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langchain/models">Models</a> — the chat-model interface,
+<code>init_chat_model</code>, invoke, stream and batch</li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/messages">Messages</a> — roles, content blocks and usage
+metadata</li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/streaming">Streaming</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/structured-output">Structured output</a></li>
+<li><a href="https://docs.langchain.com/oss/python/integrations/chat/ollama">ChatOllama integration</a></li>
+<li><a href="https://docs.ollama.com/capabilities/structured-outputs">Ollama structured outputs</a>,
+<a href="https://docs.ollama.com/context-length">context length</a> and <a href="https://docs.ollama.com/faq">FAQ</a></li>
+<li><a href="https://docs.pydantic.dev/latest/concepts/models/">Pydantic models</a> and
+<a href="https://docs.pydantic.dev/latest/concepts/fields/">fields</a> (constraints such as <code>max_length</code>)</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="llms-rag-agents.html"><small>← Chapter 1</small>LLMs, RAG, agents and the LangChain ecosystem</a>
+<a class="next" href="rag-pipeline.html"><small>Chapter 3 →</small>The RAG pipeline: load, split, embed, retrieve</a>
+</nav>
+</main>
+</body>
+</html>

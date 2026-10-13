@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 · Chat models: invoke, stream, batch</title>
+<meta name="description" content="Call a local model through LangChain with messages, streaming and batches, and read its token usage. Book chapter 3.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 01/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 01 of 16 · Hands-on lab</div>
+  <h1>Chat models: invoke, stream, batch</h1>
+  <p class="lead">Call a local model through LangChain with messages, streaming and batches, and read its token usage. Book chapter 3.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 3 · Chat Models</strong> of the book (Part II · Integrations and
+Utilities for LLMs in LangChain). This lab is our own hands-on exercise; it does not reproduce the book's examples.</div>
+
+<p class="lead">This first lab sets up everything the other fifteen labs need — Ollama, uv, the two local models and the
+project — and then makes your first calls to a chat model through LangChain: one question, a conversation with a system
+message, a streamed answer, a batch of questions, and the same model created with <code>init_chat_model</code>.</p>
+
+<h2>Goal</h2>
+<ul>
+<li>Install the tools and run a lab on your own computer, with no API key and no cloud account.</li>
+<li>Understand the one file every lab uses to get its model: <code>harbor/config.py</code>, and why it sets
+<code>num_ctx</code>, <code>num_predict</code> and <code>reasoning</code>.</li>
+<li>Call a <a class="term" href="glossary.html#chat-model">chat model</a> four ways (<code>invoke</code>,
+<code>invoke</code> with messages, <code>stream</code>, <code>batch</code>) and read its token usage.</li>
+</ul>
+
+<h2>The idea in brief</h2>
+<p>A chat model is an object with a few fixed methods. You hand it text or a list of
+<a class="term" href="glossary.html#message">messages</a>; it sends them to a model server and gives you back an
+<a class="term" href="glossary.html#ai-message">AI message</a>. In this guide the server is
+<a class="term" href="glossary.html#ollama">Ollama</a>, running the small open model <code>llama3.2</code> on your own
+machine, and LangChain talks to it through the <code>langchain-ollama</code> package. Because the methods are the same
+for every provider, the code you write here would work with a hosted model too — only the line that creates the model
+changes. The concept chapter <a href="chat-models-prompts.html">Chat models, structured output and prompts</a>
+explains the interface in more depth (sections "The chat-model interface" and "Messages: who says what").</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Where the code runs: the lab script and ChatOllama run in the Python process of the uv environment; they send HTTP requests to the Ollama server on localhost port 11434, which runs llama3.2 on the GPU and CPU">
+  <rect x="12" y="20" width="385" height="170" rx="8" class="zone"/>
+  <text x="26" y="42" class="label">Python process (uv .venv)</text>
+  <rect x="432" y="20" width="316" height="170" rx="8" class="zone"/>
+  <text x="446" y="42" class="label">Ollama app (runs in the background)</text>
+  <rect x="26" y="70" width="180" height="70" rx="8" class="box"/>
+  <text x="116" y="98" text-anchor="middle" class="title">Your lab script</text>
+  <text x="116" y="120" text-anchor="middle" class="small mono">labs/01_chat_models.py</text>
+  <path class="arrow" d="M 206,105 H 234"/>
+  <rect x="236" y="70" width="150" height="70" rx="8" class="box2"/>
+  <text x="311" y="98" text-anchor="middle" class="title">ChatOllama</text>
+  <text x="311" y="120" text-anchor="middle" class="small">langchain-ollama</text>
+  <path class="arrow-accent" d="M 386,105 H 444"/>
+  <text x="415" y="96" text-anchor="middle" class="small">HTTP</text>
+  <rect x="446" y="70" width="140" height="70" rx="8" class="box-info"/>
+  <text x="516" y="98" text-anchor="middle" class="title">Ollama server</text>
+  <text x="516" y="120" text-anchor="middle" class="small mono">localhost:11434</text>
+  <path class="arrow" d="M 586,105 H 604"/>
+  <rect x="606" y="70" width="128" height="70" rx="8" class="box-solid"/>
+  <text x="670" y="98" text-anchor="middle" class="title on-solid">llama3.2</text>
+  <text x="670" y="120" text-anchor="middle" class="small on-solid">3B · GPU + CPU</text>
+</svg>
+<figcaption>Everything runs on your computer. <strong>LangChain does not run the model; it sends your messages to the
+Ollama server and turns the reply into Python objects.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to Ollama? What it is and why we use it</summary>
+<p>Ollama is a free app that downloads open-weight language models and serves them on your machine at
+<code>http://localhost:11434</code>. "Serves" means it runs a small web server: programs send it a request with
+messages, and it answers with the generated text. You never pay per token and your data never leaves your computer.
+The price: small local models such as <code>llama3.2</code> (3 billion parameters) are far less reliable than large
+hosted ones. This guide shows their real mistakes on purpose — they are the best teaching material.</p>
+</details>
+
+<details class="primer"><summary>New to uv? Why not just pip install</summary>
+<p><a class="term" href="glossary.html#uv">uv</a> is a fast Python project manager. <code>uv sync</code> reads
+<code>pyproject.toml</code> (what the project needs) and <code>uv.lock</code> (the exact versions we tested), creates
+a private <a class="term" href="glossary.html#virtual-environment">virtual environment</a> in a <code>.venv</code>
+folder, and installs exactly those versions into it — even Python 3.12 itself if you don't have it. <code>uv run
+…</code> then runs a command inside that environment, so you never have to "activate" anything. You get the same
+library versions we used to produce the outputs on these pages.</p>
+</details>
+
+<h2>Set up your computer (once for all labs)</h2>
+<ol class="steps">
+<li><strong>Install Ollama</strong> from <a href="https://ollama.com/download">ollama.com/download</a> and start it.
+On Windows and macOS it runs as a tray/menu-bar app; on Linux the installer sets up a service. Check it with
+<code>ollama --version</code> in a terminal.</li>
+<li><strong>Install uv</strong> by following <a href="https://docs.astral.sh/uv/">docs.astral.sh/uv</a> (one
+command). Close and reopen the terminal, then check with <code>uv --version</code>.</li>
+<li><strong>Download the models</strong> (a few GB in total; do it once):
+<pre data-lang="sh" data-tag="terminal"><code>ollama pull llama3.2
+ollama pull nomic-embed-text
+ollama pull gemma4        # optional: only used for a comparison in lab 14</code></pre>
+<code>ollama</code> is the command-line tool, <code>pull</code> downloads a model by name. <code>llama3.2</code> is the
+chat model every lab uses; <code>nomic-embed-text</code> turns text into vectors (labs 06–07); <code>gemma4</code> is a
+larger model we compare in <a href="14-create-agent.html">lab 14</a>. <code>ollama list</code> shows what you have.</li>
+<li><strong>Get the project.</strong> It lives in the folder
+<a href="https://github.com/AhseneRemmouche/video-guides/tree/main/mastering-langchain-langgraph/harbor-library-ai">mastering-langchain-langgraph/harbor-library-ai</a>
+of the <code>video-guides</code> repository. Clone the repository (or use GitHub's "Code → Download ZIP" and unzip
+it), then go into that folder:
+<pre data-lang="sh" data-tag="terminal"><code>git clone https://github.com/AhseneRemmouche/video-guides.git
+cd video-guides/mastering-langchain-langgraph/harbor-library-ai</code></pre></li>
+<li><strong>Install the Python libraries</strong> into the project's own environment:
+<pre data-lang="sh" data-tag="terminal"><code>uv sync</code></pre>
+This creates <code>.venv/</code> and installs the locked versions (langchain 1.4.5, langchain-ollama 1.1.0,
+langgraph 1.2.15, …). Optional check without a model: <code>uv run pytest</code> runs the offline tests (7 passed for
+us).</li>
+<li><strong>Run this lab</strong> (from the project folder, with Ollama running):
+<pre data-lang="sh" data-tag="terminal"><code>uv run python -m labs.01_chat_models</code></pre></li>
+</ol>
+
+<p>The command has four parts: <code>uv run</code> runs what follows inside <code>.venv</code>; <code>python</code> is
+the interpreter; <code>-m labs.01_chat_models</code> runs the file <code>labs/01_chat_models.py</code> <em>as a
+module</em>. Running it as a module (instead of <code>python labs/01_chat_models.py</code>) makes Python treat the
+project folder as the starting point for imports, which is what lets the lab write
+<code>from harbor.config import …</code>.</p>
+
+<h2>The project folder</h2>
+<pre class="tree">harbor-library-ai/
+├── pyproject.toml          what the project needs (read by uv)
+├── uv.lock                 exact tested versions
+├── .env.example            the optional settings, documented
+├── .gitignore
+├── README.md
+├── harbor/                 shared code used by the labs
+│   ├── __init__.py         empty: marks harbor/ as a package
+│   ├── config.py           which models to use and how   ← this lab
+│   ├── knowledge.py        load + split the policies (labs 04–08)
+│   ├── catalog.py          catalog and member tools (labs 09+)
+│   ├── agent_graph.py      the model ⇄ tools loop (labs 11–13)
+│   └── mcp_server.py       MCP server (lab 10)
+├── labs/
+│   ├── 01_chat_models.py   ← this lab
+│   ├── 02_structured_output.py
+│   ├── …
+│   └── 16_lcel.py
+├── data/                   the invented library
+│   ├── policies/           6 Markdown files (membership, loans, fees, …)
+│   ├── catalog.csv         12 items, B001–B012
+│   └── members.json        3 members, M-1001–M-1003
+├── evals/questions.jsonl   12 retrieval test questions (lab 07)
+├── tests/test_offline.py   tests that need no model
+└── runs/                   created by the labs for their output files</pre>
+
+<h3>pyproject.toml</h3>
+<p>This file tells uv what the project is and which libraries it needs. You do not edit it for the labs.</p>
+<pre data-file="pyproject.toml" data-lang="toml" data-tag="complete file"><code>[project]
+name = "harbor-library-ai"
+version = "0.1.0"
+requires-python = "&gt;=3.12"
+dependencies = [
+    "langchain&gt;=1.4.5",
+    "langchain-classic&gt;=1.0.8",
+    "langchain-community&gt;=0.4.2",
+    "langchain-mcp-adapters&gt;=0.3.2",
+    "langchain-ollama&gt;=1.1.0",
+    "langchain-text-splitters&gt;=1.1.3",
+    "langgraph&gt;=1.2.15",
+    "langgraph-checkpoint-sqlite&gt;=3.1.2",
+    "mcp&gt;=1.30.0",
+    "rank-bm25&gt;=0.2.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest&gt;=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–3</td><td><code>[project]</code>, <code>name</code>, <code>version</code></td><td>The standard
+section every Python project file starts with: the project's name and version. Nothing is published; uv just needs
+them.</td></tr>
+<tr><td>4</td><td><code>requires-python = "&gt;=3.12"</code></td><td>The labs need Python 3.12 or newer. If you
+don't have it, <code>uv sync</code> downloads a matching Python for this project only.</td></tr>
+<tr><td>5–16</td><td><code>dependencies = [ … ]</code></td><td>The libraries the labs import. <code>&gt;=</code> means
+"this version or newer"; the exact versions we ran are pinned in <code>uv.lock</code>.</td></tr>
+<tr><td>6</td><td><code>"langchain&gt;=1.4.5"</code></td><td>The main package: <code>init_chat_model</code> (this
+lab), <code>create_agent</code> and middleware (labs 14–15).</td></tr>
+<tr><td>7</td><td><code>"langchain-classic&gt;=1.0.8"</code></td><td>Older helpers that moved out of the main package;
+lab 07 imports the ensemble and multi-query retrievers from it.</td></tr>
+<tr><td>8</td><td><code>"langchain-community&gt;=0.4.2"</code></td><td>Community integrations: document loaders and
+the BM25 retriever (labs 04 and 07). It prints a <a class="term" href="glossary.html#deprecation">deprecation</a>
+warning because it is being sunset.</td></tr>
+<tr><td>9</td><td><code>"langchain-mcp-adapters&gt;=0.3.2"</code></td><td>Turns MCP server tools into LangChain tools
+(lab 10).</td></tr>
+<tr><td>10</td><td><code>"langchain-ollama&gt;=1.1.0"</code></td><td>The provider package for Ollama:
+<code>ChatOllama</code> and <code>OllamaEmbeddings</code>. Without it LangChain cannot talk to Ollama.</td></tr>
+<tr><td>11</td><td><code>"langchain-text-splitters&gt;=1.1.3"</code></td><td>Cuts long documents into chunks (lab
+05).</td></tr>
+<tr><td>12–13</td><td><code>"langgraph…"</code>, <code>"langgraph-checkpoint-sqlite…"</code></td><td>LangGraph for
+graphs and agents (labs 08+) and a checkpointer that saves conversations in a SQLite file (lab 11).</td></tr>
+<tr><td>14</td><td><code>"mcp&gt;=1.30.0"</code></td><td>The official Model Context Protocol SDK, used to write the MCP
+server in lab 10.</td></tr>
+<tr><td>15</td><td><code>"rank-bm25&gt;=0.2.2"</code></td><td>The keyword-search algorithm behind the BM25 retriever
+(lab 07).</td></tr>
+<tr><td>18–21</td><td><code>[dependency-groups]</code> <code>dev = ["pytest…"]</code></td><td>Tools only developers
+need. uv installs the <code>dev</code> group by default, so <code>uv run pytest</code> works.</td></tr>
+<tr><td>23–24</td><td><code>[tool.pytest.ini_options]</code> <code>pythonpath = ["."]</code></td><td>Settings for
+pytest: add the project folder to the import path so the tests can <code>import harbor</code>.</td></tr>
+<tr><td>25</td><td><code>filterwarnings = ["ignore::DeprecationWarning"]</code></td><td>Hides deprecation warnings
+during tests (such as the langchain-community one) so the test report stays readable. The labs still show
+them.</td></tr>
+</table></div>
+
+<h3>.env.example</h3>
+<pre data-file=".env.example" data-lang="env" data-tag="complete file"><code># Optional settings (environment variables). The defaults work with a local Ollama server.
+HARBOR_MODEL=llama3.2
+HARBOR_EMBED_MODEL=nomic-embed-text
+HARBOR_NUM_CTX=8192</code></pre>
+<p>These are the four optional settings, with their default values. Important detail: <strong>the project does not
+read a <code>.env</code> file automatically</strong> (there is no <code>python-dotenv</code> in it).
+<code>harbor/config.py</code> reads real environment variables with <code>os.environ</code>, and falls back to the
+defaults shown here. So you can run every lab without setting anything. To change one for a single run, set the
+variable in your terminal:</p>
+<pre data-lang="sh" data-tag="illustrative · Git Bash, macOS, Linux"><code>HARBOR_MODEL=gemma4 uv run python -m labs.01_chat_models</code></pre>
+<pre data-lang="ps" data-tag="illustrative · PowerShell"><code>$env:HARBOR_MODEL = "gemma4"
+uv run python -m labs.01_chat_models
+Remove-Item Env:HARBOR_MODEL</code></pre>
+
+<h3>harbor/__init__.py</h3>
+<p>This file is <strong>empty</strong> (0 bytes), and that is on purpose. A folder with an <code>__init__.py</code> is
+a regular Python package, so <code>from harbor.config import get_model</code> works from every lab. Don't delete it.</p>
+
+<h3>harbor/config.py: one place that picks the model</h3>
+<p>Every lab gets its model from this file, so a setting changed here changes all sixteen labs.</p>
+<pre data-file="harbor/config.py" data-lang="py" data-tag="complete file"><code>"""One place that decides which models the labs use."""
+import os
+from pathlib import Path
+
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "data"
+RUNS = ROOT / "runs"
+
+MODEL = os.environ.get("HARBOR_MODEL", "llama3.2")
+EMBED_MODEL = os.environ.get("HARBOR_EMBED_MODEL", "nomic-embed-text")
+# Ollama's default context window can be far larger than a small GPU holds; 8192 tokens is plenty for these labs.
+NUM_CTX = int(os.environ.get("HARBOR_NUM_CTX", "8192"))
+
+
+def get_model(temperature=0, num_predict=512, **kwargs):
+    """The chat model every lab uses. Change HARBOR_MODEL to try another Ollama model.
+
+    num_predict caps the answer length, so a model that never stops can't block the server.
+    reasoning=False turns off the hidden "thinking" of models such as gemma4 (much faster here).
+    """
+    return ChatOllama(model=MODEL, temperature=temperature, num_ctx=NUM_CTX, num_predict=num_predict,
+                      reasoning=False, **kwargs)
+
+
+def get_embeddings():
+    return OllamaEmbeddings(model=EMBED_MODEL)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""One place that decides …"""</code></td><td>The module docstring: a one-line description
+that editors and <code>help()</code> show.</td></tr>
+<tr><td>2</td><td><code>import os</code></td><td>Gives access to environment variables through
+<code>os.environ</code>.</td></tr>
+<tr><td>3</td><td><code>from pathlib import Path</code></td><td><code>Path</code> handles file paths the same way on
+Windows, macOS and Linux.</td></tr>
+<tr><td>5</td><td><code>from langchain_ollama import ChatOllama, OllamaEmbeddings</code></td><td>The two classes
+from the provider package: one for chatting, one for embeddings (labs 06–07).</td></tr>
+<tr><td>7</td><td><code>ROOT = Path(__file__).resolve().parent.parent</code></td><td><code>__file__</code> is this
+file's path; <code>resolve()</code> makes it absolute; the first <code>.parent</code> is <code>harbor/</code>, the
+second is the project folder. Paths built from it work wherever you run the command from.</td></tr>
+<tr><td>8–9</td><td><code>DATA = ROOT / "data"</code>, <code>RUNS = ROOT / "runs"</code></td><td>Where the library
+data lives and where labs write their files. <code>/</code> joins path parts.</td></tr>
+<tr><td>11</td><td><code>MODEL = os.environ.get("HARBOR_MODEL", "llama3.2")</code></td><td>The chat model's name:
+the value of <code>HARBOR_MODEL</code> if set, else <code>"llama3.2"</code>. This is how lab 14 was re-run with
+gemma4 without touching code.</td></tr>
+<tr><td>12</td><td><code>EMBED_MODEL = …"nomic-embed-text"</code></td><td>Same idea for the embedding model.</td></tr>
+<tr><td>13–14</td><td><code>NUM_CTX = int(os.environ.get("HARBOR_NUM_CTX", "8192"))</code></td><td>The size of the
+<a class="term" href="glossary.html#context-window">context window</a> in
+<a class="term" href="glossary.html#token">tokens</a>. Environment variables are always text, so
+<code>int(…)</code> converts it. Why 8192: see "The three settings" below.</td></tr>
+<tr><td>17</td><td><code>def get_model(temperature=0, num_predict=512, **kwargs):</code></td><td>A function that
+builds the chat model. <code>temperature=0</code> asks for the most likely words (answers vary less between runs).
+<code>**kwargs</code> collects any extra keyword arguments so a lab can pass more settings through.</td></tr>
+<tr><td>18–22</td><td>docstring</td><td>Explains the two less obvious settings in plain words.</td></tr>
+<tr><td>23–24</td><td><code>return ChatOllama(model=MODEL, temperature=temperature, num_ctx=NUM_CTX,
+num_predict=num_predict, reasoning=False, **kwargs)</code></td><td>Creates the LangChain chat model. Creating it does
+not contact Ollama yet; the first <code>invoke</code> does. Each argument is described below.</td></tr>
+<tr><td>27–28</td><td><code>def get_embeddings(): return OllamaEmbeddings(model=EMBED_MODEL)</code></td><td>The
+embeddings object used from lab 06 on.</td></tr>
+</table></div>
+
+<h3>The three settings, and why they are there</h3>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>Value</th><th>Why</th></tr>
+<tr><td><code>num_ctx</code></td><td>8192</td><td>How many tokens the model can see at once (prompt + answer). Ollama's
+own default context was so large on our 4 GB graphics card that most of the model was pushed onto the much slower
+CPU. With 8192, <code>ollama ps</code> showed 3.4 GB in use, split 32 % CPU / 68 % GPU, and the 76-token call in part 1
+of this lab took about 4.5 seconds once the model was loaded. 8192 tokens is plenty for every lab.</td></tr>
+<tr><td><code>num_predict</code></td><td>512</td><td>The maximum number of tokens in one answer. We added it after a
+generation in <a href="02-structured-output.html">lab 02</a> never stopped and blocked the Ollama server until we
+killed its stuck process. With a cap, a runaway answer simply ends.</td></tr>
+<tr><td><code>reasoning</code></td><td><code>False</code></td><td>Turns off the hidden "thinking" step of models that
+have one (such as gemma4), which made them much slower here. llama3.2 has no such step, so it changes nothing for
+it.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="A bar representing the 8192-token context window: most of it is room for the prompt and history, and a small slice at the end is the answer, capped at 512 tokens by num_predict">
+  <text x="20" y="28" class="title">num_ctx = 8192 tokens: everything the model sees at once</text>
+  <rect x="20" y="50" width="660" height="50" rx="8" class="box2"/>
+  <text x="350" y="80" text-anchor="middle" class="label">prompt: system message + history + question (input tokens)</text>
+  <rect x="682" y="50" width="58" height="50" rx="8" class="box-warn"/>
+  <text x="711" y="80" text-anchor="middle" class="small">answer</text>
+  <path class="line" d="M 711,102 V 130"/>
+  <text x="740" y="146" text-anchor="end" class="small">num_predict = 512: the answer stops here at the latest</text>
+  <text x="20" y="146" class="small">Lab 01, part 1 (real): 36 input + 40 output = 76 tokens</text>
+  <text x="20" y="180" class="small">reasoning=False: no hidden "thinking" tokens are spent before the answer</text>
+</svg>
+<figcaption>The answer slice is drawn to scale: 512 is one sixteenth of 8192. <strong>num_ctx limits what the model can
+read, num_predict limits what it can write.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to tokens? Why everything is counted in them</summary>
+<p>Models do not read letters or words; they read <em>tokens</em>, pieces of text that are often a word or part of a
+word ("library" may be one token, "bibliothèque" several). Context sizes, output caps, speed and (for hosted models)
+prices are all measured in tokens. A rough rule for English: 100 tokens ≈ 75 words.</p>
+</details>
+
+<h2>The lab: four ways to call a chat model</h2>
+<p>Open <code>labs/01_chat_models.py</code>. It has five numbered parts.</p>
+<pre data-file="labs/01_chat_models.py" data-lang="py" data-tag="complete file"><code>"""Lab 01: talk to a chat model through LangChain: invoke, messages, stream, batch."""
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from harbor.config import MODEL, NUM_CTX, get_model
+
+model = get_model()
+
+# 1. The simplest call: a string in, an AIMessage out.
+reply = model.invoke("What is a public library? Answer in one sentence.")
+print("1) invoke:", reply.content)
+print("   usage:", reply.usage_metadata)
+
+# 2. A list of messages: the system message sets the role, the human message asks.
+messages = [
+    SystemMessage("You are the assistant of Harbor City Library. Be brief and friendly."),
+    HumanMessage("Hi! Can you help me find a book about the sea?"),
+]
+print("\n2) with a system message:", model.invoke(messages).content)
+
+# 3. Streaming: print each piece as soon as it arrives.
+print("\n3) stream: ", end="")
+for chunk in model.stream("Name three things people can do in a library, as a comma-separated list."):
+    print(chunk.content, end="|", flush=True)
+print()
+
+# 4. Batch: several independent prompts in one call (run in parallel threads).
+answers = model.batch(["Translate 'library' into French.", "Translate 'library' into Spanish."])
+print("\n4) batch:", [a.content for a in answers])
+
+# 5. The same model through the provider-agnostic factory: only the string changes per provider.
+same = init_chat_model(f"ollama:{MODEL}", temperature=0, num_ctx=NUM_CTX)
+print("\n5) init_chat_model:", type(same).__name__, "-&gt;", same.invoke("Say 'ready' and nothing else.").content)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 01: …"""</code></td><td>Docstring: what the lab is about.</td></tr>
+<tr><td>2</td><td><code>from langchain.chat_models import init_chat_model</code></td><td>A factory function that
+creates a chat model for any provider from a string such as <code>"ollama:llama3.2"</code>. Used in part 5.</td></tr>
+<tr><td>3</td><td><code>from langchain_core.messages import HumanMessage, SystemMessage</code></td><td>Message
+classes. <code>langchain_core</code> holds the shared building blocks every provider package uses.</td></tr>
+<tr><td>5</td><td><code>from harbor.config import MODEL, NUM_CTX, get_model</code></td><td>Our settings and the
+model factory from the file above.</td></tr>
+<tr><td>7</td><td><code>model = get_model()</code></td><td>A <code>ChatOllama</code> with temperature 0, an 8192-token
+context and a 512-token answer cap.</td></tr>
+<tr><td>10</td><td><code>reply = model.invoke("What is a public library? …")</code></td><td><code>invoke</code> sends
+one input and waits for the whole answer. A plain string is turned into a single human message. The result is an
+<code>AIMessage</code>.</td></tr>
+<tr><td>11</td><td><code>print("1) invoke:", reply.content)</code></td><td><code>.content</code> is the answer's
+text.</td></tr>
+<tr><td>12</td><td><code>print("   usage:", reply.usage_metadata)</code></td><td><code>usage_metadata</code> is a
+dictionary with <code>input_tokens</code>, <code>output_tokens</code> and <code>total_tokens</code>, the same keys for
+every provider. Useful for cost and speed checks.</td></tr>
+<tr><td>15–18</td><td><code>messages = [SystemMessage(…), HumanMessage(…)]</code></td><td>A conversation as a list.
+The <a class="term" href="glossary.html#system-message">system message</a> sets the assistant's role and tone; the
+human message is the user's turn. Order matters: system first.</td></tr>
+<tr><td>19</td><td><code>model.invoke(messages).content</code></td><td>The same <code>invoke</code>, now with a list
+of messages instead of a string.</td></tr>
+<tr><td>22</td><td><code>print("\n3) stream: ", end="")</code></td><td><code>end=""</code> stops
+<code>print</code> from starting a new line, so the streamed pieces follow on the same line.</td></tr>
+<tr><td>23</td><td><code>for chunk in model.stream("Name three things …"):</code></td><td><code>stream</code> returns
+an iterator: the loop body runs once per piece (an <code>AIMessageChunk</code>) as soon as Ollama sends it.</td></tr>
+<tr><td>24</td><td><code>print(chunk.content, end="|", flush=True)</code></td><td>Prints each piece followed by a
+<code>|</code> so you can see where one chunk ends. <code>flush=True</code> pushes it to the screen immediately instead
+of waiting for a full line.</td></tr>
+<tr><td>25</td><td><code>print()</code></td><td>Ends the line after the stream.</td></tr>
+<tr><td>28</td><td><code>answers = model.batch([…, …])</code></td><td><code>batch</code> takes a list of independent
+inputs and returns a list of <code>AIMessage</code>s in the same order. LangChain runs them in parallel threads.</td></tr>
+<tr><td>29</td><td><code>[a.content for a in answers]</code></td><td>A list comprehension: keep only the text of each
+answer.</td></tr>
+<tr><td>32</td><td><code>same = init_chat_model(f"ollama:{MODEL}", temperature=0, num_ctx=NUM_CTX)</code></td><td>
+The provider-agnostic way to create a model: the part before the colon picks the provider package, the rest is the
+model name. With another provider installed you would only change this string. (This copy sets no
+<code>num_predict</code>; the short prompt below doesn't need it.)</td></tr>
+<tr><td>33</td><td><code>type(same).__name__, "-&gt;", same.invoke(…).content</code></td><td>Prints the class
+<code>init_chat_model</code> chose — <code>ChatOllama</code>, the same class as <code>get_model()</code> — and its
+answer.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Part 1: a string goes into model.invoke and an AIMessage comes out with content text and usage_metadata of 36 input, 40 output and 76 total tokens">
+  <rect x="20" y="70" width="190" height="80" rx="8" class="box2"/>
+  <text x="115" y="98" text-anchor="middle" class="label">a string</text>
+  <text x="115" y="118" text-anchor="middle" class="small">"What is a public library?</text>
+  <text x="115" y="134" text-anchor="middle" class="small">Answer in one sentence."</text>
+  <path class="arrow" d="M 210,110 H 248"/>
+  <rect x="250" y="80" width="150" height="60" rx="8" class="box-solid"/>
+  <text x="325" y="115" text-anchor="middle" class="mono on-solid">model.invoke()</text>
+  <path class="arrow" d="M 400,110 H 438"/>
+  <rect x="440" y="20" width="300" height="190" rx="8" class="box-ok"/>
+  <text x="590" y="44" text-anchor="middle" class="title">AIMessage</text>
+  <text x="456" y="74" class="mono">.content</text>
+  <text x="456" y="94" class="small">"A public library is a free, publicly</text>
+  <text x="456" y="110" class="small">funded institution that provides …"</text>
+  <text x="456" y="144" class="mono">.usage_metadata</text>
+  <text x="456" y="164" class="small">input_tokens: 36</text>
+  <text x="456" y="180" class="small">output_tokens: 40</text>
+  <text x="456" y="196" class="small">total_tokens: 76</text>
+</svg>
+<figcaption>Values from our real run. <strong>The answer is an object, not a string: read the text from
+<code>.content</code>.</strong> The input count (36) is larger than the 10 words you typed because the model's chat
+format wraps every message in extra tokens.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Part 2: a list with a SystemMessage and a HumanMessage goes to the model, which answers with an AIMessage in the friendly librarian role">
+  <rect x="20" y="30" width="330" height="60" rx="8" class="box-info"/>
+  <text x="36" y="54" class="label">SystemMessage · sets the role</text>
+  <text x="36" y="74" class="small">"You are the assistant of Harbor City Library. …"</text>
+  <rect x="20" y="104" width="330" height="60" rx="8" class="box2"/>
+  <text x="36" y="128" class="label">HumanMessage · the user asks</text>
+  <text x="36" y="148" class="small">"Hi! Can you help me find a book about the sea?"</text>
+  <path class="arrow" d="M 352,97 H 408"/>
+  <rect x="410" y="67" width="330" height="60" rx="8" class="box-ok"/>
+  <text x="426" y="91" class="label">AIMessage · the model answers</text>
+  <text x="426" y="111" class="small">"I'd be happy to help you find a book about …"</text>
+  <text x="380" y="190" text-anchor="middle" class="small">The whole list is sent on every call: the model remembers nothing between calls.</text>
+</svg>
+<figcaption>Three roles, three message classes. <strong>The system message steers every answer; put it first.</strong>
+To continue a conversation you append the AI's reply and the next human message to the list yourself (lab 03 shows a
+template for that).</figcaption>
+</figure>
+
+<details class="primer"><summary>New to message roles? system, human, AI (and tool)</summary>
+<p>Chat models are trained on conversations where every turn has a role. <strong>System</strong>: instructions from
+the developer ("you are…, answer briefly"). <strong>Human</strong>: what the user typed. <strong>AI</strong>: what
+the model said. A fourth role, <strong>tool</strong>, carries the result of a function the model asked to call
+(<a href="09-tools.html">lab 09</a>). LangChain represents each as a class: <code>SystemMessage</code>,
+<code>HumanMessage</code>, <code>AIMessage</code>, <code>ToolMessage</code>.</p>
+</details>
+
+<h2>Run it</h2>
+<ol class="steps">
+<li>Make sure Ollama is running (the tray icon, or <code>ollama list</code> answers).</li>
+<li>From the <code>harbor-library-ai</code> folder run <code>uv run python -m labs.01_chat_models</code>.</li>
+<li>Wait. The first call loads llama3.2 into memory, which takes a little while; the next calls are faster.</li>
+</ol>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) invoke: A public library is a free, publicly funded institution that provides access to a vast collection of books, media, and other resources, as well as programs and services for community members of all ages.
+   usage: {'input_tokens': 36, 'output_tokens': 40, 'total_tokens': 76}
+
+2) with a system message: I'd be happy to help you find a book about the sea. What kind of book are you looking for? Are you interested in a specific type of sea creature, a historical account of ocean exploration, or perhaps a children's story about the ocean?
+
+3) stream: Read|,| study|,| and| research|.|||
+
+4) batch: ['The translation of "library" into French is "bibliothèque".', 'The translation of "library" into Spanish is "biblioteca".']
+
+5) init_chat_model: ChatOllama -&gt; ready</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> Five numbered results. Your sentences will be worded
+differently — models are not deterministic, even at temperature 0 — but the shapes match: (1) one sentence plus a
+<code>usage</code> dictionary with three token counts; (2) a friendly librarian answer that follows the system
+message; (3) the streamed text cut by <code>|</code> marks, ending in a few empty pieces (<code>|||</code>): the last
+chunks carry no text, only end-of-answer information; (4) a Python list with two translations; (5)
+<code>ChatOllama -&gt; ready</code>. Run <code>ollama ps</code> in a second terminal while it runs to see the loaded
+model and its CPU/GPU split.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Part 3: the streamed answer arrives as chunks Read, comma, space study, comma, space and, space research, full stop, then empty chunks">
+  <text x="20" y="28" class="title">stream(): the real pieces from our run, in arrival order</text>
+  <rect x="20" y="50" width="60" height="34" rx="6" class="box-info"/>
+  <text x="50" y="72" text-anchor="middle" class="mono">Read</text>
+  <rect x="88" y="50" width="34" height="34" rx="6" class="box-info"/>
+  <text x="105" y="72" text-anchor="middle" class="mono">,</text>
+  <rect x="130" y="50" width="76" height="34" rx="6" class="box-info"/>
+  <text x="168" y="72" text-anchor="middle" class="mono">␣study</text>
+  <rect x="214" y="50" width="34" height="34" rx="6" class="box-info"/>
+  <text x="231" y="72" text-anchor="middle" class="mono">,</text>
+  <rect x="256" y="50" width="62" height="34" rx="6" class="box-info"/>
+  <text x="287" y="72" text-anchor="middle" class="mono">␣and</text>
+  <rect x="326" y="50" width="104" height="34" rx="6" class="box-info"/>
+  <text x="378" y="72" text-anchor="middle" class="mono">␣research</text>
+  <rect x="438" y="50" width="34" height="34" rx="6" class="box-info"/>
+  <text x="455" y="72" text-anchor="middle" class="mono">.</text>
+  <rect x="480" y="50" width="34" height="34" rx="6" class="box"/>
+  <rect x="522" y="50" width="34" height="34" rx="6" class="box"/>
+  <text x="572" y="72" class="small">empty chunks: end of answer</text>
+  <path class="arrow-accent" d="M 20,110 H 738"/>
+  <text x="20" y="132" class="small">time →  each piece is printed the moment it arrives, followed by "|"</text>
+  <text x="20" y="160" class="small">"␣" marks a leading space: tokens often start with the space before a word.</text>
+</svg>
+<figcaption>Our run printed <code>Read|,| study|,| and| research|.|||</code>. <strong>Streaming does not make the answer
+finish sooner; it lets a reader see the first words sooner.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Part 4: batch sends two prompts and returns a list of two answers in the same order. Part 5: get_model and init_chat_model with the string ollama:llama3.2 both produce a ChatOllama object">
+  <text x="20" y="26" class="title">4) batch</text>
+  <rect x="20" y="40" width="250" height="28" rx="6" class="box2"/>
+  <text x="145" y="59" text-anchor="middle" class="small">"Translate 'library' into French."</text>
+  <rect x="20" y="76" width="250" height="28" rx="6" class="box2"/>
+  <text x="145" y="95" text-anchor="middle" class="small">"Translate 'library' into Spanish."</text>
+  <path class="arrow" d="M 272,54 H 300 V 66 H 318"/>
+  <path class="arrow" d="M 272,90 H 300 V 78 H 318"/>
+  <rect x="320" y="52" width="110" height="40" rx="8" class="box-solid"/>
+  <text x="375" y="77" text-anchor="middle" class="mono on-solid">batch()</text>
+  <path class="arrow" d="M 430,72 H 458"/>
+  <rect x="460" y="40" width="280" height="64" rx="8" class="box-ok"/>
+  <text x="600" y="64" text-anchor="middle" class="small">[ "… is "bibliothèque".",</text>
+  <text x="600" y="84" text-anchor="middle" class="small">"… is "biblioteca"." ]  same order</text>
+  <text x="20" y="140" class="title">5) two ways to create the same model</text>
+  <rect x="20" y="156" width="250" height="30" rx="6" class="box2"/>
+  <text x="145" y="176" text-anchor="middle" class="mono">get_model()</text>
+  <rect x="20" y="192" width="250" height="30" rx="6" class="box2"/>
+  <text x="145" y="212" text-anchor="middle" class="mono">init_chat_model("ollama:llama3.2")</text>
+  <path class="arrow" d="M 272,171 H 300 V 185 H 318"/>
+  <path class="arrow" d="M 272,207 H 300 V 193 H 318"/>
+  <rect x="320" y="169" width="130" height="40" rx="8" class="box-ok"/>
+  <text x="385" y="194" text-anchor="middle" class="mono">ChatOllama</text>
+  <text x="470" y="186" class="small">the string "provider:model" picks the</text>
+  <text x="470" y="202" class="small">provider package; the code stays the same</text>
+</svg>
+<figcaption>Real answers from our run. <strong>batch keeps the order of its inputs; init_chat_model is how you swap
+providers by changing one string.</strong> On a small machine Ollama may still answer the batch one request after
+another, so don't expect it to be twice as fast.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes.</strong>
+<ul>
+<li><strong>Ollama is not running</strong> → the first <code>invoke</code> fails with a connection error. Start the
+Ollama app (or <code>ollama serve</code>) and try again.</li>
+<li><strong>The model was not pulled</strong> → an error saying model "llama3.2" is not found. Run
+<code>ollama pull llama3.2</code>; check the exact name with <code>ollama list</code>.</li>
+<li><strong>Wrong folder or wrong command</strong> → <code>ModuleNotFoundError: No module named 'harbor'</code> or
+"No module named labs.01_chat_models". Run from the <code>harbor-library-ai</code> folder, use <code>-m</code>, dots
+instead of slashes, and no <code>.py</code> at the end.</li>
+<li><strong>Forgot <code>uv run</code></strong> → <code>python -m labs.01_chat_models</code> uses your system Python,
+which doesn't have LangChain: <code>ModuleNotFoundError: No module named 'langchain'</code>.</li>
+<li><strong>Printing the message instead of its text</strong> → <code>print(reply)</code> shows
+<code>content='…' additional_kwargs=… response_metadata=…</code>. Use <code>reply.content</code>.</li>
+<li><strong>Windows: a crash at import with "OPENSSL_Uplink … no OPENSSL_Applink"</strong>. On our Windows machine an
+<code>SSLKEYLOGFILE</code> environment variable (set by some debugging or security tools) made OpenSSL crash as soon as
+the libraries loaded. Run without it: in Git Bash
+<code>env -u SSLKEYLOGFILE uv run python -m labs.01_chat_models</code>; in PowerShell
+<code>Remove-Item Env:SSLKEYLOGFILE</code> first (it only affects that terminal window).</li>
+<li><strong>Very slow answers</strong> → check <code>ollama ps</code>. If most of the model is on the CPU, close other
+GPU-heavy programs, or lower the context with <code>HARBOR_NUM_CTX=4096</code>.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Change the role.</strong> In line 16, replace the system message with "You are a pirate librarian. Answer
+in pirate speak." Run again: part 2 changes tone, the other parts don't (they have no system message).</li>
+<li><strong>Watch the cap.</strong> In line 7 write <code>model = get_model(num_predict=10)</code> and run. The answers
+stop after about ten tokens, mid-sentence, and part 1's <code>output_tokens</code> is at most 10.</li>
+<li><strong>Raise the temperature.</strong> Use <code>get_model(temperature=1)</code> and run the lab twice. The
+wording now changes much more between runs than at temperature 0.</li>
+<li><strong>Try another model without editing code</strong> (if you pulled gemma4): run with
+<code>HARBOR_MODEL=gemma4</code> set as shown above, and compare answers and speed.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Ollama serves the model locally; LangChain's <code>ChatOllama</code> talks to it; uv keeps the exact library
+versions in <code>.venv</code>.</li>
+<li><code>harbor/config.py:get_model()</code> is the one place that builds the model: 8192-token context, 512-token
+answer cap, no hidden reasoning, temperature 0.</li>
+<li><code>invoke</code> returns an <code>AIMessage</code> (<code>.content</code> + <code>.usage_metadata</code>);
+<code>stream</code> yields chunks; <code>batch</code> returns a list in input order.</li>
+<li>Messages carry roles: system (instructions), human (user), AI (model). The model sees only what you send in each
+call.</li>
+<li><code>init_chat_model("provider:model")</code> makes the same kind of object; swapping providers means changing a
+string.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="index.html"><small>← Back</small>All steps</a>
+<a class="next" href="02-structured-output.html"><small>Next · Step 02 →</small>Structured output</a>
+</nav>
+</main>
+</body>
+</html>

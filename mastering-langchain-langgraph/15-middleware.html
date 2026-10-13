@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15 · Middleware</title>
+<meta name="description" content="Add logging, PII redaction, a call limit and human approval around every model and tool call. Book chapter 16.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 15/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 15 of 16 · Hands-on lab</div>
+  <h1>Middleware</h1>
+  <p class="lead">Add logging, PII redaction, a call limit and human approval around every model and tool call. Book chapter 16.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 16 · Middlewares</strong> of the book. The ideas behind this lab are explained in the concept chapter <a href="langchain-agents-middleware.html">LangChain agents and middleware</a>.</div>
+
+<h2>Goal</h2>
+<p>Add four guard rails to the library <a class="term" href="glossary.html#agent">agent</a> without touching its loop: a log line before
+every model call, removal of email addresses before the model sees them, a limit on the number of model calls, and a human approval
+step before any hold is placed. Each one is a <a class="term" href="glossary.html#middleware">middleware</a>: a piece of code that
+<code>create_agent</code> runs around every model call or tool call.</p>
+
+<h2>The idea in brief</h2>
+<ul>
+<li><strong>Middleware plugs into fixed points of the agent loop</strong>, called hooks: <code>before_model</code>,
+<code>after_model</code>, <code>wrap_model_call</code>, <code>wrap_tool_call</code>, <code>before_agent</code> and
+<code>after_agent</code>. A hook can read the <a class="term" href="glossary.html#state">state</a>, change it, or stop the run.</li>
+<li><strong>Order matters.</strong> <code>before_model</code> hooks run in the order of your <code>middleware=[...]</code> list;
+<code>after_model</code> hooks run in the reverse order. You will see a real consequence of this in the output.</li>
+<li><strong>Ready-made middleware</strong> ships with <code>langchain</code>. This lab uses three: <code>PIIMiddleware</code>,
+<code>ModelCallLimitMiddleware</code> and <code>HumanInTheLoopMiddleware</code>, plus one hook you write yourself with
+<code>@before_model</code>.</li>
+</ul>
+<p>The full explanation is in <a href="langchain-agents-middleware.html">LangChain agents and middleware</a>. This lab builds on
+<a href="14-create-agent.html">lab 14</a> (<code>create_agent</code>) and <a href="13-hitl-time-travel-streaming.html">lab 13</a>
+(interrupts).</p>
+
+<details class="primer"><summary>New to decorators? What <code>@before_model</code> does to a function</summary>
+<p>A decorator is a function that takes your function and returns something new built from it. You apply it by writing
+<code>@name</code> on the line above <code>def</code>. You already used <code>@tool</code>, which turns a function into a tool.
+<code>@before_model</code> turns a function with the parameters <code>(state, runtime)</code> into a middleware object whose
+<code>before_model</code> hook calls your function. The middleware takes its name from the function (here <code>log_calls</code>), and
+your function's return value decides what happens: <code>None</code> means "change nothing", a dictionary means "update the state with
+these values".</p>
+</details>
+
+<details class="primer"><summary>New to PII? What it is and why an agent should hide it</summary>
+<p><a class="term" href="glossary.html#pii">PII</a> (personally identifiable information) is any data that points to a real person: an
+email address, a phone number, a card number, an IP address. Everything you send to a model may be logged, stored in a trace or, with a
+cloud provider, leave your machine. A simple rule protects your users: if the model does not need a piece of personal data to do its
+job, remove it before the model sees it. Here the model only needs the item id to check availability, not the visitor's email.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+<li>Open a terminal in the project folder <code>harbor-library-ai</code>.</li>
+<li>Check that Ollama is running with <code>llama3.2</code> available (<code>ollama list</code>).</li>
+<li>Create the file <code>labs/15_middleware.py</code> with the content below (complete file).</li>
+<li>Run it with <code>uv run python -m labs.15_middleware</code> and read the output with the explanations below.</li>
+</ol>
+
+<h2>The code</h2>
+<pre data-file="labs/15_middleware.py" data-lang="py" data-tag="complete file"><code>"""Lab 15: middleware: hooks that run around every model and tool call of a create_agent agent."""
+from langchain.agents import create_agent
+from langchain.agents.middleware import (HumanInTheLoopMiddleware, ModelCallLimitMiddleware, PIIMiddleware,
+                                         before_model)
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
+from harbor.catalog import ALL_TOOLS
+from harbor.config import get_model
+
+
+@before_model
+def log_calls(state, runtime):
+    """A custom hook: print what the model is about to see. Returning None changes nothing."""
+    last = state["messages"][-1]
+    print(f"      [before_model] {len(state['messages'])} messages, last from {last.type}: {str(last.content)[:60]!r}")
+    return None
+
+
+agent = create_agent(
+    get_model(),
+    ALL_TOOLS,
+    system_prompt="You are Harbor City Library's assistant. Use the tools. Answer briefly.",
+    middleware=[
+        log_calls,
+        PIIMiddleware("email", strategy="redact"),                    # emails never reach the model
+        ModelCallLimitMiddleware(run_limit=4, exit_behavior="end"),   # stop runaway loops
+        HumanInTheLoopMiddleware(interrupt_on={"place_hold": True}),  # a person approves every hold
+    ],
+    checkpointer=InMemorySaver(),
+)
+
+print("1) PII redaction + logging:")
+r = agent.invoke({"messages": [("user", "My email is sam.okoro@example.com. Is item B006 available?")]},
+                 {"configurable": {"thread_id": "a"}})
+print("   the model saw:", repr(r["messages"][0].content))
+print("   answer:", r["messages"][-1].content)
+
+print("\n2) Human in the loop for place_hold:")
+config = {"configurable": {"thread_id": "b"}}
+r = agent.invoke({"messages": [("user", "I'm member M-1002, please place a hold on B010.")]}, config)
+if "__interrupt__" in r:
+    request = r["__interrupt__"][0].value
+    print("   paused for review:", [(a["name"], a["args"]) for a in request["action_requests"]])
+    r = agent.invoke(Command(resume={"decisions": [{"type": "reject", "message": "Holds on B010 are paused this week."}]}),
+                     config)
+print("   after the decision:", r["messages"][-1].content)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 15: middleware: hooks that run around ..."""</code></td><td>Module docstring: what this file demonstrates.</td></tr>
+<tr><td>2</td><td><code>from langchain.agents import create_agent</code></td><td>The agent builder from lab 14. Middleware only works with agents built this way.</td></tr>
+<tr><td>3–4</td><td><code>from langchain.agents.middleware import (HumanInTheLoopMiddleware, ModelCallLimitMiddleware, PIIMiddleware, before_model)</code></td><td>Three ready-made middleware classes and the <code>before_model</code> decorator for writing your own. The parentheses let one import span two lines.</td></tr>
+<tr><td>5</td><td><code>from langgraph.checkpoint.memory import InMemorySaver</code></td><td>A <a class="term" href="glossary.html#checkpointer">checkpointer</a>. Human-in-the-loop needs one: the paused run must be saved somewhere so it can be resumed.</td></tr>
+<tr><td>6</td><td><code>from langgraph.types import Command</code></td><td>The object used to resume a paused run with your decision, as in lab 13.</td></tr>
+<tr><td>8</td><td><code>from harbor.catalog import ALL_TOOLS</code></td><td>All four library tools, including <code>place_hold</code>, the only one that changes data (in memory only).</td></tr>
+<tr><td>9</td><td><code>from harbor.config import get_model</code></td><td>The shared chat model (<code>llama3.2</code> by default).</td></tr>
+<tr><td>12–13</td><td><code>@before_model<br>def log_calls(state, runtime):</code></td><td>Your own middleware. <code>state</code> is the agent's current state (its messages); <code>runtime</code> gives access to context and store (not used here).</td></tr>
+<tr><td>14</td><td><code>"""A custom hook: print what the model is about to see. ..."""</code></td><td>Docstring explaining the contract: returning <code>None</code> changes nothing.</td></tr>
+<tr><td>15</td><td><code>last = state["messages"][-1]</code></td><td>The newest message: the user's question on the first call, a tool result on later calls.</td></tr>
+<tr><td>16</td><td><code>print(f"      [before_model] {len(state['messages'])} messages, last from {last.type}: {str(last.content)[:60]!r}")</code></td><td>Prints how many messages the model will receive, the type of the last one (<code>human</code>, <code>tool</code>, …) and its first 60 characters. <code>str(...)</code> protects against content that is a list of blocks.</td></tr>
+<tr><td>17</td><td><code>return None</code></td><td>Leave the state unchanged and continue to the next hook.</td></tr>
+<tr><td>20–22</td><td><code>agent = create_agent(<br>    get_model(),<br>    ALL_TOOLS,</code></td><td>Same as lab 14, but with all four tools and without a context schema.</td></tr>
+<tr><td>23</td><td><code>system_prompt="You are Harbor City Library's assistant. ..."</code></td><td>The system message added before every model call.</td></tr>
+<tr><td>24</td><td><code>middleware=[</code></td><td>The ordered list of middleware. The order decides which hook runs first (see the diagram below).</td></tr>
+<tr><td>25</td><td><code>log_calls,</code></td><td>First in the list, so its <code>before_model</code> runs first, <em>before</em> the PII redaction.</td></tr>
+<tr><td>26</td><td><code>PIIMiddleware("email", strategy="redact"),</code></td><td>Finds email addresses with a built-in detector and replaces each with <code>[REDACTED_EMAIL]</code>. By default it checks user input before the model call (<code>apply_to_input=True</code>); it can also check model output and tool results if you turn those options on. Other strategies: <code>"block"</code> (raise an error), <code>"mask"</code> (show only the last characters), <code>"hash"</code> (replace with a hash).</td></tr>
+<tr><td>27</td><td><code>ModelCallLimitMiddleware(run_limit=4, exit_behavior="end"),</code></td><td>Allows at most 4 model calls per run (per <code>invoke</code>). With <code>"end"</code>, a fifth call is replaced by an AI message saying the limit was exceeded and the run ends; with <code>"error"</code> it raises an exception. A <code>thread_limit</code> also exists, counted over the whole thread.</td></tr>
+<tr><td>28</td><td><code>HumanInTheLoopMiddleware(interrupt_on={"place_hold": True}),</code></td><td>After each model call, if the model asked for <code>place_hold</code>, pause the run and wait for a person. <code>True</code> allows every decision type; tools not listed run without asking.</td></tr>
+<tr><td>30</td><td><code>checkpointer=InMemorySaver(),</code></td><td>Saves state per thread so the paused run can be resumed in part 2.</td></tr>
+<tr><td>33–35</td><td><code>r = agent.invoke({"messages": [("user", "My email is sam.okoro@example.com. Is item B006 available?")]}, {"configurable": {"thread_id": "a"}})</code></td><td>Part 1: a question that contains an email address, in thread <code>"a"</code>.</td></tr>
+<tr><td>36</td><td><code>print("   the model saw:", repr(r["messages"][0].content))</code></td><td>Prints the first message <em>as stored in the state after the run</em>. The PII middleware replaced it, so this is what the model received.</td></tr>
+<tr><td>37</td><td><code>print("   answer:", r["messages"][-1].content)</code></td><td>The final answer.</td></tr>
+<tr><td>40</td><td><code>config = {"configurable": {"thread_id": "b"}}</code></td><td>Part 2 uses a new thread; we need the same config again to resume.</td></tr>
+<tr><td>41</td><td><code>r = agent.invoke({"messages": [("user", "I'm member M-1002, please place a hold on B010.")]}, config)</code></td><td>A request that should make the model call <code>place_hold</code>.</td></tr>
+<tr><td>42</td><td><code>if "__interrupt__" in r:</code></td><td>When the run paused, the result contains an <code>__interrupt__</code> key with the pending request(s).</td></tr>
+<tr><td>43</td><td><code>request = r["__interrupt__"][0].value</code></td><td>The payload of the first interrupt. For this middleware it is a dictionary with <code>action_requests</code> (what the model wants to run) and <code>review_configs</code> (which decisions are allowed).</td></tr>
+<tr><td>44</td><td><code>print("   paused for review:", [(a["name"], a["args"]) for a in request["action_requests"]])</code></td><td>Shows the tool name and arguments waiting for review. Each action request also has a <code>description</code> text you could show in a UI.</td></tr>
+<tr><td>45–46</td><td><code>r = agent.invoke(Command(resume={"decisions": [{"type": "reject", "message": "Holds on B010 are paused this week."}]}), config)</code></td><td>Resumes the same thread with one decision per pending action. <code>"reject"</code> with a <code>message</code>: the tool is not run, and the model receives the reason.</td></tr>
+<tr><td>47</td><td><code>print("   after the decision:", r["messages"][-1].content)</code></td><td>The model's final answer after reading the rejection.</td></tr>
+</table></div>
+
+<h2>The hook order, from the real graph</h2>
+<p>Middleware hooks are added to the agent's graph as extra <a class="term" href="glossary.html#node">nodes</a>. We printed
+<code>list(agent.get_graph().nodes)</code> for this exact middleware list (an offline check, no model call) and got:
+<code>__start__</code>, <code>model</code>, <code>tools</code>, <code>log_calls.before_model</code>,
+<code>PIIMiddleware[email].before_model</code>, <code>PIIMiddleware[email].after_model</code>,
+<code>ModelCallLimitMiddleware.before_model</code>, <code>ModelCallLimitMiddleware.after_model</code>,
+<code>HumanInTheLoopMiddleware.after_model</code>, <code>__end__</code>. The graph's edges connect them like this:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 312" role="img" aria-label="Hook order: before_model hooks run in list order down to the model, after_model hooks run in reverse order up to tools or end, and after tools the loop starts again at log_calls">
+  <rect class="box2" x="95" y="10" width="140" height="28" rx="8"/>
+  <text class="mono" x="165" y="29" text-anchor="middle">__start__</text>
+  <rect class="box2" x="525" y="10" width="140" height="28" rx="8"/>
+  <text class="mono" x="595" y="29" text-anchor="middle">tools or __end__</text>
+  <rect class="box" x="30" y="60" width="270" height="44" rx="8"/>
+  <text class="mono" x="165" y="79" text-anchor="middle">log_calls</text>
+  <text class="small" x="165" y="96" text-anchor="middle">before_model</text>
+  <rect class="box" x="30" y="118" width="270" height="44" rx="8"/>
+  <text class="mono" x="165" y="137" text-anchor="middle">PIIMiddleware[email]</text>
+  <text class="small" x="165" y="154" text-anchor="middle">before_model: redact emails</text>
+  <rect class="box" x="30" y="176" width="270" height="44" rx="8"/>
+  <text class="mono" x="165" y="195" text-anchor="middle">ModelCallLimitMiddleware</text>
+  <text class="small" x="165" y="212" text-anchor="middle">before_model: count, maybe stop</text>
+  <rect class="box-solid" x="300" y="240" width="160" height="44" rx="8"/>
+  <text class="on-solid" x="380" y="267" text-anchor="middle">model</text>
+  <rect class="box-info" x="460" y="176" width="270" height="44" rx="8"/>
+  <text class="mono" x="595" y="195" text-anchor="middle">HumanInTheLoopMiddleware</text>
+  <text class="small" x="595" y="212" text-anchor="middle">after_model: pause for place_hold</text>
+  <rect class="box-info" x="460" y="118" width="270" height="44" rx="8"/>
+  <text class="mono" x="595" y="137" text-anchor="middle">ModelCallLimitMiddleware</text>
+  <text class="small" x="595" y="154" text-anchor="middle">after_model</text>
+  <rect class="box-info" x="460" y="60" width="270" height="44" rx="8"/>
+  <text class="mono" x="595" y="79" text-anchor="middle">PIIMiddleware[email]</text>
+  <text class="small" x="595" y="96" text-anchor="middle">after_model</text>
+  <path class="arrow" d="M165,38 V56"/>
+  <path class="arrow" d="M165,104 V114"/>
+  <path class="arrow" d="M165,162 V172"/>
+  <path class="arrow" d="M165,220 V262 H296"/>
+  <path class="arrow" d="M460,262 H595 V224"/>
+  <path class="arrow" d="M595,176 V166"/>
+  <path class="arrow" d="M595,118 V108"/>
+  <path class="arrow" d="M595,60 V42"/>
+  <path class="arrow dashed" d="M525,24 H330 V82 H304"/>
+  <text class="small" x="430" y="46" text-anchor="middle">next round</text>
+  <text class="small" x="30" y="302">before_model hooks: list order, top to bottom</text>
+  <text class="small" x="730" y="302" text-anchor="end">after_model hooks: reverse order, bottom to top</text>
+</svg>
+<figcaption>Left column down, model, right column up. After the tools run, the loop starts again at <code>log_calls</code>. <strong>The last middleware in the list is the first to see the model's reply</strong>, which is why the human-in-the-loop check runs right after the model.</figcaption>
+</figure>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="terminal"><code>uv run python -m labs.15_middleware</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) PII redaction + logging:
+      [before_model] 1 messages, last from human: 'My email is sam.okoro@example.com. Is item B006 available?'
+      [before_model] 3 messages, last from tool: 'The Little Crab Who Could: 4 of 5 copies available at Lighth'
+   the model saw: 'My email is [REDACTED_EMAIL]. Is item B006 available?'
+   answer: The item B006, "The Little Crab Who Could", is available for checkout at the Lighthouse Branch. It has 4 copies remaining. Would you like to place a hold or check out the item?
+
+2) Human in the loop for place_hold:
+      [before_model] 1 messages, last from human: "I'm member M-1002, please place a hold on B010."
+   paused for review: [('place_hold', {'item_id': 'B010', 'member_id': 'M-1002'})]
+      [before_model] 3 messages, last from tool: 'User rejected the tool call for `place_hold` with reason: Ho'
+   after the decision: I apologize for the inconvenience, M-1002. Unfortunately, holds on B010 are paused this week, so I won't be able to place a hold on it for you. Would you like to check the status of the book or wait until the pause is lifted?</code></pre>
+
+<h2>Reading the output</h2>
+<h3>Part 1: logging and PII redaction</h3>
+<p>Look closely at the first <code>[before_model]</code> line: it still shows <code>sam.okoro@example.com</code>. That is not a failure
+of the redaction. <code>log_calls</code> is first in the list, so its <code>before_model</code> ran <em>before</em> the PII
+middleware. One step later, <code>PIIMiddleware</code> replaced the message in the state, and the line
+<code>the model saw: 'My email is [REDACTED_EMAIL]. Is item B006 available?'</code> shows what the model actually received. The second
+log line ("3 messages, last from tool") is the second model call, after <code>check_availability</code> returned "4 of 5 copies
+available at Lighth…". The answer is correct, and the model never knew the email.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 215" role="img" aria-label="PII redaction: the user's message with an email goes through PIIMiddleware and comes out with REDACTED_EMAIL in place of the address">
+  <rect class="box-warn" x="20" y="20" width="720" height="40" rx="8"/>
+  <text class="mono" x="380" y="45" text-anchor="middle">My email is sam.okoro@example.com. Is item B006 available?</text>
+  <path class="arrow" d="M380,60 V86"/>
+  <rect class="box-info" x="200" y="90" width="360" height="40" rx="8"/>
+  <text class="mono" x="380" y="115" text-anchor="middle">PIIMiddleware("email", strategy="redact")</text>
+  <text class="small" x="20" y="115">log_calls ran before this</text>
+  <text class="small" x="740" y="115" text-anchor="end">replaces the state message</text>
+  <path class="arrow-ok" d="M380,130 V156"/>
+  <rect class="box-ok" x="20" y="160" width="720" height="40" rx="8"/>
+  <text class="mono" x="380" y="185" text-anchor="middle">My email is [REDACTED_EMAIL]. Is item B006 available?</text>
+</svg>
+<figcaption>Top: what the visitor typed (and what <code>log_calls</code> printed, because it runs first). Bottom: what the model saw and what is stored in the thread. <strong>To log the redacted text, put your logger after <code>PIIMiddleware</code> in the list.</strong></figcaption>
+</figure>
+
+<h3>Part 2: human approval for <code>place_hold</code></h3>
+<p>The model asked for <code>place_hold</code> with <code>{'item_id': 'B010', 'member_id': 'M-1002'}</code>. Right after that model
+call, <code>HumanInTheLoopMiddleware</code> called <code>interrupt()</code> and the run stopped; <code>invoke</code> returned with an
+<code>__interrupt__</code> entry. Our code then resumed with a <code>reject</code> decision. The tool did not run. Instead the middleware
+added a tool message, visible in the next log line: "User rejected the tool call for `place_hold` with reason: Ho…". The model read it
+and explained the refusal to the visitor ("holds on B010 are paused this week").</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 390" role="img" aria-label="Sequence of the human-in-the-loop run: invoke, model asks for place_hold, the run pauses, your code resumes with a reject decision, the tool never runs, the model answers">
+  <rect class="box" x="30" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="90" y="30" text-anchor="middle">your code</text>
+  <rect class="box" x="230" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="290" y="30" text-anchor="middle">agent graph</text>
+  <rect class="box" x="430" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="490" y="30" text-anchor="middle">model</text>
+  <rect class="box" x="610" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="670" y="30" text-anchor="middle">place_hold</text>
+  <path class="line dashed" d="M90,40 V375"/>
+  <path class="line dashed" d="M290,40 V375"/>
+  <path class="line dashed" d="M490,40 V375"/>
+  <path class="line dashed" d="M670,40 V375"/>
+  <path class="arrow" d="M90,70 H286"/>
+  <text class="small" x="190" y="64" text-anchor="middle">1 invoke: hold on B010</text>
+  <path class="arrow" d="M290,104 H486"/>
+  <text class="small" x="390" y="98" text-anchor="middle">2 messages</text>
+  <path class="arrow" d="M490,138 H294"/>
+  <text class="small" x="390" y="132" text-anchor="middle">3 place_hold(B010, M-1002)</text>
+  <path class="arrow-accent" d="M290,172 H94"/>
+  <text class="small" x="190" y="166" text-anchor="middle">4 __interrupt__ (paused)</text>
+  <path class="arrow-accent" d="M90,206 H286"/>
+  <text class="small" x="190" y="200" text-anchor="middle">5 Command(resume=reject)</text>
+  <rect class="box-warn" x="210" y="226" width="160" height="28" rx="8"/>
+  <text class="small" x="290" y="244" text-anchor="middle">6 ToolMessage: rejected</text>
+  <text class="small bad" x="670" y="244" text-anchor="middle">never runs</text>
+  <path class="arrow" d="M290,290 H486"/>
+  <text class="small" x="390" y="284" text-anchor="middle">7 messages + rejection</text>
+  <path class="arrow" d="M490,324 H294"/>
+  <text class="small" x="390" y="318" text-anchor="middle">8 apology, no hold</text>
+  <path class="arrow-ok" d="M290,358 H94"/>
+  <text class="small" x="190" y="352" text-anchor="middle">9 final answer</text>
+</svg>
+<figcaption>Time flows down. Between steps 4 and 5 the run is saved by the checkpointer and nothing happens until your code calls <code>invoke</code> again with a <code>Command</code>. <strong>A rejected tool never runs; the model only reads the reason.</strong></figcaption>
+</figure>
+
+<h3>The decision types (checked in the installed package)</h3>
+<p>We read the source of <code>langchain.agents.middleware.human_in_the_loop</code> in the installed <code>langchain</code> 1.4.5. The
+resume value must be a dictionary with a <code>"decisions"</code> list containing <strong>exactly one decision per paused tool
+call</strong>, in the same order as <code>action_requests</code>; otherwise the middleware raises a <code>ValueError</code>. With
+<code>interrupt_on={"place_hold": True}</code>, four decision types are allowed:</p>
+<div class="table-wrap"><table>
+<tr><th>Decision</th><th>Shape</th><th>What happens</th></tr>
+<tr><td>approve</td><td><code>{"type": "approve"}</code></td><td>The tool runs with the arguments the model wrote.</td></tr>
+<tr><td>edit</td><td><code>{"type": "edit", "edited_action": {"name": ..., "args": {...}}}</code></td><td>The tool call the reviewer wrote runs instead. The result the model reads starts with a note saying a human replaced the call.</td></tr>
+<tr><td>reject</td><td><code>{"type": "reject", "message": "..."}</code> (message optional)</td><td>The tool does not run. The model gets an error tool message: "User rejected the tool call for `place_hold` with reason: …", or, without a message, a text telling it not to retry unless the user asks.</td></tr>
+<tr><td>respond</td><td><code>{"type": "respond", "message": "..."}</code></td><td>The tool does not run. Your message is returned to the model as if it were the tool's successful result (useful for "ask the user" tools).</td></tr>
+</table></div>
+<p>To allow fewer types, pass a configuration instead of <code>True</code>, for example
+<code>{"place_hold": {"allowed_decisions": ["approve", "reject"]}}</code>. Sending a type that is not allowed raises a
+<code>ValueError</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Decision tree for a paused place_hold call: approve, edit, reject or respond, and what each one does">
+  <rect class="box-info" x="10" y="95" width="180" height="50" rx="8"/>
+  <text x="100" y="117" text-anchor="middle">paused place_hold</text>
+  <text class="small" x="100" y="134" text-anchor="middle">one decision per call</text>
+  <path class="arrow" d="M190,120 L246,34"/>
+  <path class="arrow" d="M190,120 L246,90"/>
+  <path class="arrow" d="M190,120 L246,148"/>
+  <path class="arrow" d="M190,120 L246,204"/>
+  <rect class="box-ok" x="250" y="14" width="110" height="36" rx="8"/>
+  <text class="mono" x="305" y="37" text-anchor="middle">approve</text>
+  <rect class="box" x="250" y="72" width="110" height="36" rx="8"/>
+  <text class="mono" x="305" y="95" text-anchor="middle">edit</text>
+  <rect class="box-bad" x="250" y="130" width="110" height="36" rx="8"/>
+  <text class="mono" x="305" y="153" text-anchor="middle">reject</text>
+  <rect class="box-warn" x="250" y="188" width="110" height="36" rx="8"/>
+  <text class="mono" x="305" y="211" text-anchor="middle">respond</text>
+  <path class="arrow" d="M360,32 H386"/>
+  <path class="arrow" d="M360,90 H386"/>
+  <path class="arrow" d="M360,148 H386"/>
+  <path class="arrow" d="M360,206 H386"/>
+  <rect class="box" x="390" y="14" width="360" height="36" rx="8"/>
+  <text x="570" y="37" text-anchor="middle">tool runs with the model's arguments</text>
+  <rect class="box" x="390" y="72" width="360" height="36" rx="8"/>
+  <text x="570" y="95" text-anchor="middle">tool runs with edited_action instead</text>
+  <rect class="box" x="390" y="130" width="360" height="36" rx="8"/>
+  <text x="570" y="153" text-anchor="middle">not run; error message with reason</text>
+  <rect class="box" x="390" y="188" width="360" height="36" rx="8"/>
+  <text x="570" y="211" text-anchor="middle">not run; your message is the result</text>
+</svg>
+<figcaption>The four decision types accepted by <code>HumanInTheLoopMiddleware</code> in langchain 1.4.5. <strong>The lab uses <code>reject</code> with a message; try <code>approve</code> below.</strong></figcaption>
+</figure>
+
+<h3>The call limit</h3>
+<p><code>ModelCallLimitMiddleware</code> did not trigger in our run: each part used two model calls (see the two <code>[before_model]</code>
+lines per part), below the limit of 4. It is a safety net for the day a model gets stuck calling tools in circles. Its
+<code>before_model</code> hook counts the calls of the current run; when the count has reached the limit, it adds an AI message and jumps
+to the end instead of calling the model.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="Call limit: model calls 1 to 4 are allowed, a fifth call is replaced by a limit-exceeded message and the run ends">
+  <rect class="box-ok" x="10" y="20" width="90" height="40" rx="8"/>
+  <text x="55" y="45" text-anchor="middle">call 1</text>
+  <rect class="box-ok" x="110" y="20" width="90" height="40" rx="8"/>
+  <text x="155" y="45" text-anchor="middle">call 2</text>
+  <rect class="box-ok" x="210" y="20" width="90" height="40" rx="8"/>
+  <text x="255" y="45" text-anchor="middle">call 3</text>
+  <rect class="box-ok" x="310" y="20" width="90" height="40" rx="8"/>
+  <text x="355" y="45" text-anchor="middle">call 4</text>
+  <rect class="box-bad" x="410" y="20" width="90" height="40" rx="8"/>
+  <text x="455" y="45" text-anchor="middle">call 5?</text>
+  <path class="arrow-bad" d="M455,60 V96"/>
+  <rect class="box-warn" x="250" y="100" width="410" height="40" rx="8"/>
+  <text class="mono" x="455" y="125" text-anchor="middle">Model call limits exceeded: run limit (4/4)</text>
+  <text class="small" x="670" y="125">then __end__</text>
+</svg>
+<figcaption>What <code>run_limit=4, exit_behavior="end"</code> does, as written in the middleware's source (our run stopped after 2 calls and never reached it). <strong>The run ends with a clear message instead of looping forever.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><p><strong>What you should see.</strong> In part 1, the "the model saw" line contains <code>[REDACTED_EMAIL]</code>
+every time, because redaction is plain code, not the model. In part 2, if the model calls <code>place_hold</code>, you see a "paused for
+review" line with the tool's name and arguments, then a <code>[before_model]</code> line whose last message is the rejection, then an
+answer. The wording of the answers will differ from ours.</p></div>
+
+<div class="callout warn"><p><strong>Common mistakes.</strong></p>
+<ul>
+<li><strong>No checkpointer.</strong> Human-in-the-loop pauses the run with an interrupt; without <code>checkpointer=</code> there is no
+saved state to resume.</li>
+<li><strong>Resuming with a different <code>thread_id</code>.</strong> The <code>Command</code> must be sent with the same config as the
+paused run (line 46 reuses <code>config</code>).</li>
+<li><strong>Wrong resume format.</strong> <code>Command(resume="no")</code> worked for the hand-written interrupt of lab 13, but this
+middleware expects <code>{"decisions": [...]}</code> with one decision per paused call.</li>
+<li><strong>Assuming the paused path always happens.</strong> If the model answers without calling <code>place_hold</code>, there is no
+<code>__interrupt__</code>; that is why line 42 checks for it.</li>
+<li><strong>Thinking the logger proves redaction failed.</strong> The first log line shows the raw email only because
+<code>log_calls</code> runs before <code>PIIMiddleware</code>. Check what is stored in the state, as line 36 does.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Log after redaction.</strong> Move <code>log_calls</code> below <code>PIIMiddleware(...)</code> in the list (line 25 after
+line 26). The first <code>[before_model]</code> line now shows <code>[REDACTED_EMAIL]</code>, because the PII hook runs first.</li>
+<li><strong>Another strategy.</strong> Change <code>strategy="redact"</code> to <code>"mask"</code> or <code>"hash"</code> and look at the
+"the model saw" line: the address is now partly hidden or replaced by a hash. With <code>"block"</code> the run raises an error
+instead.</li>
+<li><strong>Approve the hold.</strong> On line 45 use <code>{"decisions": [{"type": "approve"}]}</code>. Now <code>place_hold</code>
+really runs (in memory only) and the next log line shows its result, "Hold placed on The Cartographer's Daughter for Sam Okoro…".</li>
+<li><strong>Hit the limit.</strong> Set <code>run_limit=1</code>. If the model calls a tool in its first step (as in our run), the
+second model call is blocked and the answer of part 1 becomes "Model call limits exceeded: run limit (1/1)".</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Middleware adds behaviour around the agent loop through hooks; you pass it as <code>middleware=[...]</code> to
+<code>create_agent</code>, and each hook becomes a node in the graph.</li>
+<li><code>before_model</code> hooks run in list order, <code>after_model</code> hooks in reverse order. That is why our logger saw the
+email before <code>PIIMiddleware</code> removed it.</li>
+<li><code>PIIMiddleware("email", strategy="redact")</code> replaced the address with <code>[REDACTED_EMAIL]</code> in the stored message,
+so the model never saw it.</li>
+<li><code>ModelCallLimitMiddleware</code> stops runaway loops; ours never reached the limit of 4 calls.</li>
+<li><code>HumanInTheLoopMiddleware</code> pauses before chosen tools and returns <code>action_requests</code>; resume with
+<code>Command(resume={"decisions": [...]})</code> using <code>approve</code>, <code>edit</code>, <code>reject</code> or
+<code>respond</code>.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="14-create-agent.html"><small>← Previous · Step 14</small>LangChain agents with create_agent</a>
+<a class="next" href="16-runnables-lcel.html"><small>Next · Step 16 →</small>Runnables and LCEL</a>
+</nav>
+</main>
+</body>
+</html>

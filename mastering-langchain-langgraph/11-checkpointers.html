@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 · Checkpointers and threads</title>
+<meta name="description" content="Give the agent per-conversation memory, inspect checkpoints, and survive a restart with SQLite. Book chapter 12.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 11/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 11 of 16 · Hands-on lab</div>
+  <h1>Checkpointers and threads</h1>
+  <p class="lead">Give the agent per-conversation memory, inspect checkpoints, and survive a restart with SQLite. Book chapter 12.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 12 · Checkpointers</strong> of the book (Part IV · Build Agents with LangGraph).
+This lab is our own example on the Harbor City Library project; it does not reproduce the book's code.</div>
+
+<p><strong>Goal.</strong> Until now, every call to the library <a class="term" href="glossary.html#agent">agent</a> started
+from an empty page: tell it your name, ask again a second later, and it has forgotten. In this lab you give the agent a
+<a class="term" href="glossary.html#checkpointer">checkpointer</a>, so each conversation (a
+<a class="term" href="glossary.html#thread">thread</a>) keeps its own history. You look inside that saved history, and you
+make it survive a restart by writing it to a SQLite file. Along the way the run shows a real privacy bug, which is the most
+important lesson on this page.</p>
+
+<h2>The idea in brief</h2>
+<p>A compiled LangGraph <a class="term" href="glossary.html#graph">graph</a> does not remember anything by itself. A
+checkpointer is a small storage object you hand to <code>compile()</code>. After every step of the graph it saves a
+<a class="term" href="glossary.html#checkpoint">checkpoint</a>: a snapshot of the <a class="term" href="glossary.html#state">state</a>
+(here, the list of messages) plus "which node runs next". Snapshots are filed under a <code>thread_id</code> that you pass
+in the config. Next time you call the graph with the same <code>thread_id</code>, it loads the latest snapshot first and adds
+your new message to it. Different <code>thread_id</code>, different history. The concept chapter
+<a href="langgraph-agents.html">Agents with LangGraph</a> explains the theory; this page is the hands-on part.</p>
+
+<details class="primer"><summary>New to threads and checkpoints? What they are and why they matter</summary>
+<p>Think of a library's help desk. Each visitor gets a folder; every time something happens in their conversation, the
+librarian adds a dated page to that folder. The folder is the <strong>thread</strong> (named by a <code>thread_id</code>
+such as <code>"lea"</code>), each page is a <strong>checkpoint</strong>, and the filing cabinet is the
+<strong>checkpointer</strong>.</p>
+<p>Why it matters: a chat model only sees the messages you send in the current request. To "remember" a conversation, the
+application must store the earlier messages and send them again. A checkpointer does that storing for you, per thread, so
+two visitors never see each other's conversation (as long as your app gives them different thread ids).</p>
+</details>
+
+<details class="primer"><summary>New to SQLite? What it is and why it's used here</summary>
+<p>SQLite is a complete SQL database that lives in a single file and needs no server. Python ships with it (the built-in
+<code>sqlite3</code> module). <code>InMemorySaver</code> keeps checkpoints in the Python process's memory, so they disappear
+when the program ends. <code>SqliteSaver</code> (from the <code>langgraph-checkpoint-sqlite</code> package, version 3.1.2
+here) writes them to a file such as <code>runs/checkpoints.sqlite</code>, so another run of the program can continue the
+same thread. For many users at once you would pick a server database (LangGraph also has a Postgres checkpointer).</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+<li>Open the project folder from the earlier labs (the one with <code>pyproject.toml</code>). Make sure Ollama is running
+and <code>llama3.2</code> is pulled.</li>
+<li>Look at <code>harbor/agent_graph.py</code>. It is the model⇄tools loop from <a href="09-tools.html">lab 09</a>, moved into
+the shared <code>harbor</code> package so labs 11, 12 and 13 can reuse it. It returns the graph <em>builder</em>, not a
+compiled graph, so each lab can compile it with a different checkpointer.</li>
+<li>Create <code>labs/11_checkpointers.py</code> with the content below.</li>
+<li>Run it from the project folder: <code>uv run python -m labs.11_checkpointers</code>. It creates the folder
+<code>runs/</code> if needed and writes <code>runs/checkpoints.sqlite</code>.</li>
+<li>Read the output part by part with the explanations below. Pay special attention to the <code>[sam]</code> line.</li>
+</ol>
+
+<h2>The shared agent graph: <code>harbor/agent_graph.py</code></h2>
+<p>This file appears here for the first time. Labs 12 and 13 import <code>SYSTEM</code> or the builder from it.</p>
+
+<pre data-file="harbor/agent_graph.py" data-lang="py" data-tag="complete file"><code>"""The library agent as a LangGraph graph (the loop from lab 09), reused by labs 11-13."""
+from langchain_core.messages import SystemMessage
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
+
+from harbor.catalog import READ_TOOLS
+from harbor.config import get_model
+
+SYSTEM = SystemMessage("You are Harbor City Library's assistant. Use the tools to look things up. "
+                       "Remember what the visitor told you earlier in the conversation. Answer briefly.")
+
+
+def build_builder(tools=READ_TOOLS):
+    model = get_model().bind_tools(tools)
+
+    def call_model(state: MessagesState):
+        return {"messages": [model.invoke([SYSTEM] + state["messages"])]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("model", call_model)
+    builder.add_node("tools", ToolNode(tools))
+    builder.add_edge(START, "model")
+    builder.add_conditional_edges("model", tools_condition)
+    builder.add_edge("tools", "model")
+    return builder</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""The library agent as a LangGraph graph ..."""</code></td><td>Module docstring: says what the file is and who uses it. Python ignores it at run time; it is for readers and editors.</td></tr>
+<tr><td>2</td><td><code>from langchain_core.messages import SystemMessage</code></td><td>The message type for instructions to the model (a <a class="term" href="glossary.html#system-message">system message</a>).</td></tr>
+<tr><td>3</td><td><code>from langgraph.graph import START, MessagesState, StateGraph</code></td><td><code>StateGraph</code> builds a graph; <code>START</code> is the virtual entry point; <code>MessagesState</code> is a ready-made state with one key, <code>messages</code>, whose <a class="term" href="glossary.html#reducer">reducer</a> appends new messages instead of overwriting the list.</td></tr>
+<tr><td>4</td><td><code>from langgraph.prebuilt import ToolNode, tools_condition</code></td><td><a class="term" href="glossary.html#toolnode">ToolNode</a> runs the tool calls the model asked for; <code>tools_condition</code> is a ready-made router: "go to <code>tools</code> if the last message has tool calls, otherwise end".</td></tr>
+<tr><td>5</td><td></td><td>Blank line separating library imports from project imports (a common Python style).</td></tr>
+<tr><td>6</td><td><code>from harbor.catalog import READ_TOOLS</code></td><td>The three read-only tools: <code>search_catalog</code>, <code>check_availability</code>, <code>get_member_account</code>. No <code>place_hold</code> here; writing actions come in lab 13 with a human approval.</td></tr>
+<tr><td>7</td><td><code>from harbor.config import get_model</code></td><td>The one function that creates the chat model (llama3.2 via Ollama, <code>num_ctx=8192</code>, <code>num_predict=512</code>).</td></tr>
+<tr><td>9–10</td><td><code>SYSTEM = SystemMessage("You are Harbor City Library's assistant. ...")</code></td><td>The instructions sent at the start of every model call: who it is, use the tools, remember what the visitor said, be brief. Two string literals side by side are joined by Python into one string.</td></tr>
+<tr><td>13</td><td><code>def build_builder(tools=READ_TOOLS):</code></td><td>A function, so each lab gets a fresh builder and can pass its own tool list (lab 13 passes all four tools in its own graph). It returns the <em>uncompiled</em> builder because the checkpointer is chosen at compile time.</td></tr>
+<tr><td>14</td><td><code>model = get_model().bind_tools(tools)</code></td><td>Attaches the tools' names, descriptions and argument schemas to every request, so the model can answer with a <a class="term" href="glossary.html#tool-calling">tool call</a>. Note: the tool <em>descriptions</em> are sent to the model too. This matters for the bug below.</td></tr>
+<tr><td>16–17</td><td><code>def call_model(state: MessagesState): return {"messages": [model.invoke([SYSTEM] + state["messages"])]}</code></td><td>The model <a class="term" href="glossary.html#node">node</a>. It sends the system message plus the whole conversation so far, and returns the reply in a list. Because of the append reducer, returning one message <em>adds</em> it to the state.</td></tr>
+<tr><td>19</td><td><code>builder = StateGraph(MessagesState)</code></td><td>Starts a graph whose state is the message list.</td></tr>
+<tr><td>20–21</td><td><code>builder.add_node("model", call_model)</code> / <code>builder.add_node("tools", ToolNode(tools))</code></td><td>Registers the two nodes by name. The names appear later in checkpoints (<code>next=('model',)</code>) and in streaming metadata.</td></tr>
+<tr><td>22</td><td><code>builder.add_edge(START, "model")</code></td><td>Every run begins with the model.</td></tr>
+<tr><td>23</td><td><code>builder.add_conditional_edges("model", tools_condition)</code></td><td>A <a class="term" href="glossary.html#conditional-edge">conditional edge</a>: after the model, either run the tools or finish.</td></tr>
+<tr><td>24</td><td><code>builder.add_edge("tools", "model")</code></td><td>After the tools run, go back to the model so it can read the results. This closes the <a class="term" href="glossary.html#agent-loop">agent loop</a>.</td></tr>
+<tr><td>25</td><td><code>return builder</code></td><td>The caller decides how to compile it: <code>compile()</code> (no memory) or <code>compile(checkpointer=...)</code>.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="The graph built by build_builder: START to model; model goes to tools when there are tool calls, else to END; tools goes back to model">
+  <rect class="box-solid" x="20" y="80" width="90" height="40" rx="8"/>
+  <text class="on-solid" x="65" y="105" text-anchor="middle">START</text>
+  <path class="arrow" d="M 110,100 H 198"/>
+  <rect class="box-info" x="200" y="74" width="140" height="52" rx="8"/>
+  <text class="title" x="270" y="97" text-anchor="middle">"model"</text>
+  <text class="small" x="270" y="115" text-anchor="middle">call_model</text>
+  <path class="arrow-accent" d="M 340,90 H 478"/>
+  <text class="label" x="410" y="80" text-anchor="middle">tool calls</text>
+  <rect class="box-ok" x="480" y="64" width="140" height="52" rx="8"/>
+  <text class="title" x="550" y="87" text-anchor="middle">"tools"</text>
+  <text class="small" x="550" y="105" text-anchor="middle">ToolNode(READ_TOOLS)</text>
+  <path class="arrow" d="M 550,116 V 160 H 270 V 128"/>
+  <text class="label" x="410" y="176" text-anchor="middle">results go back to the model</text>
+  <path class="arrow" d="M 270,74 V 30 H 668 V 78"/>
+  <text class="label" x="470" y="24" text-anchor="middle">no tool calls (tools_condition)</text>
+  <rect class="box-solid" x="640" y="80" width="90" height="40" rx="8"/>
+  <text class="on-solid" x="685" y="105" text-anchor="middle">END</text>
+</svg>
+<figcaption>The loop in <code>harbor/agent_graph.py</code>. The model either asks for tools (they run, results go back) or
+answers and the run ends. <strong>Each arrow you follow is one step, and with a checkpointer each step is saved.</strong></figcaption>
+</figure>
+
+<h2>The lab: <code>labs/11_checkpointers.py</code></h2>
+
+<pre data-file="labs/11_checkpointers.py" data-lang="py" data-tag="complete file"><code>"""Lab 11: checkpointers give a graph a memory per conversation (thread) and let it survive restarts."""
+import sqlite3
+
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+from harbor.agent_graph import build_builder
+from harbor.config import RUNS
+
+
+def show(result, start):
+    """Print the tool calls and the final answer of one turn (messages from index `start` on)."""
+    for m in result["messages"][start:]:
+        if m.type == "ai" and m.tool_calls:
+            print("      tool call:", [(c["name"], c["args"]) for c in m.tool_calls])
+    print(f"   -&gt; {result['messages'][-1].content}")
+
+
+def ask(graph, thread, text):
+    config = {"configurable": {"thread_id": thread}}
+    before = len(graph.get_state(config).values.get("messages", []))
+    print(f"   [{thread}] {text}   ({before} earlier messages loaded)")
+    show(graph.invoke({"messages": [("user", text)]}, config), before)
+
+
+# 1. Without a checkpointer every call starts from zero.
+plain = build_builder().compile()
+print("1) No checkpointer:")
+for text in ["Hi, I'm Lea, member M-1001.", "What is my member id?"]:
+    print(f"   {text}")
+    show(plain.invoke({"messages": [("user", text)]}), 0)
+
+# 2. With a checkpointer, each thread_id keeps its own history.
+graph = build_builder().compile(checkpointer=InMemorySaver())
+print("\n2) InMemorySaver, two threads:")
+ask(graph, "lea", "Hi, I'm Lea, member M-1001.")
+ask(graph, "lea", "What is my member id?")
+ask(graph, "sam", "What is my member id?")
+
+# 3. The saved state: messages so far and the checkpoints that led there.
+config = {"configurable": {"thread_id": "lea"}}
+state = graph.get_state(config)
+print(f"\n3) Thread 'lea' has {len(state.values['messages'])} messages and "
+      f"{len(list(graph.get_state_history(config)))} checkpoints; next node: {state.next or 'none (finished)'}")
+
+# 4. SqliteSaver writes checkpoints to a file, so a new process (or a restart) can continue the thread.
+RUNS.mkdir(exist_ok=True)
+db_path = RUNS / "checkpoints.sqlite"
+db_path.unlink(missing_ok=True)
+with sqlite3.connect(db_path, check_same_thread=False) as conn:
+    durable = build_builder().compile(checkpointer=SqliteSaver(conn))
+    print("\n4) SqliteSaver:")
+    ask(durable, "ines", "Hello, I'm Ines, member M-1003. I love cooking books.")
+with sqlite3.connect(db_path, check_same_thread=False) as conn:  # a fresh connection, as after a restart
+    durable = build_builder().compile(checkpointer=SqliteSaver(conn))
+    ask(durable, "ines", "Which genre do I like?")
+    rows = conn.execute("SELECT COUNT(*) FROM checkpoints WHERE thread_id = 'ines'").fetchone()[0]
+    print(f"   {rows} checkpoint rows stored for thread 'ines' in {db_path.name}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 11: checkpointers give a graph a memory ..."""</code></td><td>Docstring describing the lab.</td></tr>
+<tr><td>2</td><td><code>import sqlite3</code></td><td>Python's built-in SQLite driver. We open the database connection ourselves and hand it to <code>SqliteSaver</code>.</td></tr>
+<tr><td>4</td><td><code>from langgraph.checkpoint.memory import InMemorySaver</code></td><td>The checkpointer that keeps snapshots in a Python dictionary. Fast, perfect for tests and demos; everything is lost when the process exits.</td></tr>
+<tr><td>5</td><td><code>from langgraph.checkpoint.sqlite import SqliteSaver</code></td><td>The checkpointer that writes snapshots to a SQLite file. It comes from the separate <code>langgraph-checkpoint-sqlite</code> package listed in <code>pyproject.toml</code>.</td></tr>
+<tr><td>7–8</td><td><code>from harbor.agent_graph import build_builder</code> / <code>from harbor.config import RUNS</code></td><td>The shared graph builder, and <code>RUNS</code>, the path of the project's <code>runs/</code> folder for generated files.</td></tr>
+<tr><td>11–16</td><td><code>def show(result, start): ...</code></td><td>A printing helper. <code>result["messages"]</code> holds the whole conversation, so <code>start</code> skips the messages that were already there before this turn. For every AI message with <code>tool_calls</code> it prints the tool name and the arguments the model chose (line 15), then prints the last message, the final answer (line 16).</td></tr>
+<tr><td>19</td><td><code>def ask(graph, thread, text):</code></td><td>One turn of a conversation on a given thread.</td></tr>
+<tr><td>20</td><td><code>config = {"configurable": {"thread_id": thread}}</code></td><td>The config that selects the thread. The key must be exactly <code>"configurable"</code> → <code>"thread_id"</code>; this is how the checkpointer knows which folder to open.</td></tr>
+<tr><td>21</td><td><code>before = len(graph.get_state(config).values.get("messages", []))</code></td><td><code>get_state</code> returns the latest snapshot of that thread (a <code>StateSnapshot</code>). Its <code>.values</code> is the state dict; for a brand-new thread it is empty, hence <code>.get("messages", [])</code>. Counting the messages shows how much history was loaded.</td></tr>
+<tr><td>22</td><td><code>print(f"   [{thread}] {text}   ({before} earlier messages loaded)")</code></td><td>Prints the thread, the question and the count. This is the line that proves memory works (or not).</td></tr>
+<tr><td>23</td><td><code>show(graph.invoke({"messages": [("user", text)]}, config), before)</code></td><td>Runs the graph with only the <em>new</em> message. The checkpointer adds the stored history in front of it. The <code>("user", text)</code> tuple is a shortcut LangChain turns into a <code>HumanMessage</code>.</td></tr>
+<tr><td>26–31</td><td><code>plain = build_builder().compile()</code> and the loop</td><td>Part 1: compile <em>without</em> a checkpointer and send two separate messages. Each <code>invoke</code> starts with an empty state, so the second call cannot know what the first one said.</td></tr>
+<tr><td>34</td><td><code>graph = build_builder().compile(checkpointer=InMemorySaver())</code></td><td>Part 2: the same graph, now with memory. From here on, every <code>invoke</code> on this graph must include a <code>thread_id</code>.</td></tr>
+<tr><td>36–38</td><td><code>ask(graph, "lea", ...)</code> ×2, <code>ask(graph, "sam", ...)</code></td><td>Two turns on thread <code>lea</code>, then the same question on a brand-new thread <code>sam</code>. Lea's second turn should load her first turn; Sam's thread should start empty.</td></tr>
+<tr><td>41–42</td><td><code>config = ...; state = graph.get_state(config)</code></td><td>Part 3: read thread <code>lea</code>'s latest snapshot directly, without running the graph.</td></tr>
+<tr><td>43–44</td><td><code>len(state.values['messages'])</code>, <code>len(list(graph.get_state_history(config)))</code>, <code>state.next</code></td><td>Prints the number of messages, the number of checkpoints (<code>get_state_history</code> yields every snapshot of the thread, newest first; <code>list()</code> collects them so we can count), and <code>next</code>: the node(s) that would run next. An empty tuple means the run finished, so <code>or 'none (finished)'</code> prints a readable text.</td></tr>
+<tr><td>47–49</td><td><code>RUNS.mkdir(exist_ok=True)</code> ... <code>db_path.unlink(missing_ok=True)</code></td><td>Part 4: make sure <code>runs/</code> exists and delete an old database file, so every run of the lab starts clean and the counts are repeatable.</td></tr>
+<tr><td>50</td><td><code>with sqlite3.connect(db_path, check_same_thread=False) as conn:</code></td><td>Opens (and creates) the database file. <code>check_same_thread=False</code> lets LangGraph use the connection from its worker threads; without it SQLite refuses calls from a thread other than the one that opened it.</td></tr>
+<tr><td>51</td><td><code>durable = build_builder().compile(checkpointer=SqliteSaver(conn))</code></td><td>The same graph, checkpointed to the file. <code>SqliteSaver</code> creates its tables (<code>checkpoints</code> and <code>writes</code>) on first use.</td></tr>
+<tr><td>53</td><td><code>ask(durable, "ines", "Hello, I'm Ines, member M-1003. I love cooking books.")</code></td><td>First turn of thread <code>ines</code>, saved to disk.</td></tr>
+<tr><td>54–55</td><td><code>with sqlite3.connect(...) as conn:</code> and a new <code>durable</code> graph</td><td>A <em>new</em> connection and a newly compiled graph: nothing is shared in memory with the first block, which simulates restarting the program. Anything the graph knows now must come from the file.</td></tr>
+<tr><td>56</td><td><code>ask(durable, "ines", "Which genre do I like?")</code></td><td>Second turn. The "earlier messages loaded" count shows whether the history came back from disk.</td></tr>
+<tr><td>57–58</td><td><code>conn.execute("SELECT COUNT(*) FROM checkpoints WHERE thread_id = 'ines'")</code></td><td>Plain SQL against the checkpointer's own table, to prove the snapshots are really in the file. <code>.fetchone()[0]</code> takes the single number from the result row.</td></tr>
+</table></div>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="command"><code>uv run python -m labs.11_checkpointers</code></pre>
+<p><code>uv run</code> runs the command inside the project's <a class="term" href="glossary.html#virtual-environment">virtual environment</a>;
+<code>-m labs.11_checkpointers</code> runs the file as a module, so <code>import harbor...</code> works from the project folder.</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) No checkpointer:
+   Hi, I'm Lea, member M-1001.
+      tool call: [('get_member_account', {'member_id': 'M-1001'})]
+   -&gt; Hello Lea, M-1001. You have two books borrowed and are due to return them on October 20th and 9th, 2026. There are no holds on your account. You also have a fee of 2.40 EUR. Can I help you with anything else?
+   What is my member id?
+      tool call: [('get_member_account', {'member_id': 'M-1001'})]
+   -&gt; Your member ID is M-1001.
+
+2) InMemorySaver, two threads:
+   [lea] Hi, I'm Lea, member M-1001.   (0 earlier messages loaded)
+      tool call: [('get_member_account', {'member_id': 'M-1001'})]
+   -&gt; Hello Lea, M-1001. You have two books borrowed and are due to return them on October 20th and 9th, 2026. There are no holds on your account. You also have a fee of 2.40 EUR. Is there anything else I can help you with?
+   [lea] What is my member id?   (4 earlier messages loaded)
+      tool call: [('get_member_account', {'member_id': 'M-1001'})]
+   -&gt; Your member ID is M-1001.
+   [sam] What is my member id?   (0 earlier messages loaded)
+      tool call: [('get_member_account', {'member_id': 'M-1001'})]
+   -&gt; Your member ID is M-1001, Lea Martin.
+
+3) Thread 'lea' has 8 messages and 10 checkpoints; next node: none (finished)
+
+4) SqliteSaver:
+   [ines] Hello, I'm Ines, member M-1003. I love cooking books.   (0 earlier messages loaded)
+      tool call: [('search_catalog', {'query': 'cooking'})]
+   -&gt; Hello Ines, M-1003! I'm glad you love cooking books. We have "Recipes from the Fish Market" by Sofia Marchetti, a popular cookbook that features fresh seafood recipes. Would you like to check it out?
+   [ines] Which genre do I like?   (4 earlier messages loaded)
+      tool call: [('search_catalog', {'query': 'genre'})]
+   -&gt; It seems that the tool couldn't find any information on a specific genre. However, I can tell you that we have a wide range of cooking books, including recipes from different cuisines and cooking styles. If you're looking for something specific, feel free to ask and I can try to help you find it!
+   10 checkpoint rows stored for thread 'ines' in checkpoints.sqlite</code></pre>
+
+<div class="callout ok"><p><strong>What you should see</strong></p>
+<ul>
+<li><strong>Part 2, thread <code>lea</code>:</strong> the first turn says <code>(0 earlier messages loaded)</code>, the second
+<code>(4 earlier messages loaded)</code>: her question, the AI message with the tool call, the tool result and the answer.
+The checkpointer works.</li>
+<li><strong>Part 3:</strong> <code>8 messages and 10 checkpoints; next node: none (finished)</code>. Two turns of four
+messages each. The 10 checkpoints are explained in the diagram below.</li>
+<li><strong>Part 4:</strong> after opening a fresh connection, the second Ines turn says <code>(4 earlier messages loaded)</code>
+and the table holds <code>10 checkpoint rows</code>. Persistence works.</li>
+<li>Your sentences will differ (the model writes them freshly each time), but the counts should match as long as the model
+makes one tool call per turn, as it did here.</li>
+</ul></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="One compiled graph with an InMemorySaver; thread lea has a stack of saved checkpoints, thread sam is empty; the thread_id in the config selects which one is loaded">
+  <rect class="zone" x="10" y="10" width="300" height="230" rx="8"/>
+  <text class="title" x="160" y="34" text-anchor="middle">Your code</text>
+  <rect class="box" x="30" y="50" width="260" height="56" rx="8"/>
+  <text class="mono" x="160" y="72" text-anchor="middle">invoke(msg, config)</text>
+  <text class="small" x="160" y="92" text-anchor="middle">thread_id = "lea"</text>
+  <rect class="box" x="30" y="150" width="260" height="56" rx="8"/>
+  <text class="mono" x="160" y="172" text-anchor="middle">invoke(msg, config)</text>
+  <text class="small" x="160" y="192" text-anchor="middle">thread_id = "sam"</text>
+  <rect class="zone" x="400" y="10" width="350" height="230" rx="8"/>
+  <text class="title" x="575" y="34" text-anchor="middle">InMemorySaver</text>
+  <rect class="box-info" x="420" y="50" width="310" height="70" rx="8"/>
+  <text class="title" x="575" y="72" text-anchor="middle">thread "lea"</text>
+  <text class="small" x="575" y="92" text-anchor="middle">10 checkpoints · latest: 8 messages</text>
+  <text class="small" x="575" y="108" text-anchor="middle">turn 2 loaded 4 earlier messages</text>
+  <rect class="box-warn" x="420" y="150" width="310" height="70" rx="8"/>
+  <text class="title" x="575" y="172" text-anchor="middle">thread "sam"</text>
+  <text class="small" x="575" y="192" text-anchor="middle">new thread: 0 earlier messages</text>
+  <text class="small" x="575" y="208" text-anchor="middle">the model knows nothing about Sam</text>
+  <path class="arrow-accent" d="M 290,78 H 418"/>
+  <path class="arrow" d="M 290,178 H 418"/>
+  <text class="label" x="354" y="70" text-anchor="middle">loads</text>
+  <text class="label" x="354" y="170" text-anchor="middle">loads</text>
+</svg>
+<figcaption>The same compiled graph serves every conversation; <strong>the <code>thread_id</code> in the config picks which
+saved history is loaded</strong>. A new thread id starts with nothing.</figcaption>
+</figure>
+
+<h2>Inside a thread: why 8 messages make 10 checkpoints</h2>
+<p>A checkpoint is written at the start of each run and after every <em>super-step</em> (one round of nodes). One turn
+where the model calls one tool goes: input saved → START hands over → <code>model</code> asks for a tool →
+<code>tools</code> runs it → <code>model</code> answers. That is 5 snapshots and 4 new messages. Two turns: 10 snapshots and
+8 messages. Thread <code>ines</code> in SQLite had the same shape, which is why the table also holds 10 rows.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Timeline of one turn: five checkpoints are saved, after input, start, model, tools and model again; message count grows from 1 to 4">
+  <path class="line" d="M 40,90 H 720"/>
+  <circle class="dot-info" cx="80" cy="90" r="9"/>
+  <circle class="dot-info" cx="220" cy="90" r="9"/>
+  <circle class="dot-info" cx="360" cy="90" r="9"/>
+  <circle class="dot-info" cx="500" cy="90" r="9"/>
+  <circle class="dot-ok" cx="640" cy="90" r="9"/>
+  <text class="label" x="80" y="60" text-anchor="middle">input saved</text>
+  <text class="label" x="220" y="60" text-anchor="middle">after START</text>
+  <text class="label" x="360" y="60" text-anchor="middle">after model</text>
+  <text class="label" x="500" y="60" text-anchor="middle">after tools</text>
+  <text class="label" x="640" y="60" text-anchor="middle">after model</text>
+  <text class="small" x="80" y="122" text-anchor="middle">next: START</text>
+  <text class="small" x="220" y="122" text-anchor="middle">next: model</text>
+  <text class="small" x="360" y="122" text-anchor="middle">next: tools</text>
+  <text class="small" x="500" y="122" text-anchor="middle">next: model</text>
+  <text class="small" x="640" y="122" text-anchor="middle">next: none</text>
+  <text class="small" x="220" y="140" text-anchor="middle">1 message</text>
+  <text class="small" x="360" y="140" text-anchor="middle">+ AI tool call</text>
+  <text class="small" x="500" y="140" text-anchor="middle">+ tool result</text>
+  <text class="small" x="640" y="140" text-anchor="middle">+ answer = 4</text>
+  <rect class="box2" x="150" y="168" width="460" height="36" rx="8"/>
+  <text x="380" y="191" text-anchor="middle">One turn = 5 checkpoints. Two turns = 10 (lab output).</text>
+</svg>
+<figcaption>Snapshots of one turn on thread <code>lea</code>. Each dot is a full copy of the state plus the next node, which is
+what <code>get_state_history</code> lists. <strong>Lab 13 uses these saved points to travel back in time.</strong></figcaption>
+</figure>
+
+<h2>The privacy bug: Sam saw Lea's account</h2>
+
+<div class="callout warn"><p><strong>Read this carefully: the run leaked a member's private data.</strong></p>
+<p>Thread <code>sam</code> is brand new (<code>0 earlier messages loaded</code>). Nobody told the agent any member id. Still,
+the model called <code>get_member_account({'member_id': 'M-1001'})</code> and answered
+<code>Your member ID is M-1001, Lea Martin.</code> The tool result it received contained Lea's loans and her 2.40 EUR fee.
+In a real library app, any visitor who asks "What is my member id?" would get another person's account.</p>
+<p><strong>Why did it happen?</strong> Not because of memory: the checkpointer kept the threads apart correctly. It happened
+because <strong>the model chooses the tool arguments</strong>. When it decided to call <code>get_member_account</code>, it
+needed some <code>member_id</code>. The only id it could see was in the tool's description, which <code>bind_tools</code>
+sends with every request: <code>"Member ids look like M-1001."</code> (line 36 of <code>harbor/catalog.py</code>). A small
+model copied that example value as if it were the visitor's id.</p>
+<p><strong>The fix has two parts.</strong></p>
+<ol>
+<li><strong>Never let the model decide whose data to read.</strong> The logged-in user's identity must come from your
+application (the login session), not from the conversation. <a href="14-create-agent.html">Lab 14</a> does exactly this: its
+<code>my_account</code> tool takes no member id at all; it reads <code>runtime.context.member_id</code> from a
+<code>ToolRuntime</code> that the app fills in (<a class="term" href="glossary.html#runtime-context">runtime context</a>).
+The model cannot change it, so it cannot read anyone else's account.</li>
+<li><strong>Never put real-looking ids in tool descriptions.</strong> Describe the format in words ("an id starting with
+<code>M-</code> followed by four digits") or use an obviously fake placeholder. Models treat examples as hints, and here the
+example was a real member.</li>
+</ol>
+<p>Also check permissions inside the tool itself, so even a wrong argument returns "not allowed" instead of data.</p></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Mistake, symptom and fix: the tool description contains M-1001, the model copies it in Sam's thread and leaks Lea's account; the fix takes the member id from the app's runtime context">
+  <text class="title" x="130" y="26" text-anchor="middle">Mistake</text>
+  <text class="title" x="380" y="26" text-anchor="middle">Symptom</text>
+  <text class="title" x="630" y="26" text-anchor="middle">Fix</text>
+  <rect class="box-bad" x="20" y="40" width="220" height="100" rx="8"/>
+  <text class="label" x="130" y="64" text-anchor="middle">tool description says</text>
+  <text class="mono" x="130" y="86" text-anchor="middle">"look like M-1001"</text>
+  <text class="label" x="130" y="108" text-anchor="middle">and the model picks</text>
+  <text class="label" x="130" y="126" text-anchor="middle">the member_id argument</text>
+  <path class="arrow-bad" d="M 240,90 H 268"/>
+  <rect class="box-warn" x="270" y="40" width="220" height="100" rx="8"/>
+  <text class="label" x="380" y="64" text-anchor="middle">thread "sam", 0 messages</text>
+  <text class="mono" x="380" y="86" text-anchor="middle">get_member_account</text>
+  <text class="mono" x="380" y="104" text-anchor="middle">('M-1001')</text>
+  <text class="label" x="380" y="126" text-anchor="middle">→ Lea Martin's account</text>
+  <path class="arrow-ok" d="M 490,90 H 518"/>
+  <rect class="box-ok" x="520" y="40" width="220" height="100" rx="8"/>
+  <text class="label" x="630" y="64" text-anchor="middle">id comes from the app</text>
+  <text class="mono" x="630" y="86" text-anchor="middle">my_account(runtime)</text>
+  <text class="label" x="630" y="108" text-anchor="middle">runtime.context.member_id</text>
+  <text class="label" x="630" y="126" text-anchor="middle">(lab 14)</text>
+  <rect class="box2" x="20" y="170" width="720" height="84" rx="8"/>
+  <text x="380" y="196" text-anchor="middle">The same cause explains part 1 ("No checkpointer"): the second call had no memory,</text>
+  <text x="380" y="216" text-anchor="middle">yet it "knew" M-1001, because it copied the id from the description again.</text>
+  <text class="small" x="380" y="238" text-anchor="middle">A right-looking answer is not proof that memory worked. Check the tool arguments.</text>
+</svg>
+<figcaption>How the leak happened and how to prevent it. <strong>The model must never choose whose private data a tool
+reads.</strong></figcaption>
+</figure>
+
+<p><strong>Look again at part 1.</strong> Without a checkpointer, the second call "What is my member id?" answered
+<code>Your member ID is M-1001.</code> It looks as if the agent remembered Lea. It did not: that call had no history at all.
+It called <code>get_member_account('M-1001')</code> for the same reason as Sam's thread: the id was copied from the tool
+description. Lea's thread in part 2 also called the tool on her second turn instead of reading the id from the 4 loaded
+messages. This is why the lab prints the tool calls: <strong>a correct-looking answer can come from the wrong
+place.</strong></p>
+
+<h2>Persistence with SqliteSaver</h2>
+<p>Part 4 shows the restart case. The first <code>with</code> block saves Ines's first turn to
+<code>runs/checkpoints.sqlite</code> and closes the connection. The second block opens a new connection and compiles a new
+graph, and the second turn reports <code>(4 earlier messages loaded)</code>. The history came from the file.</p>
+<p>The answer to "Which genre do I like?" is still poor: llama3.2 called <code>search_catalog({'query': 'genre'})</code>
+instead of reading its own history, where Ines said she loves cooking books. The memory was there; the small model did not
+use it well. Persistence guarantees the messages are <em>sent</em>; it does not guarantee the model <em>reasons</em> over
+them. (The first answer was accurate, by the way: "Recipes from the Fish Market" is item B009, genre cooking.)</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Two program runs share one SQLite file: run one writes the first Ines turn, run two reads four earlier messages and adds the second turn, ending with ten rows">
+  <rect class="zone" x="10" y="20" width="230" height="190" rx="8"/>
+  <text class="title" x="125" y="44" text-anchor="middle">Connection 1</text>
+  <rect class="box" x="30" y="60" width="190" height="60" rx="8"/>
+  <text class="label" x="125" y="84" text-anchor="middle">ines: "I love</text>
+  <text class="label" x="125" y="102" text-anchor="middle">cooking books."</text>
+  <text class="small" x="125" y="146" text-anchor="middle">0 earlier messages</text>
+  <text class="small" x="125" y="164" text-anchor="middle">writes 5 checkpoints</text>
+  <rect class="box-info" x="290" y="60" width="180" height="110" rx="8"/>
+  <text class="title" x="380" y="88" text-anchor="middle">checkpoints</text>
+  <text class="title" x="380" y="106" text-anchor="middle">.sqlite</text>
+  <text class="small" x="380" y="130" text-anchor="middle">tables: checkpoints,</text>
+  <text class="small" x="380" y="146" text-anchor="middle">writes</text>
+  <rect class="zone" x="520" y="20" width="230" height="190" rx="8"/>
+  <text class="title" x="635" y="44" text-anchor="middle">Connection 2</text>
+  <rect class="box" x="540" y="60" width="190" height="60" rx="8"/>
+  <text class="label" x="635" y="84" text-anchor="middle">ines: "Which genre</text>
+  <text class="label" x="635" y="102" text-anchor="middle">do I like?"</text>
+  <text class="small" x="635" y="146" text-anchor="middle">4 earlier messages loaded</text>
+  <text class="small" x="635" y="164" text-anchor="middle">10 rows for "ines"</text>
+  <path class="arrow-accent" d="M 220,90 H 288"/>
+  <text class="label" x="254" y="80" text-anchor="middle">save</text>
+  <path class="arrow-ok" d="M 470,90 H 538"/>
+  <text class="label" x="504" y="80" text-anchor="middle">load</text>
+  <text class="small" x="380" y="200" text-anchor="middle">closed and reopened = a restart</text>
+</svg>
+<figcaption>The file outlives the connection. <strong>Use <code>InMemorySaver</code> to learn and test, a database-backed
+saver when conversations must survive restarts.</strong></figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<tr><th></th><th><code>InMemorySaver</code></th><th><code>SqliteSaver</code></th></tr>
+<tr><td>Where checkpoints live</td><td>A dictionary in the running Python process</td><td>A SQLite file (<code>runs/checkpoints.sqlite</code>)</td></tr>
+<tr><td>Survives a restart</td><td>No</td><td>Yes (part 4 loaded 4 earlier messages)</td></tr>
+<tr><td>Extra package</td><td>None (part of <code>langgraph</code>)</td><td><code>langgraph-checkpoint-sqlite</code></td></tr>
+<tr><td>Good for</td><td>Learning, tests, notebooks</td><td>Single-machine apps, local tools</td></tr>
+</table></div>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Forgetting the <code>thread_id</code>.</strong> A graph compiled with a checkpointer refuses to run without one:
+<code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id</code>.
+Pass <code>{"configurable": {"thread_id": "..."}}</code> as the second argument of <code>invoke</code>.</li>
+<li><strong>Reusing one thread id for different users.</strong> Then they share one conversation. In a real app derive the
+thread id from the logged-in user plus a conversation id, never from what the user types.</li>
+<li><strong>Sending the whole history yourself as well.</strong> With a checkpointer, pass only the new message. If you resend
+old messages they are appended again and the conversation doubles.</li>
+<li><strong>Trusting a right answer.</strong> As shown above, "Your member ID is M-1001" came from a copied example, not from
+memory. Look at the tool calls.</li>
+<li><strong>Windows: <code>OPENSSL_Uplink ... no OPENSSL_Applink</code> at start-up.</strong> On our machine an
+<code>SSLKEYLOGFILE</code> environment variable caused it; running with that variable removed
+(<code>env -u SSLKEYLOGFILE uv run python -m labs.11_checkpointers</code> in Git Bash) fixed it.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol class="steps">
+<li><strong>Look at the full history.</strong> At the end of the file add
+<code>for s in graph.get_state_history(config): print(s.metadata["step"], s.next, len(s.values.get("messages", [])))</code>.
+You will see the 10 snapshots of thread <code>lea</code>, newest first, with the message count growing as in the timeline
+diagram.</li>
+<li><strong>Remove the example id.</strong> In <code>harbor/catalog.py</code>, change the description of
+<code>get_member_account</code> to say "Member ids start with M- and four digits." and run again. Watch what the model sends
+as <code>member_id</code> in the <code>sam</code> thread now. Whatever it does, note that only the lab 14 approach really
+fixes the leak. Undo the change afterwards so the other labs match this guide.</li>
+<li><strong>Prove the file persists.</strong> Comment out line 49 (<code>db_path.unlink(...)</code>) and run the lab twice. On
+the second run, the first Ines turn no longer reports 0 earlier messages: both turns of the previous run are still in the file
+(8 messages if each turn made one tool call, as in our run), and the row count grows too.</li>
+<li><strong>Open the database.</strong> In a Python shell:
+<code>import sqlite3; c = sqlite3.connect("runs/checkpoints.sqlite"); print(c.execute("SELECT thread_id, COUNT(*) FROM checkpoints GROUP BY thread_id").fetchall())</code>.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A checkpointer saves a snapshot of the graph's state after every step, filed by <code>thread_id</code>; pass it with
+<code>compile(checkpointer=...)</code> and the thread with <code>{"configurable": {"thread_id": ...}}</code>.</li>
+<li><code>get_state</code> returns the latest snapshot (<code>.values</code>, <code>.next</code>);
+<code>get_state_history</code> lists all of them (10 for two turns here).</li>
+<li><code>InMemorySaver</code> forgets on exit; <code>SqliteSaver</code> writes to a file, so a restarted program loaded the
+4 earlier messages.</li>
+<li>The model chooses tool arguments. It copied <code>M-1001</code> from a tool description and leaked Lea's account to a new
+visitor. Identity must come from the app (lab 14's <code>ToolRuntime</code> context), and descriptions must not contain
+real-looking ids.</li>
+<li>Memory makes the history available; a small model may still not use it (the genre question).</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="10-mcp.html"><small>← Previous · Step 10</small>Model Context Protocol (MCP)</a>
+<a class="next" href="12-memory.html"><small>Next · Step 12 →</small>Short-term and long-term memory</a>
+</nav>
+</main>
+</body>
+</html>

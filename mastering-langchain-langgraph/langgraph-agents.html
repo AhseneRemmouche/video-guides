@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 4 · Agents with LangGraph</title>
+<meta name="description" content="State graphs, tools and MCP, checkpoints, memory, human-in-the-loop, time travel and streaming. Read with book Part IV (chapters 10-14).">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 4/6</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 4 of 6</div>
+  <h1>Agents with LangGraph</h1>
+  <p class="lead">State graphs, tools and MCP, checkpoints, memory, human-in-the-loop, time travel and streaming. Read with book Part IV (chapters 10-14).</p>
+</section>
+<div class="callout">Read with <strong>Part IV · Build Agents with LangGraph (chapters 10–14)</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>A RAG chain is a straight line: retrieve, prompt, answer. Many useful assistants are not straight lines. They
+branch ("is this even a library question?"), loop ("call a tool, look at the result, maybe call another"), remember
+earlier turns, and sometimes stop to wait for a person. <a class="term" href="glossary.html#langgraph">LangGraph</a>
+is LangChain's library for exactly that: you describe your program as a
+<a class="term" href="glossary.html#graph">graph</a> of steps that share a piece of
+<a class="term" href="glossary.html#state">state</a>, and LangGraph runs it, saves it after every step, and lets you
+pause, resume, rewind and stream it.</p>
+
+<p><strong>Why this matters for your project.</strong> Labs <a href="08-langgraph-basics.html">08</a> to
+<a href="13-hitl-time-travel-streaming.html">13</a> turn the library's RAG chain into a graph, give the model
+tools to search the catalog and read member accounts, serve those tools over MCP, add conversation memory, and make
+a librarian approve every hold. Every real failure in those labs (an invented availability, a member's data shown to
+someone else, a replay that answered nothing) comes from one of the ideas below. Understanding them is how you
+predict and prevent such bugs.</p>
+
+<h2>Graphs: state, nodes and edges</h2>
+
+<p>A LangGraph program has three ingredients.</p>
+<ul>
+  <li><strong>State</strong>: a dictionary that every step can read, usually described with a
+  <a class="term" href="glossary.html#typeddict">TypedDict</a> so you (and your editor) know which keys exist. In lab
+  08 it has <code>question</code>, <code>route</code>, <code>docs</code> and <code>answer</code>.</li>
+  <li><strong><a class="term" href="glossary.html#node">Nodes</a></strong>: ordinary Python functions. Each receives
+  the current state and returns a dictionary with <em>only the keys it wants to change</em>. Lab 08's
+  <code>retrieve</code> returns <code>{"docs": …}</code> and touches nothing else.</li>
+  <li><strong><a class="term" href="glossary.html#edge">Edges</a></strong>: which node runs next. A normal edge
+  always goes to the same place. A <a class="term" href="glossary.html#conditional-edge">conditional edge</a> calls a
+  small routing function that looks at the state and returns the name of the next node.</li>
+</ul>
+<p>Two special names mark the boundaries: <code>START</code> (where input enters) and <code>END</code> (where the run
+stops). You add everything to a <code>StateGraph</code> builder, then call <code>compile()</code>, which checks the
+wiring (for example, that every edge points to a real node) and returns a runnable graph with <code>invoke</code>,
+<code>stream</code> and friends.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Lab 08's graph: START to classify, a conditional edge to retrieve or decline, retrieve to generate, both ends to END">
+  <rect class="box2" x="20" y="85" width="90" height="40" rx="20"/>
+  <text class="mono" x="65" y="110" text-anchor="middle">START</text>
+  <rect class="box" x="150" y="85" width="130" height="40" rx="8"/>
+  <text class="mono" x="215" y="110" text-anchor="middle">classify</text>
+  <rect class="box" x="350" y="25" width="130" height="40" rx="8"/>
+  <text class="mono" x="415" y="50" text-anchor="middle">retrieve</text>
+  <rect class="box-warn" x="350" y="145" width="130" height="40" rx="8"/>
+  <text class="mono" x="415" y="170" text-anchor="middle">decline</text>
+  <rect class="box" x="530" y="25" width="120" height="40" rx="8"/>
+  <text class="mono" x="590" y="50" text-anchor="middle">generate</text>
+  <rect class="box2" x="670" y="85" width="80" height="40" rx="20"/>
+  <text class="mono" x="710" y="110" text-anchor="middle">END</text>
+  <path class="arrow" d="M110,105 H148"/>
+  <path class="arrow-accent dashed" d="M280,98 L348,52"/>
+  <path class="arrow-accent dashed" d="M280,112 L348,158"/>
+  <text class="small" x="226" y="56">route = library</text>
+  <text class="small" x="226" y="164">route = other</text>
+  <path class="arrow" d="M480,45 H528"/>
+  <path class="arrow" d="M600,65 L690,84"/>
+  <path class="arrow" d="M480,165 L688,120"/>
+</svg>
+<figcaption>The graph of <a href="08-langgraph-basics.html">lab 08</a>. Dashed arrows come from the conditional edge
+(<code>pick_next</code>); Mermaid draws them as <code>-.-&gt;</code>. <strong>Branching is just a function that
+returns the next node's name.</strong></figcaption>
+</figure>
+
+<p>Lab 08 also printed the compiled graph as Mermaid text with <code>graph.get_graph().draw_mermaid()</code>. You can
+paste that text into any Mermaid viewer to see the picture; it is the quickest way to check that the graph you built
+is the graph you meant. In its output, normal edges are <code>--&gt;</code> and conditional ones
+<code>-.-&gt;</code>, for example <code>classify -.-&gt; retrieve;</code>.</p>
+
+<details class="primer"><summary>New to graphs? Boxes and arrows, nothing more</summary>
+<p>In computing, a graph is a set of boxes (nodes) joined by arrows (edges). A flowchart is a graph. What makes
+LangGraph's graphs useful for agents is that arrows may point <em>backwards</em>, forming a loop, and that the path
+can depend on the data. A plain chain cannot loop; a graph can, as many times as the routing function says.</p>
+</details>
+
+<h2>Reducers: how updates are merged into state</h2>
+
+<p>When a node returns <code>{"answer": "…"}</code>, LangGraph must merge it into the state. By default it simply
+<strong>replaces</strong> the old value. That is right for <code>answer</code>, but wrong for a conversation: if each
+node replaced the message list, every reply would erase the history. A
+<a class="term" href="glossary.html#reducer">reducer</a> is a function attached to one key that decides how an update
+combines with the current value. You attach it with <code>Annotated</code>:</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>import operator
+from typing import Annotated, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+
+class State(TypedDict):
+    question: str                               # no reducer: a new value replaces the old one
+    notes: Annotated[list[str], operator.add]   # reducer: lists are concatenated
+
+
+def a(state: State):
+    return {"question": "B", "notes": ["from a"]}
+
+
+builder = StateGraph(State)
+builder.add_node("a", a)
+builder.add_edge(START, "a")
+builder.add_edge("a", END)
+print(builder.compile().invoke({"question": "A", "notes": ["start"]}))
+# {'question': 'B', 'notes': ['start', 'from a']}</code></pre>
+
+<p>For chat messages LangGraph provides <code>add_messages</code>, and the ready-made <code>MessagesState</code>
+(used from lab 09 on) is just a state with one key, <code>messages</code>, annotated with it. It is smarter than
+<code>operator.add</code>: a message with a <strong>new id is appended</strong>, but a message whose
+<strong>id matches one already in the list replaces it</strong>. That second rule is easy to forget, and lab 13 tripped
+over it (see "Time travel" below).</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>from langchain_core.messages import HumanMessage
+from langgraph.graph.message import add_messages
+
+old = [HumanMessage("Hold B003", id="1")]
+print(len(add_messages(old, [HumanMessage("Is B006 available?")])))              # 2: appended
+print(add_messages(old, [HumanMessage("Is B006 available?", id="1")])[0].content)  # replaced</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 196" role="img" aria-label="Three merge rules: no reducer replaces, operator.add appends, add_messages appends new ids and replaces matching ids">
+  <rect class="box" x="20" y="20" width="230" height="130" rx="8"/>
+  <text class="title" x="36" y="44">No reducer</text>
+  <text class="mono" x="36" y="78">old:    "A"</text>
+  <text class="mono" x="36" y="102">update: "B"</text>
+  <text class="mono" x="36" y="126">result: "B"</text>
+  <rect class="box" x="265" y="20" width="230" height="130" rx="8"/>
+  <text class="title" x="281" y="44">operator.add</text>
+  <text class="mono" x="281" y="78">old:    [start]</text>
+  <text class="mono" x="281" y="102">update: [from a]</text>
+  <text class="mono" x="281" y="126">result: [start, from a]</text>
+  <rect class="box-info" x="510" y="20" width="230" height="130" rx="8"/>
+  <text class="title" x="526" y="44">add_messages</text>
+  <text class="mono" x="526" y="78">new id  → append</text>
+  <text class="mono" x="526" y="102">same id → replace</text>
+  <text class="small" x="526" y="126">(used by MessagesState)</text>
+  <text class="small" x="380" y="180" text-anchor="middle">Lab 13: an edited message without its old id was appended, not replaced.</text>
+</svg>
+<figcaption>What happens to a key when a node returns an update for it.
+<strong>The reducer, not the node, decides whether history grows or is overwritten.</strong></figcaption>
+</figure>
+
+<h2>Tools and the agent loop</h2>
+
+<p>A <a class="term" href="glossary.html#tool">tool</a> is a Python function the model may ask you to run. With
+LangChain's <code>@tool</code> decorator, the function's <strong>name</strong> becomes the tool name, its
+<strong>docstring</strong> becomes the description, and its <a class="term" href="glossary.html#type-hint">type
+hints</a> become a <a class="term" href="glossary.html#json-schema">JSON schema</a> for the arguments. Those three
+things are all the model ever sees of your tool, so they are part of your prompt.</p>
+
+<pre data-lang="py" data-tag="excerpt · harbor/catalog.py lines 25–31"><code>@tool
+def check_availability(item_id: str) -&gt; str:
+    """Tell how many copies of an item (id like B004) are on the shelf, and at which branch."""
+    b = CATALOG.get(item_id.strip().upper())
+    if not b:
+        return f"There is no item {item_id}."
+    return f"{b['title']}: {b['available']} of {b['copies']} copies available at {b['branch']}."</code></pre>
+
+<p>Lab 09 printed what the model receives for this tool: the name, the docstring, and the argument schema
+<code>{'item_id': {'title': 'Item Id', 'type': 'string'}}</code>. Note the example id "B004" in the docstring: it helps
+the model format ids, and later labs show it can also be copied blindly.</p>
+
+<p><a class="term" href="glossary.html#tool-calling">Tool calling</a> works in four moves:</p>
+<ol>
+  <li><code>model.bind_tools(tools)</code> sends the tool schemas along with every request. The model still runs no
+  code.</li>
+  <li>The model replies with an <a class="term" href="glossary.html#ai-message">AI message</a> whose
+  <code>tool_calls</code> list says what it wants, for example
+  <code>[{'name': 'check_availability', 'args': {'item_id': 'B004'}, 'id': '…', 'type': 'tool_call'}]</code> (lab 09).</li>
+  <li>Your code runs the function with those arguments and wraps the result in a <code>ToolMessage</code> carrying the
+  same call id ("The Quiet Engine: 1 of 2 copies available at Central Library.").</li>
+  <li>You send the conversation back to the model, which either asks for another tool or writes the answer.</li>
+</ol>
+
+<p>Repeating moves 2 to 4 until the model stops asking is the <a class="term" href="glossary.html#agent-loop">agent
+loop</a>, and a model running in such a loop is what people call an <a class="term" href="glossary.html#agent">agent</a>.
+LangGraph ships the two pieces you need: <a class="term" href="glossary.html#toolnode"><code>ToolNode</code></a>, a node
+that executes every tool call in the last AI message and appends the results, and <code>tools_condition</code>, a
+routing function that goes to <code>"tools"</code> if the last message has tool calls and to <code>END</code>
+otherwise. The project's reusable agent is just this:</p>
+
+<pre data-lang="py" data-tag="excerpt · harbor/agent_graph.py lines 13–25"><code>def build_builder(tools=READ_TOOLS):
+    model = get_model().bind_tools(tools)
+
+    def call_model(state: MessagesState):
+        return {"messages": [model.invoke([SYSTEM] + state["messages"])]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("model", call_model)
+    builder.add_node("tools", ToolNode(tools))
+    builder.add_edge(START, "model")
+    builder.add_conditional_edges("model", tools_condition)
+    builder.add_edge("tools", "model")
+    return builder</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="Sequence of the agent loop: the question goes to the model node, a tool call goes to ToolNode, the result returns, and the model answers when it asks for no more tools">
+  <rect class="box2" x="40" y="16" width="100" height="34" rx="8"/>
+  <text class="title" x="90" y="38" text-anchor="middle">User</text>
+  <rect class="box" x="240" y="16" width="120" height="34" rx="8"/>
+  <text class="title" x="300" y="38" text-anchor="middle">model node</text>
+  <rect class="box" x="450" y="16" width="120" height="34" rx="8"/>
+  <text class="title" x="510" y="38" text-anchor="middle">ToolNode</text>
+  <path class="line dashed" d="M90,50 V250"/>
+  <path class="line dashed" d="M300,50 V250"/>
+  <path class="line dashed" d="M510,50 V250"/>
+  <path class="arrow" d="M90,86 H298"/>
+  <text class="label" x="195" y="78" text-anchor="middle">1 "Is B004 on the shelf?"</text>
+  <path class="arrow-accent" d="M300,128 H508"/>
+  <text class="label" x="405" y="120" text-anchor="middle">2 check_availability('B004')</text>
+  <path class="arrow" d="M510,170 H302"/>
+  <text class="label" x="405" y="162" text-anchor="middle">3 "1 of 2 copies available…"</text>
+  <path class="arrow-ok" d="M300,220 H92"/>
+  <text class="label" x="195" y="212" text-anchor="middle">4 answer, no tool call: END</text>
+  <text class="small" x="590" y="132">steps 2–3 repeat while</text>
+  <text class="small" x="590" y="150">the model asks for tools</text>
+  <text class="small" x="590" y="168">(tools_condition)</text>
+</svg>
+<figcaption>One trip around the loop, with lab 09's real call and result. <strong>The model only asks; your graph
+runs the tool and decides when the loop ends.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>An agent can skip the tool and still sound sure.</strong> Asked "Do you have any
+books by Mara Quint? Is one available?", lab 09's agent called <code>search_catalog</code>, found two titles, and
+answered that both are "available" without ever calling <code>check_availability</code>. One of them has no copy on
+the shelf. Nothing in the loop forces a tool call; the model decides. Small models do this more often. Defences:
+tool descriptions that say when to use them, a system prompt that forbids guessing stock, tests that check
+<em>which tools were called</em>, and, for critical facts, putting the check in your own code instead of the model's
+hands.</div>
+
+<h2>MCP: tools served by another program</h2>
+
+<p>Defining tools inside your app works until you want to reuse them in another app, or use tools somebody else
+wrote. The <a class="term" href="glossary.html#mcp">Model Context Protocol (MCP)</a> is an open standard for that: an
+<a class="term" href="glossary.html#mcp-server">MCP server</a> offers capabilities, and any
+<a class="term" href="glossary.html#mcp-client">MCP client</a> can discover and use them, whatever language or
+framework each side uses. The application that hosts the model (here, our Python lab) creates one client connection
+per server.</p>
+
+<p>A server can offer three kinds of things:</p>
+<div class="table-wrap"><table>
+<tr><th>Primitive</th><th>What it is</th><th>Who usually decides to use it</th><th>In the lab</th></tr>
+<tr><td>Tools</td><td>Functions with a schema that do something or look something up</td><td>The model, through tool calls</td><td><code>search_catalog</code>, <code>check_availability</code></td></tr>
+<tr><td>Resources</td><td>Read-only data addressed by a URI</td><td>The application</td><td><code>catalog://genres</code></td></tr>
+<tr><td>Prompts</td><td>Reusable prompt templates with arguments</td><td>The user, for example from a menu</td><td>none</td></tr>
+</table></div>
+
+<p>Messages travel over a <strong>transport</strong>. With <a class="term" href="glossary.html#stdio">stdio</a>, the
+client starts the server as a child process and they talk through its standard input and output; nothing listens on
+the network, which makes it the simple, private choice for local tools. With <strong>Streamable HTTP</strong>, the
+server is a web service (one endpoint, by default <code>/mcp</code> in the Python SDK's FastMCP) that many clients can
+reach, possibly with authentication. An older HTTP + SSE transport still exists but the current specification replaces
+it with Streamable HTTP.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The app holds an agent and a MultiServerMCPClient; the client talks to the lab's server over stdio as a child process, and could talk to a remote server over Streamable HTTP">
+  <rect class="zone" x="10" y="10" width="300" height="228" rx="8"/>
+  <text class="label" x="24" y="30">Your app (MCP host)</text>
+  <rect class="box" x="30" y="46" width="260" height="50" rx="8"/>
+  <text x="160" y="76" text-anchor="middle">agent (llama3.2)</text>
+  <path class="arrow" d="M160,148 V98"/>
+  <text class="small" x="170" y="128">tools as LangChain tools</text>
+  <rect class="box-info" x="30" y="150" width="260" height="66" rx="8"/>
+  <text class="mono" x="160" y="178" text-anchor="middle">MultiServerMCPClient</text>
+  <text class="small" x="160" y="200" text-anchor="middle">connects to each server</text>
+  <rect class="box-ok" x="450" y="30" width="290" height="94" rx="8"/>
+  <text class="mono" x="466" y="56">harbor.mcp_server</text>
+  <text class="small" x="466" y="80">tools: search_catalog, check_availability</text>
+  <text class="small" x="466" y="100">resource: catalog://genres</text>
+  <rect class="box2 dashed" x="450" y="150" width="290" height="80" rx="8"/>
+  <text x="466" y="178">any remote MCP server</text>
+  <text class="small" x="466" y="202">tools, resources, prompts</text>
+  <path class="arrow-accent" d="M290,168 H350 V77 H448"/>
+  <text class="small" x="358" y="104">stdio</text>
+  <text class="small" x="358" y="120">child process</text>
+  <path class="arrow dashed" d="M290,200 H448"/>
+  <text class="small" x="400" y="192" text-anchor="middle">Streamable HTTP</text>
+</svg>
+<figcaption>Lab 10's setup (solid) and the network alternative (dashed).
+<strong>The agent cannot tell an MCP tool from a local one; the client converts them.</strong></figcaption>
+</figure>
+
+<p>Lab 10 starts <code>harbor/mcp_server.py</code> over stdio with <code>MultiServerMCPClient</code> from
+<code>langchain-mcp-adapters</code>, lists its tools and its resource, and hands the tools to an agent. Three things in
+its output are worth knowing about. The server's log lines ("Processing request of type ListToolsRequest") appear on
+stderr, which is fine for stdio because only stdout carries protocol messages; the reverse would be a bug, since
+printing to stdout from a stdio server corrupts the stream. Tool results come back as MCP content blocks
+(<code>[{'type': 'text', 'text': "No items match 'radios'.", …}]</code>), not a plain string. And the agent, faced
+with "No items match 'radios'" (the search looks for each query word inside titles, authors and genres, and "radios" does not occur in "Build Your
+Own Radio"),
+<strong>invented</strong> a book called "A History of Radio" and said it was available. MCP moves tools around; it
+does nothing about a model ignoring their results.</p>
+
+<p>Connecting over HTTP instead only changes the connection settings. The values below match the installed packages
+(<code>mcp</code> 1.30.0, <code>langchain-mcp-adapters</code> 0.3.2), but the labs do not run this variant:</p>
+
+<pre data-lang="py" data-tag="illustrative"><code># server side, instead of mcp.run(transport="stdio"):
+mcp.run(transport="streamable-http")          # serves http://127.0.0.1:8000/mcp by default
+
+# client side
+client = MultiServerMCPClient({
+    "catalog": {"transport": "streamable_http", "url": "http://127.0.0.1:8000/mcp"},
+})</code></pre>
+
+<div class="callout warn"><strong>Third-party MCP servers are code you run.</strong> A stdio server is a program on
+your machine with your user's permissions; an HTTP server sees whatever your agent sends it. Tool names and
+descriptions from a server go straight into the model's prompt, so a malicious or careless server can steer your agent
+(prompt injection) or ask it for data it should not send. Before connecting one: read its source or use one from a
+publisher you trust, pin its version, give it the least access it needs (separate credentials, read-only where
+possible), and require human approval for tools that change things or send data out. The official MCP security best
+practices page (linked below) goes deeper.</div>
+
+<h2>Checkpointers: threads and saved state</h2>
+
+<p>Without help, a compiled graph forgets everything between calls. In lab 11, two separate <code>invoke</code>
+calls without one cannot see each other. (The second call still answered "M-1001", but only because the
+model copied the example id from the tool's description, the bug described below.) A
+<a class="term" href="glossary.html#checkpointer">checkpointer</a> fixes this by saving the full state after every
+step of the graph. Each save is a <a class="term" href="glossary.html#checkpoint">checkpoint</a>. Checkpoints are
+grouped by <a class="term" href="glossary.html#thread">thread</a>, a conversation id you pass in the config:</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/11_checkpointers.py lines 19–23"><code>def ask(graph, thread, text):
+    config = {"configurable": {"thread_id": thread}}
+    before = len(graph.get_state(config).values.get("messages", []))
+    print(f"   [{thread}] {text}   ({before} earlier messages loaded)")
+    show(graph.invoke({"messages": [("user", text)]}, config), before)</code></pre>
+
+<p>When you invoke with a <code>thread_id</code>, LangGraph loads that thread's latest checkpoint, applies your new
+input through the reducers (so the user message is appended to the history), and runs. Two methods let you look
+inside: <code>get_state(config)</code> returns the latest snapshot (its <code>values</code>, and <code>next</code>,
+the nodes that would run next), and <code>get_state_history(config)</code> lists every checkpoint of the thread,
+newest first. After two turns, lab 11's thread "lea" held 8 messages in 10 checkpoints: one per step, including the
+model and tool steps, not one per question.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 214" role="img" aria-label="Each thread has its own chain of checkpoints; lea has ten, sam has its own short history, ines is stored in a SQLite file">
+  <text class="mono" x="20" y="54">thread "lea"</text>
+  <path class="line" d="M160,50 H592"/>
+  <circle class="dot-info" cx="160" cy="50" r="7"/>
+  <circle class="dot-info" cx="208" cy="50" r="7"/>
+  <circle class="dot-info" cx="256" cy="50" r="7"/>
+  <circle class="dot-info" cx="304" cy="50" r="7"/>
+  <circle class="dot-info" cx="352" cy="50" r="7"/>
+  <circle class="dot-info" cx="400" cy="50" r="7"/>
+  <circle class="dot-info" cx="448" cy="50" r="7"/>
+  <circle class="dot-info" cx="496" cy="50" r="7"/>
+  <circle class="dot-info" cx="544" cy="50" r="7"/>
+  <circle class="dot-info" cx="592" cy="50" r="7"/>
+  <text class="small" x="610" y="46">10 checkpoints</text>
+  <text class="small" x="610" y="62">8 messages</text>
+  <text class="mono" x="20" y="114">thread "sam"</text>
+  <path class="line" d="M160,110 H352"/>
+  <circle class="dot" cx="160" cy="110" r="7"/>
+  <circle class="dot" cx="208" cy="110" r="7"/>
+  <circle class="dot" cx="256" cy="110" r="7"/>
+  <circle class="dot" cx="304" cy="110" r="7"/>
+  <circle class="dot" cx="352" cy="110" r="7"/>
+  <text class="small" x="370" y="114">its own history, starts empty</text>
+  <rect class="zone" x="150" y="148" width="600" height="54" rx="8"/>
+  <text class="mono" x="20" y="180">thread "ines"</text>
+  <path class="line" d="M170,175 H602"/>
+  <circle class="dot-ok" cx="170" cy="175" r="7"/>
+  <circle class="dot-ok" cx="218" cy="175" r="7"/>
+  <circle class="dot-ok" cx="266" cy="175" r="7"/>
+  <circle class="dot-ok" cx="314" cy="175" r="7"/>
+  <circle class="dot-ok" cx="362" cy="175" r="7"/>
+  <circle class="dot-ok" cx="410" cy="175" r="7"/>
+  <circle class="dot-ok" cx="458" cy="175" r="7"/>
+  <circle class="dot-ok" cx="506" cy="175" r="7"/>
+  <circle class="dot-ok" cx="554" cy="175" r="7"/>
+  <circle class="dot-ok" cx="602" cy="175" r="7"/>
+  <text class="small" x="620" y="171">10 rows in</text>
+  <text class="small" x="620" y="187">checkpoints.sqlite</text>
+</svg>
+<figcaption>Each dot is the state saved after one step. Counts for "lea" and "ines" are lab 11's real numbers; the
+five dots for "sam" follow the same pattern for one turn with one tool call. <strong>A thread id selects a whole
+history; a new id starts from nothing.</strong></figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<tr><th>Checkpointer</th><th>Survives a restart?</th><th>Use for</th></tr>
+<tr><td><code>InMemorySaver</code></td><td>No</td><td>Learning, tests, notebooks</td></tr>
+<tr><td><code>SqliteSaver</code></td><td>Yes, in a local file</td><td>Single-process apps, demos, local tools</td></tr>
+<tr><td><code>PostgresSaver</code></td><td>Yes, in a database</td><td>Production with several workers</td></tr>
+</table></div>
+<p><code>InMemorySaver</code> ships with <code>langgraph</code>; the others are separate packages,
+<code>langgraph-checkpoint-sqlite</code> (installed for the labs) and <code>langgraph-checkpoint-postgres</code>.
+All of them save the same checkpoints, so switching is a one-line change at compile time.</p>
+
+<p>Lab 11 closed the SQLite connection, opened a fresh one as if the program had restarted, and the thread "ines"
+continued with "4 earlier messages loaded". Persistence worked. The answer did not: asked "Which genre do I like?",
+llama3.2 searched the catalog for the word "genre" instead of reading its own history. A checkpointer guarantees the
+history is <em>there</em>; it cannot make the model use it.</p>
+
+<h3>The privacy bug: identity must come from the app</h3>
+<p>Lab 11 contains a bug on purpose. In thread "sam", a different visitor asks "What is my member id?". The model has
+no idea who is asking, so it called <code>get_member_account('M-1001')</code>, copying the example id from the tool's
+own description, and answered "Your member ID is M-1001, Lea Martin." It revealed one member's account to someone
+else. The root cause is a design mistake, not a model mistake: <strong>the model was allowed to choose whose data to
+read</strong>. Anything the model writes into a tool argument can be guessed, copied or manipulated by the user.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 214" role="img" aria-label="Left: the model chooses the member id and reads Lea's account for Sam. Right: the app passes the logged-in member's id and the tool only reads that one">
+  <rect class="zone" x="10" y="10" width="360" height="192" rx="8"/>
+  <text class="label bad" x="24" y="30">Lab 11: the model picks the id</text>
+  <rect class="box" x="30" y="42" width="320" height="36" rx="8"/>
+  <text class="mono" x="190" y="65" text-anchor="middle">[sam] What is my member id?</text>
+  <path class="arrow" d="M190,78 V96"/>
+  <rect class="box-bad" x="30" y="98" width="320" height="36" rx="8"/>
+  <text class="mono" x="190" y="121" text-anchor="middle">get_member_account('M-1001')</text>
+  <path class="arrow-bad" d="M190,134 V152"/>
+  <rect class="box-bad" x="30" y="154" width="320" height="36" rx="8"/>
+  <text x="190" y="177" text-anchor="middle">Lea's account shown to Sam</text>
+  <rect class="zone" x="390" y="10" width="360" height="192" rx="8"/>
+  <text class="label ok" x="404" y="30">Fix: the app supplies the id</text>
+  <rect class="box" x="410" y="42" width="320" height="36" rx="8"/>
+  <text x="570" y="65" text-anchor="middle">login session: member M-1002</text>
+  <path class="arrow" d="M570,78 V96"/>
+  <rect class="box-ok" x="410" y="98" width="320" height="36" rx="8"/>
+  <text x="570" y="121" text-anchor="middle">tool reads the id from context</text>
+  <path class="arrow-ok" d="M570,134 V152"/>
+  <rect class="box-ok" x="410" y="154" width="320" height="36" rx="8"/>
+  <text x="570" y="177" text-anchor="middle">model cannot ask for another id</text>
+</svg>
+<figcaption>Left is lab 11's real run; right is the design lab 14 uses with runtime context.
+<strong>Never let the model decide whose private data a tool returns.</strong></figcaption>
+</figure>
+
+<p>The fix is to remove <code>member_id</code> from the tool's arguments and give the tool the logged-in member from
+your application (a session, a token), outside the model's reach. <a href="14-create-agent.html">Lab 14</a> does this
+with <a class="term" href="glossary.html#runtime-context">runtime context</a>; the
+<a href="langchain-agents-middleware.html">next concept chapter</a> explains it. The same rule applies to thread ids:
+derive them from the authenticated user, never from something the visitor typed, or one person can load another's
+conversation.</p>
+
+<h2>Memory: short-term and long-term</h2>
+
+<p><a class="term" href="glossary.html#short-term-memory">Short-term memory</a> is the conversation inside one thread,
+kept by the checkpointer. Its problem is growth: every turn adds messages, and eventually the history no longer fits
+the context window, or simply makes each call slow and distracting. Two common remedies:</p>
+<ul>
+  <li><strong>Trimming</strong>: send only the most recent part. Lab 12's <code>trim_messages</code> call cut 12
+  messages to 2 with a tiny 40-token budget, keeping the last question and answer. Options such as
+  <code>start_on="human"</code> make sure the kept part starts at a user message, because a history that starts with
+  an orphan tool result confuses models. Trimming before the model call leaves the saved state untouched.</li>
+  <li><strong>Summarizing</strong>: ask the model to summarize older turns into one message, then delete those turns
+  from the state. Deletion uses the reducer again: return <code>RemoveMessage</code> objects with the ids to drop.</li>
+</ul>
+
+<pre data-lang="py" data-tag="illustrative"><code>from langchain_core.messages import RemoveMessage
+from langgraph.graph import MessagesState
+
+
+def forget_old(state: MessagesState):
+    # add_messages treats RemoveMessage(id=...) as "delete the message with this id"
+    return {"messages": [RemoveMessage(id=m.id) for m in state["messages"][:-6]]}</code></pre>
+
+<p><a class="term" href="glossary.html#long-term-memory">Long-term memory</a> is information that should outlive a
+single thread: a member's preferences, facts learned last week. LangGraph keeps it in a
+<a class="term" href="glossary.html#store">store</a>, separate from the checkpointer. A store saves JSON values under a
+key inside a <a class="term" href="glossary.html#namespace">namespace</a>, a tuple that works like a folder path.
+Compile the graph with <code>store=...</code> and any node that declares a <code>store</code> parameter receives it:</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/12_memory.py lines 23–28"><code>def call_model(state: MessagesState, config, *, store: BaseStore):
+    member = config["configurable"]["member_id"]
+    namespace = ("members", member, "preferences")
+    last = state["messages"][-1].content
+    if last.lower().startswith("remember"):  # a deliberately simple rule for what to save
+        store.put(namespace, f"note-{len(store.search(namespace))}", {"text": last})</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 226" role="img" aria-label="Thread monday puts a note into the store under the member's namespace; thread friday searches the same namespace and finds it">
+  <rect class="box" x="20" y="24" width="220" height="74" rx="8"/>
+  <text class="mono" x="36" y="50">thread "monday"</text>
+  <text class="small" x="36" y="72">"Remember: I only read</text>
+  <text class="small" x="36" y="88">books in large print."</text>
+  <rect class="box" x="20" y="128" width="220" height="74" rx="8"/>
+  <text class="mono" x="36" y="154">thread "friday"</text>
+  <text class="small" x="36" y="176">"How should I look for</text>
+  <text class="small" x="36" y="192">a new novel?"</text>
+  <rect class="box-info" x="330" y="24" width="410" height="178" rx="8"/>
+  <text class="title" x="346" y="50">InMemoryStore (long-term memory)</text>
+  <text class="small" x="346" y="78">namespace</text>
+  <text class="mono" x="346" y="98">("members", "M-1002", "preferences")</text>
+  <text class="small" x="346" y="126">key</text>
+  <text class="mono" x="346" y="146">note-0</text>
+  <text class="small" x="346" y="174">value</text>
+  <text class="mono" x="346" y="194">{"text": "Remember: I only…"}</text>
+  <path class="arrow-accent" d="M240,61 H328"/>
+  <text class="label" x="284" y="53" text-anchor="middle">put</text>
+  <path class="arrow-ok" d="M328,165 H242"/>
+  <text class="label" x="285" y="157" text-anchor="middle">search</text>
+</svg>
+<figcaption>Lab 12's real namespace and value. Each thread keeps its own messages (short-term); the store is shared
+by every thread of member M-1002. <strong>The namespace decides who shares a memory.</strong></figcaption>
+</figure>
+
+<p>In lab 12 the "friday" thread had never seen the "monday" conversation, yet it suggested the large-print section,
+because the note came in through the system prompt. Two design choices deserve attention. First, the namespace
+contains the member id from the config, so the privacy rule above applies: it must come from the app. Second, the
+"what to save" rule is deliberately naive (messages starting with "remember"); real systems let the model call a
+"save memory" tool or extract facts after each conversation, and then must deal with outdated or wrong memories.
+Stores can also search by meaning if you create them with an embedding index, for example
+<code>InMemoryStore(index={"embed": embeddings, "dims": 768})</code> and then
+<code>store.search(namespace, query="print size")</code>.</p>
+
+<h2>Human in the loop</h2>
+
+<p>Some actions should not happen just because a model asked. Placing a hold changes a member's account, so lab 13
+pauses before it. <a class="term" href="glossary.html#human-in-the-loop">Human in the loop</a> in LangGraph rests on
+one function, <a class="term" href="glossary.html#interrupt"><code>interrupt()</code></a>, and on the checkpointer
+(it is required, because the paused run must be saved somewhere).</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/13_hitl_streaming.py lines 19–28"><code>def approve(state: MessagesState):
+    """Pause before any place_hold call and ask a librarian. Other tools run without asking."""
+    last = state["messages"][-1]
+    holds = [c for c in last.tool_calls if c["name"] == "place_hold"]
+    if holds:
+        decision = interrupt({"question": "Approve this hold?", "calls": holds})
+        if decision != "yes":
+            refused = AIMessage("A librarian did not approve this hold, so I did not place it.")
+            return Command(goto=END, update={"messages": [refused]})
+    return Command(goto="tools")</code></pre>
+
+<p>When <code>interrupt(value)</code> runs, the graph stops, saves a checkpoint, and <code>invoke</code> returns with
+an <code>__interrupt__</code> entry carrying <code>value</code>, so your app can show the librarian what is pending
+(lab 13 printed the place_hold call and <code>next node: ('approve',)</code>). Later, possibly in another process,
+you call <code>graph.invoke(Command(resume="yes"), config)</code> with the same thread. The node runs again
+<strong>from its first line</strong>, and this time <code>interrupt()</code> returns <code>"yes"</code> instead of
+pausing. The node also returns a <code>Command</code>, which updates state and chooses the next node in one go, so no
+separate conditional edge is needed. In the lab, "yes" placed the hold and "no" produced the refusal message.</p>
+
+<div class="callout"><strong>Because the node restarts from its first line</strong>, any code before
+<code>interrupt()</code> runs twice. Keep side effects (writing to a database, sending an email) after the interrupt,
+or in a separate node.</div>
+
+<h2>Time travel: rewinding and forking</h2>
+
+<p>Since every step is saved, you can go back. <a class="term" href="glossary.html#time-travel">Time travel</a> means
+picking an earlier checkpoint from <code>get_state_history</code> and either replaying from it
+(<code>graph.invoke(None, checkpoint_config)</code>) or first changing it with <code>update_state</code>, which creates
+a <strong>fork</strong>: a new checkpoint branching off the old one, while the original history stays intact. It is
+the tool for "what if the user had asked something else here?" and for debugging a bad run step by step.</p>
+
+<p>Lab 13's thread "hold-1" had 6 checkpoints, steps −1 to 4. The lab took step 0 (the user's message, next node
+<code>model</code>), replaced that message with "Is item B006 available?", and replayed. The forked run answered with
+B006's availability, and the thread then had 11 checkpoints because the old branch was kept. The first attempt
+failed: the edited message had no id, so <code>add_messages</code> <strong>appended</strong> it after the original
+hold request. The model saw both, asked for the hold again, hit the approval interrupt, and the replay ended without
+an answer. Reusing the original message's id made the reducer replace it:</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/13_hitl_streaming.py lines 66–71"><code>first_input = next(s for s in history if s.next == ("model",) and len(s.values["messages"]) == 1)
+original = first_input.values["messages"][0]
+# Reusing the message id REPLACES that message; a message without its id would be appended instead.
+edited = HumanMessage("I'm member M-1002. Is item B006 available?", id=original.id)
+fork = graph.update_state(first_input.config, {"messages": [edited]})
+replayed = graph.invoke(None, fork)</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Six original checkpoints in a row; a fork branches from step 0 with an edited message and continues to an answer; without the id the message would be appended">
+  <text class="label" x="20" y="24">Original run (thread hold-1)</text>
+  <path class="line" d="M60,70 H610"/>
+  <circle class="dot" cx="60" cy="70" r="8"/>
+  <circle class="dot-info" cx="170" cy="70" r="8"/>
+  <circle class="dot" cx="280" cy="70" r="8"/>
+  <circle class="dot" cx="390" cy="70" r="8"/>
+  <circle class="dot" cx="500" cy="70" r="8"/>
+  <circle class="dot" cx="610" cy="70" r="8"/>
+  <text class="small" x="60" y="50" text-anchor="middle">__start__</text>
+  <text class="small" x="170" y="50" text-anchor="middle">model</text>
+  <text class="small" x="280" y="50" text-anchor="middle">approve</text>
+  <text class="small" x="390" y="50" text-anchor="middle">tools</text>
+  <text class="small" x="500" y="50" text-anchor="middle">model</text>
+  <text class="small" x="610" y="50" text-anchor="middle">done</text>
+  <text class="mono" x="60" y="96" text-anchor="middle">-1</text>
+  <text class="mono" x="170" y="96" text-anchor="middle">0</text>
+  <text class="mono" x="280" y="96" text-anchor="middle">1</text>
+  <text class="mono" x="390" y="96" text-anchor="middle">2</text>
+  <text class="mono" x="500" y="96" text-anchor="middle">3</text>
+  <text class="mono" x="610" y="96" text-anchor="middle">4</text>
+  <path class="arrow-accent" d="M170,104 V150 H226"/>
+  <rect class="box-ok" x="228" y="130" width="300" height="40" rx="8"/>
+  <text x="378" y="155" text-anchor="middle">fork: edited message, same id</text>
+  <path class="arrow-ok" d="M528,150 H576"/>
+  <rect class="box-ok" x="578" y="130" width="162" height="40" rx="8"/>
+  <text x="659" y="155" text-anchor="middle">B006 answer</text>
+  <rect class="box-bad" x="228" y="186" width="512" height="40" rx="8"/>
+  <text x="484" y="211" text-anchor="middle">first try, no id: appended, hold asked again, no answer</text>
+</svg>
+<figcaption>Labels above the dots are the <code>next</code> node of each checkpoint, numbers below are steps (real
+values from lab 13; "done" means nothing left to run). <strong>Forking keeps the old branch; the reducer decides whether your edit replaces or adds.</strong></figcaption>
+</figure>
+
+<h2>Streaming: watching a graph work</h2>
+
+<p><a class="term" href="glossary.html#streaming">Streaming</a> means receiving results while the graph is still
+running. <code>graph.stream(input, config, stream_mode=...)</code> yields pieces as they become available, and the
+mode decides what a piece is (lab 08 printed updates such as
+<code>[classify] {'route': 'library'}</code>; lab 13 streamed tokens and kept those whose metadata says
+<code>langgraph_node == "model"</code>):</p>
+<div class="table-wrap"><table>
+<tr><th>Mode</th><th>Each item is</th><th>Good for</th><th>In the labs</th></tr>
+<tr><td><code>values</code></td><td>The full state after each step</td><td>Simple UIs that redraw everything</td><td>none</td></tr>
+<tr><td><code>updates</code></td><td>Only what each node returned, keyed by node name</td><td>Progress views, debugging</td><td>Lab 08</td></tr>
+<tr><td><code>messages</code></td><td>(token, metadata) pairs from model calls inside nodes</td><td>Typing effect in chat UIs</td><td>Lab 13</td></tr>
+<tr><td><code>custom</code></td><td>Anything your node sends with a stream writer</td><td>Your own progress messages</td><td>none</td></tr>
+</table></div>
+<p>The installed version also offers <code>"checkpoints"</code>, <code>"tasks"</code> and <code>"debug"</code> for
+low-level inspection. You can pass a list of modes; each item then comes as a <code>(mode, data)</code> pair:</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>from langgraph.config import get_stream_writer
+
+
+def retrieve(state):
+    writer = get_stream_writer()
+    writer({"progress": "searching the policies"})   # arrives in the "custom" stream
+    ...
+
+
+for mode, data in graph.stream(inputs, stream_mode=["updates", "custom"]):
+    print(mode, data)</code></pre>
+
+<p>Note that <code>"messages"</code> mode streams tokens even though the node calls <code>model.invoke</code>, not
+<code>model.stream</code>: LangGraph hooks into the model's callbacks. That is why lab 13 could print the maker-space
+answer word by word with no change to <code>call_model</code>. When a graph has several model calls (a router and a
+writer, say), the metadata tells you which node a token came from, so filter on it.</p>
+
+<p>Everything on this page also exists in a prebuilt form: <code>create_agent</code>, used in lab 10 and explained
+in <a href="langchain-agents-middleware.html">LangChain agents and middleware</a>, builds the same model-and-tools
+loop for you. Knowing the graph underneath is what lets you debug it. For a video introduction to the same ideas, see
+the companion guide <a href="../langGraph/">LangGraph crash course</a>.</p>
+
+<div class="callout warn"><strong>Common misconceptions and pitfalls</strong>
+<ul>
+  <li><strong>"The agent checked."</strong> Read the tool calls, not the answer. Lab 09 claimed availability without
+  calling the availability tool; lab 10 invented a book after an empty search.</li>
+  <li><strong>Letting the model pick identities.</strong> Member ids, thread ids and namespaces must come from your
+  app's login, never from a tool argument the model fills (lab 11).</li>
+  <li><strong>Forgetting the reducer.</strong> A message list without <code>add_messages</code> is overwritten each
+  step; an edited message without its id is appended instead of replaced (lab 13).</li>
+  <li><strong>Expecting memory without a checkpointer or thread id.</strong> No checkpointer, no history; a new
+  <code>thread_id</code>, a blank conversation.</li>
+  <li><strong>Assuming a saved history is a used history.</strong> SQLite restored 4 messages in lab 11; the model
+  still answered as if it had not read them.</li>
+  <li><strong>Side effects before <code>interrupt()</code>.</strong> The node reruns from the top on resume.</li>
+  <li><strong>Trusting any MCP server.</strong> Its tool descriptions enter your prompt and its code runs with your
+  permissions.</li>
+  <li><strong>Printing to stdout in a stdio MCP server.</strong> Log to stderr; stdout is the protocol channel.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+  <li>A LangGraph program is state plus nodes plus edges; conditional edges route with a function; <code>START</code>
+  and <code>END</code> mark the boundaries; <code>compile()</code> checks and builds it, and
+  <code>draw_mermaid()</code> shows it.</li>
+  <li>Reducers decide how updates merge: replace by default, append with <code>operator.add</code>, and append or
+  replace-by-id with <code>add_messages</code>.</li>
+  <li>Tools get their schema from name, docstring and type hints; <code>bind_tools</code> lets the model request
+  them; <code>ToolNode</code> runs them; <code>tools_condition</code> closes the agent loop.</li>
+  <li>MCP lets separate programs serve tools, resources and prompts over stdio or Streamable HTTP; treat third-party
+  servers as untrusted code.</li>
+  <li>Checkpointers save state after every step, per thread; <code>get_state</code> and
+  <code>get_state_history</code> let you inspect it; identity must come from the app.</li>
+  <li>Short-term memory is the thread's messages (trim or summarize them); long-term memory lives in a store under
+  namespaces shared across threads.</li>
+  <li><code>interrupt()</code> and <code>Command(resume=...)</code> add human approval; forking a checkpoint is time
+  travel; stream modes <code>values</code>, <code>updates</code>, <code>messages</code> and <code>custom</code> show a
+  run as it happens.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/overview">LangGraph docs: Overview</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/thinking-in-langgraph">LangGraph docs: Thinking in LangGraph</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/graph-api">LangGraph docs: Graph API (state, nodes, edges, reducers)</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/tools">LangChain docs: Tools</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/mcp">LangChain docs: Model Context Protocol</a></li>
+  <li><a href="https://modelcontextprotocol.io/docs/learn/architecture">MCP: Architecture overview</a></li>
+  <li><a href="https://modelcontextprotocol.io/specification/2025-06-18/basic/transports">MCP specification: Transports</a></li>
+  <li><a href="https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices">MCP: Security best practices</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/persistence">LangGraph docs: Persistence (checkpointers, threads, stores)</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/memory">LangGraph docs: Memory overview</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/add-memory">LangGraph docs: Add and manage memory</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/interrupts">LangGraph docs: Interrupts</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/use-time-travel">LangGraph docs: Use time travel</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/streaming">LangGraph docs: Streaming</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="rag-pipeline.html"><small>← Chapter 3</small>The RAG pipeline: load, split, embed, retrieve</a>
+<a class="next" href="langchain-agents-middleware.html"><small>Chapter 5 →</small>LangChain agents and middleware</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 · Tools and the agent loop</title>
+<meta name="description" content="Define tools, bind them to the model, run them by hand, then loop with ToolNode. Book chapter 11.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 09/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 09 of 16 · Hands-on lab</div>
+  <h1>Tools and the agent loop</h1>
+  <p class="lead">Define tools, bind them to the model, run them by hand, then loop with ToolNode. Book chapter 11.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 11 · Tools and Model Context Protocol (MCP)</strong> of the book (Part IV · Build Agents with LangGraph). This lab covers the tools half; <a href="10-mcp.html">lab 10</a> covers MCP.</div>
+
+<p><strong>Goal.</strong> Give the model a way to <em>do</em> things: search the library catalog, check how many
+copies are on the shelf, read a member's account. You will define these <a class="term" href="glossary.html#tool">tools</a>
+once in <code>harbor/catalog.py</code>, see exactly what the model is shown about them, watch the model ask for a tool
+call, run that call yourself, and finally let LangGraph run the whole
+<a class="term" href="glossary.html#agent-loop">agent loop</a> for you.</p>
+
+<p><strong>Why the project needs it.</strong> RAG (labs 04–08) answers from fixed policy text. But "Is this book on
+the shelf right now?" or "What do I owe?" need live data from the catalog and the member records. Tools are how a
+model reaches that data. Every agent in labs 10 to 15 uses the tools in this file.</p>
+
+<h2>The idea in brief</h2>
+
+<p>A model cannot run code. What it <em>can</em> do, when you describe some tools to it, is reply with a structured
+request: "please call <code>check_availability</code> with <code>item_id="B004"</code>". This is
+<a class="term" href="glossary.html#tool-calling">tool calling</a>. Your program runs the function, sends the result
+back as a message, and calls the model again. Repeat until the model answers with plain text: that repetition is the
+agent loop, and LangGraph's prebuilt <a class="term" href="glossary.html#toolnode">ToolNode</a> plus
+<code>tools_condition</code> build it in a few lines. The concept chapter
+<a href="langgraph-agents.html">LangGraph and agents</a> covers the theory.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Sequence: your code sends question and tool schemas to the model, the model replies with a tool call, your code runs the tool, sends the result back, and the model answers in text">
+  <rect class="box2" x="40" y="10" width="160" height="34" rx="8"/>
+  <text class="title" x="120" y="32" text-anchor="middle">Your code</text>
+  <rect class="box-info" x="300" y="10" width="160" height="34" rx="8"/>
+  <text class="title" x="380" y="32" text-anchor="middle">Model (llama3.2)</text>
+  <rect class="box-ok" x="560" y="10" width="160" height="34" rx="8"/>
+  <text class="title" x="640" y="32" text-anchor="middle">Tool function</text>
+  <path class="line dashed" d="M120,44 V290"/>
+  <path class="line dashed" d="M380,44 V290"/>
+  <path class="line dashed" d="M640,44 V290"/>
+  <path class="arrow" d="M120,80 H378"/>
+  <text class="small" x="130" y="72">1 question + tool schemas</text>
+  <path class="arrow-accent" d="M380,122 H122"/>
+  <text class="small" x="130" y="114">2 AIMessage.tool_calls (no text)</text>
+  <path class="arrow" d="M120,164 H638"/>
+  <text class="small" x="390" y="156">3 run it: check_availability("B004")</text>
+  <path class="arrow-ok" d="M640,200 H122"/>
+  <text class="small" x="390" y="192">4 "1 of 2 copies available …"</text>
+  <path class="arrow" d="M120,242 H378"/>
+  <text class="small" x="130" y="234">5 history + ToolMessage</text>
+  <path class="arrow-accent" d="M380,280 H122"/>
+  <text class="small" x="130" y="272">6 final answer in text</text>
+</svg>
+<figcaption>Steps 1–2 are what <code>bind_tools</code> gives you; step 3 is what part 3 of the lab does by hand.
+<strong>The model only asks; your code (or ToolNode) runs the tool.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to tool calling? What the model really sees</summary>
+<p>When you bind tools, LangChain turns each one into a small description in
+<a class="term" href="glossary.html#json-schema">JSON Schema</a>: a name, a sentence saying what it does, and the
+names and types of its arguments. That description is sent to the model with every request. Models trained for
+tool use have learned to answer either with normal text or with a tool request that matches one of those
+descriptions.</p>
+<p>Two consequences matter for beginners. First, the model chooses tools <em>only from their names and
+descriptions</em>, so the docstring is part of your prompt, and badly worded docstrings give bad tool choices.
+Second, the model may also choose <em>not</em> to call a tool and answer from imagination. This lab shows that
+happening.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+  <li>Read <code>harbor/catalog.py</code> (below). It loads <code>data/catalog.csv</code> and
+  <code>data/members.json</code> and defines the four tools. Labs 09–15 and the MCP server import from it.</li>
+  <li>Read <code>labs/09_tools.py</code>, which uses the tools in four parts.</li>
+  <li>With Ollama running, start the lab: <code>uv run python -m labs.09_tools</code>.</li>
+  <li>Compare the agent's answers with the real data in <code>data/catalog.csv</code> and
+  <code>data/members.json</code>. One of them is wrong.</li>
+</ol>
+
+<h2>The tools: <code>harbor/catalog.py</code></h2>
+
+<pre data-file="harbor/catalog.py" data-lang="py" data-tag="complete file"><code>"""The library's catalog and member records, and the tools an agent may call on them."""
+import csv
+import json
+
+from langchain_core.tools import tool
+
+from harbor.config import DATA
+
+with open(DATA / "catalog.csv", encoding="utf-8") as f:
+    CATALOG = {row["id"]: row for row in csv.DictReader(f)}
+MEMBERS = json.loads((DATA / "members.json").read_text(encoding="utf-8"))
+
+
+@tool
+def search_catalog(query: str) -&gt; str:
+    """Search the catalog by words in the title, author or genre. Returns matching items with their ids."""
+    words = query.lower().split()
+    hits = [b for b in CATALOG.values()
+            if any(w in f"{b['title']} {b['author']} {b['genre']}".lower() for w in words)]
+    if not hits:
+        return f"No items match '{query}'."
+    return "\n".join(f"{b['id']}: {b['title']} by {b['author']} ({b['format']}, {b['year']})" for b in hits[:5])
+
+
+@tool
+def check_availability(item_id: str) -&gt; str:
+    """Tell how many copies of an item (id like B004) are on the shelf, and at which branch."""
+    b = CATALOG.get(item_id.strip().upper())
+    if not b:
+        return f"There is no item {item_id}."
+    return f"{b['title']}: {b['available']} of {b['copies']} copies available at {b['branch']}."
+
+
+@tool
+def get_member_account(member_id: str) -&gt; str:
+    """Show a member's loans with due dates, holds and unpaid fees. Member ids look like M-1001."""
+    m = MEMBERS.get(member_id.strip().upper())
+    if not m:
+        return f"There is no member {member_id}."
+    loans = ", ".join(f"{CATALOG[l['id']]['title']} (due {l['due']})" for l in m["loans"]) or "none"
+    return f"{m['name']} ({m['card']} card). Loans: {loans}. Holds: {m['holds'] or 'none'}. Fees: {m['fees_eur']:.2f} EUR."
+
+
+@tool
+def place_hold(member_id: str, item_id: str) -&gt; str:
+    """Place a hold on an item for a member. This changes the member's account."""
+    m, b = MEMBERS.get(member_id.strip().upper()), CATALOG.get(item_id.strip().upper())
+    if not m or not b:
+        return "Unknown member or item."
+    if len(m["holds"]) &gt;= 5:
+        return "This member already has 5 holds, the maximum."
+    m["holds"].append(b["id"])  # in memory only: the labs never write the JSON file
+    return f"Hold placed on {b['title']} for {m['name']}. We keep it for 7 days once it is back."
+
+
+READ_TOOLS = [search_catalog, check_availability, get_member_account]
+ALL_TOOLS = READ_TOOLS + [place_hold]</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""The library's catalog and member records …"""</code></td><td>Module docstring describing the file.</td></tr>
+<tr><td>2–3</td><td><code>import csv</code><br><code>import json</code></td><td>Standard-library readers for the two data files: a CSV table of items and a JSON file of members.</td></tr>
+<tr><td>5</td><td><code>from langchain_core.tools import tool</code></td><td>The <code>@tool</code> decorator that turns a normal function into a LangChain tool.</td></tr>
+<tr><td>7</td><td><code>from harbor.config import DATA</code></td><td><code>DATA</code> is the path of the project's <code>data/</code> folder, so the file works from any current directory.</td></tr>
+<tr><td>9–10</td><td><code>with open(DATA / "catalog.csv", …) as f:</code><br><code>CATALOG = {row["id"]: row for row in csv.DictReader(f)}</code></td><td>Reads the 12 items once, when the module is first imported. <code>DictReader</code> gives each row as a dict keyed by the header (<code>id</code>, <code>title</code>, <code>author</code> …). The comprehension indexes them by id, so <code>CATALOG["B004"]</code> is one item. All values are strings, which is fine for printing.</td></tr>
+<tr><td>11</td><td><code>MEMBERS = json.loads((DATA / "members.json").read_text(…))</code></td><td>Loads the three invented members into a dict keyed by member id (<code>M-1001</code> …).</td></tr>
+<tr><td>14</td><td><code>@tool</code></td><td>Wraps the function below into a tool object. The tool's <strong>name</strong> is the function name, its <strong>description</strong> is the docstring, and its <strong>argument schema</strong> comes from the type hints. A function without a docstring fails here with <code>ValueError: Function must have a docstring if description not provided.</code></td></tr>
+<tr><td>15</td><td><code>def search_catalog(query: str) -&gt; str:</code></td><td>The type hint <code>query: str</code> becomes the schema <code>{'query': {'title': 'Query', 'type': 'string'}}</code>. Returning a <code>str</code> keeps things simple: the result goes back to the model as text.</td></tr>
+<tr><td>16</td><td><code>"""Search the catalog by words in the title, author or genre. …"""</code></td><td>The description the model reads to decide when to use this tool. "Returns matching items with their ids" hints that the ids can be used with the next tool.</td></tr>
+<tr><td>17</td><td><code>words = query.lower().split()</code></td><td>Lower-cases the query and splits it on spaces, so <code>"Mara Quint"</code> becomes <code>["mara", "quint"]</code>.</td></tr>
+<tr><td>18–19</td><td><code>hits = [b for b in CATALOG.values()</code><br><code>if any(w in f"{b['title']} {b['author']} {b['genre']}".lower() for w in words)]</code></td><td>An item matches when <em>any</em> query word appears inside its title, author and genre joined together. This is a plain text search: <code>"radio"</code> is found inside "Build Your Own Radio", but <code>"radios"</code> is not, because of the extra s. Lab 10 runs into exactly this.</td></tr>
+<tr><td>20–21</td><td><code>if not hits:</code><br><code>return f"No items match '{query}'."</code></td><td>A clear sentence instead of an empty string or an exception. The model reads tool results as text, so a readable "nothing found" helps it react correctly.</td></tr>
+<tr><td>22</td><td><code>return "\n".join(f"{b['id']}: {b['title']} by …" for b in hits[:5])</code></td><td>One line per hit, at most 5, each starting with the id. Limiting results keeps the model's context short.</td></tr>
+<tr><td>25–26</td><td><code>@tool</code><br><code>def check_availability(item_id: str) -&gt; str:</code></td><td>The second tool, with one string argument <code>item_id</code>.</td></tr>
+<tr><td>27</td><td><code>"""Tell how many copies of an item (id like B004) …"""</code></td><td>The example id <code>B004</code> tells the model what an id looks like. Useful, but small models sometimes <em>copy</em> the example instead of finding the real id: lab 14 shows llama3.2 calling <code>check_availability('B004')</code> for an unrelated question.</td></tr>
+<tr><td>28</td><td><code>b = CATALOG.get(item_id.strip().upper())</code></td><td>Cleans the argument (drops spaces, upper-cases) so <code>" b010"</code> still finds <code>B010</code>. <code>.get</code> returns <code>None</code> instead of crashing on an unknown id.</td></tr>
+<tr><td>29–30</td><td><code>if not b:</code> … <code>return f"There is no item {item_id}."</code></td><td>Unknown ids give a message the model can pass on, rather than an error.</td></tr>
+<tr><td>31</td><td><code>return f"{b['title']}: {b['available']} of {b['copies']} copies available at {b['branch']}."</code></td><td>The fact the model needs, in one sentence, e.g. "The Quiet Engine: 1 of 2 copies available at Central Library."</td></tr>
+<tr><td>34–36</td><td><code>def get_member_account(member_id: str) -&gt; str:</code><br><code>"""… Member ids look like M-1001."""</code></td><td>Reads a member's private data. Its docstring example <code>M-1001</code> is a real member id in our data. Lab 11 shows the danger: asked "What is my member id?", the model called this tool with <code>M-1001</code> and showed Lea Martin's account to someone else. Lab 14 fixes it by taking the member id from the app, not from the model.</td></tr>
+<tr><td>37–39</td><td><code>m = MEMBERS.get(member_id.strip().upper())</code> …</td><td>Same clean-up and "not found" message as above.</td></tr>
+<tr><td>40</td><td><code>loans = ", ".join(f"{CATALOG[l['id']]['title']} (due {l['due']})" for l in m["loans"]) or "none"</code></td><td>Turns each loan into "Title (due date)" by looking up the title in the catalog. <code>or "none"</code> replaces an empty string when there are no loans.</td></tr>
+<tr><td>41</td><td><code>return f"{m['name']} ({m['card']} card). Loans: … Fees: {m['fees_eur']:.2f} EUR."</code></td><td>One summary line. <code>:.2f</code> formats the fee with two decimals (2.4 becomes 2.40).</td></tr>
+<tr><td>44–46</td><td><code>@tool</code><br><code>def place_hold(member_id: str, item_id: str) -&gt; str:</code><br><code>"""… This changes the member's account."""</code></td><td>The only tool that <em>writes</em>. Two arguments, so its schema has two properties. The docstring says plainly that it changes data.</td></tr>
+<tr><td>47</td><td><code>m, b = MEMBERS.get(…), CATALOG.get(…)</code></td><td>Looks up both the member and the item in one line (tuple assignment).</td></tr>
+<tr><td>48–49</td><td><code>if not m or not b:</code> … <code>"Unknown member or item."</code></td><td>Refuses when either id is wrong.</td></tr>
+<tr><td>50–51</td><td><code>if len(m["holds"]) &gt;= 5:</code></td><td>A business rule enforced in code: at most 5 holds. Rules like this belong in the tool, where the model cannot talk its way around them.</td></tr>
+<tr><td>52</td><td><code>m["holds"].append(b["id"])  # in memory only …</code></td><td>Adds the hold to the <code>MEMBERS</code> dict in memory. The JSON file is never written, so every new run starts from the original data. A real system would write to a database here.</td></tr>
+<tr><td>53</td><td><code>return f"Hold placed on {b['title']} for {m['name']}. …"</code></td><td>Confirms what happened, so the model can tell the user.</td></tr>
+<tr><td>56</td><td><code>READ_TOOLS = [search_catalog, check_availability, get_member_account]</code></td><td>The tools that only read. Safe to give to an agent without supervision. Lab 09 uses this list.</td></tr>
+<tr><td>57</td><td><code>ALL_TOOLS = READ_TOOLS + [place_hold]</code></td><td>Read tools plus the writing tool. Labs 11 to 13 use this list, and lab 13 adds a human approval before <code>place_hold</code> runs.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="How a decorated function becomes a tool: the function name becomes the tool name, the docstring becomes the description, the type hints become the argument schema">
+  <rect class="box2" x="10" y="20" width="330" height="196" rx="8"/>
+  <text class="title" x="175" y="44" text-anchor="middle">What you write</text>
+  <text class="mono" x="26" y="80">@tool</text>
+  <text class="mono" x="26" y="110">def check_availability(</text>
+  <text class="mono" x="26" y="130">    item_id: str) -&gt; str:</text>
+  <text class="mono" x="26" y="160">  """Tell how many copies</text>
+  <text class="mono" x="26" y="180">  of an item (id like B004)…"""</text>
+  <rect class="box-info" x="420" y="20" width="330" height="196" rx="8"/>
+  <text class="title" x="585" y="44" text-anchor="middle">What the model is shown</text>
+  <text class="label" x="436" y="80">name</text>
+  <text class="mono" x="520" y="80">check_availability</text>
+  <text class="label" x="436" y="122">args</text>
+  <text class="mono" x="520" y="122">item_id: string</text>
+  <text class="label" x="436" y="164">description</text>
+  <text class="small" x="520" y="164">Tell how many copies of an</text>
+  <text class="small" x="520" y="180">item (id like B004) are on …</text>
+  <path class="arrow-accent" d="M260,106 C340,106 340,80 418,80"/>
+  <path class="arrow-accent" d="M236,128 C330,128 340,118 418,118"/>
+  <path class="arrow-accent" d="M310,170 C360,170 370,166 418,166"/>
+</svg>
+<figcaption>The function body is never shown to the model. <strong>The name, the docstring and the type hints are
+all it knows</strong>, so write them for the model to read.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to decorators? What <code>@tool</code> does to a function</summary>
+<p>A decorator is a function that takes your function and returns something new in its place. After
+<code>@tool</code>, the name <code>check_availability</code> no longer refers to a plain function but to a
+<code>StructuredTool</code> object that <em>contains</em> it. That is why you run it with
+<code>check_availability.invoke({"item_id": "B004"})</code>; calling it like a function,
+<code>check_availability("B004")</code>, fails with <code>TypeError: 'StructuredTool' object is not callable</code>.
+The object also has <code>.name</code>, <code>.description</code> and <code>.args</code>, which part 1 of the lab
+prints.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="READ_TOOLS contains search_catalog, check_availability and get_member_account; ALL_TOOLS adds place_hold, which writes">
+  <rect class="zone" x="10" y="10" width="740" height="150" rx="8"/>
+  <text class="label" x="24" y="30">ALL_TOOLS (labs 11–13)</text>
+  <rect class="box-ok" x="24" y="44" width="540" height="102" rx="8"/>
+  <text class="label" x="38" y="64">READ_TOOLS (lab 09): only read data</text>
+  <rect class="box" x="38" y="78" width="160" height="50" rx="8"/>
+  <text class="mono" x="118" y="108" text-anchor="middle">search_catalog</text>
+  <rect class="box" x="210" y="78" width="168" height="50" rx="8"/>
+  <text class="mono" x="294" y="108" text-anchor="middle">check_availability</text>
+  <rect class="box" x="390" y="78" width="164" height="50" rx="8"/>
+  <text class="mono" x="472" y="108" text-anchor="middle">get_member_account</text>
+  <rect class="box-warn" x="584" y="62" width="152" height="66" rx="8"/>
+  <text class="mono" x="660" y="90" text-anchor="middle">place_hold</text>
+  <text class="small" x="660" y="110" text-anchor="middle">writes (memory only)</text>
+</svg>
+<figcaption>Give an agent the smallest set of tools it needs. <strong>Writing tools deserve an approval step</strong>
+(lab 13).</figcaption>
+</figure>
+
+<h2>The lab: <code>labs/09_tools.py</code></h2>
+
+<pre data-file="labs/09_tools.py" data-lang="py" data-tag="complete file"><code>"""Lab 09: tools. First by hand, then with LangGraph's ToolNode in a loop."""
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
+
+from harbor.catalog import READ_TOOLS, check_availability
+from harbor.config import get_model
+
+# 1. A tool is a function plus a name, a description and an argument schema the model reads.
+print("1) What the model sees for check_availability:")
+print("  ", check_availability.name, "|", check_availability.description)
+print("  ", check_availability.args)
+
+# 2. bind_tools: the model can now answer with tool calls instead of text. It does not run them.
+model = get_model().bind_tools(READ_TOOLS)
+reply = model.invoke("Is The Quiet Engine on the shelf? Its id is B004.")
+print("\n2) The model asked for:", reply.tool_calls)
+
+# 3. We run the tool ourselves and could send the result back. ToolNode automates exactly this.
+for call in reply.tool_calls:
+    print("   running it gives:", check_availability.invoke(call["args"]))
+
+# 4. The agent loop as a graph: model -&gt; (tools -&gt; model)* -&gt; end.
+SYSTEM = SystemMessage("You are Harbor City Library's assistant. Use the tools to look things up. Answer briefly.")
+
+
+def call_model(state: MessagesState):
+    return {"messages": [model.invoke([SYSTEM] + state["messages"])]}
+
+
+builder = StateGraph(MessagesState)
+builder.add_node("model", call_model)
+builder.add_node("tools", ToolNode(READ_TOOLS))
+builder.add_edge(START, "model")
+builder.add_conditional_edges("model", tools_condition)  # goes to "tools" if there are tool calls, else ends
+builder.add_edge("tools", "model")
+agent = builder.compile()
+
+for question in ["Do you have any books by Mara Quint? Is one available?",
+                 "What are member M-1001's loans and fees?"]:
+    print(f"\n4) Q: {question}")
+    result = agent.invoke({"messages": [HumanMessage(question)]})
+    for m in result["messages"][1:]:
+        if m.type == "ai" and m.tool_calls:
+            print("   model -&gt; tools:", [(c["name"], c["args"]) for c in m.tool_calls])
+        elif m.type == "tool":
+            print(f"   tool {m.name} -&gt; {m.content[:100]!r}")
+        else:
+            print("   answer:", m.content)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 09: tools. …"""</code></td><td>Docstring: tools by hand first, then in a loop.</td></tr>
+<tr><td>2</td><td><code>from langchain_core.messages import HumanMessage, SystemMessage</code></td><td>Message classes: the user's question and the instructions for the model.</td></tr>
+<tr><td>3</td><td><code>from langgraph.graph import START, MessagesState, StateGraph</code></td><td><code>MessagesState</code> is a ready-made state with one key, <code>messages</code>, whose <a class="term" href="glossary.html#reducer">reducer</a> <em>appends</em> new messages instead of replacing the list.</td></tr>
+<tr><td>4</td><td><code>from langgraph.prebuilt import ToolNode, tools_condition</code></td><td>The two prebuilt pieces of the agent loop: a node that runs tool calls, and a router that checks whether there are any.</td></tr>
+<tr><td>6–7</td><td><code>from harbor.catalog import READ_TOOLS, check_availability</code> …</td><td>The read-only tools, one tool on its own for the hand-run demo, and the model helper.</td></tr>
+<tr><td>10–12</td><td><code>print("  ", check_availability.name, "|", check_availability.description)</code><br><code>print("  ", check_availability.args)</code></td><td>Part 1: shows the tool's name, description (the docstring) and argument schema. Output lines 2–3.</td></tr>
+<tr><td>15</td><td><code>model = get_model().bind_tools(READ_TOOLS)</code></td><td>Returns a new model object that sends the three tool schemas with every request. The original model is unchanged. Binding does <strong>not</strong> make the model run tools.</td></tr>
+<tr><td>16</td><td><code>reply = model.invoke("Is The Quiet Engine on the shelf? Its id is B004.")</code></td><td>Part 2: one call. The reply is an <code>AIMessage</code>; because a tool fits, it carries a tool call instead of an answer.</td></tr>
+<tr><td>17</td><td><code>print("\n2) The model asked for:", reply.tool_calls)</code></td><td>Each tool call is a dict with <code>name</code>, <code>args</code>, an <code>id</code> (used to match the result to the call) and <code>type</code>.</td></tr>
+<tr><td>20–21</td><td><code>for call in reply.tool_calls:</code><br><code>print("   running it gives:", check_availability.invoke(call["args"]))</code></td><td>Part 3: we run the requested call ourselves by passing its <code>args</code> dict to <code>.invoke</code>. This is all a "tool executor" does. (We use <code>check_availability</code> directly because we know it was the tool asked for; ToolNode looks the tool up by name.)</td></tr>
+<tr><td>24</td><td><code>SYSTEM = SystemMessage("You are Harbor City Library's assistant. Use the tools …")</code></td><td>The <a class="term" href="glossary.html#system-message">system message</a> with standing instructions.</td></tr>
+<tr><td>27–28</td><td><code>def call_model(state: MessagesState):</code><br><code>return {"messages": [model.invoke([SYSTEM] + state["messages"])]}</code></td><td>The model node: sends the system message plus the whole conversation so far, and returns the reply in a one-item list. The reducer appends it. The system message is added on every call but never stored in the state.</td></tr>
+<tr><td>31</td><td><code>builder = StateGraph(MessagesState)</code></td><td>A graph whose state is the message list.</td></tr>
+<tr><td>32</td><td><code>builder.add_node("model", call_model)</code></td><td>The node that thinks.</td></tr>
+<tr><td>33</td><td><code>builder.add_node("tools", ToolNode(READ_TOOLS))</code></td><td>The node that acts. <code>ToolNode</code> reads the tool calls in the last AI message, runs each matching tool, and returns one <code>ToolMessage</code> per call with the result and the call's id. The node must be named <code>"tools"</code> because that is the name <code>tools_condition</code> returns.</td></tr>
+<tr><td>34</td><td><code>builder.add_edge(START, "model")</code></td><td>Every run starts by asking the model.</td></tr>
+<tr><td>35</td><td><code>builder.add_conditional_edges("model", tools_condition)</code></td><td>After the model: if its last message has tool calls, go to <code>"tools"</code>; otherwise go to the end. No list of targets is needed because <code>tools_condition</code> only returns those two.</td></tr>
+<tr><td>36</td><td><code>builder.add_edge("tools", "model")</code></td><td>The loop: after tools run, the model sees the results and decides again. Without this edge the run would stop right after the tools, with no answer.</td></tr>
+<tr><td>37</td><td><code>agent = builder.compile()</code></td><td>The finished agent.</td></tr>
+<tr><td>39–40</td><td><code>for question in ["Do you have any books by Mara Quint? …", "What are member M-1001's loans and fees?"]:</code></td><td>Two test questions: one needs a search (and ideally an availability check), one needs the account tool.</td></tr>
+<tr><td>42</td><td><code>result = agent.invoke({"messages": [HumanMessage(question)]})</code></td><td>Runs the loop until the model answers in text. <code>result["messages"]</code> holds the whole exchange.</td></tr>
+<tr><td>43</td><td><code>for m in result["messages"][1:]:</code></td><td>Skips the first message (the question we already know).</td></tr>
+<tr><td>44–45</td><td><code>if m.type == "ai" and m.tool_calls:</code></td><td>AI messages with tool calls are printed as <code>model -&gt; tools</code> with each call's name and arguments.</td></tr>
+<tr><td>46–47</td><td><code>elif m.type == "tool":</code><br><code>print(f"   tool {m.name} -&gt; {m.content[:100]!r}")</code></td><td>Tool results, cut to 100 characters to keep the output short. <code>!r</code> prints the Python representation, so you see the quotes and <code>\n</code> line breaks. The cut is ours; the model received the full text.</td></tr>
+<tr><td>48–49</td><td><code>else:</code> <code>print("   answer:", m.content)</code></td><td>Anything else is the model's final text answer.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="The agent graph: start leads to model; model goes to tools when there are tool calls, otherwise to end; tools always go back to model">
+  <rect class="box-solid" x="40" y="96" width="120" height="36" rx="18"/>
+  <text class="on-solid mono" x="100" y="119" text-anchor="middle">__start__</text>
+  <path class="arrow" d="M160,114 H258"/>
+  <rect class="box-info" x="260" y="90" width="160" height="48" rx="8"/>
+  <text class="title mono" x="340" y="119" text-anchor="middle">model</text>
+  <path class="arrow-accent dashed" d="M380,90 V50 H498"/>
+  <text class="small" x="390" y="40">tool_calls? yes</text>
+  <rect class="box-ok" x="500" y="26" width="160" height="48" rx="8"/>
+  <text class="title mono" x="580" y="46" text-anchor="middle">tools</text>
+  <text class="small" x="580" y="64" text-anchor="middle">ToolNode(READ_TOOLS)</text>
+  <path class="arrow" d="M580,74 V100 C580,150 520,130 422,124"/>
+  <text class="small" x="470" y="150">results go back</text>
+  <path class="arrow-accent dashed" d="M380,138 V184 H498"/>
+  <text class="small" x="390" y="204">no tool calls</text>
+  <rect class="box-solid" x="500" y="168" width="120" height="36" rx="18"/>
+  <text class="on-solid mono" x="560" y="191" text-anchor="middle">__end__</text>
+</svg>
+<figcaption>The same picture <code>agent.get_graph().draw_mermaid()</code> describes (try it below).
+<strong>The loop is model → tools → model, until the model stops asking.</strong></figcaption>
+</figure>
+
+<h2>Run it</h2>
+
+<pre data-lang="sh"><code>uv run python -m labs.09_tools</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>1) What the model sees for check_availability:
+   check_availability | Tell how many copies of an item (id like B004) are on the shelf, and at which branch.
+   {'item_id': {'title': 'Item Id', 'type': 'string'}}
+
+2) The model asked for: [{'name': 'check_availability', 'args': {'item_id': 'B004'}, 'id': 'a281fcb5-67ff-4bd6-ba8b-0e7bf4df38b1', 'type': 'tool_call'}]
+   running it gives: The Quiet Engine: 1 of 2 copies available at Central Library.
+
+4) Q: Do you have any books by Mara Quint? Is one available?
+   model -&gt; tools: [('search_catalog', {'query': 'Mara Quint'})]
+   tool search_catalog -&gt; "B001: The Lighthouse Keeper's Atlas by Mara Quint (book, 2019)\nB010: The Cartographer's Daughter by "
+   answer: We have two books by Mara Quint available at the library: "The Lighthouse Keeper's Atlas" (2019) and "The Cartographer's Daughter" (2023). Would you like to check out one of these books or know more about their availability?
+
+4) Q: What are member M-1001's loans and fees?
+   model -&gt; tools: [('get_member_account', {'member_id': 'M-1001'})]
+   tool get_member_account -&gt; 'Lea Martin (standard card). Loans: The Quiet Engine (due 2026-10-20), Recipes from the Fish Market ('
+   answer: Member M-1001 has the following loans and fees:
+
+* Loans:
+	+ The Quiet Engine (due October 20, 2026)
+	+ Recipes from the Fish Market (due October 9, 2026)
+* Holds: None
+* Fees: 2.40 EUR</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> Part 1 prints the description and the schema
+<code>{'item_id': {'title': 'Item Id', 'type': 'string'}}</code>. Part 2 prints a list with one tool call,
+<code>check_availability</code> with <code>{'item_id': 'B004'}</code> (your <code>id</code> will be a different
+random string). Running it gives "1 of 2 copies available at Central Library", which matches
+<code>catalog.csv</code>. In part 4 the agent calls <code>search_catalog</code> for Mara Quint and
+<code>get_member_account</code> for M-1001. The second answer is correct: two loans with their due dates and
+2.40 EUR in fees, exactly as in <code>members.json</code>.</div>
+
+<h2>The real hallucination in this run</h2>
+
+<p>Look closely at the Mara Quint answer: "We have two books by Mara Quint <strong>available</strong>". The model only
+called <code>search_catalog</code>, which lists titles but says nothing about copies. It never called
+<code>check_availability</code>. The truth, from <code>catalog.csv</code>: B001 has 1 of 3 copies on the shelf, and
+B010, <em>The Cartographer's Daughter</em>, has <strong>0 of 4</strong>. The model filled the gap with a confident
+guess. This is a <a class="term" href="glossary.html#hallucination">hallucination</a>, and tool access alone does not
+prevent it: the model has to decide to use the tool, and here it did not.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The Mara Quint run: the model called search_catalog, skipped check_availability, and claimed both books are available while B010 has 0 of 4 copies">
+  <rect class="box2" x="10" y="14" width="230" height="44" rx="8"/>
+  <text class="label" x="125" y="41" text-anchor="middle">Q: books by Mara Quint?</text>
+  <path class="arrow" d="M240,36 H264"/>
+  <rect class="box-ok" x="266" y="14" width="220" height="44" rx="8"/>
+  <text class="mono" x="376" y="41" text-anchor="middle">search_catalog</text>
+  <path class="arrow" d="M486,36 H510"/>
+  <rect class="box-ok" x="512" y="14" width="238" height="44" rx="8"/>
+  <text class="small" x="631" y="34" text-anchor="middle">B001 … (book, 2019)</text>
+  <text class="small" x="631" y="50" text-anchor="middle">B010 … (book, 2023)</text>
+  <rect class="box-bad" x="266" y="84" width="220" height="44" rx="8"/>
+  <text class="mono" x="376" y="104" text-anchor="middle">check_availability</text>
+  <text class="small bad" x="376" y="120" text-anchor="middle">never called</text>
+  <rect class="box-bad" x="10" y="154" width="360" height="80" rx="8"/>
+  <text class="title" x="190" y="176" text-anchor="middle">What the model said</text>
+  <text class="small" x="190" y="198" text-anchor="middle">"two books by Mara Quint</text>
+  <text class="small" x="190" y="214" text-anchor="middle">available at the library"</text>
+  <rect class="box-ok" x="390" y="154" width="360" height="80" rx="8"/>
+  <text class="title" x="570" y="176" text-anchor="middle">What catalog.csv says</text>
+  <text class="small" x="570" y="198" text-anchor="middle">B001: 1 of 3 copies on the shelf</text>
+  <text class="small bad" x="570" y="214" text-anchor="middle">B010: 0 of 4 copies on the shelf</text>
+</svg>
+<figcaption>The search result has no availability in it, yet the answer claims availability.
+<strong>A tool the model does not call cannot keep it honest.</strong></figcaption>
+</figure>
+
+<p>How would you reduce this? Common approaches (not run in this lab): say it in the system message ("Never say an
+item is available unless <code>check_availability</code> returned it"); make <code>search_catalog</code> include the
+availability in its own result so there is nothing to guess; or use a stronger tool-calling model. Lab 14 compares
+llama3.2 with gemma4 on a similar question.</p>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+  <li><strong>Expecting <code>bind_tools</code> to run tools.</strong> It only lets the model <em>ask</em>. The request
+  is in <code>reply.tool_calls</code>, not in <code>reply.content</code> (which usually holds little or no text when
+  the model asks for a tool).</li>
+  <li><strong>A tool function without a docstring</strong> fails at import with
+  <code>ValueError: Function must have a docstring if description not provided.</code></li>
+  <li><strong>Calling a tool like a function</strong>: <code>check_availability("B004")</code> gives
+  <code>TypeError: 'StructuredTool' object is not callable</code>. Use <code>.invoke({"item_id": "B004"})</code>.</li>
+  <li><strong>Naming the tool node something else</strong>, like <code>"run_tools"</code>. <code>tools_condition</code>
+  returns <code>"tools"</code>, so the run fails with <code>ValueError: At 'model' node, 'tools_condition' branch
+  found unknown target 'tools'</code>. Name it <code>"tools"</code> (or pass a mapping as the third argument).</li>
+  <li><strong>Forgetting <code>add_edge("tools", "model")</code></strong>. No error: the tools run and the run simply
+  stops. The last message is the <code>ToolMessage</code>, the model never sees the result, and there is no answer.</li>
+  <li><strong>Trusting a fluent answer.</strong> Check claims against the tool results printed above them, as with the
+  Mara Quint answer.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol class="steps">
+  <li><strong>Print the agent's graph.</strong> After line 37 add <code>print(agent.get_graph().draw_mermaid())</code>.
+  You get <code>__start__ --&gt; model</code>, two dotted arrows from <code>model</code> (to <code>tools</code> and
+  <code>__end__</code>) and <code>tools --&gt; model</code>: the loop from the diagram above.</li>
+  <li><strong>Inspect every schema.</strong> Add <code>print(place_hold.args)</code> (import it from
+  <code>harbor.catalog</code>). It has two string properties, <code>member_id</code> and <code>item_id</code>, both
+  taken from the type hints.</li>
+  <li><strong>Run a tool by hand with the item the model got wrong.</strong>
+  <code>print(check_availability.invoke({"item_id": "b010"}))</code> prints "The Cartographer's Daughter: 0 of 4 copies
+  available at Central Library." (lower-case works because of <code>.upper()</code> on line 28 of catalog.py).</li>
+  <li><strong>See the full conversation.</strong> Replace the printing loop with
+  <code>for m in result["messages"]: m.pretty_print()</code>. You see every message with its type, including the
+  untruncated tool results and the tool call ids.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+  <li><code>@tool</code> builds a tool from a function: name from the function, description from the docstring,
+  argument schema from the type hints. The model sees only those three.</li>
+  <li>Example ids in descriptions (<code>B004</code>, <code>M-1001</code>) help, but small models copy them: labs 11
+  and 14 show it.</li>
+  <li><code>bind_tools</code> lets the model return <code>tool_calls</code>; it never runs them. Running one is just
+  <code>tool.invoke(call["args"])</code>.</li>
+  <li><code>ToolNode</code> + <code>tools_condition</code> + an edge back to the model make the agent loop.</li>
+  <li><code>READ_TOOLS</code> for safe lookups; <code>ALL_TOOLS</code> adds <code>place_hold</code>, which changes
+  memory only.</li>
+  <li>The agent claimed two books were available without checking; B010 has 0 copies. Verify, don't trust.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="08-langgraph-basics.html"><small>← Previous · Step 08</small>LangGraph fundamentals</a>
+<a class="next" href="10-mcp.html"><small>Next · Step 10 →</small>Model Context Protocol (MCP)</a>
+</nav>
+</main>
+</body>
+</html>

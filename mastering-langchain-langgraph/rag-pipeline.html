@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 3 · The RAG pipeline: load, split, embed, retrieve</title>
+<meta name="description" content="Documents and metadata, chunking strategies, embeddings, vector stores and retrieval strategies. Read with book Part III (chapters 6-9).">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 3/6</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 3 of 6</div>
+  <h1>The RAG pipeline: load, split, embed, retrieve</h1>
+  <p class="lead">Documents and metadata, chunking strategies, embeddings, vector stores and retrieval strategies. Read with book Part III (chapters 6-9).</p>
+</section>
+<div class="callout">Read with <strong>Part III · Integrations and Utilities for RAG in LangChain (chapters 6–9)</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>A language model only knows what was in its training data and what you put in its prompt. It has never read the
+Harbor City Library's fee rules, so when you ask it about them it either refuses or, worse, makes something up
+(lab 03 saw it invent an "Innovation Studio"). <a class="term" href="glossary.html#rag">Retrieval-augmented generation (RAG)</a>
+fixes this in a simple way: before the model answers, your code looks up the few passages that matter and pastes them
+into the prompt. This chapter walks through every stage of that pipeline: loading files, splitting them into pieces,
+turning the pieces into numbers, storing them, and finding the right ones again.</p>
+
+<p><strong>Why this matters for your project.</strong> Labs <a href="04-document-loaders.html">04</a>,
+<a href="05-text-splitters.html">05</a>, <a href="06-vector-store.html">06</a> and
+<a href="07-retrievers.html">07</a> build this pipeline for the library's six policy files, and every later agent
+reuses it through <code>harbor/knowledge.py</code>. When an answer is wrong, you need to know which stage broke:
+did the right text never get found, or did the model ignore it? This chapter gives you the vocabulary and the
+mental model to tell the difference.</p>
+
+<h2>The big picture: two phases</h2>
+
+<p>A RAG system does its work at two different moments. The first phase, <strong>indexing</strong>, happens once,
+ahead of time (and again whenever the documents change). The second phase, <strong>answering</strong>, happens for
+every question. Keeping the two apart in your head explains a lot: indexing can be slow and thorough, while answering
+must be fast, so the expensive work of reading and embedding every file is done in advance.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="Indexing turns files into stored vectors once; answering embeds each question, searches the store and sends the best chunks to the model">
+  <rect class="zone" x="10" y="10" width="740" height="104" rx="8"/>
+  <text class="label" x="24" y="30">Indexing: once, ahead of time</text>
+  <rect class="box" x="30" y="42" width="145" height="58" rx="8"/>
+  <text class="title" x="102" y="66" text-anchor="middle">Load</text>
+  <text class="small" x="102" y="86" text-anchor="middle">6 Documents</text>
+  <rect class="box" x="215" y="42" width="145" height="58" rx="8"/>
+  <text class="title" x="287" y="66" text-anchor="middle">Split</text>
+  <text class="small" x="287" y="86" text-anchor="middle">12 chunks (400/60)</text>
+  <rect class="box" x="400" y="42" width="145" height="58" rx="8"/>
+  <text class="title" x="472" y="66" text-anchor="middle">Embed</text>
+  <text class="small" x="472" y="86" text-anchor="middle">768 numbers each</text>
+  <rect class="box-info" x="585" y="42" width="145" height="58" rx="8"/>
+  <text class="title" x="657" y="66" text-anchor="middle">Store</text>
+  <text class="small" x="657" y="86" text-anchor="middle">InMemoryVectorStore</text>
+  <path class="arrow" d="M175,71 H213"/>
+  <path class="arrow" d="M360,71 H398"/>
+  <path class="arrow" d="M545,71 H583"/>
+  <rect class="zone" x="10" y="134" width="740" height="118" rx="8"/>
+  <text class="label" x="24" y="154">Answering: for every question</text>
+  <rect class="box2" x="30" y="174" width="145" height="58" rx="8"/>
+  <text class="title" x="102" y="198" text-anchor="middle">Question</text>
+  <text class="small" x="102" y="218" text-anchor="middle">"Is there Wi-Fi?"</text>
+  <rect class="box2" x="215" y="174" width="145" height="58" rx="8"/>
+  <text class="title" x="287" y="198" text-anchor="middle">Embed query</text>
+  <text class="small" x="287" y="218" text-anchor="middle">same model</text>
+  <rect class="box2" x="400" y="174" width="145" height="58" rx="8"/>
+  <text class="title" x="472" y="198" text-anchor="middle">Retrieve</text>
+  <text class="small" x="472" y="218" text-anchor="middle">best k chunks</text>
+  <rect class="box-ok" x="585" y="174" width="145" height="58" rx="8"/>
+  <text class="title" x="657" y="198" text-anchor="middle">Prompt + model</text>
+  <text class="small" x="657" y="218" text-anchor="middle">answer + [source]</text>
+  <path class="arrow" d="M175,203 H213"/>
+  <path class="arrow" d="M360,203 H398"/>
+  <path class="arrow" d="M545,203 H583"/>
+  <path class="arrow-accent" d="M657,100 V122 H472 V172"/>
+  <text class="small" x="480" y="166">compares with stored vectors</text>
+</svg>
+<figcaption>Top row runs once; bottom row runs per question. The counts are the lab's real numbers.
+<strong>Retrieval only works if the question is embedded with the same model as the chunks.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to RAG? What it is and why it matters</summary>
+<p>RAG is not a library or a model. It is a pattern: <em>retrieve</em> relevant text, <em>augment</em> the prompt
+with it, then let the model <em>generate</em> an answer. The model still writes the sentence, but the facts come from
+your documents. Two big wins follow: answers can be grounded in private or recent information the model never saw,
+and you can show the source so a reader can check it.</p>
+<p>RAG does not make a model smarter. If the right passage is not retrieved, or the model misreads it, the answer is
+still wrong. The rest of this chapter is about reducing both risks.</p>
+</details>
+
+<h2>Documents and metadata</h2>
+
+<p>Every stage of the pipeline passes around the same small object: a
+<a class="term" href="glossary.html#document">Document</a>. It has two parts. <code>page_content</code> is the text
+itself, the part that gets embedded and eventually pasted into the prompt. <code>metadata</code> is a plain Python
+dictionary of labels about that text: which file it came from, which row, which section, which branch.</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>from langchain_core.documents import Document
+
+doc = Document(
+    page_content="Books are loaned for 21 days.",
+    metadata={"source": "loans.md", "section": "Loan periods"},
+)
+print(doc.page_content, doc.metadata["source"])   # Books are loaned for 21 days. loans.md</code></pre>
+
+<p><a class="term" href="glossary.html#metadata">Metadata</a> looks like a detail, but you will use it constantly.
+It lets the RAG chain print <code>[fees.md]</code> after an answer (see <code>format_docs</code> in
+<code>harbor/knowledge.py</code>), it lets the evaluation in lab 07 check whether the right file came back, and it lets
+a search stay inside one file or one branch. A good rule: anything you might later want to filter on, show, or debug
+with belongs in metadata, not buried in the text.</p>
+
+<h2>Document loaders: getting text in</h2>
+
+<p>A <a class="term" href="glossary.html#document-loader">document loader</a> reads some source and returns a list of
+Documents. They all share one method, <code>load()</code>, so you can swap one for another without touching the rest of
+the pipeline. What differs is how a source is cut into Documents and which metadata is filled in.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 222" role="img" aria-label="TextLoader turns one file into one Document, DirectoryLoader turns a folder into one Document per file, CSVLoader turns a CSV into one Document per row">
+  <rect class="box2" x="20" y="20" width="190" height="50" rx="8"/>
+  <text class="mono" x="115" y="50" text-anchor="middle">loans.md</text>
+  <rect class="box" x="270" y="20" width="190" height="50" rx="8"/>
+  <text class="mono" x="365" y="50" text-anchor="middle">TextLoader</text>
+  <rect class="box-ok" x="520" y="20" width="220" height="50" rx="8"/>
+  <text x="630" y="50" text-anchor="middle">1 Document</text>
+  <rect class="box2" x="20" y="86" width="190" height="50" rx="8"/>
+  <text class="mono" x="115" y="116" text-anchor="middle">policies/*.md</text>
+  <rect class="box" x="270" y="86" width="190" height="50" rx="8"/>
+  <text class="mono" x="365" y="116" text-anchor="middle">DirectoryLoader</text>
+  <rect class="box-ok" x="520" y="86" width="220" height="50" rx="8"/>
+  <text x="630" y="116" text-anchor="middle">6 Documents, one per file</text>
+  <rect class="box2" x="20" y="152" width="190" height="50" rx="8"/>
+  <text class="mono" x="115" y="182" text-anchor="middle">catalog.csv</text>
+  <rect class="box" x="270" y="152" width="190" height="50" rx="8"/>
+  <text class="mono" x="365" y="182" text-anchor="middle">CSVLoader</text>
+  <rect class="box-ok" x="520" y="152" width="220" height="50" rx="8"/>
+  <text x="630" y="182" text-anchor="middle">12 Documents, one per row</text>
+  <path class="arrow" d="M210,45 H268"/>
+  <path class="arrow" d="M460,45 H518"/>
+  <path class="arrow" d="M210,111 H268"/>
+  <path class="arrow" d="M460,111 H518"/>
+  <path class="arrow" d="M210,177 H268"/>
+  <path class="arrow" d="M460,177 H518"/>
+</svg>
+<figcaption>The three loaders of <a href="04-document-loaders.html">lab 04</a> with their real counts.
+<strong>The loader decides what one Document means</strong>: a file, or a row.</figcaption>
+</figure>
+
+<p>In lab 04 the CSV loader was told which column is the source and which columns become metadata, so the first book
+came back as text (<code>id: B001</code>, <code>title: …</code>) plus
+<code>{'source': 'B001', 'row': 0, 'branch': 'Central Library', 'format': 'book', 'available': '1'}</code>. Notice the
+<code>'1'</code> in quotes: CSV values arrive as strings, so the lab compares with <code>!= "0"</code>, not with a number.</p>
+
+<p>Other sources follow the same idea. A PDF loader usually gives one Document per page, with the page number in
+metadata, so an answer can cite "page 12". A web loader fetches a page and strips the HTML, keeping the URL as the
+source. Office files, e-mails, databases and cloud drives all have loaders too. The quality varies a lot: PDFs with
+columns, tables or scanned images often come out as jumbled text. <strong>Always print a few loaded Documents
+before you build anything on top of them</strong>; a bad load poisons every later stage.</p>
+
+<div class="callout warn"><strong>The <code>langchain-community</code> sunset warning.</strong> The loaders in the
+labs (<code>TextLoader</code>, <code>DirectoryLoader</code>, <code>CSVLoader</code>) and <code>BM25Retriever</code>
+come from <code>langchain_community</code>. With the installed version (0.4.2), importing it prints a real
+<a class="term" href="glossary.html#deprecation">deprecation</a> notice: "<code>langchain-community</code> is being
+sunset and is no longer actively maintained". It is a warning, not an error: the code still runs (you can see it at
+the top of the outputs of labs 04 and 07). It tells you where things are heading: integrations are moving to their
+own standalone packages (as <code>langchain-ollama</code> already did). For new projects, check the current
+integration page of the official docs first and prefer a dedicated package when one exists.</div>
+
+<h2>Why split documents at all?</h2>
+
+<p>Our policy files are short (between 508 and 574 characters each, as lab 04 printed), so why cut them up? Real
+documents are not: a handbook can have hundreds of pages. Splitting helps for three reasons:</p>
+<ul>
+  <li><strong>Precision.</strong> An <a class="term" href="glossary.html#embedding">embedding</a> squeezes a whole text
+  into one list of numbers. A text about fees, Wi-Fi and opening hours becomes a blurry average of all three and is
+  never a strong match for any single question. A short passage about one topic gives a sharp vector.</li>
+  <li><strong>Room in the prompt.</strong> The retrieved text is pasted into the prompt, which must fit the model's
+  <a class="term" href="glossary.html#context-window">context window</a> (the labs set 8,192
+  <a class="term" href="glossary.html#token">tokens</a>). Small pieces let you include several sources.</li>
+  <li><strong>Focus and cost.</strong> Less irrelevant text in the prompt means fewer distractions for the model and
+  less work per answer, which matters on a small local model.</li>
+</ul>
+
+<p>The pieces are called <a class="term" href="glossary.html#chunk">chunks</a>. Each chunk is itself a Document, and
+the splitter copies the original metadata onto every chunk, so <code>source</code> survives the cut.</p>
+
+<h2>Text splitters and the size/overlap trade-off</h2>
+
+<p>A <a class="term" href="glossary.html#text-splitter">text splitter</a> takes Documents and returns smaller ones.
+Two settings matter everywhere. <code>chunk_size</code> is the maximum length of a chunk (in characters, unless you
+tell the splitter to count tokens). <code>chunk_overlap</code> is how much text neighbouring chunks may share, so a
+sentence cut in half still appears whole in at least one chunk.</p>
+
+<h3>The recursive character splitter</h3>
+<p>The general-purpose choice is <code>RecursiveCharacterTextSplitter</code>. It has a list of separators in order
+of preference. It first tries to cut at the first one (by default a blank line, so paragraphs stay together); any
+piece still too long is cut at the next separator (a line break), then a space, and only as a last resort in the
+middle of a word. Then it packs neighbouring pieces back together as long as they fit the size limit. The result:
+chunks that respect the structure of the text as much as the size allows.</p>
+
+<p>The project's own splitter adds one separator at the front: <code>"\n## "</code>, the start of a Markdown
+section. That one change makes chunks begin at headings:</p>
+
+<pre data-lang="py" data-tag="excerpt · harbor/knowledge.py lines 17–20"><code>def split(docs, chunk_size=400, chunk_overlap=60):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                                              separators=["\n## ", "\n\n", "\n", ". ", " ", ""])
+    return splitter.split_documents(docs)</code></pre>
+
+<p>Lab 05 compared the two settings on the same six files. With size 200 and overlap 40 it got 30 chunks between 14
+and 198 characters long, and one of them was nothing but the heading <code>## Lost or damaged items</code>: a chunk
+with a title and no content, useless to retrieve and a waste of a search slot. With size 400, overlap 60 and the
+heading separator first, it got 12 chunks, each starting at a section. The diagram shows what happened to
+<code>fees.md</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="With size 200 fees.md became five chunks including a heading alone; with size 400 and heading-first separators it became two whole-section chunks">
+  <text class="label" x="20" y="24">Size 200 / overlap 40: fees.md becomes 5 chunks</text>
+  <rect class="box" x="20" y="36" width="188" height="44" rx="8"/>
+  <text x="114" y="56" text-anchor="middle">## Late fees</text>
+  <text class="small" x="114" y="72" text-anchor="middle">157 chars</text>
+  <rect class="box" x="212" y="36" width="178" height="44" rx="8"/>
+  <text x="301" y="56" text-anchor="middle">## Blocked cards</text>
+  <text class="small" x="301" y="72" text-anchor="middle">148 chars</text>
+  <rect class="box-bad" x="394" y="36" width="30" height="44" rx="6"/>
+  <rect class="box" x="428" y="36" width="238" height="44" rx="8"/>
+  <text x="547" y="56" text-anchor="middle">lost-item rules</text>
+  <text class="small" x="547" y="72" text-anchor="middle">198 chars</text>
+  <rect class="box-warn" x="624" y="88" width="76" height="34" rx="6"/>
+  <text class="small" x="662" y="109" text-anchor="middle">59 chars</text>
+  <path class="line" d="M409,80 V92"/>
+  <text class="small bad" x="409" y="106" text-anchor="middle">heading alone (24 chars)</text>
+  <text class="small" x="560" y="140" text-anchor="middle">the last chunk repeats the end of the one above (overlap)</text>
+  <text class="label" x="20" y="176">Size 400 / overlap 60, cut at "## " first (harbor/knowledge.py): 2 chunks</text>
+  <rect class="box-ok" x="20" y="188" width="368" height="44" rx="8"/>
+  <text x="204" y="208" text-anchor="middle">## Late fees + ## Blocked cards</text>
+  <text class="small" x="204" y="224" text-anchor="middle">307 chars</text>
+  <rect class="box-ok" x="392" y="188" width="296" height="44" rx="8"/>
+  <text x="540" y="208" text-anchor="middle">## Lost or damaged items + rules</text>
+  <text class="small" x="540" y="224" text-anchor="middle">247 chars</text>
+</svg>
+<figcaption>Widths are proportional to the real chunk lengths of <code>fees.md</code>. Overlap only appears where a
+section had to be cut mid-text. <strong>Small chunks can strand a heading away from the text it introduces.</strong></figcaption>
+</figure>
+
+<p>There is no universally right size. Use these rules of thumb and then measure (see "Evaluating retrieval" below):</p>
+<div class="table-wrap"><table>
+<tr><th>If chunks are…</th><th>You gain</th><th>You risk</th></tr>
+<tr><td>Small (a sentence or two)</td><td>Sharp embeddings, precise matches, many fit in the prompt</td><td>Lost context: "it costs 3 EUR" without saying what "it" is; orphan headings</td></tr>
+<tr><td>Large (several sections)</td><td>Full context, rules stay with their conditions</td><td>Blurry embeddings, fewer sources per prompt, more noise for the model</td></tr>
+<tr><td>Heavily overlapped</td><td>Sentences at the edges are never lost</td><td>Duplicate text in results and in the index</td></tr>
+</table></div>
+
+<h3>Other splitters</h3>
+<div class="table-wrap"><table>
+<tr><th>Splitter</th><th>How it cuts</th><th>Good for</th></tr>
+<tr><td><code>MarkdownHeaderTextSplitter</code></td><td>At the headings you list, and stores each heading as metadata</td><td>Docs written in Markdown; lab 05 got 17 sections with metadata like <code>{'page': 'Branches and opening hours', 'section': 'Central Library'}</code></td></tr>
+<tr><td>Token-based (for example <code>TokenTextSplitter</code>, or a recursive splitter that counts tokens)</td><td>Measures size in tokens with a tokenizer instead of characters</td><td>Staying exactly inside a model's token limit; needs an extra tokenizer package</td></tr>
+<tr><td>Semantic chunking</td><td>Embeds sentences and cuts where the meaning shifts</td><td>Long prose without clear headings; slower because it embeds while splitting</td></tr>
+<tr><td>Code splitters</td><td>Prefer cutting between functions and classes of a given language</td><td>Source code search</td></tr>
+</table></div>
+<p>The Markdown header splitter returns sections from a string, so lab 05 calls <code>md.split_text(...)</code> per
+file. Note that its metadata holds the headings but not the file name; if you need both, copy the source in yourself
+or run a size-based splitter on its output.</p>
+
+<h2>Embeddings: meaning as numbers</h2>
+
+<p>An embedding model turns a text into a fixed-length list of numbers, a <em>vector</em>. The model was trained so
+that texts with similar meaning get similar vectors, even when they share no words. In lab 06,
+<code>nomic-embed-text</code> turned "When does the library open?" into 768 numbers, starting
+<code>[-0.075, 0.012, -0.14, -0.067]</code>. No single number means anything you can name ("number 3 is about
+fees"); meaning lives in the pattern as a whole. The length (768 here) is called the <strong>dimension</strong>, and it
+is fixed by the model: every text, a single word or a whole page, becomes exactly 768 numbers.</p>
+
+<details class="primer"><summary>New to vectors? Think of arrows</summary>
+<p>A vector with two numbers, like <code>[3, 4]</code>, is an arrow on a sheet of paper: 3 steps right, 4 steps up.
+With three numbers it is an arrow in a room. With 768 numbers nobody can picture it, but the maths is the same: you
+can still ask whether two arrows point in the same direction. Diagrams like the one below draw two dimensions to give
+you the intuition; the real thing has 768.</p>
+</details>
+
+<p>To compare two vectors, the labs use <a class="term" href="glossary.html#cosine-similarity">cosine similarity</a>:
+the cosine of the angle between the two arrows. Pointing the same way gives 1, at right angles gives 0, opposite
+gives −1. It ignores the arrows' length, which is handy because length mostly reflects things like text size rather
+than topic. <code>InMemoryVectorStore</code> computes exactly this, so in its results <strong>higher means closer</strong>
+(some other stores report a distance instead, where lower is closer; check the docs of the store you use).</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>import math
+
+def cosine(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    return dot / (math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b)))
+
+print(cosine([1, 0], [1, 0]))    # 1.0   same direction
+print(cosine([1, 0], [0, 1]))    # 0.0   unrelated
+print(cosine([1, 0], [-1, 0]))   # -1.0  opposite</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Two-dimensional sketch: the question's arrow points close to the fees chunk and further from the rooms chunk; real scores from lab 06 on the right">
+  <path class="line" d="M60,260 H420"/>
+  <path class="line" d="M60,260 V24"/>
+  <text class="small" x="420" y="278" text-anchor="end">dimension 1</text>
+  <text class="small" x="66" y="20">dimension 2</text>
+  <path class="arrow-accent" d="M60,260 L328,122"/>
+  <text class="accent" x="334" y="126">your question</text>
+  <path class="arrow-ok" d="M60,260 L298,92"/>
+  <text x="250" y="80">fees.md chunk</text>
+  <path class="arrow" d="M60,260 L356,238"/>
+  <text x="290" y="226">digital.md chunk</text>
+  <path class="arrow" d="M60,260 L148,44"/>
+  <text x="156" y="46">rooms.md chunk</text>
+  <rect class="box" x="470" y="24" width="270" height="118" rx="8"/>
+  <text class="title" x="486" y="48">Real search (lab 06)</text>
+  <text class="small" x="486" y="68">"How much do I pay if a book is late?"</text>
+  <text class="mono" x="486" y="96">0.676  fees.md</text>
+  <text class="mono" x="486" y="120">0.615  digital.md</text>
+  <rect class="box-info" x="470" y="160" width="270" height="100" rx="8"/>
+  <text class="title" x="486" y="184">Cosine similarity</text>
+  <text class="small" x="486" y="206">1 = same direction</text>
+  <text class="small" x="486" y="226">0 = unrelated</text>
+  <text class="small" x="486" y="246">higher = closer (in this store)</text>
+</svg>
+<figcaption>Left: a two-dimensional sketch with illustrative positions. Right: the real top-2 scores from lab 06.
+<strong>Retrieval returns the chunks whose arrows point most nearly the same way as the question's.</strong></figcaption>
+</figure>
+
+<p>Two lessons from lab 06's scores. First, "Can I make things with a laser?" found the maker-space chunk (0.663)
+although the chunk talks about a "laser cutter" and the question never says "maker space": meaning, not exact words.
+Second, the scores are close together (0.676 against 0.615 for the late-fee question) and an unrelated chunk always
+gets <em>some</em> score. A vector search never says "nothing matches"; it always returns the k nearest chunks, even if
+all of them are poor. Scores are only comparable within one model and one store, so do not hard-code a threshold you
+read in a blog post.</p>
+
+<h3>Query embeddings and document embeddings</h3>
+<p>LangChain embedding classes have two methods: <code>embed_documents</code> for many texts at indexing time and
+<code>embed_query</code> for the question. Some embedding models are trained to expect a short task prefix that
+marks a text as a search query or as a document, and their model cards say so; providers may add it for you or
+leave it to you. In <code>langchain-ollama</code> 1.1.0, <code>embed_query</code> simply calls
+<code>embed_documents</code> on one text, so in these labs both sides are embedded in exactly the same way. The rule
+that never changes: <strong>index and query with the same embedding model</strong>. Vectors from two different models
+live in different spaces, and comparing them gives meaningless numbers (often with no error at all).</p>
+
+<h2>Vector stores: keeping and searching the vectors</h2>
+
+<p>A <a class="term" href="glossary.html#vector-store">vector store</a> keeps each chunk's text, metadata and vector,
+and answers the question "which stored vectors are closest to this one?". The labs use
+<code>InMemoryVectorStore</code> from <code>langchain_core</code>: a Python dictionary plus a cosine computation over
+every entry. That is perfect for learning and for a dozen chunks. It is not built for millions of chunks or for
+several programs sharing one index, which is what dedicated stores are for.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Kind</th><th>Examples (at the time of writing)</th><th>Where data lives</th><th>When to use</th></tr>
+<tr><td>In memory</td><td><code>InMemoryVectorStore</code></td><td>Your Python process; gone when it ends unless you dump it</td><td>Learning, tests, tiny data sets</td></tr>
+<tr><td>Embedded library</td><td>FAISS, Chroma (local mode)</td><td>Files on your disk</td><td>One app, a lot of chunks, no server to run</td></tr>
+<tr><td>Database or server</td><td>PostgreSQL with pgvector, Chroma server, managed vector databases</td><td>A separate service</td><td>Several apps or users, updates over time, production</td></tr>
+</table></div>
+<p>All of them implement the same LangChain interface (<code>add_documents</code>, <code>similarity_search</code>,
+<code>as_retriever</code>), so the rest of your code barely changes when you switch. Large stores use approximate
+nearest-neighbour indexes that trade a tiny bit of accuracy for a lot of speed; the in-memory store compares against
+every vector, which is exact but slow at scale.</p>
+
+<p><strong>Metadata filters</strong> restrict a search before ranking. Lab 06 searched only inside
+<code>branches.md</code>. In <code>InMemoryVectorStore</code> the filter is a Python function that receives each
+Document; most database-backed stores take a dictionary instead (each store documents its own filter syntax):</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/06_vector_store.py lines 27–28"><code>only_branches = store.similarity_search("open on Sunday", k=2,
+                                        filter=lambda d: d.metadata["source"].endswith("branches.md"))</code></pre>
+
+<p><strong>Persistence.</strong> Embedding costs time, so you do not want to redo it at every start. Lab 06 saved the
+in-memory store to a JSON file with <code>dump</code> and loaded it back with <code>load</code>, and the reloaded
+store answered "printing price" with the chunk that starts at <code>## Wi-Fi and computers</code> (in the 400-character split it also holds the printing prices) without embedding a single chunk again. <code>load</code> still needs
+the embeddings object, because every new <em>question</em> must be embedded with the same model.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 196" role="img" aria-label="The store is dumped to runs/policies_store.json and loaded into a new store that needs the same embeddings object for new questions">
+  <rect class="box" x="20" y="30" width="220" height="130" rx="8"/>
+  <text class="title" x="130" y="54" text-anchor="middle">InMemoryVectorStore</text>
+  <text class="small" x="36" y="80">each entry:</text>
+  <text class="mono" x="36" y="102">id</text>
+  <text class="mono" x="36" y="122">vector (768 numbers)</text>
+  <text class="mono" x="36" y="142">text + metadata</text>
+  <path class="arrow" d="M240,95 H298"/>
+  <text class="mono" x="269" y="85" text-anchor="middle">dump</text>
+  <rect class="box-info" x="300" y="62" width="200" height="66" rx="8"/>
+  <text class="mono" x="400" y="92" text-anchor="middle">runs/</text>
+  <text class="mono" x="400" y="112" text-anchor="middle">policies_store.json</text>
+  <path class="arrow" d="M500,95 H538"/>
+  <text class="mono" x="519" y="85" text-anchor="middle">load</text>
+  <rect class="box-ok" x="540" y="30" width="200" height="130" rx="8"/>
+  <text class="title" x="640" y="54" text-anchor="middle">Reloaded store</text>
+  <text class="small" x="640" y="80" text-anchor="middle">no chunk re-embedded</text>
+  <text class="small" x="640" y="100" text-anchor="middle">still needs embeddings</text>
+  <text class="small" x="640" y="118" text-anchor="middle">to embed new questions</text>
+  <text class="small" x="380" y="184" text-anchor="middle">If a policy file changes, the saved vectors are stale: rebuild or update them.</text>
+</svg>
+<figcaption>What <code>dump</code> and <code>load</code> in <a href="06-vector-store.html">lab 06</a> do.
+<strong>Saving the index saves the embedding work, not the need for the embedding model.</strong></figcaption>
+</figure>
+
+<h2>Retrievers: strategies for finding the right chunks</h2>
+
+<p>A <a class="term" href="glossary.html#retriever">retriever</a> is anything that takes a question string and returns
+a list of Documents. That small contract is the point: a retriever is a
+<a class="term" href="glossary.html#runnable">Runnable</a>, so it plugs into a chain with <code>|</code>, and you can
+swap strategies without touching the prompt or the model. Lab 07 builds five of them over the same 12 chunks:</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/07_retrievers.py lines 20–24"><code>dense = store.as_retriever(search_kwargs={"k": 2})
+mmr = store.as_retriever(search_type="mmr", search_kwargs={"k": 2, "fetch_k": 6})
+bm25 = BM25Retriever.from_documents(chunks, k=2)
+hybrid = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.5, 0.5])
+multi = MultiQueryRetriever.from_llm(retriever=dense, llm=get_model())</code></pre>
+
+<div class="table-wrap"><table>
+<tr><th>Strategy</th><th>Idea</th><th>Strong at</th><th>Weak at</th></tr>
+<tr><td>Similarity (dense)</td><td>Nearest vectors by cosine</td><td>Paraphrases, synonyms ("laser" → maker space)</td><td>Exact names, codes, rare words</td></tr>
+<tr><td><a class="term" href="glossary.html#mmr">MMR</a></td><td>Fetch more candidates (here 6), then pick results that are relevant <em>and</em> different from each other</td><td>Avoiding near-duplicate chunks</td><td>Can push out the second-best relevant chunk</td></tr>
+<tr><td><a class="term" href="glossary.html#bm25">BM25</a></td><td>Keyword scoring: rare words that appear in both count most</td><td>Exact terms, ids, product names</td><td>Different words for the same idea</td></tr>
+<tr><td><a class="term" href="glossary.html#hybrid-search">Hybrid</a> (ensemble)</td><td>Run several retrievers and merge their rankings</td><td>Getting both kinds of match</td><td>More moving parts, weights to tune</td></tr>
+<tr><td><a class="term" href="glossary.html#multi-query">Multi-query</a></td><td>Ask an LLM for other phrasings, search with each, merge</td><td>Vague or oddly worded questions</td><td>Extra model call; phrasings can drift off topic</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to BM25? Keyword search with a sense of proportion</summary>
+<p>BM25 is a classic search-engine formula from long before LLMs. For each word of the question it asks: does the
+chunk contain it, how often, and how rare is the word across all chunks? "Wi-Fi" appears in one chunk, so it is a
+strong signal; "the" appears everywhere, so it counts for almost nothing. It also stops rewarding a word after a few
+repetitions and favours shorter chunks slightly. No model, no vectors: it runs in a blink and needs the
+<code>rank-bm25</code> package.</p>
+</details>
+
+<h3>Hybrid search and rank fusion</h3>
+<p>BM25 scores and cosine scores are on completely different scales, so you cannot just add them. The
+<code>EnsembleRetriever</code> merges by <em>rank</em> instead, with a method called reciprocal rank fusion: each
+document gets <code>weight / (rank + c)</code> from every list it appears in, and the totals decide the final order.
+In the installed <code>langchain-classic</code>, <code>c</code> defaults to 60 and ranks start at 1. A document that
+both retrievers like rises to the top even if neither put it first.</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>def rrf(rankings, weights, c=60):
+    scores = {}
+    for ranking, w in zip(rankings, weights):
+        for rank, doc_id in enumerate(ranking, start=1):
+            scores[doc_id] = scores.get(doc_id, 0) + w / (rank + c)
+    return sorted(scores, key=scores.get, reverse=True)
+
+print(rrf([["fees", "loans"], ["digital", "fees"]], [0.5, 0.5]))   # ['fees', 'digital', 'loans']</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 216" role="img" aria-label="Reciprocal rank fusion merges a BM25 ranking and a vector ranking; the chunk found by both ends up first">
+  <rect class="box" x="20" y="20" width="200" height="80" rx="8"/>
+  <text class="title" x="36" y="42">BM25 ranking</text>
+  <text class="mono" x="36" y="66">1  fees</text>
+  <text class="mono" x="36" y="88">2  loans</text>
+  <rect class="box" x="20" y="116" width="200" height="80" rx="8"/>
+  <text class="title" x="36" y="138">Vector ranking</text>
+  <text class="mono" x="36" y="162">1  digital</text>
+  <text class="mono" x="36" y="184">2  fees</text>
+  <path class="arrow" d="M220,60 L298,96"/>
+  <path class="arrow" d="M220,156 L298,122"/>
+  <rect class="box-info" x="300" y="78" width="170" height="60" rx="8"/>
+  <text class="title" x="385" y="102" text-anchor="middle">Rank fusion</text>
+  <text class="mono" x="385" y="124" text-anchor="middle">w / (rank + 60)</text>
+  <path class="arrow" d="M470,108 H518"/>
+  <rect class="box-ok" x="520" y="40" width="220" height="136" rx="8"/>
+  <text class="title" x="536" y="64">Fused order</text>
+  <text class="mono" x="536" y="92">fees     0.0163</text>
+  <text class="mono" x="536" y="118">digital  0.0082</text>
+  <text class="mono" x="536" y="144">loans    0.0081</text>
+</svg>
+<figcaption>The toy rankings of the snippet above, weights 0.5 and 0.5 (illustrative ids, real formula).
+<strong>Agreement between retrievers beats a single first place.</strong></figcaption>
+</figure>
+
+<h3>Multi-query, and when the rewrites drift</h3>
+<p>The multi-query retriever asks the model for several rewrites of the question, runs the base retriever for each,
+and returns the union of the results. In lab 07 the log shows what llama3.2 produced for "What is the Wi-Fi
+password?": the list of "queries" included the model's own preamble ("Here are three alternative versions…") and a
+closing paragraph, and the real rewrites drifted to generic questions about Wi-Fi at "my home or office" and
+"common Wi-Fi network names and passwords". The retriever turns each output line into a query, so chatty lines become
+searches too. A small model rewriting questions can make retrieval <em>worse</em>; here multi-query scored 11 of 12,
+no better than plain vector search.</p>
+
+<h3>Compression and reranking</h3>
+<p>Two more ideas you will meet in the docs. <strong>Contextual compression</strong> wraps a retriever and post-processes
+what it returns: drop chunks that are not relevant, or cut each chunk down to the sentences that matter, so the prompt
+holds less noise. <strong>Reranking</strong> retrieves generously (say 20 candidates) with a fast method, then re-scores
+them with a slower, more accurate model that reads the question and each chunk together (a cross-encoder or an LLM),
+and keeps the best few. Both trade extra computation for precision. The labs do not use them; try them only once you
+can measure whether they help.</p>
+
+<h2>Evaluating retrieval</h2>
+
+<p>You cannot judge a retriever by trying two questions by hand. Lab 07 uses a tiny but real method: a question set
+(<code>evals/questions.jsonl</code>, 12 questions, each with the file that holds its answer) and one metric, the
+<strong>hit rate</strong>: in how many questions did the expected file appear among the retrieved chunks? It checks
+only retrieval, not the final answer, which makes it fast, cheap and free of model randomness for most strategies.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Retriever (k=2)</th><th>Hit rate</th><th>Missed</th></tr>
+<tr><td>vector</td><td>11/12</td><td>"I'm visiting for a month. Can I borrow books?"</td></tr>
+<tr><td>MMR</td><td>11/12</td><td>"How much is a colour print?"</td></tr>
+<tr><td>BM25</td><td>12/12</td><td>none</td></tr>
+<tr><td>hybrid</td><td>12/12</td><td>none</td></tr>
+<tr><td>multi-query</td><td>11/12</td><td>"I'm visiting for a month. Can I borrow books?"</td></tr>
+</table></div>
+
+<p>Read these numbers carefully. With 12 questions, one question is more than 8 percentage points, so differences of
+one are a hint, not a verdict. The vector miss is instructive: the membership file speaks of "visitors" and a
+"temporary card", while the question says "visiting for a month". Meaning-based search should bridge that, and on
+this run it did not. BM25 matched the words. That is why hybrid, which got both, is a common default. Grow your
+question set from real user questions, especially the ones that failed, and rerun it after every change to chunking,
+embedding model or retriever.</p>
+
+<h2>The RAG chain, and how it fails</h2>
+
+<p>Lab 07 then assembles the full chain in one line of <a class="term" href="glossary.html#lcel">LCEL</a>:</p>
+
+<pre data-lang="py" data-tag="excerpt · labs/07_retrievers.py lines 44–50"><code>prompt = ChatPromptTemplate.from_messages([
+    ("system", "You answer questions about Harbor City Library using only the context below. "
+               "If the context does not contain the answer, say you don't know. "
+               "End with the source file in brackets.\n\nContext:\n{context}"),
+    ("human", "{question}"),
+])
+rag = {"context": hybrid | format_docs, "question": RunnablePassthrough()} | prompt | get_model() | StrOutputParser()</code></pre>
+
+<p>Read it left to right. The dictionary runs two things on the same question: the hybrid retriever followed by
+<code>format_docs</code> (which joins the chunks and tags each with its file name) fills <code>context</code>, and
+<code>RunnablePassthrough</code> passes the question through unchanged. The
+<a class="term" href="glossary.html#prompt-template">prompt template</a> receives both, the model answers, and the
+<a class="term" href="glossary.html#output-parser">output parser</a> turns the reply message into a plain string.</p>
+
+<p>Two of the five answers were good ("You can keep a DVD for 7 days. [loans.md]"). The other three are worth more,
+because they show the typical failures:</p>
+<ul>
+  <li><strong>"What happens if I owe 20 EUR?" → "I don't know. [fees.md]".</strong> The hybrid retriever had a perfect
+  score, and re-running the retriever alone shows the chunk with the rule "If you owe 15 EUR or more, your card is blocked" among the results. Retrieval worked; the model did not apply a threshold
+  rule to a number that was not written in the text. The cited file even shows it saw the right source.</li>
+  <li><strong>"Do kids pay late fees?" → "Yes, kids do pay late fees. According to the context, Junior cards never pay
+  late fees."</strong> The second sentence is right and contradicts the first. The model did not connect "kids" with
+  "junior cards" before committing to "Yes".</li>
+  <li><strong>"Can I bring my dog to the library?" → "I don't know. [branches.md]".</strong> Saying "I don't know" is
+  correct, since no policy mentions pets, but the source tag is decoration: there was nothing in
+  <code>branches.md</code> to cite. A citation is only as honest as the model producing it.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 252" role="img" aria-label="Three failure types: wrong chunks retrieved, rule not applied, self-contradiction, each with its symptom and a fix to try">
+  <text class="label" x="20" y="22">Where it broke</text>
+  <text class="label" x="270" y="22">Symptom in lab 07</text>
+  <text class="label" x="520" y="22">What to try</text>
+  <rect class="box-warn" x="20" y="34" width="220" height="60" rx="8"/>
+  <text x="130" y="60" text-anchor="middle">Retrieval missed</text>
+  <text class="small" x="130" y="78" text-anchor="middle">right file not in top k</text>
+  <rect class="box" x="270" y="34" width="220" height="60" rx="8"/>
+  <text x="380" y="60" text-anchor="middle">"visiting for a month"</text>
+  <text class="small" x="380" y="78" text-anchor="middle">vector search: 11/12</text>
+  <rect class="box-ok" x="520" y="34" width="220" height="60" rx="8"/>
+  <text x="630" y="60" text-anchor="middle">hybrid, chunking, k</text>
+  <text class="small" x="630" y="78" text-anchor="middle">measure hit rate again</text>
+  <rect class="box-bad" x="20" y="108" width="220" height="60" rx="8"/>
+  <text x="130" y="134" text-anchor="middle">Rule not applied</text>
+  <text class="small" x="130" y="152" text-anchor="middle">right chunk, no reasoning</text>
+  <rect class="box" x="270" y="108" width="220" height="60" rx="8"/>
+  <text x="380" y="134" text-anchor="middle">20 EUR: "I don't know"</text>
+  <text class="small" x="380" y="152" text-anchor="middle">rule says 15 EUR or more</text>
+  <rect class="box-ok" x="520" y="108" width="220" height="60" rx="8"/>
+  <text x="630" y="134" text-anchor="middle">clearer prompt, examples</text>
+  <text class="small" x="630" y="152" text-anchor="middle">stronger model, answer tests</text>
+  <rect class="box-bad" x="20" y="182" width="220" height="60" rx="8"/>
+  <text x="130" y="208" text-anchor="middle">Self-contradiction</text>
+  <text class="small" x="130" y="226" text-anchor="middle">answers before reading</text>
+  <rect class="box" x="270" y="182" width="220" height="60" rx="8"/>
+  <text x="380" y="208" text-anchor="middle">kids: "Yes … never pay"</text>
+  <text class="small" x="380" y="226" text-anchor="middle">junior card = kids</text>
+  <rect class="box-ok" x="520" y="182" width="220" height="60" rx="8"/>
+  <text x="630" y="208" text-anchor="middle">quote the rule first</text>
+  <text class="small" x="630" y="226" text-anchor="middle">then answer; check it</text>
+  <path class="arrow" d="M240,64 H268"/>
+  <path class="arrow" d="M490,64 H518"/>
+  <path class="arrow" d="M240,138 H268"/>
+  <path class="arrow" d="M490,138 H518"/>
+  <path class="arrow" d="M240,212 H268"/>
+  <path class="arrow" d="M490,212 H518"/>
+</svg>
+<figcaption>Real symptoms from lab 07; the fixes are ideas to test, not guaranteed cures.
+<strong>First find out whether retrieval or generation failed; the fixes are completely different.</strong></figcaption>
+</figure>
+
+<p>The habit to build: when a RAG answer is wrong, print the retrieved chunks before changing anything. If the answer
+is not in them, work on loading, splitting and retrieval. If it is, work on the prompt, the model, or the way the
+rule is written. Lab <a href="08-langgraph-basics.html">08</a> rebuilds this chain as a graph so you can watch each
+step, and the companion guide <a href="../ai-engineering/">AI Engineering</a> builds RAG in plain Python if you want
+to see the same pipeline without a framework.</p>
+
+<div class="callout warn"><strong>Common misconceptions and pitfalls</strong>
+<ul>
+  <li><strong>"RAG stops hallucinations."</strong> It reduces them when the right chunk is found and the model uses
+  it. Lab 07 shows both conditions failing separately.</li>
+  <li><strong>Mixing embedding models.</strong> Indexing with one model and querying with another gives nonsense
+  scores, usually without an error.</li>
+  <li><strong>Trusting a single score.</strong> Vector search always returns k results; a high-looking score does not
+  mean the chunk answers the question.</li>
+  <li><strong>Tuning chunk size by feel.</strong> Change one setting, rerun the question set, compare hit rates.</li>
+  <li><strong>Forgetting stale indexes.</strong> A saved store does not notice that a policy file changed.</li>
+  <li><strong>Dropping metadata.</strong> Without <code>source</code> you can neither cite nor evaluate.</li>
+  <li><strong>Assuming the citation is checked.</strong> The model writes <code>[fees.md]</code> itself; it can cite
+  a file that says nothing on the subject.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+  <li>RAG has an indexing phase (load, split, embed, store) and an answering phase (embed the question, retrieve,
+  prompt the model).</li>
+  <li>A Document is text plus metadata; loaders decide what one Document is, and metadata powers citations, filters
+  and evaluation.</li>
+  <li>Splitting gives sharper embeddings and room in the prompt; size and overlap trade context against precision, and
+  small chunks can strand a heading (lab 05).</li>
+  <li>Embeddings are fixed-length vectors (768 for <code>nomic-embed-text</code>); cosine similarity compares their
+  directions; always use the same model for chunks and questions.</li>
+  <li>Vector stores range from in-memory to databases; they share one interface, support metadata filters and can be
+  saved and reloaded.</li>
+  <li>Retrievers are swappable: similarity, MMR, BM25, hybrid with rank fusion, multi-query; measure them with a hit
+  rate on a question set (lab 07: BM25 and hybrid 12/12).</li>
+  <li>A correct retrieval does not guarantee a correct answer: check which stage failed before fixing.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/retrieval">LangChain docs: Retrieval</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/rag">LangChain docs: Build a RAG agent</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/knowledge-base">LangChain docs: Build a semantic search engine</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/integrations/document_loaders">LangChain docs: Document loader integrations</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/integrations/splitters">LangChain docs: Text splitters</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/integrations/splitters/markdown_header_metadata_splitter">LangChain docs: Splitting Markdown by headers</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/integrations/text_embedding">LangChain docs: Embedding model integrations</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/integrations/vectorstores">LangChain docs: Vector store integrations</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/integrations/retrievers">LangChain docs: Retriever integrations</a></li>
+  <li><a href="https://docs.ollama.com/capabilities/embeddings">Ollama docs: Embeddings</a></li>
+  <li><a href="https://ollama.com/library/nomic-embed-text">Ollama library: nomic-embed-text</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="chat-models-prompts.html"><small>← Chapter 2</small>Chat models, structured output and prompts</a>
+<a class="next" href="langgraph-agents.html"><small>Chapter 4 →</small>Agents with LangGraph</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16 · Runnables and LCEL</title>
+<meta name="description" content="Take apart the chains: sequences, parallel branches, assign, retries, fallbacks and schemas. Book chapters 17-18.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 16/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 16 of 16 · Hands-on lab</div>
+  <h1>Runnables and LCEL</h1>
+  <p class="lead">Take apart the chains: sequences, parallel branches, assign, retries, fallbacks and schemas. Book chapters 17-18.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapters 17–18 · Runnables and LCEL, Python Typing and Pydantic</strong> of the book. The ideas behind this lab are explained in the concept chapter <a href="runnables-typing.html">Runnables, LCEL, typing and Pydantic</a>.</div>
+
+<h2>Goal</h2>
+<p>Since <a href="03-prompt-templates.html">lab 03</a> you have written chains like <code>prompt | model | parser</code>. This lab takes
+that syntax apart. You will turn plain Python functions into <a class="term" href="glossary.html#runnable">Runnables</a>, connect them
+with <code>|</code>, run branches side by side, add keys to a dictionary as it flows through, describe the data with a
+<a class="term" href="glossary.html#typeddict">TypedDict</a>, and make a step survive failures with retries and fallbacks. Only one part
+calls the model; the rest runs instantly.</p>
+
+<h2>The idea in brief</h2>
+<ul>
+<li><strong>A Runnable is anything with the same small interface</strong>: <code>invoke</code> (one input), <code>batch</code> (a list
+of inputs) and <code>stream</code> (output in pieces). Prompts, models, parsers, retrievers and compiled graphs are all Runnables.</li>
+<li><strong><a class="term" href="glossary.html#lcel">LCEL</a></strong> (LangChain Expression Language) is the way you combine them:
+<code>a | b</code> makes a sequence, a dictionary of Runnables runs them in parallel on the same input, and <code>.assign</code> adds new
+keys while keeping the old ones.</li>
+<li><strong>Every Runnable gets extra powers for free</strong>: <code>with_retry</code>, <code>with_fallbacks</code>, input and output
+schemas.</li>
+</ul>
+<p>The full explanation, including Python typing and Pydantic, is in <a href="runnables-typing.html">Runnables, LCEL, typing and
+Pydantic</a>.</p>
+
+<details class="primer"><summary>New to <code>lambda</code>? Small functions without a name</summary>
+<p><code>lambda text: text.upper()</code> is a function written in one expression: it takes <code>text</code> and returns
+<code>text.upper()</code>. It is the same as writing <code>def f(text): return text.upper()</code>, without the name. Lambdas are handy
+for tiny steps in a chain. <code>len</code> (Python's built-in "how long is this?") is already a function, so it can be passed directly,
+as on line 13.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+<li>Open a terminal in the project folder <code>harbor-library-ai</code>.</li>
+<li>Check that Ollama is running with <code>llama3.2</code> and <code>nomic-embed-text</code> pulled (part 4 embeds the policies and calls
+the model).</li>
+<li>Create the file <code>labs/16_lcel.py</code> with the content below (complete file).</li>
+<li>Run it with <code>uv run python -m labs.16_lcel</code>.</li>
+</ol>
+
+<h2>The code</h2>
+<pre data-file="labs/16_lcel.py" data-lang="py" data-tag="complete file"><code>"""Lab 16: Runnables and LCEL: the pieces every chain in labs 03-07 was made of."""
+from typing import TypedDict
+
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableLambda, RunnableParallel, RunnablePassthrough
+
+from harbor.config import get_model
+from harbor.knowledge import build_vector_store, format_docs
+
+# 1. Any function becomes a Runnable, with invoke / batch / stream for free.
+shout = RunnableLambda(lambda text: text.upper())
+count = RunnableLambda(len)
+print("1) invoke:", shout.invoke("quiet please"), "| batch:", count.batch(["a", "abc", "hello"]))
+
+# 2. The pipe | feeds one Runnable's output into the next (a RunnableSequence).
+chain = shout | count
+print("2) sequence:", type(chain).__name__, "-&gt;", chain.invoke("library"))
+
+# 3. A dict (RunnableParallel) runs branches on the same input; .assign adds keys and keeps the rest.
+stats = RunnableParallel(upper=shout, length=count)
+print("3) parallel:", stats.invoke("harbor"))
+print("   assign:  ", RunnablePassthrough.assign(words=lambda d: len(d["text"].split())).invoke({"text": "open on Sunday"}))
+
+
+# 4. Type hints document the shapes that flow through a chain, and help your editor catch mistakes.
+class Answer(TypedDict):
+    question: str
+    context: str
+    answer: str
+
+
+retriever = build_vector_store().as_retriever(search_kwargs={"k": 2})
+prompt = ChatPromptTemplate.from_template("Answer in one sentence from this context:\n{context}\n\nQuestion: {question}")
+rag = (
+    RunnableParallel(context=retriever | format_docs, question=RunnablePassthrough())
+    | RunnablePassthrough.assign(answer=prompt | get_model() | StrOutputParser())
+)
+result: Answer = rag.invoke("How much does 3D printing cost?")
+print("\n4) RAG with the context kept:", {k: v[:70] for k, v in result.items()})
+
+# 5. Resilience: retry a flaky step, and fall back to another Runnable if it still fails.
+attempts = {"n": 0}
+
+
+def flaky(text):
+    attempts["n"] += 1
+    if attempts["n"] &lt; 3:
+        raise ConnectionError("temporary network problem")
+    return f"ok after {attempts['n']} attempts: {text}"
+
+
+print("5) with_retry:", RunnableLambda(flaky).with_retry(stop_after_attempt=3, wait_exponential_jitter=False).invoke("ping"))
+broken = RunnableLambda(lambda _: 1 / 0)
+print("   with_fallbacks:", broken.with_fallbacks([RunnableLambda(lambda _: "fallback answer")]).invoke("x"))
+
+# 6. Every chain can describe its input and output schema.
+print("6) input schema of the prompt:", prompt.get_input_jsonschema()["required"])</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 16: Runnables and LCEL: ..."""</code></td><td>Module docstring.</td></tr>
+<tr><td>2</td><td><code>from typing import TypedDict</code></td><td><code>TypedDict</code> describes a dictionary with fixed keys and value types (used on line 27).</td></tr>
+<tr><td>4</td><td><code>from langchain_core.output_parsers import StrOutputParser</code></td><td>The <a class="term" href="glossary.html#output-parser">output parser</a> that turns the model's message into a plain string.</td></tr>
+<tr><td>5</td><td><code>from langchain_core.prompts import ChatPromptTemplate</code></td><td>The <a class="term" href="glossary.html#prompt-template">prompt template</a> class from lab 03.</td></tr>
+<tr><td>6</td><td><code>from langchain_core.runnables import RunnableLambda, RunnableParallel, RunnablePassthrough</code></td><td>The three building blocks: wrap a function, run branches side by side, pass the input through unchanged (and <code>.assign</code>).</td></tr>
+<tr><td>8</td><td><code>from harbor.config import get_model</code></td><td>The shared chat model, used only in part 4.</td></tr>
+<tr><td>9</td><td><code>from harbor.knowledge import build_vector_store, format_docs</code></td><td>Builds the in-memory vector store of the six policy files (labs 04–06) and formats retrieved chunks as one string, each tagged with its file name.</td></tr>
+<tr><td>12</td><td><code>shout = RunnableLambda(lambda text: text.upper())</code></td><td>Wraps a function as a Runnable that upper-cases text.</td></tr>
+<tr><td>13</td><td><code>count = RunnableLambda(len)</code></td><td>Wraps Python's <code>len</code>: returns the number of characters.</td></tr>
+<tr><td>14</td><td><code>print("1) invoke:", shout.invoke("quiet please"), "| batch:", count.batch(["a", "abc", "hello"]))</code></td><td><code>invoke</code> runs one input; <code>batch</code> runs a list of inputs and returns a list of results in the same order. You never wrote a <code>batch</code> method: every Runnable has one.</td></tr>
+<tr><td>17</td><td><code>chain = shout | count</code></td><td>The pipe makes a <code>RunnableSequence</code>: the output of <code>shout</code> becomes the input of <code>count</code>.</td></tr>
+<tr><td>18</td><td><code>print("2) sequence:", type(chain).__name__, "-&gt;", chain.invoke("library"))</code></td><td>Prints the class name of the combined object and the result: "library" becomes "LIBRARY", which has 7 characters.</td></tr>
+<tr><td>21</td><td><code>stats = RunnableParallel(upper=shout, length=count)</code></td><td>Runs both Runnables on the <em>same</em> input and returns a dictionary with one key per branch.</td></tr>
+<tr><td>22</td><td><code>print("3) parallel:", stats.invoke("harbor"))</code></td><td>Gives <code>{'upper': 'HARBOR', 'length': 6}</code>.</td></tr>
+<tr><td>23</td><td><code>RunnablePassthrough.assign(words=lambda d: len(d["text"].split())).invoke({"text": "open on Sunday"})</code></td><td>Takes a dictionary, keeps all its keys and adds <code>words</code>, computed from the input. <code>.split()</code> cuts the text at spaces, so "open on Sunday" has 3 words.</td></tr>
+<tr><td>27–30</td><td><code>class Answer(TypedDict):<br>    question: str<br>    context: str<br>    answer: str</code></td><td>Documents the shape of the RAG chain's result: a dictionary with three string keys.</td></tr>
+<tr><td>33</td><td><code>retriever = build_vector_store().as_retriever(search_kwargs={"k": 2})</code></td><td>Embeds the policy chunks (calls <code>nomic-embed-text</code>) and makes a <a class="term" href="glossary.html#retriever">retriever</a> that returns the 2 closest chunks.</td></tr>
+<tr><td>34</td><td><code>prompt = ChatPromptTemplate.from_template("Answer in one sentence from this context:\n{context}\n\nQuestion: {question}")</code></td><td>A prompt with two variables, <code>{context}</code> and <code>{question}</code>.</td></tr>
+<tr><td>35–38</td><td><code>rag = (<br>    RunnableParallel(context=retriever | format_docs, question=RunnablePassthrough())<br>    | RunnablePassthrough.assign(answer=prompt | get_model() | StrOutputParser())<br>)</code></td><td>The <a class="term" href="glossary.html#rag">RAG</a> chain from lab 07, rebuilt so that it keeps its intermediate data. Step 1 turns the question string into <code>{context, question}</code>: the retriever's documents are formatted into one string, and the question is passed through. <code>format_docs</code> is a plain function; LCEL wraps it in a <code>RunnableLambda</code> automatically when you pipe it. Step 2 adds <code>answer</code> while keeping <code>context</code> and <code>question</code>.</td></tr>
+<tr><td>39</td><td><code>result: Answer = rag.invoke("How much does 3D printing cost?")</code></td><td>Runs the chain. <code>: Answer</code> is a <a class="term" href="glossary.html#type-hint">type hint</a>: Python does not check it at runtime, but your editor and type checkers use it to warn you about a misspelled key.</td></tr>
+<tr><td>40</td><td><code>print("\n4) RAG with the context kept:", {k: v[:70] for k, v in result.items()})</code></td><td>Prints every key with its value cut to 70 characters, so the output stays readable.</td></tr>
+<tr><td>43</td><td><code>attempts = {"n": 0}</code></td><td>A counter stored in a dictionary, so the function below can change it without a <code>global</code> statement.</td></tr>
+<tr><td>46–50</td><td><code>def flaky(text):<br>    attempts["n"] += 1<br>    if attempts["n"] &lt; 3:<br>        raise ConnectionError("temporary network problem")<br>    return f"ok after {attempts['n']} attempts: {text}"</code></td><td>A fake unreliable step: it fails on the first two calls and succeeds on the third. It imitates a network call that sometimes times out.</td></tr>
+<tr><td>53</td><td><code>RunnableLambda(flaky).with_retry(stop_after_attempt=3, wait_exponential_jitter=False).invoke("ping")</code></td><td>Wraps the step so that an exception triggers another try, up to 3 attempts in total. <code>wait_exponential_jitter=False</code> turns off the default growing, randomised pause between tries, so the demo runs instantly.</td></tr>
+<tr><td>54</td><td><code>broken = RunnableLambda(lambda _: 1 / 0)</code></td><td>A step that always fails with <code>ZeroDivisionError</code>. <code>_</code> is the usual name for an argument you ignore.</td></tr>
+<tr><td>55</td><td><code>broken.with_fallbacks([RunnableLambda(lambda _: "fallback answer")]).invoke("x")</code></td><td>If <code>broken</code> raises, the same input is sent to the next Runnable in the list. In a real app the fallback could be a different model.</td></tr>
+<tr><td>58</td><td><code>print("6) input schema of the prompt:", prompt.get_input_jsonschema()["required"])</code></td><td>Every Runnable can describe its input as a <a class="term" href="glossary.html#json-schema">JSON Schema</a>. For the prompt, the required keys are its two variables.</td></tr>
+</table></div>
+
+<h2>Parts 1–3: the building blocks</h2>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="One Runnable interface: shout.invoke turns quiet please into QUIET PLEASE; count.batch turns a list of three strings into the list 1, 3, 5">
+  <rect class="box" x="10" y="20" width="220" height="44" rx="8"/>
+  <text class="mono" x="120" y="47" text-anchor="middle">"quiet please"</text>
+  <rect class="box-info" x="280" y="20" width="200" height="44" rx="8"/>
+  <text class="mono" x="380" y="47" text-anchor="middle">shout.invoke</text>
+  <rect class="box-ok" x="530" y="20" width="220" height="44" rx="8"/>
+  <text class="mono" x="640" y="47" text-anchor="middle">"QUIET PLEASE"</text>
+  <path class="arrow" d="M230,42 H276"/>
+  <path class="arrow" d="M480,42 H526"/>
+  <rect class="box" x="10" y="90" width="220" height="44" rx="8"/>
+  <text class="mono" x="120" y="117" text-anchor="middle">["a", "abc", "hello"]</text>
+  <rect class="box-info" x="280" y="90" width="200" height="44" rx="8"/>
+  <text class="mono" x="380" y="117" text-anchor="middle">count.batch</text>
+  <rect class="box-ok" x="530" y="90" width="220" height="44" rx="8"/>
+  <text class="mono" x="640" y="117" text-anchor="middle">[1, 3, 5]</text>
+  <path class="arrow" d="M230,112 H276"/>
+  <path class="arrow" d="M480,112 H526"/>
+</svg>
+<figcaption>Part 1 of the output, drawn. <strong>Wrap any function in <code>RunnableLambda</code> and it gets <code>invoke</code>, <code>batch</code> and <code>stream</code>.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 140" role="img" aria-label="Sequence: library goes through shout to LIBRARY, then through count to 7">
+  <rect class="zone" x="140" y="10" width="460" height="110" rx="8"/>
+  <text class="small" x="370" y="28" text-anchor="middle">chain = shout | count   (RunnableSequence)</text>
+  <rect class="box" x="10" y="50" width="110" height="44" rx="8"/>
+  <text class="mono" x="65" y="77" text-anchor="middle">"library"</text>
+  <rect class="box-info" x="160" y="50" width="110" height="44" rx="8"/>
+  <text class="mono" x="215" y="77" text-anchor="middle">shout</text>
+  <rect class="box" x="305" y="50" width="130" height="44" rx="8"/>
+  <text class="mono" x="370" y="77" text-anchor="middle">"LIBRARY"</text>
+  <rect class="box-info" x="470" y="50" width="110" height="44" rx="8"/>
+  <text class="mono" x="525" y="77" text-anchor="middle">count</text>
+  <rect class="box-ok" x="640" y="50" width="110" height="44" rx="8"/>
+  <text class="mono" x="695" y="77" text-anchor="middle">7</text>
+  <path class="arrow" d="M120,72 H156"/>
+  <path class="arrow" d="M270,72 H301"/>
+  <path class="arrow" d="M435,72 H466"/>
+  <path class="arrow" d="M580,72 H636"/>
+</svg>
+<figcaption>The pipe <code>|</code> connects output to input. <strong>Each step must accept what the previous step returns</strong>: swap the order and <code>count</code> hands an integer to <code>shout</code>, which fails.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Parallel: harbor goes to shout and count at the same time and the results form a dictionary. Assign: a dictionary with text gets a new key words while keeping text">
+  <text class="label" x="10" y="16">RunnableParallel(upper=shout, length=count)</text>
+  <rect class="box" x="10" y="50" width="110" height="44" rx="8"/>
+  <text class="mono" x="65" y="77" text-anchor="middle">"harbor"</text>
+  <rect class="box-info" x="190" y="26" width="160" height="36" rx="8"/>
+  <text class="mono" x="270" y="49" text-anchor="middle">upper: shout</text>
+  <rect class="box-info" x="190" y="82" width="160" height="36" rx="8"/>
+  <text class="mono" x="270" y="105" text-anchor="middle">length: count</text>
+  <rect class="box-ok" x="430" y="50" width="320" height="44" rx="8"/>
+  <text class="mono" x="590" y="77" text-anchor="middle">{'upper': 'HARBOR', 'length': 6}</text>
+  <path class="arrow" d="M120,66 L186,46"/>
+  <path class="arrow" d="M120,78 L186,98"/>
+  <path class="arrow" d="M350,46 L426,66"/>
+  <path class="arrow" d="M350,98 L426,78"/>
+  <text class="label" x="10" y="150">RunnablePassthrough.assign(words=...)</text>
+  <rect class="box" x="10" y="168" width="220" height="44" rx="8"/>
+  <text class="mono" x="120" y="195" text-anchor="middle">{'text': 'open on Sunday'}</text>
+  <rect class="box-info" x="260" y="168" width="170" height="44" rx="8"/>
+  <text class="mono" x="345" y="195" text-anchor="middle">assign(words)</text>
+  <rect class="box-ok" x="460" y="168" width="290" height="44" rx="8"/>
+  <text class="mono" x="605" y="195" text-anchor="middle">{'text': 'open on Sunday', 'words': 3}</text>
+  <path class="arrow" d="M230,190 H256"/>
+  <path class="arrow" d="M430,190 H456"/>
+</svg>
+<figcaption>Top: parallel branches see the same input and their results become keys. Bottom: <code>assign</code> adds a key and keeps the others. <strong>This "keep and add" pattern is how the RAG chain in part 4 keeps its context.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to TypedDict? Types for dictionaries</summary>
+<p>LCEL chains pass dictionaries around a lot, and a typo in a key (<code>"contxt"</code>) only shows up when the code runs.
+A <code>TypedDict</code> lists the keys a dictionary should have and the type of each value. It changes nothing at runtime (the value
+is still an ordinary <code>dict</code>), but editors such as VS Code and type checkers such as mypy or pyright read the annotation and
+underline <code>result["contxt"]</code> before you run anything. Pydantic models (lab 02) go one step further and validate the values at
+runtime.</p>
+</details>
+
+<h2>Part 4: a RAG chain that keeps its context</h2>
+<p>The chain in <a href="07-retrievers.html">lab 07</a> returned only the answer string. Here, thanks to <code>RunnableParallel</code> and
+<code>assign</code>, the result keeps the question and the retrieved context next to the answer. That is useful for showing sources to
+the user, or for checking afterwards whether the answer really came from the context.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 360" role="img" aria-label="The RAG chain of part 4: a question string becomes a dictionary with context and question, then assign adds the answer">
+  <rect class="box" x="230" y="10" width="300" height="40" rx="8"/>
+  <text class="mono" x="380" y="35" text-anchor="middle">"How much does 3D printing cost?"</text>
+  <rect class="zone" x="40" y="66" width="680" height="76" rx="8"/>
+  <text class="small" x="56" y="82">RunnableParallel</text>
+  <rect class="box-info" x="60" y="90" width="300" height="40" rx="8"/>
+  <text class="mono" x="210" y="115" text-anchor="middle">context: retriever | format_docs</text>
+  <rect class="box-info" x="400" y="90" width="300" height="40" rx="8"/>
+  <text class="mono" x="550" y="115" text-anchor="middle">question: RunnablePassthrough()</text>
+  <path class="arrow" d="M330,50 L230,86"/>
+  <path class="arrow" d="M430,50 L530,86"/>
+  <rect class="box" x="180" y="166" width="400" height="40" rx="8"/>
+  <text class="mono" x="380" y="191" text-anchor="middle">{'context': ..., 'question': ...}</text>
+  <path class="arrow" d="M380,142 V162"/>
+  <rect class="box-solid" x="130" y="232" width="500" height="40" rx="8"/>
+  <text class="mono on-solid" x="380" y="257" text-anchor="middle">assign(answer=prompt | get_model() | StrOutputParser())</text>
+  <path class="arrow" d="M380,206 V228"/>
+  <rect class="box-ok" x="130" y="298" width="500" height="40" rx="8"/>
+  <text class="mono" x="380" y="323" text-anchor="middle">{'context', 'question', 'answer'}  # Answer</text>
+  <path class="arrow-ok" d="M380,272 V294"/>
+</svg>
+<figcaption>Shapes flowing through <code>rag</code>: a string, then a two-key dictionary, then a three-key dictionary described by the <code>Answer</code> TypedDict. <strong>Inside <code>assign</code>, the prompt receives the whole dictionary and picks <code>{context}</code> and <code>{question}</code> from it.</strong></figcaption>
+</figure>
+
+<h2>Part 5: retries and fallbacks</h2>
+<p>Real chains call networks and models, and those fail sometimes. <code>with_retry</code> tries the same step again;
+<code>with_fallbacks</code> switches to another step. Both return a new Runnable, so you can still pipe them into a chain.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Retry: attempts 1 and 2 fail with ConnectionError, attempt 3 returns ok after 3 attempts. Fallback: broken raises ZeroDivisionError and the fallback returns fallback answer">
+  <text class="label" x="10" y="18">with_retry(stop_after_attempt=3)</text>
+  <rect class="box-bad" x="10" y="30" width="220" height="44" rx="8"/>
+  <text x="120" y="57" text-anchor="middle">1: ConnectionError</text>
+  <rect class="box-bad" x="270" y="30" width="220" height="44" rx="8"/>
+  <text x="380" y="57" text-anchor="middle">2: ConnectionError</text>
+  <rect class="box-ok" x="530" y="30" width="220" height="44" rx="8"/>
+  <text class="mono" x="640" y="57" text-anchor="middle">ok after 3 attempts</text>
+  <path class="arrow-bad" d="M230,52 H266"/>
+  <path class="arrow-bad" d="M490,52 H526"/>
+  <text class="label" x="10" y="118">with_fallbacks([...])</text>
+  <rect class="box-bad" x="10" y="130" width="220" height="44" rx="8"/>
+  <text class="mono" x="120" y="157" text-anchor="middle">broken: 1 / 0</text>
+  <rect class="box-warn" x="270" y="130" width="220" height="44" rx="8"/>
+  <text x="380" y="157" text-anchor="middle">ZeroDivisionError caught</text>
+  <rect class="box-ok" x="530" y="130" width="220" height="44" rx="8"/>
+  <text class="mono" x="640" y="157" text-anchor="middle">"fallback answer"</text>
+  <path class="arrow-bad" d="M230,152 H266"/>
+  <path class="arrow-ok" d="M490,152 H526"/>
+</svg>
+<figcaption>Part 5 of the output. <strong>Retry when the same step may work next time (a timeout); fall back when you have a different step that can do the job (another model).</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to retries? Why the default waits longer each time</summary>
+<p>When a server is overloaded, hammering it with instant retries makes things worse. That is why <code>with_retry</code> by default waits
+between attempts, a little longer each time and with some randomness ("exponential backoff with jitter"), so many clients do not retry
+at the same moment. The lab turns the waiting off only to keep the demo fast. Retry only errors that can go away (network, rate limits);
+a bug like <code>1 / 0</code> fails every time, which is why the lab uses a fallback for it.</p>
+</details>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="terminal"><code>uv run python -m labs.16_lcel</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) invoke: QUIET PLEASE | batch: [1, 3, 5]
+2) sequence: RunnableSequence -&gt; 7
+3) parallel: {'upper': 'HARBOR', 'length': 6}
+   assign:   {'text': 'open on Sunday', 'words': 3}
+
+4) RAG with the context kept: {'context': '[rooms.md]\n## Maker space\nThe maker space at the Central Library has t', 'question': 'How much does 3D printing cost?', 'answer': '3D printing costs 0.05 EUR per gram of material.'}
+5) with_retry: ok after 3 attempts: ping
+   with_fallbacks: fallback answer
+6) input schema of the prompt: ['context', 'question']</code></pre>
+
+<p>Parts 1, 2, 3, 5 and 6 contain no model, so your output will match ours exactly. In part 4 the retriever found the "Maker space"
+section of <code>rooms.md</code>, and the answer "3D printing costs 0.05 EUR per gram of material." is correct: it is the sentence in that
+policy file. The <code>with_retry</code> line confirms the third attempt succeeded, and part 6 shows the prompt's required inputs,
+<code>['context', 'question']</code>.</p>
+
+<div class="callout ok"><p><strong>What you should see.</strong> Six numbered parts. The first lines are identical to ours:
+<code>QUIET PLEASE</code>, <code>[1, 3, 5]</code>, <code>RunnableSequence -&gt; 7</code>,
+<code>{'upper': 'HARBOR', 'length': 6}</code>, <code>'words': 3</code>. Part 4 takes a few seconds (embedding and one model call) and
+its answer wording may differ. Part 5 prints <code>ok after 3 attempts: ping</code> and <code>fallback answer</code>.</p></div>
+
+<div class="callout warn"><p><strong>Common mistakes.</strong></p>
+<ul>
+<li><strong>Steps that don't fit together.</strong> In a sequence, each step receives exactly what the previous one returned.
+<code>count | shout</code> fails with <code>AttributeError: 'int' object has no attribute 'upper'</code>.</li>
+<li><strong>Losing data in a chain.</strong> <code>prompt | model | parser</code> returns only the answer. Use
+<code>RunnablePassthrough.assign(...)</code> when later steps (or your app) still need the earlier keys.</li>
+<li><strong>Expecting a TypedDict to validate.</strong> <code>result: Answer</code> is only a hint; a missing key is not detected at
+runtime. Use a Pydantic model when values must be checked.</li>
+<li><strong>Retrying everything.</strong> <code>with_retry</code> repeats the step for any exception by default; retrying a real bug just
+fails three times, slower.</li>
+<li><strong>Ollama not running.</strong> Parts 1–3 work, then part 4 fails with a connection error. Start Ollama and run again.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Break the sequence.</strong> Change line 17 to <code>chain = count | shout</code>. Running it raises
+<code>AttributeError: 'int' object has no attribute 'upper'</code>: the output of <code>count</code> is an integer.</li>
+<li><strong>Too few retries.</strong> On line 53, set <code>stop_after_attempt=2</code>. The step fails twice and the original
+<code>ConnectionError: temporary network problem</code> is raised, because the third, successful attempt never happens.</li>
+<li><strong>Fallback for the wrong error.</strong> On line 55 add <code>exceptions_to_handle=(KeyError,)</code> to
+<code>with_fallbacks(...)</code>. Now the <code>ZeroDivisionError</code> is not caught and the program stops with it: fallbacks only
+handle the exception types you list (by default, any <code>Exception</code>).</li>
+<li><strong>Batch a parallel step.</strong> Add <code>print(stats.batch(["a", "harbor"]))</code>. You get
+<code>[{'upper': 'A', 'length': 1}, {'upper': 'HARBOR', 'length': 6}]</code>: composed Runnables have <code>batch</code> too.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>RunnableLambda</code> turns any function into a Runnable with <code>invoke</code>, <code>batch</code> and
+<code>stream</code>.</li>
+<li><code>a | b</code> builds a <code>RunnableSequence</code>; <code>RunnableParallel</code> (or a dict) runs branches on the same
+input; <code>RunnablePassthrough.assign</code> adds keys and keeps the rest.</li>
+<li>A <code>TypedDict</code> documents the dictionaries flowing through a chain for your editor; it does not validate at runtime.</li>
+<li><code>with_retry</code> repeats a failing step (ours succeeded on attempt 3); <code>with_fallbacks</code> switches to another
+Runnable.</li>
+<li><code>get_input_jsonschema()</code> describes what a Runnable expects; the prompt requires <code>['context', 'question']</code>.</li>
+</ul></div>
+
+<h2>Where to go next</h2>
+<p>You have now built every piece of the Harbor City Library assistant: chat models and prompts, a RAG pipeline, LangGraph agents with
+memory and human approval, and LangChain agents with middleware. To review the ideas, read the concept chapters again in order:</p>
+<ul>
+<li><a href="llms-rag-agents.html">LLMs, RAG, agents and the LangChain ecosystem</a></li>
+<li><a href="chat-models-prompts.html">Chat models, structured output and prompts</a></li>
+<li><a href="rag-pipeline.html">The RAG pipeline: load, split, embed, retrieve</a></li>
+<li><a href="langgraph-agents.html">Agents with LangGraph</a></li>
+<li><a href="langchain-agents-middleware.html">LangChain agents and middleware</a></li>
+<li><a href="runnables-typing.html">Runnables, LCEL, typing and Pydantic</a></li>
+</ul>
+<p>Related guides in the same collection:</p>
+<ul>
+<li><a href="../langchain/">LangChain crash course</a>: a video course companion that builds chains and RAG step by step.</li>
+<li><a href="../langGraph/">LangGraph crash course</a>: a video course companion focused on graphs, state and agents.</li>
+<li><a href="../ai-engineering/">AI Engineering companion</a>: evaluations, RAG and agents in plain Python, without a framework.</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="15-middleware.html"><small>← Previous · Step 15</small>Middleware</a>
+<a class="next" href="index.html"><small>Done →</small>All steps</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>08 · LangGraph fundamentals</title>
+<meta name="description" content="Rebuild RAG as a graph with state, nodes, a router and conditional edges, and stream its steps. Book chapter 10.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 08/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 08 of 16 · Hands-on lab</div>
+  <h1>LangGraph fundamentals</h1>
+  <p class="lead">Rebuild RAG as a graph with state, nodes, a router and conditional edges, and stream its steps. Book chapter 10.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 10 · Fundamentals of LangGraph</strong> of the book (Part IV · Build Agents with LangGraph). This lab is our own example on the Harbor City Library project.</div>
+
+<p><strong>Goal.</strong> Rebuild the question-answering pipeline from lab 07 as a
+<a class="term" href="glossary.html#graph">graph</a> instead of a chain. The graph first decides whether a question is
+about the library at all. Library questions go through retrieval and an answer; everything else gets a polite
+refusal without ever touching the vector store. Along the way you will meet the four building blocks of every
+<a class="term" href="glossary.html#langgraph">LangGraph</a> program: state, nodes, edges and a compiled graph.</p>
+
+<p><strong>Why the project needs it.</strong> A chain always runs the same steps in the same order. An
+<a class="term" href="glossary.html#agent">agent</a> has to choose what to do next, loop, and stop when it is done.
+LangGraph is the tool the rest of this guide uses for that. Labs 09 to 13 all build on what you learn here.</p>
+
+<h2>The idea in brief</h2>
+
+<p>A LangGraph program is a small state machine. The <a class="term" href="glossary.html#state">state</a> is a
+dictionary that every step can read. A <a class="term" href="glossary.html#node">node</a> is a plain Python function:
+it receives the current state and returns <em>only the keys it wants to change</em>. An
+<a class="term" href="glossary.html#edge">edge</a> says which node runs next. A
+<a class="term" href="glossary.html#conditional-edge">conditional edge</a> calls a small routing function that looks at
+the state and returns the name of the next node. That is the whole model. The concept chapter
+<a href="langgraph-agents.html">LangGraph and agents</a> explains it in more depth.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="The lab 08 graph: start, classify, then a dashed branch to retrieve or decline, retrieve leads to generate, both generate and decline lead to end">
+  <rect class="box-solid" x="320" y="10" width="120" height="36" rx="18"/>
+  <text class="on-solid mono" x="380" y="33" text-anchor="middle">__start__</text>
+  <path class="arrow" d="M380,46 V66"/>
+  <rect class="box" x="300" y="68" width="160" height="44" rx="8"/>
+  <text class="title mono" x="380" y="95" text-anchor="middle">classify</text>
+  <path class="arrow-accent dashed" d="M380,112 V128 H180 V146"/>
+  <path class="arrow-accent dashed" d="M380,112 V128 H580 V146"/>
+  <text class="small" x="190" y="124">route == "library"</text>
+  <text class="small" x="476" y="124">route == "other"</text>
+  <rect class="box-info" x="100" y="148" width="160" height="44" rx="8"/>
+  <text class="title mono" x="180" y="175" text-anchor="middle">retrieve</text>
+  <rect class="box-warn" x="500" y="148" width="160" height="44" rx="8"/>
+  <text class="title mono" x="580" y="175" text-anchor="middle">decline</text>
+  <path class="arrow" d="M180,192 V210"/>
+  <rect class="box-ok" x="100" y="212" width="160" height="40" rx="8"/>
+  <text class="title mono" x="180" y="237" text-anchor="middle">generate</text>
+  <path class="arrow" d="M260,232 H360 V252"/>
+  <path class="arrow" d="M580,192 V232 H400 V252"/>
+  <rect class="box-solid" x="320" y="254" width="120" height="36" rx="18"/>
+  <text class="on-solid mono" x="380" y="277" text-anchor="middle">__end__</text>
+  <text class="small" x="560" y="270">dashed = conditional edge</text>
+</svg>
+<figcaption>This is the Mermaid text the lab prints (output lines 7–19), drawn as a picture. Solid arrows always
+run; dashed arrows are the two choices of the conditional edge after <code>classify</code>. <strong>Only one dashed
+arrow is taken per run.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to graphs and state machines? What they are and why they matter</summary>
+<p>In computer science a graph is just "boxes and arrows": the boxes (nodes) are steps, the arrows (edges) say what
+can come after what. A state machine adds a shared piece of data, the state, which each step reads and updates. You
+already use this idea when you draw a flowchart on paper.</p>
+<p>Why bother for an AI app? Because a model's answer decides what happens next. "Is this a library question?",
+"Did the model ask for a tool?", "Did the user approve?" are all branches. Writing them as a graph keeps each step
+small and testable, makes the branches visible (you can print the picture), and lets LangGraph add features later,
+like saving the state after every step (lab 11) or pausing for a human (lab 13).</p>
+</details>
+
+<details class="primer"><summary>New to TypedDict? A dictionary with a declared shape</summary>
+<p>A <a class="term" href="glossary.html#typeddict">TypedDict</a> is a normal Python <code>dict</code> at run time.
+The class only <em>describes</em> which keys exist and what type each value should have, so your editor and
+LangGraph know the shape of the state. <code>total=False</code> means "none of these keys is required". That fits
+this lab: the run starts with only <code>question</code>, and the other keys appear as nodes fill them in.
+Python itself does not check the types while the program runs.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+  <li>Open a terminal in the lab project folder (the one with <code>pyproject.toml</code>). Make sure Ollama is
+  running and that <code>llama3.2</code> and <code>nomic-embed-text</code> are pulled (lab 01 and lab 06).</li>
+  <li>Look at the file <code>labs/08_langgraph_basics.py</code> below. It is already in the project; read it top to
+  bottom with the table that follows it.</li>
+  <li>Run it with <code>uv run python -m labs.08_langgraph_basics</code>.</li>
+  <li>Copy the Mermaid text from the output (from <code>---</code> to the last <code>classDef</code> line) and paste
+  it into <code>mermaid.live</code> if you want to see the drawing in your browser.</li>
+</ol>
+
+<h2>The code</h2>
+
+<pre data-file="labs/08_langgraph_basics.py" data-lang="py" data-tag="complete file"><code>"""Lab 08: the RAG chain rebuilt as a LangGraph graph with a router."""
+from typing import Literal, TypedDict
+
+from langchain_core.documents import Document
+from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel
+
+from harbor.config import get_model
+from harbor.knowledge import build_vector_store, format_docs
+
+retriever = build_vector_store().as_retriever(search_kwargs={"k": 2})
+model = get_model()
+
+
+class State(TypedDict, total=False):
+    question: str
+    route: str
+    docs: list[Document]
+    answer: str
+
+
+class Route(BaseModel):
+    route: Literal["library", "other"]
+
+
+def classify(state: State) -&gt; State:
+    prompt = ("Is this question about a public library (cards, loans, fees, branches, rooms, digital services)? "
+              f"Answer 'library' or 'other'.\nQuestion: {state['question']}")
+    return {"route": model.with_structured_output(Route).invoke(prompt).route}
+
+
+def retrieve(state: State) -&gt; State:
+    return {"docs": retriever.invoke(state["question"])}
+
+
+def generate(state: State) -&gt; State:
+    prompt = (f"Answer in one or two sentences using only this context. If it is not there, say you don't know.\n\n"
+              f"{format_docs(state['docs'])}\n\nQuestion: {state['question']}")
+    return {"answer": model.invoke(prompt).content}
+
+
+def decline(state: State) -&gt; State:
+    return {"answer": "I can only help with Harbor City Library questions."}
+
+
+def pick_next(state: State) -&gt; str:
+    return "retrieve" if state["route"] == "library" else "decline"
+
+
+builder = StateGraph(State)
+builder.add_node("classify", classify)
+builder.add_node("retrieve", retrieve)
+builder.add_node("generate", generate)
+builder.add_node("decline", decline)
+builder.add_edge(START, "classify")
+builder.add_conditional_edges("classify", pick_next, ["retrieve", "decline"])
+builder.add_edge("retrieve", "generate")
+builder.add_edge("generate", END)
+builder.add_edge("decline", END)
+graph = builder.compile()
+
+print("1) The graph as Mermaid text (paste it into mermaid.live to see it):")
+print(graph.get_graph().draw_mermaid())
+
+print("2) Running it. stream_mode='updates' shows each node as it finishes:")
+for question in ["How many items can a junior card borrow?", "Who won the football match yesterday?"]:
+    print(f"\n   Q: {question}")
+    for update in graph.stream({"question": question}, stream_mode="updates"):
+        for node, change in update.items():
+            shown = {k: (f"{len(v)} documents" if k == "docs" else v) for k, v in change.items()}
+            print(f"   [{node}] {shown}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 08: the RAG chain rebuilt …"""</code></td><td>A docstring: a description of the file. It does nothing when the file runs, but tells readers what the lab is about.</td></tr>
+<tr><td>2</td><td><code>from typing import Literal, TypedDict</code></td><td><code>TypedDict</code> describes the state's keys. <code>Literal</code> limits a value to a fixed set of strings; we use it for the router's answer.</td></tr>
+<tr><td>4</td><td><code>from langchain_core.documents import Document</code></td><td>The <a class="term" href="glossary.html#document">Document</a> class (text plus metadata). It is imported only to write the type of the <code>docs</code> key.</td></tr>
+<tr><td>5</td><td><code>from langgraph.graph import END, START, StateGraph</code></td><td><code>StateGraph</code> is the builder. <code>START</code> and <code>END</code> are special node names for "where a run begins" and "where it stops" (they print as <code>__start__</code> and <code>__end__</code>).</td></tr>
+<tr><td>6</td><td><code>from pydantic import BaseModel</code></td><td>Pydantic models describe structured output (lab 02). We use one so the classifier's answer is checked.</td></tr>
+<tr><td>8–9</td><td><code>from harbor.config import get_model</code><br><code>from harbor.knowledge import …</code></td><td>Our shared helpers: <code>get_model()</code> returns llama3.2 through Ollama; <code>build_vector_store()</code> loads, splits and embeds the six policy files; <code>format_docs()</code> joins chunks into one text tagged with their file names.</td></tr>
+<tr><td>11</td><td><code>retriever = build_vector_store().as_retriever(search_kwargs={"k": 2})</code></td><td>Builds the store once when the file starts and turns it into a <a class="term" href="glossary.html#retriever">retriever</a> that returns the 2 closest chunks. Done at the top so every run of the graph reuses it.</td></tr>
+<tr><td>12</td><td><code>model = get_model()</code></td><td>One chat model shared by the nodes.</td></tr>
+<tr><td>15</td><td><code>class State(TypedDict, total=False):</code></td><td>The shape of the graph's state. <code>total=False</code> makes every key optional, because a run starts with only the question.</td></tr>
+<tr><td>16–19</td><td><code>question</code>, <code>route</code>, <code>docs</code>, <code>answer</code></td><td>The four pieces of data the graph passes around: the input, the router's decision, the retrieved chunks, and the final answer. Each node fills in one of them.</td></tr>
+<tr><td>22–23</td><td><code>class Route(BaseModel):</code><br><code>route: Literal["library", "other"]</code></td><td>The classifier must return exactly <code>"library"</code> or <code>"other"</code>. Any other word fails validation instead of silently sending the run the wrong way.</td></tr>
+<tr><td>26</td><td><code>def classify(state: State) -&gt; State:</code></td><td>A node. LangGraph calls it with the current state. The return type <code>State</code> works because every key is optional, so a partial dict is still a valid <code>State</code>.</td></tr>
+<tr><td>27–28</td><td><code>prompt = ("Is this question about a public library …</code></td><td>Builds the classification prompt: a list of library topics, the two allowed answers, and the question taken from the state with <code>state['question']</code>.</td></tr>
+<tr><td>29</td><td><code>return {"route": model.with_structured_output(Route).invoke(prompt).route}</code></td><td>Asks the model for a <code>Route</code> object and returns <strong>only</strong> <code>{"route": …}</code>. LangGraph merges this into the state; the question stays there untouched.</td></tr>
+<tr><td>32–33</td><td><code>def retrieve(state)</code> … <code>return {"docs": retriever.invoke(state["question"])}</code></td><td>The retrieval node: looks up the 2 best chunks for the question and stores them under <code>docs</code>.</td></tr>
+<tr><td>36–38</td><td><code>prompt = (f"Answer in one or two sentences using only this context …</code></td><td>The RAG prompt: an instruction to stay inside the context and admit when the answer is missing, then the formatted chunks, then the question.</td></tr>
+<tr><td>39</td><td><code>return {"answer": model.invoke(prompt).content}</code></td><td>Calls the model and stores the text of its reply (<code>.content</code>) as <code>answer</code>.</td></tr>
+<tr><td>42–43</td><td><code>def decline(state)</code> … <code>return {"answer": "I can only help …"}</code></td><td>The other branch. No model call, no retrieval: a fixed sentence. Cheap and predictable.</td></tr>
+<tr><td>46–47</td><td><code>def pick_next(state: State) -&gt; str:</code><br><code>return "retrieve" if state["route"] == "library" else "decline"</code></td><td>The router. It is <em>not</em> a node: it changes nothing and only returns the <strong>name</strong> of the next node. LangGraph calls it right after <code>classify</code>.</td></tr>
+<tr><td>50</td><td><code>builder = StateGraph(State)</code></td><td>Starts a new graph whose state has the shape of <code>State</code>.</td></tr>
+<tr><td>51–54</td><td><code>builder.add_node("classify", classify)</code> …</td><td>Registers each function under a name. The names are what edges and the router refer to.</td></tr>
+<tr><td>55</td><td><code>builder.add_edge(START, "classify")</code></td><td>Every run begins at <code>classify</code>. Without an edge from <code>START</code>, <code>compile()</code> refuses the graph because it has no entry point.</td></tr>
+<tr><td>56</td><td><code>builder.add_conditional_edges("classify", pick_next, ["retrieve", "decline"])</code></td><td>After <code>classify</code>, call <code>pick_next</code> and go where it says. The list names the possible targets so LangGraph can draw the dashed arrows.</td></tr>
+<tr><td>57–59</td><td><code>add_edge("retrieve", "generate")</code>, <code>("generate", END)</code>, <code>("decline", END)</code></td><td>Fixed arrows: retrieval is always followed by generation, and both answer nodes finish the run.</td></tr>
+<tr><td>60</td><td><code>graph = builder.compile()</code></td><td>Checks the structure and turns the builder into a runnable object with <code>invoke</code>, <code>stream</code> and <code>batch</code>, just like a chain.</td></tr>
+<tr><td>62–63</td><td><code>print(graph.get_graph().draw_mermaid())</code></td><td>Asks the compiled graph for its structure and prints it as Mermaid text, a small language for diagrams. No drawing library is needed.</td></tr>
+<tr><td>65–67</td><td><code>for question in [ … ]:</code></td><td>Two test questions: one about the library, one clearly not.</td></tr>
+<tr><td>68</td><td><code>graph.stream({"question": question}, stream_mode="updates")</code></td><td>Runs the graph with a starting state that has only the question. <code>stream_mode="updates"</code> yields one item per finished node, in the form <code>{node_name: what_it_returned}</code>.</td></tr>
+<tr><td>69–71</td><td><code>for node, change in update.items():</code> …</td><td>Prints each update. The dictionary comprehension replaces the long list of documents with a count ("2 documents") so the output stays readable.</td></tr>
+</table></div>
+
+<h2>How the state fills up</h2>
+
+<p>The key rule: <strong>a node returns only what it changes</strong>, and LangGraph merges that into the state. You
+never copy the whole state forward by hand. Here is the first question's run, step by step.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="The state dictionary after each node for the junior card question: question only, then route added, then docs added, then answer added">
+  <rect class="box2" x="10" y="20" width="170" height="196" rx="8"/>
+  <text class="title" x="95" y="42" text-anchor="middle">Input</text>
+  <text class="mono" x="22" y="72">question</text>
+  <rect class="box2" x="200" y="20" width="170" height="196" rx="8"/>
+  <text class="title" x="285" y="42" text-anchor="middle">after classify</text>
+  <text class="mono" x="212" y="72">question</text>
+  <text class="mono accent" x="212" y="96">route="library"</text>
+  <rect class="box2" x="390" y="20" width="170" height="196" rx="8"/>
+  <text class="title" x="475" y="42" text-anchor="middle">after retrieve</text>
+  <text class="mono" x="402" y="72">question</text>
+  <text class="mono" x="402" y="96">route="library"</text>
+  <text class="mono accent" x="402" y="120">docs=[2 chunks]</text>
+  <rect class="box-ok" x="580" y="20" width="170" height="196" rx="8"/>
+  <text class="title" x="665" y="42" text-anchor="middle">after generate</text>
+  <text class="mono" x="592" y="72">question</text>
+  <text class="mono" x="592" y="96">route="library"</text>
+  <text class="mono" x="592" y="120">docs=[2 chunks]</text>
+  <text class="mono accent" x="592" y="144">answer="A junior</text>
+  <text class="mono accent" x="592" y="162">card lets you…"</text>
+  <path class="arrow" d="M180,190 H198"/>
+  <path class="arrow" d="M370,190 H388"/>
+  <path class="arrow" d="M560,190 H578"/>
+  <text class="small" x="22" y="204">{"question": …}</text>
+  <text class="small" x="212" y="204">node returned 1 key</text>
+  <text class="small" x="402" y="204">node returned 1 key</text>
+  <text class="small" x="592" y="204">node returned 1 key</text>
+</svg>
+<figcaption>Highlighted keys are the ones each node returned; everything else was kept by LangGraph.
+<strong>Nodes return partial updates; the graph keeps the full state.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>What is a reducer, and why don't we need one here?</summary>
+<p>When a node returns a key, LangGraph has to decide how to combine the new value with the old one. The default is
+simple: the new value replaces the old one. A <a class="term" href="glossary.html#reducer">reducer</a> is a function
+you attach to a key to change that rule, for example "append to the list instead of replacing it". This lab writes
+each key once, so replacing is exactly right. Lab 09 uses <code>MessagesState</code>, whose <code>messages</code> key
+has a reducer that appends new messages to the conversation.</p>
+</details>
+
+<h2>Run it</h2>
+
+<pre data-lang="sh"><code>uv run python -m labs.08_langgraph_basics</code></pre>
+
+<p><code>uv run</code> uses the project's own Python environment; <code>-m labs.08_langgraph_basics</code> runs the
+file as a module, so the imports of <code>harbor.…</code> work from the project folder. On Windows, if Python crashes at
+start-up with <code>OPENSSL_Uplink … no OPENSSL_Applink</code>, an <code>SSLKEYLOGFILE</code> environment variable is
+the cause; run <code>env -u SSLKEYLOGFILE uv run python -m labs.08_langgraph_basics</code> in Git Bash.</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>1) The graph as Mermaid text (paste it into mermaid.live to see it):
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([&lt;p&gt;__start__&lt;/p&gt;]):::first
+	classify(classify)
+	retrieve(retrieve)
+	generate(generate)
+	decline(decline)
+	__end__([&lt;p&gt;__end__&lt;/p&gt;]):::last
+	__start__ --&gt; classify;
+	classify -.-&gt; decline;
+	classify -.-&gt; retrieve;
+	retrieve --&gt; generate;
+	decline --&gt; __end__;
+	generate --&gt; __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+
+2) Running it. stream_mode='updates' shows each node as it finishes:
+
+   Q: How many items can a junior card borrow?
+   [classify] {'route': 'library'}
+   [retrieve] {'docs': '2 documents'}
+   [generate] {'answer': 'A junior card lets you borrow up to 8 items.'}
+
+   Q: Who won the football match yesterday?
+   [classify] {'route': 'other'}
+   [decline] {'answer': 'I can only help with Harbor City Library questions.'}</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> First the Mermaid text: <code>__start__ --&gt;
+classify</code>, two dotted arrows <code>classify -.-&gt; decline</code> and <code>classify -.-&gt; retrieve</code>
+(dotted means conditional), then the fixed arrows. Then two runs. The library question passes through
+<code>[classify]</code>, <code>[retrieve]</code> and <code>[generate]</code>; the football question goes
+<code>[classify]</code> then <code>[decline]</code> and never reaches retrieval. Your answer sentence may be worded
+differently; the path through the graph should be the same.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 196" role="img" aria-label="Two timelines of stream updates: the library question produces three updates, the football question produces two">
+  <text class="label" x="10" y="30">Q1 "How many items can a junior card borrow?"</text>
+  <rect class="box" x="10" y="42" width="150" height="40" rx="8"/>
+  <text class="mono" x="85" y="67" text-anchor="middle">[classify]</text>
+  <rect class="box-info" x="200" y="42" width="150" height="40" rx="8"/>
+  <text class="mono" x="275" y="67" text-anchor="middle">[retrieve]</text>
+  <rect class="box-ok" x="390" y="42" width="150" height="40" rx="8"/>
+  <text class="mono" x="465" y="67" text-anchor="middle">[generate]</text>
+  <path class="arrow" d="M160,62 H198"/>
+  <path class="arrow" d="M350,62 H388"/>
+  <text class="small" x="556" y="60">3 updates, 2 model calls</text>
+  <text class="small" x="556" y="76">(classify + generate)</text>
+  <text class="label" x="10" y="122">Q2 "Who won the football match yesterday?"</text>
+  <rect class="box" x="10" y="134" width="150" height="40" rx="8"/>
+  <text class="mono" x="85" y="159" text-anchor="middle">[classify]</text>
+  <rect class="box-warn" x="200" y="134" width="150" height="40" rx="8"/>
+  <text class="mono" x="275" y="159" text-anchor="middle">[decline]</text>
+  <path class="arrow" d="M160,154 H198"/>
+  <text class="small" x="370" y="152">2 updates, 1 model call</text>
+  <text class="small" x="370" y="168">no retrieval, fixed answer</text>
+</svg>
+<figcaption>Each box is one line of the streamed output. <strong>The router saved the second question a retrieval
+and a model call.</strong></figcaption>
+</figure>
+
+<h2>Compared with the chain of lab 07</h2>
+
+<p>In <a href="07-retrievers.html">lab 07</a> the RAG answer came from an <a class="term" href="glossary.html#lcel">LCEL</a>
+chain: <code>{"context": retriever | format_docs, "question": RunnablePassthrough()} | prompt | model |
+StrOutputParser()</code>. That is a straight pipe: data flows left to right, every step runs every time. The graph does
+the same retrieve-then-generate work, but adds a decision in front and keeps the intermediate results (route, docs)
+in a state you can look at.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Comparison: the lab 07 chain is one straight pipe, the lab 08 graph has named nodes, a shared state and a branch">
+  <rect class="zone" x="10" y="10" width="360" height="216" rx="8"/>
+  <text class="title" x="190" y="34" text-anchor="middle">Lab 07: LCEL chain</text>
+  <rect class="box" x="30" y="50" width="320" height="34" rx="8"/>
+  <text class="mono" x="190" y="72" text-anchor="middle">retriever | format_docs</text>
+  <rect class="box" x="30" y="96" width="320" height="34" rx="8"/>
+  <text class="mono" x="190" y="118" text-anchor="middle">| prompt | model | parser</text>
+  <path class="arrow" d="M190,84 V94"/>
+  <text class="small" x="30" y="156">always the same steps, in order</text>
+  <text class="small" x="30" y="174">values flow through, nothing is kept</text>
+  <text class="small" x="30" y="192">branches/loops are awkward</text>
+  <text class="small" x="30" y="210">best for fixed pipelines</text>
+  <rect class="zone" x="390" y="10" width="360" height="216" rx="8"/>
+  <text class="title" x="570" y="34" text-anchor="middle">Lab 08: LangGraph graph</text>
+  <rect class="box" x="410" y="50" width="100" height="34" rx="8"/>
+  <text class="mono" x="460" y="72" text-anchor="middle">classify</text>
+  <rect class="box-info" x="530" y="50" width="100" height="34" rx="8"/>
+  <text class="mono" x="580" y="72" text-anchor="middle">retrieve</text>
+  <rect class="box-ok" x="650" y="50" width="90" height="34" rx="8"/>
+  <text class="mono" x="695" y="72" text-anchor="middle">generate</text>
+  <rect class="box-warn" x="530" y="96" width="100" height="34" rx="8"/>
+  <text class="mono" x="580" y="118" text-anchor="middle">decline</text>
+  <path class="arrow dashed" d="M510,67 H528"/>
+  <path class="arrow dashed" d="M460,84 V113 H528"/>
+  <path class="arrow" d="M630,67 H648"/>
+  <text class="small" x="410" y="156">a router picks the path</text>
+  <text class="small" x="410" y="174">a shared state keeps every result</text>
+  <text class="small" x="410" y="192">loops are allowed (lab 09)</text>
+  <text class="small" x="410" y="210">best for agents and decisions</text>
+</svg>
+<figcaption>Both are runnables with <code>invoke</code> and <code>stream</code>. <strong>Use a chain for a fixed
+pipeline, a graph as soon as the next step depends on a result.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes</strong> (each checked on a tiny offline graph with the same
+LangGraph version):
+<ul>
+  <li><strong>A node returns a string instead of a dict</strong>, e.g. <code>return model.invoke(prompt).content</code>.
+  You get <code>InvalidUpdateError: Expected dict, got …</code>. Wrap it: <code>return {"answer": …}</code>.</li>
+  <li><strong>A typo in a returned key</strong>, e.g. <code>{"answr": …}</code>. There is no error: keys that are not
+  in <code>State</code> are silently dropped, and the final state simply has no answer. If a value "disappears",
+  compare its key with the <code>State</code> class.</li>
+  <li><strong>The router returns a name that is not a target</strong>. If <code>pick_next</code> returned
+  <code>"retriever"</code> (with an r), the run stops with <code>KeyError: 'retriever'</code>. Router return values must
+  match node names exactly.</li>
+  <li><strong>Reading a key no node has set yet.</strong> With <code>total=False</code> nothing is guaranteed, so
+  <code>state["docs"]</code> in a node that can run before <code>retrieve</code> raises <code>KeyError: 'docs'</code>.
+  Use <code>state.get("docs", [])</code> when a key may be missing.</li>
+  <li><strong>Forgetting <code>compile()</code></strong>: calling <code>builder.invoke(…)</code> gives
+  <code>AttributeError: 'StateGraph' object has no attribute 'invoke'</code>.</li>
+</ul></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Mistake, symptom and fix for three common LangGraph errors">
+  <text class="label" x="20" y="24">Mistake</text>
+  <text class="label" x="270" y="24">Symptom</text>
+  <text class="label" x="520" y="24">Fix</text>
+  <rect class="box-bad" x="10" y="34" width="230" height="44" rx="8"/>
+  <text class="mono" x="125" y="61" text-anchor="middle">return "text"</text>
+  <rect class="box-warn" x="260" y="34" width="240" height="44" rx="8"/>
+  <text class="small" x="380" y="60" text-anchor="middle">InvalidUpdateError: Expected dict</text>
+  <rect class="box-ok" x="520" y="34" width="230" height="44" rx="8"/>
+  <text class="mono" x="635" y="61" text-anchor="middle">return {"answer": …}</text>
+  <path class="arrow" d="M240,56 H258"/>
+  <path class="arrow" d="M500,56 H518"/>
+  <rect class="box-bad" x="10" y="94" width="230" height="44" rx="8"/>
+  <text class="mono" x="125" y="121" text-anchor="middle">return {"answr": …}</text>
+  <rect class="box-warn" x="260" y="94" width="240" height="44" rx="8"/>
+  <text class="small" x="380" y="120" text-anchor="middle">no error, answer is missing</text>
+  <rect class="box-ok" x="520" y="94" width="230" height="44" rx="8"/>
+  <text class="small" x="635" y="120" text-anchor="middle">use the exact State key</text>
+  <path class="arrow" d="M240,116 H258"/>
+  <path class="arrow" d="M500,116 H518"/>
+  <rect class="box-bad" x="10" y="154" width="230" height="44" rx="8"/>
+  <text class="mono" x="125" y="181" text-anchor="middle">router: "retriever"</text>
+  <rect class="box-warn" x="260" y="154" width="240" height="44" rx="8"/>
+  <text class="small" x="380" y="180" text-anchor="middle">KeyError: 'retriever'</text>
+  <rect class="box-ok" x="520" y="154" width="230" height="44" rx="8"/>
+  <text class="small" x="635" y="180" text-anchor="middle">return a real node name</text>
+  <path class="arrow" d="M240,176 H258"/>
+  <path class="arrow" d="M500,176 H518"/>
+</svg>
+<figcaption>The middle row is the dangerous one: <strong>a misspelled state key fails silently</strong>.</figcaption>
+</figure>
+
+<h2>Try it yourself</h2>
+<ol class="steps">
+  <li><strong>Watch the whole state instead of the updates.</strong> On line 68 change
+  <code>stream_mode="updates"</code> to <code>stream_mode="values"</code> and print each item. You now get the
+  complete state after every step, the same picture as the "How the state fills up" diagram (the first item is the
+  input itself).</li>
+  <li><strong>Add your own question.</strong> Put <code>"Can I book a meeting room at Northside?"</code> in the list on
+  line 66. It should be classified <code>library</code> and answered from <code>rooms.md</code>. Then try something
+  borderline, like <code>"What is a good book about the sea?"</code>, and see which way the router goes.</li>
+  <li><strong>Get the final state in one call.</strong> Replace the inner loop with
+  <code>print(graph.invoke({"question": question})["answer"])</code>. <code>invoke</code> runs the same graph but
+  returns only the final state.</li>
+  <li><strong>Retrieve more context.</strong> On line 11 set <code>"k": 4</code>. The <code>[retrieve]</code> line
+  will show <code>'4 documents'</code> and the prompt for <code>generate</code> gets longer.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+  <li>The state is a <code>TypedDict</code>; <code>total=False</code> lets it start with only the question.</li>
+  <li>Nodes are plain functions that return <strong>only the keys they change</strong>; LangGraph merges them.</li>
+  <li>A conditional edge calls a router (<code>pick_next</code>) that returns the next node's name.</li>
+  <li><code>compile()</code> turns the builder into a runnable; <code>draw_mermaid()</code> prints its picture.</li>
+  <li><code>stream_mode="updates"</code> shows each node's change as it finishes; the off-topic question skipped
+  retrieval entirely.</li>
+  <li>Same RAG work as lab 07's chain, plus a decision and a visible state. Next, lab 09 adds a loop: the agent.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="07-retrievers.html"><small>← Previous · Step 07</small>Retrievers and a RAG chain</a>
+<a class="next" href="09-tools.html"><small>Next · Step 09 →</small>Tools and the agent loop</a>
+</nav>
+</main>
+</body>
+</html>

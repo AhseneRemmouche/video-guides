@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 · Text splitters</title>
+<meta name="description" content="Split the policies with the recursive and the Markdown-header splitters and compare the chunks. Book chapter 7.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 05/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 05 of 16 · Hands-on lab</div>
+  <h1>Text splitters</h1>
+  <p class="lead">Split the policies with the recursive and the Markdown-header splitters and compare the chunks. Book chapter 7.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 7 · Text Splitters</strong> (Part III of the book). This lab is our own
+hands-on exercise on the same topic; the ideas are explained in our own words.</div>
+
+<h2>Goal</h2>
+<p>Lab 04 gave you six Documents, one per policy file. A search should not return a whole file when the question is
+about one rule in it: the extra text costs space in the prompt and can distract the model. In this lab you cut the
+Documents into smaller pieces called <a class="term" href="glossary.html#chunk">chunks</a> with
+<a class="term" href="glossary.html#text-splitter">text splitters</a>, compare three settings, and see a real
+mistake a splitter makes. You also write <code>harbor/knowledge.py</code>, the shared module that every later RAG
+lab and agent imports.</p>
+
+<h2>The idea in brief</h2>
+<p>Splitting is the second stage of the RAG pipeline (load, <strong>split</strong>, embed, store, retrieve). The
+concept chapter <a href="rag-pipeline.html">The RAG pipeline</a> explains why chunk size is a trade-off. In short:</p>
+<ul>
+  <li><strong>Too big</strong>: a chunk mixes several topics, its meaning gets blurry, and fewer chunks fit in the
+  model's <a class="term" href="glossary.html#context-window">context window</a>.</li>
+  <li><strong>Too small</strong>: a chunk loses the context that makes it understandable (a sentence without its
+  heading, or a heading without its sentence).</li>
+  <li><strong><a class="term" href="glossary.html#chunk-overlap">Overlap</a></strong>: neighbouring chunks may repeat a
+  little text, so a sentence cut at a border still appears whole in one of them.</li>
+</ul>
+<p>A good chunk is one that <em>makes sense on its own</em>. With well-structured files, the best cut points are the
+document's own headings.</p>
+
+<details class="primer"><summary>New to text splitting? What a splitter actually does</summary>
+<p>A splitter takes long text and returns a list of shorter strings (or Documents). <code>chunk_size</code> is the
+maximum length of a chunk, measured here in <strong>characters</strong> (not words or tokens).
+<code>chunk_overlap</code> is how many characters at the end of one chunk may be repeated at the start of the next.
+<code>split_documents(docs)</code> splits a list of Documents and copies each Document's metadata onto every chunk
+made from it, so every chunk still knows its <code>source</code> file.</p>
+</details>
+
+<details class="primer"><summary>New to the recursive splitter? How it chooses where to cut</summary>
+<p><code>RecursiveCharacterTextSplitter</code> has a list of separators, from "best" to "worst". By default it is
+<code>["\n\n", "\n", " ", ""]</code>: blank line (between paragraphs), line break, space (between words), and finally
+nothing (between any two characters). It splits on the first separator, then glues small neighbouring pieces back
+together until a chunk is almost <code>chunk_size</code> long. Any piece that is still too long is split again with
+the <em>next</em> separator. That second round is the "recursive" part.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="The recursive splitter tries a blank line first, then a line break, then a space, then any character, only moving down when a piece is still too long">
+  <rect class="box-ok" x="20" y="40" width="160" height="56" rx="8"/>
+  <text class="mono" x="100" y="64" text-anchor="middle">"\n\n"</text>
+  <text class="small" x="100" y="84" text-anchor="middle">between paragraphs</text>
+  <path class="arrow" d="M 180,68 H 208"/>
+  <rect class="box" x="210" y="40" width="160" height="56" rx="8"/>
+  <text class="mono" x="290" y="64" text-anchor="middle">"\n"</text>
+  <text class="small" x="290" y="84" text-anchor="middle">between lines</text>
+  <path class="arrow" d="M 370,68 H 398"/>
+  <rect class="box-warn" x="400" y="40" width="160" height="56" rx="8"/>
+  <text class="mono" x="480" y="64" text-anchor="middle">" "</text>
+  <text class="small" x="480" y="84" text-anchor="middle">between words</text>
+  <path class="arrow" d="M 560,68 H 588"/>
+  <rect class="box-bad" x="590" y="40" width="150" height="56" rx="8"/>
+  <text class="mono" x="665" y="64" text-anchor="middle">""</text>
+  <text class="small" x="665" y="84" text-anchor="middle">anywhere</text>
+  <text class="label" x="20" y="26">Default separators, best first</text>
+  <text class="small" x="20" y="126">Each arrow means: "this piece is still longer than chunk_size, try the next separator on it".</text>
+  <rect class="box-info" x="20" y="142" width="720" height="44" rx="8"/>
+  <text class="label" x="34" y="160">harbor/knowledge.py puts "\n## " in front:</text>
+  <text class="mono" x="34" y="178">["\n## ", "\n\n", "\n", ". ", " ", ""]</text>
+</svg>
+<figcaption>The recursive splitter's ladder. <strong>The further right it has to go, the worse the cut</strong>;
+our own list adds "cut before a <code>## </code> heading" and "cut after a full stop" so cuts fall on section and
+sentence borders.</figcaption>
+</figure>
+
+<h2>Actions</h2>
+<ol class="steps">
+  <li>Create <code>harbor/knowledge.py</code> (shown in full below). It wraps lab 04's folder loader and adds the
+  splitter, the vector store and a formatting helper.</li>
+  <li>Create <code>labs/05_splitters.py</code>.</li>
+  <li>Run <code>uv run python -m labs.05_splitters</code> from the project folder. No model is called, so this works
+  without Ollama.</li>
+</ol>
+
+<h2>The shared module: harbor/knowledge.py</h2>
+<p>This file is shown here for the first time. It has four small functions. Labs 05 and 06 use the first two,
+labs 07 and later use all four, and the agents in later labs search the policies through it.</p>
+
+<pre data-file="harbor/knowledge.py" data-lang="py" data-tag="complete file"><code>"""Load, split and index the library's policy documents. Labs 04-07 build this step by step."""
+from pathlib import Path
+
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from harbor.config import DATA, get_embeddings
+
+
+def load_policies():
+    loader = DirectoryLoader(str(DATA / "policies"), glob="*.md", loader_cls=TextLoader,
+                             loader_kwargs={"encoding": "utf-8"})
+    return loader.load()
+
+
+def split(docs, chunk_size=400, chunk_overlap=60):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                                              separators=["\n## ", "\n\n", "\n", ". ", " ", ""])
+    return splitter.split_documents(docs)
+
+
+def build_vector_store(chunks=None):
+    chunks = chunks if chunks is not None else split(load_policies())
+    return InMemoryVectorStore.from_documents(chunks, get_embeddings())
+
+
+def format_docs(docs):
+    """Turn retrieved chunks into one context string, each chunk tagged with its source file."""
+    return "\n\n".join(f"[{Path(d.metadata['source']).name}]\n{d.page_content}" for d in docs)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Load, split and index …"""</code></td><td>Module docstring: says this file is built step by step in labs
+04 to 07.</td></tr>
+<tr><td>2</td><td><code>from pathlib import Path</code></td><td>Used by <code>format_docs</code> to show only the file name of a
+chunk's source.</td></tr>
+<tr><td>4</td><td><code>from langchain_community.document_loaders import DirectoryLoader, TextLoader</code></td><td>The same two loaders
+as lab 04 (and the same DeprecationWarning when imported).</td></tr>
+<tr><td>5</td><td><code>from langchain_core.vectorstores import InMemoryVectorStore</code></td><td>A
+<a class="term" href="glossary.html#vector-store">vector store</a> that keeps everything in a Python dict in memory.
+Lab 06 explains it.</td></tr>
+<tr><td>6</td><td><code>from langchain_text_splitters import RecursiveCharacterTextSplitter</code></td><td>The splitter. It lives in
+its own small package, <code>langchain-text-splitters</code>.</td></tr>
+<tr><td>8</td><td><code>from harbor.config import DATA, get_embeddings</code></td><td><code>DATA</code> is the data folder;
+<code>get_embeddings()</code> returns the Ollama embedding model (<code>nomic-embed-text</code>), used only by
+<code>build_vector_store</code>.</td></tr>
+<tr><td>11–14</td><td><code>def load_policies(): … return loader.load()</code></td><td>Loads the six policy files as six Documents,
+exactly like part 2 of lab 04. Putting it in a function means every lab loads the data the same way.</td></tr>
+<tr><td>17</td><td><code>def split(docs, chunk_size=400, chunk_overlap=60):</code></td><td>Default values: chunks of at most 400
+characters with up to 60 characters of overlap. Callers can pass other numbers to experiment.</td></tr>
+<tr><td>18–19</td><td><code>RecursiveCharacterTextSplitter(…, separators=["\n## ", "\n\n", "\n", ". ", " ", ""])</code></td><td>The
+custom separator list: first try to cut right before a line that starts with <code>## </code> (a section heading),
+then at blank lines, line breaks, after a full stop, at spaces, and as a last resort anywhere. Putting the heading
+first keeps each heading together with its own paragraph.</td></tr>
+<tr><td>20</td><td><code>return splitter.split_documents(docs)</code></td><td>Splits every Document and copies its metadata
+(<code>source</code>) onto each chunk. With the defaults, the six policy files become 12 chunks.</td></tr>
+<tr><td>23</td><td><code>def build_vector_store(chunks=None):</code></td><td>Builds the searchable store. <code>chunks</code> is
+optional, so a lab can pass its own chunks or let the function do everything.</td></tr>
+<tr><td>24</td><td><code>chunks = chunks if chunks is not None else split(load_policies())</code></td><td>If no chunks were given,
+load and split the policies. <code>is not None</code> (instead of <code>if chunks</code>) means an empty list is
+respected rather than silently replaced.</td></tr>
+<tr><td>25</td><td><code>return InMemoryVectorStore.from_documents(chunks, get_embeddings())</code></td><td>Embeds every chunk with
+the embedding model and stores text, vector and metadata together. This line calls Ollama, so it needs the server
+running (lab 06).</td></tr>
+<tr><td>28–30</td><td><code>def format_docs(docs): … "\n\n".join(f"[{Path(d.metadata['source']).name}]\n{d.page_content}" for d in docs)</code></td><td>Turns
+a list of retrieved chunks into one string for a prompt. Each chunk starts with its file name in square brackets,
+like <code>[fees.md]</code>, and chunks are separated by blank lines. Lab 07's RAG chain uses it so the model can
+end its answer with the source file.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Structure of harbor/knowledge.py: load_policies feeds split, both feed build_vector_store, and format_docs is used by lab 07's RAG chain">
+  <rect class="zone" x="10" y="10" width="500" height="216" rx="8"/>
+  <text class="label" x="24" y="30">harbor/knowledge.py</text>
+  <rect class="box" x="30" y="44" width="200" height="50" rx="8"/>
+  <text class="mono" x="130" y="66" text-anchor="middle">load_policies()</text>
+  <text class="small" x="130" y="84" text-anchor="middle">6 Documents</text>
+  <path class="arrow" d="M 230,69 H 278"/>
+  <rect class="box" x="280" y="44" width="210" height="50" rx="8"/>
+  <text class="mono" x="385" y="66" text-anchor="middle">split(docs)</text>
+  <text class="small" x="385" y="84" text-anchor="middle">12 chunks at 400/60</text>
+  <path class="arrow" d="M 385,94 V 112"/>
+  <rect class="box-info" x="280" y="114" width="210" height="50" rx="8"/>
+  <text class="mono" x="385" y="136" text-anchor="middle">build_vector_store()</text>
+  <text class="small" x="385" y="154" text-anchor="middle">embeds, calls Ollama</text>
+  <rect class="box2" x="30" y="114" width="200" height="50" rx="8"/>
+  <text class="mono" x="130" y="136" text-anchor="middle">format_docs(docs)</text>
+  <text class="small" x="130" y="154" text-anchor="middle">"[fees.md]\n…"</text>
+  <text class="small" x="30" y="200">format_docs takes retrieved chunks, not files.</text>
+  <rect class="box-ok" x="560" y="30" width="180" height="40" rx="8"/>
+  <text class="label" x="650" y="55" text-anchor="middle">lab 05: load, split</text>
+  <rect class="box-ok" x="560" y="90" width="180" height="40" rx="8"/>
+  <text class="label" x="650" y="115" text-anchor="middle">lab 06: + store</text>
+  <rect class="box-ok" x="560" y="150" width="180" height="40" rx="8"/>
+  <text class="label" x="650" y="175" text-anchor="middle">lab 07: all four</text>
+  <path class="arrow-accent dashed" d="M 512,60 H 558"/>
+  <path class="arrow-accent dashed" d="M 512,120 H 558"/>
+  <path class="arrow-accent dashed" d="M 512,170 H 558"/>
+</svg>
+<figcaption>The four functions and who uses them. <strong>One module, one way to load and split</strong>: if you
+change the chunk size here, every later lab and agent sees the change.</figcaption>
+</figure>
+
+<h2>The lab script</h2>
+
+<pre data-file="labs/05_splitters.py" data-lang="py" data-tag="complete file"><code>"""Lab 05: split documents into chunks that fit a prompt and still make sense alone."""
+from pathlib import Path
+
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+
+from harbor.knowledge import load_policies
+
+docs = load_policies()
+
+# 1. The general-purpose splitter: tries "\n\n", then "\n", then " ", then characters.
+plain = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=40)
+chunks = plain.split_documents(docs)
+sizes = [len(c.page_content) for c in chunks]
+print(f"1) Recursive, size 200 / overlap 40: {len(chunks)} chunks, {min(sizes)}-{max(sizes)} characters")
+fees = [c for c in chunks if Path(c.metadata["source"]).name == "fees.md"]
+for c in fees[:3]:
+    print(f"   {c.page_content[:90]!r}")
+
+# 2. Bigger chunks, and separators that prefer to cut at a "## " heading (what harbor/knowledge.py uses).
+smart = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=60,
+                                       separators=["\n## ", "\n\n", "\n", ". ", " ", ""])
+chunks = smart.split_documents(docs)
+print(f"\n2) Recursive, size 400, heading-first: {len(chunks)} chunks")
+print("   example:", repr(chunks[3].page_content[:120]))
+
+# 3. Split on Markdown headings and keep the headings as metadata.
+md = MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "page"), ("##", "section")])
+sections = [s for d in docs for s in md.split_text(d.page_content)]
+print(f"\n3) MarkdownHeaderTextSplitter: {len(sections)} sections")
+for s in sections[:3]:
+    print(f"   {s.metadata}  {s.page_content[:60]!r}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 05: split documents …"""</code></td><td>Docstring with the goal: chunks that fit a prompt and still
+make sense alone.</td></tr>
+<tr><td>2</td><td><code>from pathlib import Path</code></td><td>Used to pick out the chunks whose source file is
+<code>fees.md</code>.</td></tr>
+<tr><td>4</td><td><code>from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter</code></td><td>Two
+splitters: the general one, and one that understands Markdown headings.</td></tr>
+<tr><td>6</td><td><code>from harbor.knowledge import load_policies</code></td><td>Reuses the loader from the shared module.</td></tr>
+<tr><td>8</td><td><code>docs = load_policies()</code></td><td>The six Documents from lab 04.</td></tr>
+<tr><td>11</td><td><code>plain = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=40)</code></td><td>A small chunk size
+with the <strong>default</strong> separators (no heading rule). This is the setting that shows the problem.</td></tr>
+<tr><td>12</td><td><code>chunks = plain.split_documents(docs)</code></td><td>Splits all six files. Each chunk keeps its file's
+<code>source</code> metadata.</td></tr>
+<tr><td>13</td><td><code>sizes = [len(c.page_content) for c in chunks]</code></td><td>The length of every chunk, for a min/max
+summary.</td></tr>
+<tr><td>14</td><td><code>print(f"1) Recursive, size 200 / overlap 40: {len(chunks)} chunks, {min(sizes)}-{max(sizes)} characters")</code></td><td>How
+many chunks, the shortest and the longest. No chunk can be longer than 200.</td></tr>
+<tr><td>15</td><td><code>fees = [c for c in chunks if Path(c.metadata["source"]).name == "fees.md"]</code></td><td>Keeps only the
+chunks that came from <code>fees.md</code>. This works because <code>split_documents</code> copied the metadata.</td></tr>
+<tr><td>16–17</td><td><code>for c in fees[:3]: print(f"   {c.page_content[:90]!r}")</code></td><td>Prints the start of the first
+three fees chunks. <code>!r</code> inside an f-string is the same as <code>repr(...)</code>: it shows quotes and
+<code>\n</code>.</td></tr>
+<tr><td>20–21</td><td><code>smart = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=60, separators=[…])</code></td><td>The
+setting <code>harbor/knowledge.py</code> uses: bigger chunks and "cut before a heading" first.</td></tr>
+<tr><td>22–23</td><td><code>chunks = smart.split_documents(docs)</code> / <code>print(…)</code></td><td>Splits again and prints the
+count: 12.</td></tr>
+<tr><td>24</td><td><code>print("   example:", repr(chunks[3].page_content[:120]))</code></td><td>Shows chunk number 3 (the fourth,
+since counting starts at 0): it starts exactly at a <code>## </code> heading.</td></tr>
+<tr><td>27</td><td><code>md = MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "page"), ("##", "section")])</code></td><td>A
+splitter that cuts at Markdown headings. Each pair says "a line starting with <code>#</code> is stored under the
+metadata key <code>page</code>; <code>##</code> under <code>section</code>".</td></tr>
+<tr><td>28</td><td><code>sections = [s for d in docs for s in md.split_text(d.page_content)]</code></td><td>A nested list
+comprehension: for each Document, split its text, and collect all the pieces in one flat list. Note that
+<code>split_text</code> takes a string, so these pieces do <strong>not</strong> get the file's <code>source</code>
+metadata; only the headings.</td></tr>
+<tr><td>29</td><td><code>print(f"\n3) MarkdownHeaderTextSplitter: {len(sections)} sections")</code></td><td>One piece per
+<code>##</code> section: 17.</td></tr>
+<tr><td>30–31</td><td><code>for s in sections[:3]: print(f"   {s.metadata}  {s.page_content[:60]!r}")</code></td><td>Shows the
+metadata and the text start of the first three sections. The heading lines themselves are no longer in the text; they
+moved into the metadata.</td></tr>
+</table></div>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="command"><code>uv run python -m labs.05_splitters</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>1) Recursive, size 200 / overlap 40: 30 chunks, 14-198 characters
+   '# Late fees and lost items\n\n## Late fees\nAdult cards pay 0.20 EUR per item per day late, u'
+   '## Blocked cards\nIf you owe 15 EUR or more, your card is blocked for borrowing until you p'
+   '## Lost or damaged items'
+
+2) Recursive, size 400, heading-first: 12 chunks
+   example: '## Wi-Fi and computers\nFree Wi-Fi is available in all branches; the network is called HarborLibrary-Guest and needs no p'
+
+3) MarkdownHeaderTextSplitter: 17 sections
+   {'page': 'Branches and opening hours', 'section': 'Central Library'}  'Address: 1 Quay Street. Open Monday to Saturday, 9 am to 8 p'
+   {'page': 'Branches and opening hours', 'section': 'Northside Branch'}  'Address: 48 Mill Road. Open Tuesday to Saturday, 10 am to 6 '
+   {'page': 'Branches and opening hours', 'section': 'Lighthouse Branch'}  'Address: 7 Beacon Square. Open Monday to Friday, 12 pm to 7 '</code></pre>
+
+<p>No DeprecationWarning this time, although <code>harbor/knowledge.py</code> imports
+<code>langchain-community</code>: by default Python only displays a DeprecationWarning when it is triggered by code
+in the script you run (the <code>__main__</code> module), and here the import happens inside another module. No model
+is involved, so your numbers should be exactly the same.</p>
+
+<h2>What happened in part 1: the orphan heading</h2>
+<p>The first two fees chunks look fine: each starts at a heading and contains its rule. The third one is just
+<code>'## Lost or damaged items'</code>, a 24-character chunk with a heading and no content. Here is why. The section
+"Lost or damaged items" is longer than 200 characters, so the splitter cannot keep it in one piece. It splits that
+section at the next separator, <code>"\n"</code>, which sits right after the heading. The paragraph that follows is
+still too long to join the heading, so the heading is left alone and the paragraph is cut again at spaces.</p>
+<p>The result is a chunk that will never answer anything, and a paragraph that lost its heading. We checked the other
+files too (by running the same splitter and printing every chunk): <code>## Central Library</code>,
+<code>## Lighthouse Branch</code>, <code>## E-books and audiobooks</code>, <code>## Study rooms</code> and
+<code>## Maker space</code> are also orphaned, and the shortest chunks (14 characters) are
+<code>## Study rooms</code> and <code>## Maker space</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Bar chart of the five fees.md chunks at size 200: 157, 148, 24, 198 and 59 characters; the 24-character one is only a heading">
+  <text class="label" x="20" y="24">fees.md at chunk_size=200, overlap 40 (bar length = characters)</text>
+  <text class="small" x="20" y="59">chunk 1</text>
+  <rect class="box-ok" x="80" y="40" width="392" height="30" rx="6"/>
+  <text class="mono" x="92" y="60"># Late fees… ## Late fees…</text>
+  <text class="small" x="482" y="59">157</text>
+  <text class="small" x="20" y="99">chunk 2</text>
+  <rect class="box-ok" x="80" y="80" width="370" height="30" rx="6"/>
+  <text class="mono" x="92" y="100">## Blocked cards…</text>
+  <text class="small" x="460" y="99">148</text>
+  <text class="small" x="20" y="139">chunk 3</text>
+  <rect class="box-bad" x="80" y="120" width="60" height="30" rx="6"/>
+  <text class="small" x="150" y="139">24</text>
+  <text class="bad" x="180" y="140">"## Lost or damaged items" alone</text>
+  <text class="small" x="20" y="179">chunk 4</text>
+  <rect class="box-warn" x="80" y="160" width="495" height="30" rx="6"/>
+  <text class="mono" x="92" y="180">If you lose or damage an item…</text>
+  <text class="small" x="585" y="179">198</text>
+  <text class="small" x="20" y="219">chunk 5</text>
+  <rect class="box-warn" x="80" y="200" width="148" height="30" rx="6"/>
+  <text class="small" x="238" y="219">59</text>
+  <text class="small" x="270" y="219">"we refund the replacement price…"</text>
+</svg>
+<figcaption>The real chunk lengths for <code>fees.md</code> (only the first three are printed by the lab; we listed all
+five offline). Red: <strong>a heading cut off from its paragraph</strong>; amber: the paragraph, now without its
+heading, cut in two.</figcaption>
+</figure>
+
+<h3>Overlap, seen in the same file</h3>
+<p>Chunks 4 and 5 above also show what <code>chunk_overlap=40</code> does. Chunk 4 ends with "…we refund the
+replacement price but" and chunk 5 starts with "we refund the replacement price but not the processing fee." The
+35-character phrase appears in both, so whichever chunk is retrieved, the sentence is not completely lost.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Two consecutive chunks share the phrase we refund the replacement price but, which is the overlap">
+  <rect class="box" x="20" y="30" width="450" height="46" rx="8"/>
+  <text class="small" x="34" y="48">chunk 4 (198 characters)</text>
+  <text class="mono" x="34" y="66">…in good condition,</text>
+  <rect class="box" x="290" y="110" width="450" height="46" rx="8"/>
+  <text class="small" x="726" y="128" text-anchor="end">chunk 5 (59 characters)</text>
+  <text class="mono" x="726" y="146" text-anchor="end">not the processing fee.</text>
+  <rect class="box-info" x="290" y="22" width="180" height="142" rx="8"/>
+  <text class="mono" x="380" y="84" text-anchor="middle">we refund the</text>
+  <text class="mono" x="380" y="102" text-anchor="middle">replacement</text>
+  <text class="mono" x="380" y="120" text-anchor="middle">price but</text>
+  <text class="label" x="380" y="186" text-anchor="middle">overlap: in both chunks</text>
+</svg>
+<figcaption>Real text from the 200/40 run. <strong>Overlap repeats the end of one chunk at the start of the
+next</strong>, up to 40 characters here, and only whole words.</figcaption>
+</figure>
+
+<h2>What happened in part 2: heading-first chunks</h2>
+<p>With <code>chunk_size=400</code> and <code>"\n## "</code> as the first separator, the six files become 12 chunks:
+exactly two per file (we confirmed this by printing every chunk offline). Each chunk starts at a heading and holds one
+or two whole sections. The example, <code>chunks[3]</code>, is the second chunk of <code>digital.md</code>: it starts
+at <code>## Wi-Fi and computers</code>, and, because both sections fit in 400 characters, it also contains the whole
+<code>## Printing</code> section. Keep that in mind: in lab 06 a search for "printing price" returns this very
+chunk.</p>
+<p>Why no visible overlap here? The overlap only re-uses whole pieces from the end of the previous chunk, and the
+pieces at this level are whole sections, all longer than 60 characters. So when cuts happen at headings, the chunks
+simply do not overlap. That is fine: a cut at a heading does not break a sentence.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Comparison: size 200 with default separators gives 30 chunks with orphan headings; size 400 heading-first gives 12 chunks, two per file, each starting at a heading">
+  <rect class="box-warn" x="20" y="14" width="350" height="208" rx="8"/>
+  <text class="title" x="195" y="40" text-anchor="middle">200 / 40, default separators</text>
+  <text class="label" x="40" y="72">30 chunks, 14 to 198 characters</text>
+  <text class="label" x="40" y="98">6 section headings left alone</text>
+  <text class="label" x="40" y="124">paragraphs cut mid-sentence</text>
+  <text class="label" x="40" y="150">overlap repeats words</text>
+  <text class="small" x="40" y="190">many tiny or useless chunks</text>
+  <rect class="box-ok" x="390" y="14" width="350" height="208" rx="8"/>
+  <text class="title" x="565" y="40" text-anchor="middle">400 / 60, "\n## " first</text>
+  <text class="label" x="410" y="72">12 chunks, 2 per file</text>
+  <text class="label" x="410" y="98">every chunk starts at a heading</text>
+  <text class="label" x="410" y="124">whole sections, whole sentences</text>
+  <text class="label" x="410" y="150">some chunks hold 2 sections</text>
+  <text class="small" x="410" y="190">what harbor/knowledge.py uses</text>
+</svg>
+<figcaption>Same six files, two settings. <strong>Respecting the document's structure matters more than the exact
+number</strong>; the trade-off on the right is that two topics can share a chunk.</figcaption>
+</figure>
+
+<h2>What happened in part 3: splitting on Markdown headings</h2>
+<p><code>MarkdownHeaderTextSplitter</code> does not count characters at all. It cuts at every heading you list and
+stores the heading text as metadata. The six files have 17 <code>##</code> sections in total (three in each file,
+two in <code>rooms.md</code>), so you get 17 pieces, and each one knows its <code>page</code> and
+<code>section</code>. That metadata is useful: you could later filter on "section = Late fees" or show the section
+title next to an answer. The price: the pieces can be any length, so in a real project you often run a size-based
+splitter on them afterwards.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="MarkdownHeaderTextSplitter turns the branches.md file into sections whose headings become page and section metadata">
+  <rect class="box2" x="20" y="20" width="270" height="170" rx="8"/>
+  <text class="label" x="34" y="42">branches.md</text>
+  <text class="mono" x="34" y="68"># Branches and opening…</text>
+  <text class="mono" x="34" y="92">## Central Library</text>
+  <text class="mono" x="34" y="110">Address: 1 Quay Street…</text>
+  <text class="mono" x="34" y="134">## Northside Branch</text>
+  <text class="mono" x="34" y="152">Address: 48 Mill Road…</text>
+  <text class="mono" x="34" y="176">## Lighthouse Branch …</text>
+  <path class="arrow-accent" d="M 290,105 H 328"/>
+  <rect class="box" x="330" y="20" width="410" height="50" rx="8"/>
+  <text class="small" x="344" y="40">page: Branches and opening hours</text>
+  <text class="small" x="344" y="58">section: Central Library</text>
+  <text class="mono" x="580" y="50">"Address: 1…"</text>
+  <rect class="box" x="330" y="80" width="410" height="50" rx="8"/>
+  <text class="small" x="344" y="100">page: Branches and opening hours</text>
+  <text class="small" x="344" y="118">section: Northside Branch</text>
+  <text class="mono" x="580" y="110">"Address: 48…"</text>
+  <rect class="box" x="330" y="140" width="410" height="50" rx="8"/>
+  <text class="small" x="344" y="160">page: Branches and opening hours</text>
+  <text class="small" x="344" y="178">section: Lighthouse Branch</text>
+  <text class="mono" x="580" y="170">"Address: 7…"</text>
+</svg>
+<figcaption>The first three of the 17 sections, as printed by the lab. <strong>The headings leave the text and become
+metadata</strong>, which is why the printed text starts at "Address:".</figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see</strong>
+<ul>
+  <li><code>1) Recursive, size 200 / overlap 40: 30 chunks, 14-198 characters</code>, then three fees chunks, the last
+  of which is only <code>'## Lost or damaged items'</code>.</li>
+  <li><code>2) Recursive, size 400, heading-first: 12 chunks</code> and an example that starts with
+  <code>'## Wi-Fi and computers\n…'</code>.</li>
+  <li><code>3) MarkdownHeaderTextSplitter: 17 sections</code> and three lines of metadata like
+  <code>{'page': 'Branches and opening hours', 'section': 'Central Library'}</code>.</li>
+</ul></div>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+  <li><strong>Overlap bigger than the chunk size.</strong> The default overlap is 200, so
+  <code>RecursiveCharacterTextSplitter(chunk_size=10)</code> fails with
+  <code>ValueError: Got a larger chunk overlap (200) than chunk size (10), should be smaller.</code> Always set both
+  numbers together.</li>
+  <li><strong>Thinking <code>chunk_size</code> is in words or tokens.</strong> Here it counts characters. 400 characters
+  is roughly 60 to 80 English words.</li>
+  <li><strong>Losing the source.</strong> <code>split_text(string)</code> returns pieces without your Document's
+  metadata (part 3 of this lab). Use <code>split_documents(docs)</code> when you need to know where a chunk came
+  from, or add the metadata yourself.</li>
+  <li><strong>Reading <code>chunks[3]</code> as "the third chunk".</strong> Python lists count from 0, so
+  <code>chunks[3]</code> is the fourth chunk (the second one of <code>digital.md</code>).</li>
+  <li><strong>Changing the chunk size in only one place.</strong> Change it in <code>harbor/knowledge.py</code> and
+  every later lab uses it; but the numbers in labs 06 and 07 (12 chunks, the scores) will change too.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+  <li>Change line 11 to <code>chunk_size=300, chunk_overlap=40</code> and run again. You get 17 chunks, and the
+  whole "Lost or damaged items" section (heading and paragraph) now fits in one chunk.</li>
+  <li>Add <code>separators=["\n## ", "\n\n", "\n", ". ", " ", ""]</code> to the 200-character splitter on line 11.
+  Surprise: still 30
+  chunks, and the orphans stay. At 200 characters most sections are simply too long, so the splitter must cut after
+  their heading anyway. Separators help only when the size leaves room for whole sections.</li>
+  <li>Pass <code>strip_headers=False</code> to <code>MarkdownHeaderTextSplitter</code> on line 27. The heading lines (for
+  example <code>## Central Library</code>) stay in the text as well as in the metadata.</li>
+  <li>At the end of the file, add <code>from harbor.knowledge import format_docs</code> and
+  <code>print(format_docs(chunks[:2]))</code>. You will see each chunk prefixed with <code>[branches.md]</code>: the
+  exact text lab 07 puts into the prompt.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>Splitters cut Documents into chunks; <code>split_documents</code> copies each Document's metadata to its
+  chunks.</li>
+  <li><code>RecursiveCharacterTextSplitter</code> tries separators from best to worst; <code>chunk_size</code> and
+  <code>chunk_overlap</code> are counted in characters.</li>
+  <li>At 200/40 with default separators, headings like <code>## Lost or damaged items</code> ended up alone: 30 chunks,
+  many useless.</li>
+  <li>At 400/60 with <code>"\n## "</code> first: 12 clean chunks, two per file. This is what
+  <code>harbor/knowledge.py</code> uses.</li>
+  <li><code>MarkdownHeaderTextSplitter</code> gave 17 sections with the headings as metadata.</li>
+  <li><code>harbor/knowledge.py</code> now holds <code>load_policies</code>, <code>split</code>,
+  <code>build_vector_store</code> and <code>format_docs</code>. Next, lab 06 turns the 12 chunks into vectors.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="04-document-loaders.html"><small>← Previous · Step 04</small>Document loaders</a>
+<a class="next" href="06-vector-store.html"><small>Next · Step 06 →</small>Embeddings and a vector store</a>
+</nav>
+</main>
+</body>
+</html>

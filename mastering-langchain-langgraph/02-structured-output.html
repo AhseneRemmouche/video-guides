@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02 · Structured output</title>
+<meta name="description" content="Get validated Pydantic objects back, catch a runaway list with include_raw, and limit it with the schema. Book chapter 4.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 02/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 02 of 16 · Hands-on lab</div>
+  <h1>Structured output</h1>
+  <p class="lead">Get validated Pydantic objects back, catch a runaway list with include_raw, and limit it with the schema. Book chapter 4.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 4 · Generating Structured Outputs</strong> of the book (Part II ·
+Integrations and Utilities for LLMs in LangChain). This lab is our own hands-on exercise; it does not reproduce the
+book's examples.</div>
+
+<p class="lead">A library visitor writes "My 8-year-old loves crabs and the beach…". A catalog search cannot use that
+sentence, but it can use <code>audience="children"</code> and <code>max_pages=40</code>. In this lab the model fills in
+a typed Python object instead of writing free text — and you will watch it fail in an instructive way, catch the
+failure safely, and fix it in the schema.</p>
+
+<h2>Goal</h2>
+<ul>
+<li>Describe the data you want as a <a class="term" href="glossary.html#pydantic">Pydantic</a> class and get validated
+objects back with <code>with_structured_output</code>.</li>
+<li>Use <code>include_raw=True</code> so a parsing failure returns information instead of crashing your program.</li>
+<li>Limit a list with <code>Field(max_length=…)</code> and see why a valid object can still be wrong.</li>
+</ul>
+
+<h2>The idea in brief</h2>
+<p><a class="term" href="glossary.html#structured-output">Structured output</a> means the model's answer must fit a
+schema you define. LangChain turns your Pydantic class into a
+<a class="term" href="glossary.html#json-schema">JSON schema</a>. For <code>ChatOllama</code> the default method is
+<code>"json_schema"</code>: the schema is sent to Ollama as its <code>format</code> setting, and Ollama only lets the
+model produce text that fits it (this is called constrained decoding). LangChain then parses the JSON back into your
+class. The result has the right <em>shape</em> — right field names, allowed values, right types. Nothing guarantees
+the values are <em>true</em>. The concept chapter <a href="chat-models-prompts.html">Chat models, structured output and
+prompts</a> (section "Structured output") compares the three methods and tells the same runaway story from the
+concept side.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Flow of with_structured_output: the request text and the BookRequest JSON schema go to Ollama, llama3.2 writes JSON restricted to the schema, PydanticOutputParser turns it into a BookRequest object">
+  <rect x="20" y="30" width="150" height="56" rx="8" class="box2"/>
+  <text x="95" y="54" text-anchor="middle" class="label">request text</text>
+  <text x="95" y="72" text-anchor="middle" class="small">"My 8-year-old …"</text>
+  <rect x="20" y="110" width="150" height="56" rx="8" class="box-info"/>
+  <text x="95" y="134" text-anchor="middle" class="label">BookRequest</text>
+  <text x="95" y="152" text-anchor="middle" class="small">→ JSON schema</text>
+  <path class="arrow" d="M 170,58 H 200 V 92 H 218"/>
+  <path class="arrow" d="M 170,138 H 200 V 104 H 218"/>
+  <rect x="220" y="66" width="170" height="64" rx="8" class="box-solid"/>
+  <text x="305" y="92" text-anchor="middle" class="label on-solid">Ollama + llama3.2</text>
+  <text x="305" y="112" text-anchor="middle" class="small on-solid">format = the schema</text>
+  <path class="arrow" d="M 390,98 H 418"/>
+  <rect x="420" y="66" width="140" height="64" rx="8" class="box2"/>
+  <text x="490" y="92" text-anchor="middle" class="label">JSON text</text>
+  <text x="490" y="112" text-anchor="middle" class="small mono">{"topic": …}</text>
+  <path class="arrow" d="M 560,98 H 588"/>
+  <rect x="590" y="66" width="150" height="64" rx="8" class="box-ok"/>
+  <text x="665" y="92" text-anchor="middle" class="label">BookRequest(…)</text>
+  <text x="665" y="112" text-anchor="middle" class="small">validated object</text>
+  <text x="575" y="160" text-anchor="middle" class="small">parsed by PydanticOutputParser</text>
+  <text x="305" y="160" text-anchor="middle" class="small">only schema-shaped tokens allowed</text>
+</svg>
+<figcaption>One call, two safety nets: Ollama restricts what can be written, Pydantic checks what was written.
+<strong>Neither one checks whether the content is right.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to Pydantic? Classes that check their own data</summary>
+<p>Pydantic is a Python library for data classes with validation. You write a class that inherits from
+<code>BaseModel</code> and give each field a type hint (<code>topic: str</code>). When you create an object, Pydantic
+checks every value and raises a <code>ValidationError</code> if one doesn't fit. It can also describe the class as a
+JSON schema (<code>BookRequest.model_json_schema()</code>), which is what LangChain sends to the model, and turn an
+object back into a plain dictionary (<code>.model_dump()</code>).</p>
+</details>
+
+<details class="primer"><summary>New to Literal and <code>int | None</code>? Type hints that limit values</summary>
+<p><code>Literal["children", "teens", "adults"]</code> means "exactly one of these three strings"; in the JSON schema
+it becomes an <code>enum</code>, so the model cannot write "kids". <code>list[Literal[…]]</code> is a list whose items
+must each be one of the listed words. <code>int | None</code> means "a whole number or nothing"; with
+<code>default=None</code> the field becomes optional. See also <a class="term" href="glossary.html#type-hint">type
+hints</a>.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+<li>Open <code>labs/02_structured_output.py</code> in the <code>harbor-library-ai</code> project (set up in
+<a href="01-chat-models.html">lab 01</a>). No new files and no new packages: Pydantic is already installed as a
+LangChain dependency.</li>
+<li>Read the code and the table below.</li>
+<li>Make sure Ollama is running, then run <code>uv run python -m labs.02_structured_output</code>.</li>
+</ol>
+
+<pre data-file="labs/02_structured_output.py" data-lang="py" data-tag="complete file"><code>"""Lab 02: get typed, validated data back instead of free text."""
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from harbor.config import get_model
+
+
+class BookRequest(BaseModel):
+    """What a library visitor is looking for."""
+    topic: str = Field(description="The subject, in two to four words")
+    audience: Literal["children", "teens", "adults"] = Field(description="Who the book is for")
+    formats: list[Literal["book", "e-book", "audiobook", "DVD"]] = Field(description="Formats the visitor accepts")
+    max_pages: int | None = Field(default=None, description="Maximum length if the visitor gives one, else null")
+
+
+model = get_model()
+structured = model.with_structured_output(BookRequest)
+
+requests = [
+    "My 8-year-old loves crabs and the beach. Anything short, under 40 pages? Paper or e-book is fine.",
+    "I'd like an audiobook on the history of our harbor for my commute.",
+]
+for text in requests:
+    result = structured.invoke(text)
+    print(type(result).__name__, result.model_dump())
+
+# include_raw=True also returns the raw AIMessage and any parsing error, so a failure does not raise.
+vague = "Something fun to read."
+raw = model.with_structured_output(BookRequest, include_raw=True).invoke(vague)
+print("\ninclude_raw keys:", list(raw))
+print("parsed:", raw["parsed"])
+print("parsing_error:", str(raw["parsing_error"])[:200] if raw["parsing_error"] else None)
+print("output tokens:", raw["raw"].usage_metadata["output_tokens"])
+
+
+# A schema can also limit size: max_length becomes "maxItems" in the JSON schema, which Ollama enforces.
+class BookRequestV2(BookRequest):
+    formats: list[Literal["book", "e-book", "audiobook", "DVD"]] = Field(max_length=4, description="Formats the visitor accepts")
+
+
+fixed = model.with_structured_output(BookRequestV2, include_raw=True).invoke(vague)
+print("\nwith max_length=4:", fixed["parsed"], "| error:", fixed["parsing_error"])</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 02: …"""</code></td><td>Docstring.</td></tr>
+<tr><td>2</td><td><code>from typing import Literal</code></td><td><code>Literal</code> lists the exact values a field
+may take.</td></tr>
+<tr><td>4</td><td><code>from pydantic import BaseModel, Field</code></td><td><code>BaseModel</code> is the base class
+for validated data classes; <code>Field</code> adds a description, a default and limits to a field.</td></tr>
+<tr><td>6</td><td><code>from harbor.config import get_model</code></td><td>The shared model factory (512-token cap
+included).</td></tr>
+<tr><td>9</td><td><code>class BookRequest(BaseModel):</code></td><td>The shape we want back. The class name becomes the
+schema's title.</td></tr>
+<tr><td>10</td><td><code>"""What a library visitor is looking for."""</code></td><td>The class docstring becomes the
+schema's <code>description</code>.</td></tr>
+<tr><td>11</td><td><code>topic: str = Field(description="The subject, in two to four words")</code></td><td>A text
+field. The description travels inside the schema; it is a hint, not a rule — nothing counts the words.</td></tr>
+<tr><td>12</td><td><code>audience: Literal["children", "teens", "adults"] = Field(…)</code></td><td>Exactly one of
+three values. Constrained decoding makes any other word impossible.</td></tr>
+<tr><td>13</td><td><code>formats: list[Literal["book", "e-book", "audiobook", "DVD"]] = Field(…)</code></td><td>A list
+of allowed format words. <strong>No length limit</strong> — remember this line; it causes the runaway below.</td></tr>
+<tr><td>14</td><td><code>max_pages: int | None = Field(default=None, description="… else null")</code></td><td>An
+optional number. <code>default=None</code> makes it not required; the description asks the model to leave it empty
+unless the visitor gave a length.</td></tr>
+<tr><td>17</td><td><code>model = get_model()</code></td><td>The usual <code>ChatOllama</code>.</td></tr>
+<tr><td>18</td><td><code>structured = model.with_structured_output(BookRequest)</code></td><td>Returns a new runnable
+that sends the schema with each call and parses the reply. The default method for ChatOllama is
+<code>"json_schema"</code>. <code>structured.invoke(…)</code> returns a <code>BookRequest</code>, not an
+<code>AIMessage</code>.</td></tr>
+<tr><td>20–23</td><td><code>requests = [ … ]</code></td><td>Two realistic requests: one with an age, a page limit and
+two formats; one asking for an audiobook, with no length given.</td></tr>
+<tr><td>24–26</td><td><code>for text in requests: result = structured.invoke(text)</code>,
+<code>print(type(result).__name__, result.model_dump())</code></td><td>Calls the model once per request and prints the
+class name (proof it is a real object) and its fields as a dictionary.</td></tr>
+<tr><td>29</td><td><code>vague = "Something fun to read."</code></td><td>A deliberately vague request: no topic, no
+audience, no format.</td></tr>
+<tr><td>30</td><td><code>model.with_structured_output(BookRequest, include_raw=True).invoke(vague)</code></td><td>With
+<code>include_raw=True</code> the result is a dictionary with three keys instead of the object, and a parsing error
+is <em>returned</em> instead of raised.</td></tr>
+<tr><td>31</td><td><code>list(raw)</code></td><td>Listing a dictionary gives its keys.</td></tr>
+<tr><td>32</td><td><code>raw["parsed"]</code></td><td>The <code>BookRequest</code> if parsing worked, else
+<code>None</code>.</td></tr>
+<tr><td>33</td><td><code>str(raw["parsing_error"])[:200] if raw["parsing_error"] else None</code></td><td>The error
+message, cut to its first 200 characters (the full one repeats the whole broken JSON). A conditional expression:
+<code>A if condition else B</code>.</td></tr>
+<tr><td>34</td><td><code>raw["raw"].usage_metadata["output_tokens"]</code></td><td><code>raw["raw"]</code> is the
+original <code>AIMessage</code>; its output token count tells us whether the answer hit the 512 cap.</td></tr>
+<tr><td>38</td><td><code>class BookRequestV2(BookRequest):</code></td><td>A subclass: it inherits every field and
+replaces only the one it redefines.</td></tr>
+<tr><td>39</td><td><code>formats: list[…] = Field(max_length=4, …)</code></td><td><code>max_length</code> on a list
+means "at most 4 items". Pydantic writes it into the schema as <code>"maxItems": 4</code>, which Ollama enforces while
+the model writes, so the list has to close.</td></tr>
+<tr><td>42</td><td><code>fixed = model.with_structured_output(BookRequestV2, include_raw=True).invoke(vague)</code></td>
+<td>The same vague request with the bounded schema.</td></tr>
+<tr><td>43</td><td><code>print("\nwith max_length=4:", fixed["parsed"], "| error:", fixed["parsing_error"])</code></td>
+<td>Prints the object (Pydantic's <code>field=value</code> form) and the error, if any.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="How Python type hints in BookRequest map to JSON schema pieces: str to type string, Literal to enum, list of Literal to array of enum, int or None with default None to an optional anyOf integer or null, Field max_length 4 to maxItems 4">
+  <text x="20" y="26" class="title">Python (Pydantic)</text>
+  <text x="430" y="26" class="title">JSON schema sent to Ollama</text>
+  <rect x="20" y="40" width="360" height="34" rx="6" class="box2"/>
+  <text x="32" y="62" class="mono">topic: str</text>
+  <rect x="430" y="40" width="310" height="34" rx="6" class="box-info"/>
+  <text x="442" y="62" class="mono">"type": "string"</text>
+  <path class="arrow" d="M 380,57 H 428"/>
+  <rect x="20" y="84" width="360" height="34" rx="6" class="box2"/>
+  <text x="32" y="106" class="mono">audience: Literal[…3 values]</text>
+  <rect x="430" y="84" width="310" height="34" rx="6" class="box-info"/>
+  <text x="442" y="106" class="mono">"enum": ["children", …]</text>
+  <path class="arrow" d="M 380,101 H 428"/>
+  <rect x="20" y="128" width="360" height="34" rx="6" class="box2"/>
+  <text x="32" y="150" class="mono">formats: list[Literal[…]]</text>
+  <rect x="430" y="128" width="310" height="34" rx="6" class="box-info"/>
+  <text x="442" y="150" class="mono">"type": "array", items: enum</text>
+  <path class="arrow" d="M 380,145 H 428"/>
+  <rect x="20" y="172" width="360" height="34" rx="6" class="box2"/>
+  <text x="32" y="194" class="mono">max_pages: int | None = None</text>
+  <rect x="430" y="172" width="310" height="34" rx="6" class="box-info"/>
+  <text x="442" y="194" class="mono">integer or null, not required</text>
+  <path class="arrow" d="M 380,189 H 428"/>
+  <rect x="20" y="216" width="360" height="34" rx="6" class="box-ok"/>
+  <text x="32" y="238" class="mono">Field(max_length=4)   (V2)</text>
+  <rect x="430" y="216" width="310" height="34" rx="6" class="box-ok"/>
+  <text x="442" y="238" class="mono">"maxItems": 4</text>
+  <path class="arrow-ok" d="M 380,233 H 428"/>
+</svg>
+<figcaption>Simplified: the real schema also carries titles and descriptions. Print
+<code>BookRequest.model_json_schema()</code> to see all of it. <strong>Every limit you want enforced while the model
+writes must appear in the schema.</strong></figcaption>
+</figure>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="terminal"><code>uv run python -m labs.02_structured_output</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>BookRequest {'topic': 'crab books for kids', 'audience': 'children', 'formats': ['e-book', 'book'], 'max_pages': 40}
+BookRequest {'topic': 'harbor history', 'audience': 'adults', 'formats': ['audiobook'], 'max_pages': 200}
+
+include_raw keys: ['raw', 'parsing_error', 'parsed']
+parsed: None
+parsing_error: Failed to parse BookRequest from completion {"topic": "funny stories", "audience": "adults", "formats": ["book", "audiobook", "e-book", "e-book", "e-book", "e-book", "e-book", "e-book", "e-book", "e-b
+output tokens: 512
+
+with max_length=4: topic='funny stories' audience='adults' formats=['book', 'audiobook', 'e-book', 'e-book'] max_pages=2000 | error: None</code></pre>
+
+<h3>Reading the output</h3>
+<p><strong>Lines 1–2: two good-looking objects.</strong> The crab request became <code>audience='children'</code>,
+<code>formats=['e-book', 'book']</code> and <code>max_pages=40</code> — all taken from the sentence. The harbor request
+became an adult audiobook request. But look at <code>max_pages: 200</code>: the visitor never mentioned a length. The
+model invented it, even though the field description says "else null".</p>
+
+<p><strong>Lines 4–7: the runaway list.</strong> For "Something fun to read." the model started a valid object, then
+wrote <code>"e-book"</code> into <code>formats</code> again and again. The schema allows a list of any length, so
+nothing forced the list to close. It stopped only because <code>get_model()</code> caps every answer at 512 tokens —
+<code>output tokens: 512</code> proves it hit the cap. The JSON was cut in the middle, could not be parsed, and because
+of <code>include_raw=True</code> we got <code>parsed: None</code> plus the error instead of a crash.</p>
+
+<div class="callout warn"><strong>This once froze the whole server.</strong> When we first wrote this lab,
+<code>get_model()</code> had no <code>num_predict</code>. The same generation never ended: the lab hung, and the Ollama
+server stayed busy with it, so other requests could not get through either. We had to stop the stuck
+<code>llama-server</code> process by hand. That is why <code>harbor/config.py</code> now sets
+<code>num_predict=512</code> for every lab: <strong>always cap the output of a model you don't fully
+control.</strong></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="The 512-token output budget filled by the runaway JSON: a valid start with topic and audience, then e-book repeated until the budget ends mid-word, so the JSON is never closed and parsing fails">
+  <text x="20" y="26" class="title">The vague request: 512 output tokens, used like this</text>
+  <rect x="20" y="44" width="150" height="44" rx="6" class="box-ok"/>
+  <text x="95" y="64" text-anchor="middle" class="small mono">{"topic": "funny</text>
+  <text x="95" y="80" text-anchor="middle" class="small mono">stories", …</text>
+  <rect x="172" y="44" width="140" height="44" rx="6" class="box-ok"/>
+  <text x="242" y="64" text-anchor="middle" class="small mono">"formats": ["book",</text>
+  <text x="242" y="80" text-anchor="middle" class="small mono">"audiobook",</text>
+  <rect x="314" y="44" width="380" height="44" rx="6" class="box-warn"/>
+  <text x="504" y="71" text-anchor="middle" class="small mono">"e-book", "e-book", "e-book", "e-book", … "e-b</text>
+  <rect x="696" y="44" width="44" height="44" rx="6" class="box-bad"/>
+  <text x="718" y="71" text-anchor="middle" class="small">cut</text>
+  <path class="line dashed" d="M 718,90 V 116"/>
+  <text x="740" y="132" text-anchor="end" class="small bad">token 512: num_predict stops it, JSON never closed</text>
+  <text x="20" y="162" class="small">→ PydanticOutputParser fails → include_raw returns parsed: None + parsing_error</text>
+  <text x="20" y="180" class="small">→ without the cap: no end at all, and a blocked Ollama server</text>
+</svg>
+<figcaption>Proportions illustrative; the text pieces are from our real output. <strong>Constrained decoding keeps
+each token valid but cannot make the model stop.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="With include_raw=True the result is a dictionary with keys raw, parsing_error and parsed. On success parsed holds the object and parsing_error is None; on failure parsed is None and parsing_error holds the exception">
+  <rect x="20" y="20" width="220" height="180" rx="8" class="box-solid"/>
+  <text x="130" y="46" text-anchor="middle" class="title on-solid">include_raw=True</text>
+  <text x="130" y="76" text-anchor="middle" class="mono on-solid">"raw": AIMessage</text>
+  <text x="130" y="106" text-anchor="middle" class="mono on-solid">"parsing_error": …</text>
+  <text x="130" y="136" text-anchor="middle" class="mono on-solid">"parsed": …</text>
+  <text x="130" y="176" text-anchor="middle" class="small on-solid">always these 3 keys</text>
+  <path class="arrow-ok" d="M 240,70 H 300"/>
+  <path class="arrow-bad" d="M 240,150 H 300"/>
+  <rect x="302" y="24" width="438" height="84" rx="8" class="box-ok"/>
+  <text x="318" y="48" class="label">success (BookRequestV2 run)</text>
+  <text x="318" y="70" class="small mono">parsed: topic='funny stories' audience='adults' …</text>
+  <text x="318" y="90" class="small mono">parsing_error: None</text>
+  <rect x="302" y="116" width="438" height="84" rx="8" class="box-bad"/>
+  <text x="318" y="140" class="label">failure (BookRequest run)</text>
+  <text x="318" y="162" class="small mono">parsed: None</text>
+  <text x="318" y="182" class="small mono">parsing_error: Failed to parse BookRequest from …</text>
+</svg>
+<figcaption>Both cases are from our run. <strong>With include_raw your code checks <code>parsing_error</code>
+instead of wrapping every call in try/except</strong>, and keeps the raw message for logging.</figcaption>
+</figure>
+
+<p><strong>Line 9: the fix, and its limit.</strong> With <code>Field(max_length=4)</code> the schema says
+<code>"maxItems": 4</code>, Ollama refuses a fifth item, and the object parses: <code>error: None</code>. But read the
+values: <code>'e-book'</code> appears twice, and <code>max_pages=2000</code> came from nowhere. The object is valid;
+it is not correct.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Table comparing what the visitor said with what the model returned: crab request max_pages 40 correct; harbor request max_pages 200 invented; vague request formats with a duplicate e-book and max_pages 2000 invented">
+  <text x="20" y="26" class="title">Shape is checked. Truth is not.</text>
+  <text x="30" y="56" class="label">request</text>
+  <text x="300" y="56" class="label">the visitor said</text>
+  <text x="520" y="56" class="label">the model returned</text>
+  <path class="line" d="M 20,66 H 740"/>
+  <rect x="20" y="74" width="720" height="40" rx="6" class="box-ok"/>
+  <text x="30" y="99" class="small">crabs, 8-year-old</text>
+  <text x="300" y="99" class="small">"under 40 pages"</text>
+  <text x="520" y="99" class="small mono">max_pages: 40   ✓</text>
+  <rect x="20" y="122" width="720" height="40" rx="6" class="box-warn"/>
+  <text x="30" y="147" class="small">harbor audiobook</text>
+  <text x="300" y="147" class="small">no length at all</text>
+  <text x="520" y="147" class="small mono">max_pages: 200   invented</text>
+  <rect x="20" y="170" width="720" height="48" rx="6" class="box-bad"/>
+  <text x="30" y="191" class="small">"Something fun to read."</text>
+  <text x="300" y="191" class="small">no format, no length</text>
+  <text x="520" y="191" class="small mono">'e-book' twice</text>
+  <text x="520" y="208" class="small mono">max_pages: 2000   invented</text>
+</svg>
+<figcaption>All values from our real output. <strong>Treat structured output like user input: validate the values that
+matter in your own code.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> Two lines starting with <code>BookRequest</code> and a
+dictionary; then the <code>include_raw</code> block; then the <code>max_length=4</code> line with
+<code>error: None</code>. Your values will differ. The vague request may or may not run away on your machine — if your
+<code>parsed</code> is an object and <code>output tokens</code> is small, the model simply behaved this time; run it
+again or try the experiments below. Whatever happens, the program must not crash: that is the point of
+<code>include_raw=True</code>.</div>
+
+<div class="callout warn"><strong>Common mistakes.</strong>
+<ul>
+<li><strong>Reading <code>.content</code> from the result</strong> → <code>AttributeError: 'BookRequest' object has no
+attribute 'content'</code>. A structured runnable returns your class (or a dict with <code>include_raw=True</code>),
+not an <code>AIMessage</code>. Use <code>result.topic</code>, <code>raw["parsed"]</code>.</li>
+<li><strong>Using <code>raw["parsed"]</code> without checking it</strong> → <code>AttributeError: 'NoneType' object
+has no attribute …</code> when parsing failed. Check <code>if raw["parsing_error"]:</code> first.</li>
+<li><strong>No output cap</strong> → a runaway generation can hang your program and the Ollama server. Keep
+<code>num_predict</code> (it comes from <code>get_model()</code>; a bare <code>ChatOllama(model=…)</code> has
+none).</li>
+<li><strong>Unbounded lists</strong> → give every list a <code>max_length</code>; small models can repeat an item
+until they hit the cap.</li>
+<li><strong>Trusting the values</strong> → a valid object can still hold invented numbers (<code>max_pages</code> 200
+and 2000 here). Check them against the request.</li>
+<li><strong>Thinking the description is enforced</strong> → "two to four words" and "else null" are only hints.
+LangChain sends them inside the schema but does not add them to your prompt, and constrained decoding enforces types,
+enums and limits such as <code>maxItems</code>, not meanings.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Add a request.</strong> Append <code>"A DVD about whales for my teenage son."</code> to the
+<code>requests</code> list (lines 20–23) and run. Check that <code>audience</code> is <code>'teens'</code>,
+<code>formats</code> contains <code>'DVD'</code>, and whether <code>max_pages</code> is <code>None</code> or
+invented again.</li>
+<li><strong>Catch invented page counts in code.</strong> After line 25 add, indented by four spaces like
+the lines around it, <code>if result.max_pages and str(result.max_pages) not in text: result.max_pages = None</code>. Run: the harbor
+request now prints <code>'max_pages': None</code> when the model invents a number, while the crab request keeps its
+40, because "40" is in its text.</li>
+<li><strong>See the schema.</strong> Add <code>print(BookRequestV2.model_json_schema())</code> at the end and find
+<code>'maxItems': 4</code>, the <code>enum</code> lists and your descriptions.</li>
+<li><strong>Look at the raw JSON.</strong> At the end add <code>print(fixed["raw"].content)</code>. You see the exact
+text the model wrote — a JSON string — before LangChain parsed it into <code>BookRequestV2</code>.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>model.with_structured_output(MyPydanticClass)</code> returns objects of your class; for ChatOllama the
+default method sends the JSON schema as Ollama's <code>format</code>.</li>
+<li>Types, <code>Literal</code> enums and <code>Field(max_length=…)</code> (→ <code>maxItems</code>) are enforced while
+the model writes; descriptions are only hints.</li>
+<li>An unbounded list let llama3.2 repeat <code>"e-book"</code> until the 512-token cap; without the cap it froze the
+Ollama server.</li>
+<li><code>include_raw=True</code> returns <code>raw</code>, <code>parsed</code> and <code>parsing_error</code>, so
+failures don't crash your program.</li>
+<li>A schema constrains shape, not truth: a duplicate format and invented page counts (200, 2000) passed validation.
+Next, <a href="03-prompt-templates.html">lab 03</a> builds reusable prompts.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="01-chat-models.html"><small>← Previous · Step 01</small>Chat models: invoke, stream, batch</a>
+<a class="next" href="03-prompt-templates.html"><small>Next · Step 03 →</small>Prompt templates</a>
+</nav>
+</main>
+</body>
+</html>

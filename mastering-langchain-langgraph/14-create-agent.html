@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>14 · LangChain agents with create_agent</title>
+<meta name="description" content="Build the agent in a few lines, pass the logged-in user as context, and ask for a typed result. Book chapter 15.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 14/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 14 of 16 · Hands-on lab</div>
+  <h1>LangChain agents with create_agent</h1>
+  <p class="lead">Build the agent in a few lines, pass the logged-in user as context, and ask for a typed result. Book chapter 15.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 15 · Fundamentals of LangChain Agents</strong> of the book. The ideas behind this lab are explained in the concept chapter <a href="langchain-agents-middleware.html">LangChain agents and middleware</a>.</div>
+
+<h2>Goal</h2>
+<p>In labs 09 to 13 you wrote the <a class="term" href="glossary.html#agent-loop">agent loop</a> by hand as a
+<a class="term" href="glossary.html#langgraph">LangGraph</a> <a class="term" href="glossary.html#graph">graph</a>. In this lab you build the
+same <a class="term" href="glossary.html#agent">agent</a> with one function call, <a class="term" href="glossary.html#create-agent">create_agent</a>,
+and you fix the privacy bug from <a href="11-checkpointers.html">lab 11</a>: the model will no longer choose <em>whose</em> account it
+reads. You will also ask the agent for a typed final answer (a <a class="term" href="glossary.html#pydantic">Pydantic</a> object) and see,
+with two different local models, how reliable that is.</p>
+
+<h2>The idea in brief</h2>
+<ul>
+<li><strong><code>create_agent</code> builds the loop for you.</strong> You give it a model, a list of
+<a class="term" href="glossary.html#tool">tools</a> and a system prompt. It returns a compiled LangGraph graph with a <code>model</code>
+<a class="term" href="glossary.html#node">node</a> and a <code>tools</code> node, exactly the loop you wrote by hand.</li>
+<li><strong>Identity comes from the app, not from the model.</strong> The logged-in member is passed as
+<a class="term" href="glossary.html#runtime-context">runtime context</a>. A tool reads it through <code>ToolRuntime</code>. The model never
+sees a <code>member_id</code> argument, so it cannot type someone else's id.</li>
+<li><strong><code>response_format</code> asks for a typed final answer.</strong> Two strategies exist: <code>ToolStrategy</code> (the schema
+becomes an extra tool the model must call) and <code>ProviderStrategy</code> (the model provider forces JSON output). With our small
+local models neither gave a trustworthy object, and you will see exactly why.</li>
+</ul>
+<p>The full explanation, with more background, is in <a href="langchain-agents-middleware.html">LangChain agents and middleware</a>.</p>
+
+<details class="primer"><summary>New to runtime context? Why the model must not choose the member id</summary>
+<p>A model only produces text. When it "calls a tool", it writes the tool's name and the argument values it thinks are right. If a tool
+has an argument <code>member_id</code>, the model fills it in, and it can fill in anything: a guess, an id from an example, an id another
+user typed. In lab 11 llama3.2 copied <code>M-1001</code> from the tool's description and showed Lea Martin's account to a different
+visitor.</p>
+<p>The fix is a rule you will meet in every real application: <strong>facts the application already knows for sure (who is logged in,
+which shop, which language) are passed by your code, not asked from the model</strong>. LangChain calls this "context". Your code passes
+it on every <code>invoke</code>, and tools read it. The model does not even know the value exists.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+<li>Open a terminal in the project folder <code>harbor-library-ai</code> (the folder that contains <code>pyproject.toml</code>).</li>
+<li>Make sure Ollama is running and that <code>llama3.2</code> is pulled (you did this in lab 01): <code>ollama list</code> should show it.</li>
+<li>Create the file <code>labs/14_create_agent.py</code> with the content below (complete file).</li>
+<li>Run it with <code>uv run python -m labs.14_create_agent</code> and compare your output with ours.</li>
+<li>Optional: pull a second model with <code>ollama pull gemma4</code> and run the same file with it (instructions further down).</li>
+</ol>
+
+<h2>The code</h2>
+<p>This file uses three tools. <code>search_catalog</code> and <code>check_availability</code> come from <code>harbor/catalog.py</code>
+(you met them in <a href="09-tools.html">lab 09</a>). The third, <code>my_account</code>, is new and defined here, because it needs the
+logged-in member.</p>
+
+<pre data-file="labs/14_create_agent.py" data-lang="py" data-tag="complete file"><code>"""Lab 14: the same agent in a few lines with create_agent, plus a typed final answer and per-user context."""
+from dataclasses import dataclass
+
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+from langchain.tools import ToolRuntime, tool
+from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import BaseModel
+
+from harbor.catalog import MEMBERS, check_availability, search_catalog
+from harbor.config import get_model
+
+
+@dataclass
+class Visitor:
+    member_id: str  # set by the application after login, never by the model
+
+
+@tool
+def my_account(runtime: ToolRuntime[Visitor]) -&gt; str:
+    """Show the logged-in member's own loans, holds and fees."""
+    m = MEMBERS[runtime.context.member_id]  # the id comes from the app's context, so no one can ask for another member
+    return f"{m['name']}: loans {m['loans']}, holds {m['holds']}, fees {m['fees_eur']:.2f} EUR"
+
+
+agent = create_agent(
+    model=get_model(),
+    tools=[search_catalog, check_availability, my_account],
+    system_prompt="You are Harbor City Library's assistant. Use the tools. Answer briefly.",
+    context_schema=Visitor,
+    checkpointer=InMemorySaver(),
+)
+
+print("1) Graph nodes create_agent built:", list(agent.get_graph().nodes))
+
+config = {"configurable": {"thread_id": "sam"}}
+for text in ["What do I owe, and what do I have on loan?", "Is The Little Crab Who Could on the shelf?"]:
+    result = agent.invoke({"messages": [("user", text)]}, config, context=Visitor(member_id="M-1002"))
+    calls = [(c["name"], c["args"]) for m in result["messages"] if m.type == "ai" for c in m.tool_calls]
+    print(f"\n2) Q: {text}\n   tools: {calls[-2:]}\n   A: {result['messages'][-1].content}")
+
+
+# 3. response_format: the agent's last step returns a validated object instead of free text.
+class Availability(BaseModel):
+    title: str
+    copies_available: int
+    branch: str
+
+
+print("\n3) response_format, two strategies:")
+for label, strategy in [("ToolStrategy", ToolStrategy(Availability)), ("ProviderStrategy", ProviderStrategy(Availability))]:
+    typed = create_agent(get_model(), [search_catalog, check_availability], response_format=strategy,
+                         system_prompt="Find the item with search_catalog, then check_availability.")
+    result = typed.invoke({"messages": [("user", "Is 'Build Your Own Radio' available?")]})
+    used = [c["name"] for m in result["messages"] if m.type == "ai" for c in m.tool_calls]
+    print(f"   {label:&lt;17} tools called: {used}\n   {'':&lt;17} structured_response: {result.get('structured_response')!r}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 14: the same agent in a few lines ..."""</code></td><td>The module docstring: one sentence that says what the file is for. Python ignores it when running; it is for readers.</td></tr>
+<tr><td>2</td><td><code>from dataclasses import dataclass</code></td><td>Imports the <code>@dataclass</code> decorator from the standard library. It turns a small class into a simple data container (see line 14).</td></tr>
+<tr><td>4</td><td><code>from langchain.agents import create_agent</code></td><td>The function that builds a complete agent graph. In LangChain 1.x it lives in <code>langchain.agents</code>.</td></tr>
+<tr><td>5</td><td><code>from langchain.agents.structured_output import ProviderStrategy, ToolStrategy</code></td><td>The two ways to ask the agent for a typed final answer. Used in part 3 (line 51).</td></tr>
+<tr><td>6</td><td><code>from langchain.tools import ToolRuntime, tool</code></td><td><code>tool</code> is the decorator that turns a function into a tool. <code>ToolRuntime</code> is a special parameter type: a tool that declares it receives the run's context, state and more, and this parameter is <em>hidden from the model</em>.</td></tr>
+<tr><td>7</td><td><code>from langgraph.checkpoint.memory import InMemorySaver</code></td><td>The in-memory <a class="term" href="glossary.html#checkpointer">checkpointer</a> from lab 11. It gives the agent per-<a class="term" href="glossary.html#thread">thread</a> memory.</td></tr>
+<tr><td>8</td><td><code>from pydantic import BaseModel</code></td><td>The base class for the typed answer schema in part 3.</td></tr>
+<tr><td>10</td><td><code>from harbor.catalog import MEMBERS, check_availability, search_catalog</code></td><td><code>MEMBERS</code> is the dictionary loaded from <code>data/members.json</code>; the two tools are the shared catalog tools. Note that <code>get_member_account</code> (the tool with the leak) is <em>not</em> imported.</td></tr>
+<tr><td>11</td><td><code>from harbor.config import get_model</code></td><td>Returns the chat model. It reads the <code>HARBOR_MODEL</code> environment variable (default <code>llama3.2</code>), which is how you switch to gemma4 without touching this file.</td></tr>
+<tr><td>14–16</td><td><code>@dataclass<br>class Visitor:<br>    member_id: str</code></td><td>The shape of the context: one field, the logged-in member's id. The comment says the rule: the application sets it after login, never the model.</td></tr>
+<tr><td>19–20</td><td><code>@tool<br>def my_account(runtime: ToolRuntime[Visitor]) -&gt; str:</code></td><td>A tool with <strong>no argument the model can fill</strong>. LangChain sees the <code>ToolRuntime</code> type and removes <code>runtime</code> from the schema sent to the model; we checked that <code>my_account.args</code> is <code>{}</code>. <code>[Visitor]</code> tells your editor what <code>runtime.context</code> contains.</td></tr>
+<tr><td>21</td><td><code>"""Show the logged-in member's own loans, holds and fees."""</code></td><td>The docstring becomes the tool description the model reads to decide when to call it. It contains no example id to copy, unlike the lab 11 tool.</td></tr>
+<tr><td>22</td><td><code>m = MEMBERS[runtime.context.member_id]</code></td><td>Reads the member id from the context that your code passed (line 38) and looks up that member. Nothing the model writes can change which record is read.</td></tr>
+<tr><td>23</td><td><code>return f"{m['name']}: loans {m['loans']}, ..."</code></td><td>Builds the text the model will read: name, the raw loans list (ids and due dates), holds and fees with two decimals (<code>:.2f</code>).</td></tr>
+<tr><td>26</td><td><code>agent = create_agent(</code></td><td>Builds and compiles the agent graph in one call.</td></tr>
+<tr><td>27</td><td><code>model=get_model(),</code></td><td>The chat model that decides what to do at each step.</td></tr>
+<tr><td>28</td><td><code>tools=[search_catalog, check_availability, my_account],</code></td><td>The tools the model may ask for. <code>create_agent</code> binds them to the model and puts them in its <code>tools</code> node.</td></tr>
+<tr><td>29</td><td><code>system_prompt="You are Harbor City Library's assistant. ..."</code></td><td>A <a class="term" href="glossary.html#system-message">system message</a> added in front of every model call. You no longer add it to the messages yourself.</td></tr>
+<tr><td>30</td><td><code>context_schema=Visitor,</code></td><td>Declares the type of the context this agent expects on every <code>invoke</code>.</td></tr>
+<tr><td>31</td><td><code>checkpointer=InMemorySaver(),</code></td><td>Saves the conversation after each step, per <code>thread_id</code>. Without it, the second question would start from an empty history.</td></tr>
+<tr><td>34</td><td><code>print("1) Graph nodes ...", list(agent.get_graph().nodes))</code></td><td>Proves that the result is an ordinary LangGraph graph: it lists the node names <code>create_agent</code> built.</td></tr>
+<tr><td>36</td><td><code>config = {"configurable": {"thread_id": "sam"}}</code></td><td>One conversation thread called <code>"sam"</code>, used for both questions, so the second turn sees the first.</td></tr>
+<tr><td>37</td><td><code>for text in [...]:</code></td><td>Two questions: one about the visitor's own account (needs <code>my_account</code>), one about a book (needs <code>search_catalog</code> then <code>check_availability</code>).</td></tr>
+<tr><td>38</td><td><code>result = agent.invoke({...}, config, context=Visitor(member_id="M-1002"))</code></td><td>Runs the agent. <code>context=</code> is where the app passes the logged-in member (Sam Okoro, M-1002). In a real app this value would come from the login session.</td></tr>
+<tr><td>39</td><td><code>calls = [(c["name"], c["args"]) for m in result["messages"] if m.type == "ai" for c in m.tool_calls]</code></td><td>Collects every tool call the model wrote. Careful: <code>result["messages"]</code> holds the <em>whole thread</em>, including the earlier turn, because of the checkpointer.</td></tr>
+<tr><td>40</td><td><code>print(f"\n2) Q: {text}\n   tools: {calls[-2:]}\n   A: ...")</code></td><td>Prints the question, the last two tool calls of the thread and the final answer (the last message).</td></tr>
+<tr><td>44–47</td><td><code>class Availability(BaseModel):<br>    title: str<br>    copies_available: int<br>    branch: str</code></td><td>The typed answer we want for part 3: three fields with types. Pydantic validates the values.</td></tr>
+<tr><td>50</td><td><code>print("\n3) response_format, two strategies:")</code></td><td>A heading in the output.</td></tr>
+<tr><td>51</td><td><code>for label, strategy in [("ToolStrategy", ToolStrategy(Availability)), ("ProviderStrategy", ProviderStrategy(Availability))]:</code></td><td>Loops over the two strategies, each wrapping the same schema, so we can compare them on the same question.</td></tr>
+<tr><td>52–53</td><td><code>typed = create_agent(get_model(), [search_catalog, check_availability], response_format=strategy, system_prompt=...)</code></td><td>A second agent with only the two catalog tools and <code>response_format</code> set. The prompt tells it the right order: search first, then check availability. No checkpointer or context is needed here.</td></tr>
+<tr><td>54</td><td><code>result = typed.invoke({"messages": [("user", "Is 'Build Your Own Radio' available?")]})</code></td><td>The question. The true answer, from <code>data/catalog.csv</code>: B011, 1 of 1 copies at the Central Library.</td></tr>
+<tr><td>55</td><td><code>used = [c["name"] for m in result["messages"] if m.type == "ai" for c in m.tool_calls]</code></td><td>The names of the tools the model actually called.</td></tr>
+<tr><td>56</td><td><code>print(f"   {label:&lt;17} tools called: ... structured_response: {result.get('structured_response')!r}")</code></td><td>Prints the tools used and the typed result. <code>result.get(...)</code> returns <code>None</code> instead of crashing when the key is missing; <code>!r</code> prints the object's full representation. <code>{label:&lt;17}</code> pads the label to 17 characters so the columns line up.</td></tr>
+</table></div>
+
+<h2>What <code>create_agent</code> built</h2>
+<p>The first output line prints the graph's nodes: <code>['__start__', 'model', 'tools', '__end__']</code>. That is the loop from labs
+09 to 13: the model node calls the model; if the reply contains tool calls, the tools node runs them and sends the results back to the
+model; if not, the run ends.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="The graph create_agent built: __start__ to model, model to tools and back while there are tool calls, model to __end__ when there are none">
+  <rect class="box2" x="20" y="50" width="120" height="44" rx="8"/>
+  <text class="mono" x="80" y="77" text-anchor="middle">__start__</text>
+  <rect class="box-info" x="210" y="40" width="170" height="64" rx="8"/>
+  <text class="title" x="295" y="66" text-anchor="middle">model</text>
+  <text class="small" x="295" y="86" text-anchor="middle">get_model() + 3 tools</text>
+  <rect class="box" x="490" y="40" width="200" height="64" rx="8"/>
+  <text class="title" x="590" y="66" text-anchor="middle">tools</text>
+  <text class="small" x="590" y="86" text-anchor="middle">runs the requested tool</text>
+  <rect class="box2" x="235" y="170" width="120" height="40" rx="8"/>
+  <text class="mono" x="295" y="195" text-anchor="middle">__end__</text>
+  <path class="arrow" d="M140,72 H206"/>
+  <path class="arrow-accent" d="M380,58 H486"/>
+  <text class="small" x="433" y="50" text-anchor="middle">tool calls</text>
+  <path class="arrow" d="M490,88 H384"/>
+  <text class="small" x="437" y="102" text-anchor="middle">results</text>
+  <path class="arrow-ok" d="M295,104 V166"/>
+  <text class="small" x="305" y="140">no tool calls: final answer</text>
+</svg>
+<figcaption>The node names are the real ones printed by line 34. <strong><code>create_agent</code> returns the same kind of graph you built by hand</strong>, so <code>invoke</code>, <code>stream</code>, checkpointers and interrupts all still work.</figcaption>
+</figure>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="terminal"><code>uv run python -m labs.14_create_agent</code></pre>
+<p><code>uv run</code> runs the command inside the project's <a class="term" href="glossary.html#virtual-environment">virtual environment</a>;
+<code>python -m labs.14_create_agent</code> runs the file as a module, so its imports of <code>harbor.…</code> work. The module name has no
+<code>.py</code>.</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) Graph nodes create_agent built: ['__start__', 'model', 'tools', '__end__']
+
+2) Q: What do I owe, and what do I have on loan?
+   tools: [('check_availability', {'item_id': 'B004'})]
+   A: It looks like you have one copy of "The Quiet Engine" on loan. To find out how much you owe, I can check your account for you. Can you please provide me with your library card number?
+
+2) Q: Is The Little Crab Who Could on the shelf?
+   tools: [('check_availability', {'item_id': 'B004'}), ('check_availability', {'item_id': 'B004'})]
+   A: Unfortunately, "The Little Crab Who Could" is currently checked out. However, I can place a hold on it for you, and you can pick it up when it becomes available. Would you like me to do that?
+
+3) response_format, two strategies:
+   ToolStrategy      tools called: ['check_availability']
+                     structured_response: None
+   ProviderStrategy  tools called: []
+                     structured_response: Availability(title='Function call', copies_available=1, branch='Main Branch')</code></pre>
+
+<h2>Reading the llama3.2 output</h2>
+<p>Part 1 is correct and always the same. Parts 2 and 3 show the small model failing, and each failure teaches something.</p>
+<ul>
+<li><strong>Question 1, "What do I owe, and what do I have on loan?"</strong> llama3.2 ignored <code>my_account</code> and called
+<code>check_availability('B004')</code>. <code>B004</code> is the example id written in that tool's description ("id like B004"): the
+model copied the example, the same mistake as in lab 11. It then claimed the visitor has "The Quiet Engine" (that is B004) on loan and
+asked for a library card number. Sam actually has B006 on loan and owes nothing.</li>
+<li><strong>Question 2, "Is The Little Crab Who Could on the shelf?"</strong> The last two tool calls in the thread are both
+<code>check_availability('B004')</code>. Because line 39 reads the whole thread, the first of them can be the call from question 1, but
+either way the model never searched for the book and never looked up B006. Its answer, "currently checked out", is invented: 4 of 5
+copies are available.</li>
+<li><strong>The privacy fix still held.</strong> Even with these mistakes, the model had no way to read another member's account: the
+only account tool takes no arguments.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 310" role="img" aria-label="Before and after: in lab 11 the model fills member_id and leaks another account; in lab 14 the app passes the id as context and the tool reads it">
+  <rect class="zone" x="10" y="10" width="360" height="290" rx="8"/>
+  <text class="title" x="190" y="34" text-anchor="middle">Lab 11: the model picks the id</text>
+  <rect class="box" x="30" y="52" width="320" height="40" rx="8"/>
+  <text x="190" y="77" text-anchor="middle">Sam asks: What is my member id?</text>
+  <rect class="box-warn" x="30" y="116" width="320" height="40" rx="8"/>
+  <text x="190" y="141" text-anchor="middle">the model fills member_id itself</text>
+  <rect class="box-warn" x="30" y="180" width="320" height="40" rx="8"/>
+  <text class="mono" x="190" y="205" text-anchor="middle">get_member_account('M-1001')</text>
+  <rect class="box-bad" x="30" y="244" width="320" height="40" rx="8"/>
+  <text x="190" y="269" text-anchor="middle">Lea Martin's account is shown</text>
+  <path class="arrow" d="M190,92 V112"/>
+  <path class="arrow" d="M190,156 V176"/>
+  <path class="arrow-bad" d="M190,220 V240"/>
+  <rect class="zone" x="390" y="10" width="360" height="290" rx="8"/>
+  <text class="title" x="570" y="34" text-anchor="middle">Lab 14: the app passes the id</text>
+  <rect class="box" x="410" y="52" width="320" height="40" rx="8"/>
+  <text x="570" y="77" text-anchor="middle">the app logs Sam in</text>
+  <rect class="box-info" x="410" y="116" width="320" height="40" rx="8"/>
+  <text class="mono" x="570" y="141" text-anchor="middle">context=Visitor('M-1002')</text>
+  <rect class="box-info" x="410" y="180" width="320" height="40" rx="8"/>
+  <text class="mono" x="570" y="205" text-anchor="middle">my_account()  # no arguments</text>
+  <rect class="box-ok" x="410" y="244" width="320" height="40" rx="8"/>
+  <text class="mono" x="570" y="269" text-anchor="middle">runtime.context.member_id</text>
+  <path class="arrow" d="M570,92 V112"/>
+  <path class="arrow" d="M570,156 V176"/>
+  <path class="arrow-ok" d="M570,220 V240"/>
+</svg>
+<figcaption>Left: the bug from lab 11. Right: lab 14, where the id travels from your code to the tool without passing through the model. <strong>The model can still call the wrong tool, but it can no longer read someone else's data.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to dataclasses? What <code>@dataclass</code> does</summary>
+<p><code>@dataclass</code> is a decorator from Python's standard library. You list fields with their <a class="term" href="glossary.html#type-hint">type hints</a>
+and Python writes the boring parts for you: an <code>__init__</code> that takes those fields, a readable <code>repr</code> and an equality
+check. So <code>Visitor(member_id="M-1002")</code> works without you writing a constructor. Unlike Pydantic, a dataclass does not
+validate types at runtime; here that is fine, because your own code creates it, not the model.</p>
+</details>
+
+<h2>Same code, a bigger model: gemma4</h2>
+<p><code>harbor/config.py</code> reads the model name from the <code>HARBOR_MODEL</code> environment variable, so you can rerun the lab
+with another Ollama model without editing any file. First pull it with <code>ollama pull gemma4</code>, then:</p>
+
+<pre data-lang="ps" data-tag="PowerShell"><code>$env:HARBOR_MODEL = "gemma4"
+uv run python -m labs.14_create_agent
+Remove-Item Env:HARBOR_MODEL   # back to llama3.2 for the next labs</code></pre>
+<p>In PowerShell, <code>$env:HARBOR_MODEL = "gemma4"</code> sets the variable for the rest of this terminal session, which is why the
+last line removes it again.</p>
+
+<pre data-lang="sh" data-tag="bash"><code>HARBOR_MODEL=gemma4 uv run python -m labs.14_create_agent</code></pre>
+<p>In bash (macOS, Linux, Git Bash), writing <code>NAME=value</code> in front of a command sets the variable for that one command
+only.</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · gemma4 · your output will differ"><code>1) Graph nodes create_agent built: ['__start__', 'model', 'tools', '__end__']
+
+2) Q: What do I owe, and what do I have on loan?
+   tools: [('my_account', {})]
+   A: You have one item on loan, due on 2026-10-25, and you have no outstanding fees.
+
+2) Q: Is The Little Crab Who Could on the shelf?
+   tools: [('search_catalog', {'query': 'The Little Crab Who Could'}), ('check_availability', {'item_id': 'B006'})]
+   A: Yes, there are 4 of 5 copies of "The Little Crab Who Could" available at the Lighthouse Branch.
+
+3) response_format, two strategies:
+   ToolStrategy      tools called: ['search_catalog', 'check_availability']
+                     structured_response: None
+   ProviderStrategy  tools called: []
+                     structured_response: Availability(title='Build Your Own Radio', copies_available=5, branch='Main Branch')</code></pre>
+
+<p>With gemma4, parts 1 and 2 are right. For the account question it called <code>my_account</code> with no arguments
+(<code>('my_account', {})</code>) and answered "one item on loan, due on 2026-10-25, and no outstanding fees", which matches M-1002 in
+<code>data/members.json</code>. For the book it called <code>search_catalog</code>, found the id B006 in the result, called
+<code>check_availability('B006')</code> and answered "4 of 5 copies … at the Lighthouse Branch", which matches the catalog.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="Comparison of llama3.2 and gemma4 on the two questions of part 2: tools called and answers">
+  <text class="title" x="305" y="30" text-anchor="middle">llama3.2</text>
+  <text class="title" x="605" y="30" text-anchor="middle">gemma4</text>
+  <text class="label" x="20" y="77">Q1 · tools</text>
+  <rect class="box-bad" x="160" y="50" width="290" height="44" rx="8"/>
+  <text class="mono" x="305" y="77" text-anchor="middle">check_availability('B004')</text>
+  <rect class="box-ok" x="460" y="50" width="290" height="44" rx="8"/>
+  <text class="mono" x="605" y="77" text-anchor="middle">my_account()</text>
+  <text class="label" x="20" y="129">Q1 · answer</text>
+  <rect class="box-bad" x="160" y="102" width="290" height="44" rx="8"/>
+  <text x="305" y="129" text-anchor="middle">invents a loan, asks for a card no.</text>
+  <rect class="box-ok" x="460" y="102" width="290" height="44" rx="8"/>
+  <text x="605" y="129" text-anchor="middle">1 loan due 2026-10-25, no fees</text>
+  <text class="label" x="20" y="181">Q2 · tools</text>
+  <rect class="box-bad" x="160" y="154" width="290" height="44" rx="8"/>
+  <text class="mono" x="305" y="181" text-anchor="middle">check_availability('B004')</text>
+  <rect class="box-ok" x="460" y="154" width="290" height="44" rx="8"/>
+  <text x="605" y="181" text-anchor="middle">search_catalog, then B006</text>
+  <text class="label" x="20" y="233">Q2 · answer</text>
+  <rect class="box-bad" x="160" y="206" width="290" height="44" rx="8"/>
+  <text x="305" y="233" text-anchor="middle">"currently checked out" (wrong)</text>
+  <rect class="box-ok" x="460" y="206" width="290" height="44" rx="8"/>
+  <text x="605" y="233" text-anchor="middle">4 of 5 copies, Lighthouse Branch</text>
+</svg>
+<figcaption>Same code, same tools, same prompt; only <code>HARBOR_MODEL</code> changed. <strong>Choosing the right tool is a model skill: test your agent with the model you will actually use.</strong></figcaption>
+</figure>
+
+<h2>Part 3: a typed final answer with <code>response_format</code></h2>
+<p>Sometimes your code needs the agent's answer as data, not as a sentence: for example to show the number of copies in a web page.
+<code>response_format</code> asks <code>create_agent</code> to end with a validated object, stored in
+<code>result["structured_response"]</code>. There are two strategies, and the lab tries both on the question "Is 'Build Your Own Radio'
+available?" (truth: 1 of 1 copies at the Central Library).</p>
+
+<details class="primer"><summary>New to structured output? A quick reminder</summary>
+<p><a class="term" href="glossary.html#structured-output">Structured output</a> means asking the model for data that follows a schema
+(a <a class="term" href="glossary.html#json-schema">JSON Schema</a> generated from your Pydantic class) instead of free text. In
+<a href="02-structured-output.html">lab 02</a> you did this for a single model call with <code>with_structured_output</code>. The
+lesson there still applies: a schema controls the <em>shape</em> of the answer, not whether the values are true.</p>
+</details>
+
+<ul>
+<li><strong><code>ToolStrategy(Availability)</code></strong> adds the schema to the model as one more tool. The model can call the real
+tools first; to finish, it must "call" the <code>Availability</code> tool with the final values, and LangChain validates them.</li>
+<li><strong><code>ProviderStrategy(Availability)</code></strong> uses the provider's own structured-output feature. For Ollama,
+<code>langchain-ollama</code> turns it into the JSON schema sent in the request's <code>format</code> field, so the model is forced to
+answer with JSON in that shape.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="How ToolStrategy and ProviderStrategy work, and what happened in our runs">
+  <rect class="zone" x="10" y="10" width="360" height="280" rx="8"/>
+  <text class="title" x="190" y="34" text-anchor="middle">ToolStrategy</text>
+  <rect class="box" x="30" y="50" width="320" height="44" rx="8"/>
+  <text x="190" y="77" text-anchor="middle">schema becomes an extra tool</text>
+  <rect class="box" x="30" y="114" width="320" height="44" rx="8"/>
+  <text x="190" y="141" text-anchor="middle">model may call real tools first</text>
+  <rect class="box" x="30" y="178" width="320" height="44" rx="8"/>
+  <text x="190" y="205" text-anchor="middle">must end by calling Availability</text>
+  <rect class="box-bad" x="30" y="236" width="320" height="40" rx="8"/>
+  <text x="190" y="261" text-anchor="middle">ours: ended with text, so None</text>
+  <path class="arrow" d="M190,94 V110"/>
+  <path class="arrow" d="M190,158 V174"/>
+  <path class="arrow-bad" d="M190,222 V232"/>
+  <rect class="zone" x="390" y="10" width="360" height="280" rx="8"/>
+  <text class="title" x="570" y="34" text-anchor="middle">ProviderStrategy</text>
+  <rect class="box" x="410" y="50" width="320" height="44" rx="8"/>
+  <text x="570" y="77" text-anchor="middle">schema sent as Ollama's format</text>
+  <rect class="box" x="410" y="114" width="320" height="44" rx="8"/>
+  <text x="570" y="141" text-anchor="middle">the reply must be that JSON</text>
+  <rect class="box-warn" x="410" y="178" width="320" height="44" rx="8"/>
+  <text x="570" y="205" text-anchor="middle">ours: JSON at once, no tool calls</text>
+  <rect class="box-bad" x="410" y="236" width="320" height="40" rx="8"/>
+  <text x="570" y="261" text-anchor="middle">ours: every value invented</text>
+  <path class="arrow" d="M570,94 V110"/>
+  <path class="arrow" d="M570,158 V174"/>
+  <path class="arrow-bad" d="M570,222 V232"/>
+</svg>
+<figcaption>The top three boxes in each column are how the strategy works; the bottom boxes are what happened with both llama3.2 and gemma4. <strong>ToolStrategy keeps the tools but depends on the model calling one more tool; ProviderStrategy guarantees JSON but, here, skipped the tools.</strong></figcaption>
+</figure>
+
+<p>The real results for both models:</p>
+<div class="table-wrap"><table>
+<tr><th>Strategy</th><th>Model</th><th>Tools called</th><th><code>structured_response</code></th></tr>
+<tr><td>ToolStrategy</td><td>llama3.2</td><td><code>check_availability</code></td><td><code>None</code></td></tr>
+<tr><td>ProviderStrategy</td><td>llama3.2</td><td>none</td><td><code>Availability(title='Function call', copies_available=1, branch='Main Branch')</code></td></tr>
+<tr><td>ToolStrategy</td><td>gemma4</td><td><code>search_catalog</code>, <code>check_availability</code></td><td><code>None</code></td></tr>
+<tr><td>ProviderStrategy</td><td>gemma4</td><td>none</td><td><code>Availability(title='Build Your Own Radio', copies_available=5, branch='Main Branch')</code></td></tr>
+</table></div>
+<p>With <code>ToolStrategy</code>, both models used the real tools (gemma4 in the right order) but finished with plain text instead of
+calling the <code>Availability</code> tool, so there was no typed object. With <code>ProviderStrategy</code>, both models answered with
+valid JSON immediately and called no tools at all, so the values came from nowhere: llama3.2 even put "Function call" as the title, and
+gemma4 got the title right only because it was in the question. There is no "Main Branch" in Harbor City. Pydantic accepted both
+objects because the <em>types</em> were right. Lesson: <strong>with these local models, typed final answers from an agent were not
+reliable, and ProviderStrategy skipped the tools entirely.</strong></p>
+
+<h3>A more robust pattern to try</h3>
+<p>A common way around this is to split the job in two. Let the agent do what it is good at (call tools and answer in text), then make
+a <em>separate</em>, single model call with <code>with_structured_output(Availability)</code> whose only job is to copy facts from the
+agent's messages into the schema. The second call has no tools to juggle, and it reads the tool results directly. We did not run this
+pattern in the lab, so treat the sketch below as a starting point and check its output yourself.</p>
+<pre data-lang="py" data-tag="illustrative · not run"><code>result = agent.invoke({"messages": [("user", "Is 'Build Your Own Radio' available?")]})
+transcript = "\n".join(f"{m.type}: {m.content}" for m in result["messages"])
+extractor = get_model().with_structured_output(Availability)
+answer = extractor.invoke("Fill the fields using only the tool results below.\n\n" + transcript)</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 130" role="img" aria-label="Suggested pattern: run the agent, collect its messages, make a second structured-output call, get a typed object">
+  <rect class="box" x="10" y="30" width="170" height="64" rx="8"/>
+  <text class="title" x="95" y="56" text-anchor="middle">1 · agent</text>
+  <text class="small" x="95" y="76" text-anchor="middle">tools, free-text answer</text>
+  <rect class="box" x="200" y="30" width="170" height="64" rx="8"/>
+  <text class="title" x="285" y="56" text-anchor="middle">2 · collect</text>
+  <text class="small" x="285" y="76" text-anchor="middle">tool results + answer</text>
+  <rect class="box-info" x="390" y="30" width="170" height="64" rx="8"/>
+  <text class="title" x="475" y="56" text-anchor="middle">3 · second call</text>
+  <text class="small" x="475" y="76" text-anchor="middle">with_structured_output</text>
+  <rect class="box-ok" x="580" y="30" width="170" height="64" rx="8"/>
+  <text class="title" x="665" y="56" text-anchor="middle">4 · typed object</text>
+  <text class="small" x="665" y="76" text-anchor="middle">Availability(...)</text>
+  <path class="arrow" d="M180,62 H196"/>
+  <path class="arrow" d="M370,62 H386"/>
+  <path class="arrow" d="M560,62 H576"/>
+  <text class="small" x="380" y="118" text-anchor="middle">suggested pattern, not run in this lab</text>
+</svg>
+<figcaption>Separate "find the facts" from "format the facts". <strong>Each model call gets one simple job</strong>, which small models handle much better.</figcaption>
+</figure>
+
+<div class="callout ok"><p><strong>What you should see.</strong> Line 1 of the output is always
+<code>['__start__', 'model', 'tools', '__end__']</code>. The rest depends on the model: with llama3.2 expect wrong tool choices and
+invented details like ours; with gemma4 expect <code>my_account</code> to be called with <code>{}</code> for the first question. In part 3,
+<code>structured_response</code> may be <code>None</code> or an object with made-up values. That is the real behaviour of small local
+models, not a bug in your code.</p></div>
+
+<div class="callout warn"><p><strong>Common mistakes.</strong></p>
+<ul>
+<li><strong>Forgetting <code>context=</code> on <code>invoke</code>.</strong> <code>my_account</code> reads
+<code>runtime.context.member_id</code>; without a context there is nothing to read and the tool fails when the model calls it.</li>
+<li><strong>Adding a <code>member_id</code> argument "to be safe".</strong> Any argument in the tool's signature (except
+<code>runtime</code>) is shown to the model and filled by it. That brings the lab 11 leak back.</li>
+<li><strong>Reading the tool calls of the last turn only.</strong> With a checkpointer, <code>result["messages"]</code> is the whole
+thread. Line 39 collects calls from every turn, which is why question 2 can show a call from question 1.</li>
+<li><strong>Running <code>python labs/14_create_agent.py</code>.</strong> Use <code>uv run python -m labs.14_create_agent</code> from the
+project folder; otherwise <code>import harbor</code> fails with <code>ModuleNotFoundError</code>.</li>
+<li><strong>Forgetting to unset <code>HARBOR_MODEL</code> in PowerShell.</strong> Every later lab then runs on gemma4. Use
+<code>Remove-Item Env:HARBOR_MODEL</code> or open a new terminal.</li>
+<li><strong>Windows only:</strong> if Python crashes at import with "OPENSSL_Uplink … no OPENSSL_Applink", an <code>SSLKEYLOGFILE</code>
+environment variable is set on your machine. Run without it (in Git Bash: <code>env -u SSLKEYLOGFILE uv run python -m labs.14_create_agent</code>).</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>See the graph as a diagram.</strong> Add <code>print(agent.get_graph().draw_mermaid())</code> after line 34. It prints
+Mermaid text (paste it into any Mermaid viewer) with the same four nodes and the edges between them.</li>
+<li><strong>Check what the model sees.</strong> Add <code>print(my_account.args)</code>. It prints <code>{}</code>: the
+<code>runtime</code> parameter is hidden from the model. Compare with <code>print(check_availability.args)</code>, which shows
+<code>item_id</code>.</li>
+<li><strong>Log in as someone else.</strong> On line 38, change <code>"M-1002"</code> to <code>"M-1003"</code> and run with gemma4. When
+it calls <code>my_account</code>, the answer should mention Ines Duarte's 16 EUR in fees, because only the context changed.</li>
+<li><strong>One thread per question.</strong> Move line 36 inside the loop and use
+<code>{"configurable": {"thread_id": text}}</code>. Each question now starts a fresh conversation, so the <code>tools:</code> line shows
+only the calls of that turn, and the second question can no longer see the first.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>create_agent(model, tools, system_prompt=...)</code> builds the model ⇄ tools loop as a compiled LangGraph graph with nodes
+<code>model</code> and <code>tools</code>.</li>
+<li>Pass facts the app knows (the logged-in member) with <code>context=</code>; tools read them through a <code>ToolRuntime</code>
+parameter that the model never sees. This fixes the lab 11 leak by design.</li>
+<li>A checkpointer plus a <code>thread_id</code> gives the agent memory, exactly as in lab 11; <code>result["messages"]</code> then
+contains the whole thread.</li>
+<li>llama3.2 picked the wrong tool and copied the example id <code>B004</code>; gemma4 used the right tools with the same code.</li>
+<li><code>ToolStrategy</code> returned <code>None</code> and <code>ProviderStrategy</code> skipped the tools and invented values, for
+both models. A safer pattern: run the agent, then extract the typed object in a separate <code>with_structured_output</code> call.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="13-hitl-time-travel-streaming.html"><small>← Previous · Step 13</small>Human in the loop, time travel and streaming</a>
+<a class="next" href="15-middleware.html"><small>Next · Step 15 →</small>Middleware</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 · Embeddings and a vector store</title>
+<meta name="description" content="Embed the chunks, search by meaning with scores and filters, and save the store to disk. Book chapter 8.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 06/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 06 of 16 · Hands-on lab</div>
+  <h1>Embeddings and a vector store</h1>
+  <p class="lead">Embed the chunks, search by meaning with scores and filters, and save the store to disk. Book chapter 8.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 8 · Embeddings and Vector Stores</strong> (Part III of the book). This lab
+is our own hands-on exercise on the same topic; the ideas are explained in our own words.</div>
+
+<h2>Goal</h2>
+<p>You have 12 tidy chunks. Now you need a way to find the right ones for a question, even when the question uses
+different words than the policy ("How much do I pay if a book is late?" versus "Adult cards pay 0.20 EUR per item per
+day late"). In this lab you turn text into <a class="term" href="glossary.html#embedding">embeddings</a> (lists of
+numbers that capture meaning), put all chunks in a <a class="term" href="glossary.html#vector-store">vector
+store</a>, search it with scores and a metadata filter, and save it to disk and load it back.</p>
+
+<h2>The idea in brief</h2>
+<p>Embedding and storing are stages three and four of the RAG pipeline. The concept chapter
+<a href="rag-pipeline.html">The RAG pipeline</a> covers the theory; here is the short version:</p>
+<ul>
+  <li>An <strong>embedding model</strong> reads a text and returns a fixed-length list of numbers (a vector). Texts with
+  similar meaning get vectors that point in similar directions. We use <code>nomic-embed-text</code> running in
+  <a class="term" href="glossary.html#ollama">Ollama</a>; it returns 768 numbers per text.</li>
+  <li>A <strong>vector store</strong> keeps each chunk's text, vector and metadata together. To search, it embeds the
+  question with the same model and returns the chunks whose vectors are closest.</li>
+  <li>"Closest" is measured here with <a class="term" href="glossary.html#cosine-similarity">cosine similarity</a>: a
+  score where higher means more similar.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="A sentence goes into the nomic-embed-text model in Ollama and comes out as a list of 768 numbers">
+  <rect class="box2" x="20" y="50" width="220" height="64" rx="8"/>
+  <text class="label" x="130" y="76" text-anchor="middle">"When does the</text>
+  <text class="label" x="130" y="96" text-anchor="middle">library open?"</text>
+  <path class="arrow" d="M 240,82 H 288"/>
+  <rect class="box-solid" x="290" y="44" width="180" height="76" rx="8"/>
+  <text class="title on-solid" x="380" y="76" text-anchor="middle">nomic-embed-text</text>
+  <text class="small on-solid" x="380" y="98" text-anchor="middle">in Ollama, local</text>
+  <path class="arrow-accent" d="M 470,82 H 518"/>
+  <rect class="box-info" x="520" y="44" width="220" height="76" rx="8"/>
+  <text class="mono" x="630" y="72" text-anchor="middle">[-0.075, 0.012,</text>
+  <text class="mono" x="630" y="92" text-anchor="middle"> -0.14, -0.067, …]</text>
+  <text class="small" x="630" y="112" text-anchor="middle">768 numbers</text>
+  <text class="small" x="20" y="150">The first four numbers are the real values printed by the lab; the meaning is spread over all 768.</text>
+</svg>
+<figcaption>Part 1 of the lab. <strong>An embedding is just a list of numbers</strong>; one number alone means
+nothing, but two lists can be compared.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to embeddings? What the numbers mean</summary>
+<p>Think of each vector as an arrow in a space with 768 directions instead of the usual two or three. The embedding
+model was trained so that texts about the same thing produce arrows pointing roughly the same way: "late fee" and
+"pay if a book is late" end up close, "Wi-Fi password" ends up somewhere else. You never read the numbers yourself;
+you only compare them.</p>
+<p>Two rules matter in practice. First, the question and the chunks must be embedded by the <strong>same</strong>
+model, or the arrows live in different spaces and comparisons are meaningless. Second, an embedding model is not a
+chat model: it never writes text. It is small and fast (it runs fine next to llama3.2).</p>
+</details>
+
+<details class="primer"><summary>New to cosine similarity? How two vectors get a score</summary>
+<p>Cosine similarity measures the angle between two arrows. Pointing the same way gives 1, at right angles gives 0,
+opposite gives -1. Length does not matter, only direction. With text embeddings, scores for related texts are
+higher than for unrelated ones, but the exact numbers depend on the model, so compare scores <em>within</em> one
+search ("0.676 beats 0.615") rather than treating 0.6 as a universal threshold.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Illustrative two-dimensional map: the late-fee question sits next to the fees chunk, the Wi-Fi question next to the Wi-Fi chunk, and the laser question next to the maker space chunk">
+  <rect class="zone" x="10" y="10" width="740" height="280" rx="8"/>
+  <text class="small" x="24" y="30">meaning space (2-D sketch of 768-D, illustrative positions)</text>
+  <circle class="dot-info" cx="140" cy="100" r="9"/>
+  <text class="label" x="156" y="96">fees.md chunk</text>
+  <circle class="dot-warn" cx="120" cy="140" r="7"/>
+  <text class="small" x="40" y="168">"pay if a book is late?"</text>
+  <circle class="dot-info" cx="560" cy="90" r="9"/>
+  <text class="label" x="576" y="86">Wi-Fi + Printing chunk</text>
+  <circle class="dot-warn" cx="590" cy="130" r="7"/>
+  <text class="small" x="606" y="134">"Is there Wi-Fi?"</text>
+  <circle class="dot-info" cx="420" cy="230" r="9"/>
+  <text class="label" x="436" y="226">Maker space chunk</text>
+  <circle class="dot-warn" cx="380" cy="262" r="7"/>
+  <text class="small" x="210" y="266">"make things with a laser?"</text>
+  <circle class="dot-info" cx="300" cy="80" r="9"/>
+  <text class="label" x="316" y="76">E-books chunk</text>
+  <circle class="dot-info" cx="200" cy="230" r="9"/>
+  <text class="label" x="40" y="226">branches.md</text>
+  <path class="line dashed" d="M 120,140 L 140,100"/>
+  <path class="line dashed" d="M 590,130 L 560,90"/>
+  <path class="line dashed" d="M 380,262 L 420,230"/>
+</svg>
+<figcaption>Blue dots are stored chunks, amber dots are questions. The positions are invented to show the idea; the
+real pairs (question to nearest chunk) are the ones the lab found. <strong>Search means: embed the question, then pick
+the nearest stored dots.</strong></figcaption>
+</figure>
+
+<h2>Actions</h2>
+<ol class="steps">
+  <li>Make sure Ollama is running and has the embedding model: <code>ollama pull nomic-embed-text</code>
+  (<code>pull</code> downloads a model once; later runs use the local copy).</li>
+  <li>Create <code>labs/06_vector_store.py</code>. It uses <code>load_policies</code> and <code>split</code> from
+  <code>harbor/knowledge.py</code> (lab 05) and <code>get_embeddings</code> and <code>RUNS</code> from
+  <code>harbor/config.py</code>.</li>
+  <li>Run <code>uv run python -m labs.06_vector_store</code> from the project folder.</li>
+  <li>Look in the <code>runs/</code> folder: the lab writes <code>runs/policies_store.json</code> there.</li>
+</ol>
+
+<h2>The lab script</h2>
+
+<pre data-file="labs/06_vector_store.py" data-lang="py" data-tag="complete file"><code>"""Lab 06: embed chunks, store them, and search by meaning."""
+from pathlib import Path
+
+from langchain_core.vectorstores import InMemoryVectorStore
+
+from harbor.config import RUNS, get_embeddings
+from harbor.knowledge import load_policies, split
+
+embeddings = get_embeddings()
+
+# 1. An embedding is a list of numbers; similar texts get similar lists.
+vector = embeddings.embed_query("When does the library open?")
+print(f"1) one embedding: {len(vector)} numbers, starting {[round(x, 3) for x in vector[:4]]}")
+
+# 2. Build the store: every chunk is embedded once.
+chunks = split(load_policies())
+store = InMemoryVectorStore.from_documents(chunks, embeddings)
+print(f"\n2) stored {len(chunks)} chunks")
+
+# 3. Similarity search with scores (cosine similarity: higher is closer).
+for question in ["How much do I pay if a book is late?", "Is there Wi-Fi?", "Can I make things with a laser?"]:
+    print(f"\n3) {question}")
+    for doc, score in store.similarity_search_with_score(question, k=2):
+        print(f"   {score:.3f}  {Path(doc.metadata['source']).name:&lt;13} {doc.page_content[:70]!r}")
+
+# 4. Filter on metadata: search only inside one file.
+only_branches = store.similarity_search("open on Sunday", k=2,
+                                        filter=lambda d: d.metadata["source"].endswith("branches.md"))
+print("\n4) filtered to branches.md:", [d.page_content[:50] for d in only_branches])
+
+# 5. Save to disk and load it back without re-embedding.
+RUNS.mkdir(exist_ok=True)
+store.dump(str(RUNS / "policies_store.json"))
+again = InMemoryVectorStore.load(str(RUNS / "policies_store.json"), embeddings)
+print("\n5) reloaded store answers:", again.similarity_search("printing price", k=1)[0].page_content[:60])</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 06: embed chunks, store them, and search by meaning."""</code></td><td>Docstring with the three
+goals of the lab.</td></tr>
+<tr><td>2</td><td><code>from pathlib import Path</code></td><td>Used to print short file names from the <code>source</code>
+metadata.</td></tr>
+<tr><td>4</td><td><code>from langchain_core.vectorstores import InMemoryVectorStore</code></td><td>The simplest vector store: it
+lives in your program's memory (a Python dict) and disappears when the program ends, unless you save it. It is part
+of <code>langchain-core</code>, so no extra database is needed.</td></tr>
+<tr><td>6</td><td><code>from harbor.config import RUNS, get_embeddings</code></td><td><code>RUNS</code> is the project's
+<code>runs/</code> folder (for files the labs produce). <code>get_embeddings()</code> returns
+<code>OllamaEmbeddings(model="nomic-embed-text")</code>, or the model named in the <code>HARBOR_EMBED_MODEL</code>
+environment variable.</td></tr>
+<tr><td>7</td><td><code>from harbor.knowledge import load_policies, split</code></td><td>The loading and splitting from labs 04
+and 05: 12 chunks at 400/60.</td></tr>
+<tr><td>9</td><td><code>embeddings = get_embeddings()</code></td><td>Creates the embedding client once and reuses it. Creating it
+does not call Ollama yet; the first call happens on line 12.</td></tr>
+<tr><td>12</td><td><code>vector = embeddings.embed_query("When does the library open?")</code></td><td>Sends one text to the
+embedding model and gets back a list of floats. <code>embed_query</code> is for questions;
+<code>embed_documents</code> (used inside the store) embeds many texts at once.</td></tr>
+<tr><td>13</td><td><code>print(f"1) one embedding: {len(vector)} numbers, starting {[round(x, 3) for x in vector[:4]]}")</code></td><td>Prints
+the length (768) and the first four numbers rounded to 3 decimals, just to make the idea concrete.</td></tr>
+<tr><td>16</td><td><code>chunks = split(load_policies())</code></td><td>Loads the six files and splits them into 12 chunks.</td></tr>
+<tr><td>17</td><td><code>store = InMemoryVectorStore.from_documents(chunks, embeddings)</code></td><td>Embeds all 12 chunks (12
+vectors) and stores each one with its text and metadata. This is the slow step in a real project; here it takes a
+moment.</td></tr>
+<tr><td>18</td><td><code>print(f"\n2) stored {len(chunks)} chunks")</code></td><td>Confirms the count.</td></tr>
+<tr><td>21</td><td><code>for question in ["How much do I pay if a book is late?", "Is there Wi-Fi?", "Can I make things with a laser?"]:</code></td><td>Three
+test questions. None of them repeats the policy's exact words, which is the point of searching by meaning.</td></tr>
+<tr><td>22</td><td><code>print(f"\n3) {question}")</code></td><td>A header line per question.</td></tr>
+<tr><td>23</td><td><code>for doc, score in store.similarity_search_with_score(question, k=2):</code></td><td>Embeds the question,
+compares it with all 12 stored vectors, and returns the <code>k=2</code> best as <code>(Document, score)</code> pairs,
+best first. Without <code>_with_score</code>, <code>similarity_search</code> returns only the Documents.</td></tr>
+<tr><td>24</td><td><code>print(f"   {score:.3f}  {Path(doc.metadata['source']).name:&lt;13} {doc.page_content[:70]!r}")</code></td><td>Score
+with 3 decimals, the file name padded to 13 characters, and the first 70 characters of the chunk.</td></tr>
+<tr><td>27–28</td><td><code>store.similarity_search("open on Sunday", k=2, filter=lambda d: d.metadata["source"].endswith("branches.md"))</code></td><td>A
+search restricted by metadata. For <code>InMemoryVectorStore</code>, <code>filter</code> is a Python function that
+receives a Document and returns <code>True</code> to keep it. The store drops the other chunks <em>before</em>
+scoring. <code>endswith</code> is used because <code>source</code> holds the full path. (Other vector stores take a
+dict or a query expression instead of a function.)</td></tr>
+<tr><td>29</td><td><code>print("\n4) filtered to branches.md:", [d.page_content[:50] for d in only_branches])</code></td><td>Shows
+the first 50 characters of the two results.</td></tr>
+<tr><td>32</td><td><code>RUNS.mkdir(exist_ok=True)</code></td><td>Creates <code>runs/</code> if it does not exist;
+<code>exist_ok=True</code> avoids an error if it does.</td></tr>
+<tr><td>33</td><td><code>store.dump(str(RUNS / "policies_store.json"))</code></td><td>Writes every entry (id, vector, text,
+metadata) to a JSON file. Our file is about 195 KB for 12 chunks, because each vector is 768 numbers written as
+text.</td></tr>
+<tr><td>34</td><td><code>again = InMemoryVectorStore.load(str(RUNS / "policies_store.json"), embeddings)</code></td><td>Reads the
+file back into a new store. The stored chunks are <strong>not</strong> embedded again. You still pass
+<code>embeddings</code>, because every new question has to be embedded with the same model.</td></tr>
+<tr><td>35</td><td><code>again.similarity_search("printing price", k=1)[0].page_content[:60]</code></td><td>Proves the reloaded
+store works: one search, best result, first 60 characters. The result is surprising at first sight; see below.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Similarity search: the question is embedded, compared with all 12 stored vectors, sorted by score, and the top two are returned">
+  <rect class="box2" x="20" y="70" width="150" height="64" rx="8"/>
+  <text class="label" x="95" y="96" text-anchor="middle">question</text>
+  <text class="small" x="95" y="116" text-anchor="middle">"…book is late?"</text>
+  <path class="arrow" d="M 170,102 H 198"/>
+  <rect class="box" x="200" y="70" width="120" height="64" rx="8"/>
+  <text class="label" x="260" y="96" text-anchor="middle">embed</text>
+  <text class="small" x="260" y="116" text-anchor="middle">768 numbers</text>
+  <path class="arrow" d="M 320,102 H 348"/>
+  <rect class="box-info" x="350" y="20" width="180" height="170" rx="8"/>
+  <text class="label" x="440" y="44" text-anchor="middle">compare with 12</text>
+  <text class="mono" x="370" y="72">fees.md   0.676</text>
+  <text class="mono" x="370" y="94">digital   0.615</text>
+  <text class="mono" x="370" y="116">…         …</text>
+  <text class="mono" x="370" y="138">…         …</text>
+  <text class="small" x="440" y="174" text-anchor="middle">cosine similarity</text>
+  <path class="arrow" d="M 530,102 H 558"/>
+  <rect class="box-ok" x="560" y="60" width="180" height="84" rx="8"/>
+  <text class="label" x="650" y="84" text-anchor="middle">top k=2</text>
+  <text class="small" x="650" y="106" text-anchor="middle">(Document, score)</text>
+  <text class="small" x="650" y="126" text-anchor="middle">best first</text>
+</svg>
+<figcaption>What <code>similarity_search_with_score</code> does for the first question; the two scores are the real
+ones. <strong>An in-memory store simply compares the question with every chunk</strong>; databases use indexes to
+avoid that when there are millions.</figcaption>
+</figure>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="command"><code>uv run python -m labs.06_vector_store</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>1) one embedding: 768 numbers, starting [-0.075, 0.012, -0.14, -0.067]
+
+2) stored 12 chunks
+
+3) How much do I pay if a book is late?
+   0.676  fees.md       '# Late fees and lost items\n\n## Late fees\nAdult cards pay 0.20 EUR per '
+   0.615  digital.md    '# Digital services\n\n## E-books and audiobooks\nMembers can borrow up to'
+
+3) Is there Wi-Fi?
+   0.610  digital.md    '## Wi-Fi and computers\nFree Wi-Fi is available in all branches; the ne'
+   0.500  digital.md    '# Digital services\n\n## E-books and audiobooks\nMembers can borrow up to'
+
+3) Can I make things with a laser?
+   0.663  rooms.md      '## Maker space\nThe maker space at the Central Library has two 3D print'
+   0.459  digital.md    '## Wi-Fi and computers\nFree Wi-Fi is available in all branches; the ne'
+
+4) filtered to branches.md: ['# Branches and opening hours\n\n## Central Library\nA', '## Lighthouse Branch\nAddress: 7 Beacon Square. Ope']
+
+5) reloaded store answers: ## Wi-Fi and computers
+Free Wi-Fi is available in all branch</code></pre>
+
+<div class="callout ok"><strong>What you should see</strong>
+<ul>
+  <li><code>1) one embedding: 768 numbers</code>. The four numbers after "starting" can differ slightly on another
+  machine or Ollama version.</li>
+  <li><code>2) stored 12 chunks</code>.</li>
+  <li>For each question, two lines with a score, a file name and the start of a chunk. The best match should be the
+  chunk you would pick yourself: <code>fees.md</code> for late fees (0.676 here), the Wi-Fi chunk of
+  <code>digital.md</code> for Wi-Fi (0.610), the maker space chunk of <code>rooms.md</code> for the laser (0.663).</li>
+  <li><code>4) filtered to branches.md</code> with two chunks, both from <code>branches.md</code>.</li>
+  <li><code>5) reloaded store answers: ## Wi-Fi and computers</code> on two lines (the chunk's line break is printed as
+  a real new line).</li>
+</ul></div>
+
+<h2>Reading the scores</h2>
+<p>For the late-fee question, the winner is the fees chunk (0.676). The runner-up is the e-books chunk of
+<code>digital.md</code> (0.615), which is not random: it contains "there are never late fees on digital items". The
+model saw "late fees" in both. For the laser question, the gap is larger (0.663 versus 0.459): only one chunk talks
+about a laser cutter. A big gap between first and second place usually means a clear answer; a small gap means the
+store is less sure. Remember that a store <em>always</em> returns <code>k</code> results, even when nothing is
+relevant; lab 07 shows what that does to an answer.</p>
+
+<h2>Filtering with metadata</h2>
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="The filter function keeps only the two chunks whose source ends with branches.md, and only those are scored">
+  <rect class="box" x="20" y="40" width="160" height="120" rx="8"/>
+  <text class="title" x="100" y="84" text-anchor="middle">12 chunks</text>
+  <text class="small" x="100" y="106" text-anchor="middle">6 files × 2</text>
+  <path class="arrow" d="M 180,100 H 218"/>
+  <rect class="box-info" x="220" y="40" width="270" height="120" rx="8"/>
+  <text class="label" x="355" y="66" text-anchor="middle">filter=lambda d:</text>
+  <text class="mono" x="355" y="92" text-anchor="middle">d.metadata["source"]</text>
+  <text class="mono" x="355" y="112" text-anchor="middle">.endswith("branches.md")</text>
+  <text class="small" x="355" y="142" text-anchor="middle">runs before scoring</text>
+  <path class="arrow-ok" d="M 490,100 H 528"/>
+  <rect class="box-ok" x="530" y="30" width="210" height="140" rx="8"/>
+  <text class="label" x="635" y="56" text-anchor="middle">2 chunks scored</text>
+  <text class="small" x="635" y="84" text-anchor="middle"># Branches and opening…</text>
+  <text class="small" x="635" y="102" text-anchor="middle">## Central Library …</text>
+  <text class="small" x="635" y="130" text-anchor="middle">## Lighthouse Branch …</text>
+  <text class="small" x="635" y="154" text-anchor="middle">"open on Sunday", k=2</text>
+</svg>
+<figcaption>Part 4. <code>branches.md</code> has exactly two chunks, so both come back. <strong>A filter narrows the
+search to chunks you trust for this question</strong>, for example one branch, one document type or one language.</figcaption>
+</figure>
+<p>The first chunk contains both the Central Library (open on Sunday afternoon) and the Northside Branch (closed on
+Sunday), which is why it holds the answer to "open on Sunday" for two branches at once.</p>
+
+<h2>Saving and loading the store</h2>
+<p>Embedding is the expensive part of indexing. With 12 chunks it does not matter, but with thousands of pages you do
+not want to re-embed everything each time the program starts. <code>dump</code> writes the store as JSON and
+<code>load</code> reads it back. Each entry in the file has four keys: <code>id</code> (a random UUID),
+<code>vector</code> (768 numbers), <code>text</code> and <code>metadata</code>. The metadata keeps the
+<strong>absolute</strong> path of the source file, so if you move the project, the file names still print correctly,
+but the full paths point to the old place.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The store is dumped to runs/policies_store.json and loaded back with the embedding model, which is still needed for new questions">
+  <rect class="box-info" x="20" y="60" width="170" height="70" rx="8"/>
+  <text class="title" x="105" y="90" text-anchor="middle">store</text>
+  <text class="small" x="105" y="112" text-anchor="middle">12 entries in memory</text>
+  <path class="arrow" d="M 190,95 H 238"/>
+  <text class="mono" x="214" y="84" text-anchor="middle">dump</text>
+  <rect class="box2" x="240" y="30" width="270" height="140" rx="8"/>
+  <text class="mono" x="375" y="54" text-anchor="middle">runs/policies_store.json</text>
+  <text class="mono" x="260" y="82">{ "3fa9…": {</text>
+  <text class="mono" x="276" y="100">"id", "vector": [768],</text>
+  <text class="mono" x="276" y="118">"text", "metadata" },</text>
+  <text class="mono" x="260" y="136">  … 12 entries }</text>
+  <text class="small" x="375" y="160" text-anchor="middle">about 195 KB</text>
+  <path class="arrow" d="M 510,95 H 558"/>
+  <text class="mono" x="534" y="84" text-anchor="middle">load</text>
+  <rect class="box-ok" x="560" y="60" width="180" height="70" rx="8"/>
+  <text class="title" x="650" y="90" text-anchor="middle">again</text>
+  <text class="small" x="650" y="112" text-anchor="middle">same 12, no re-embed</text>
+  <rect class="box-solid" x="580" y="150" width="140" height="40" rx="8"/>
+  <text class="small on-solid" x="650" y="175" text-anchor="middle">+ embeddings</text>
+  <path class="arrow-accent" d="M 650,150 V 132"/>
+</svg>
+<figcaption>Part 5. The file holds the vectors, so loading is fast. <strong>The embedding model is still needed after
+loading</strong>, to embed each new question with the same model.</figcaption>
+</figure>
+
+<h2>Why "printing price" returned the Wi-Fi chunk</h2>
+<p>Part 5 searched for "printing price" and printed <code>## Wi-Fi and computers</code>. That looks wrong, but it is
+not. In lab 05 we saw that at 400 characters <code>digital.md</code> is cut into two chunks, and the second one
+contains <em>both</em> the Wi-Fi section and the Printing section (we checked by running <code>split()</code> offline
+and looking for the word "Printing": it is only in that chunk). So the store found the right text; the lab only
+printed the first 60 characters, which happen to be about Wi-Fi.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="The second digital.md chunk contains the Wi-Fi section and the Printing section; the printed 60-character preview only shows the Wi-Fi heading">
+  <rect class="box" x="20" y="20" width="300" height="60" rx="8"/>
+  <text class="label" x="34" y="44">digital.md chunk 1 (247 chars)</text>
+  <text class="mono" x="34" y="66">## E-books and audiobooks</text>
+  <rect class="box-ok" x="20" y="96" width="460" height="110" rx="8"/>
+  <text class="label" x="34" y="118">digital.md chunk 2 (324 chars): the result</text>
+  <rect class="box-warn" x="30" y="128" width="300" height="26" rx="6"/>
+  <text class="mono" x="40" y="146">## Wi-Fi and computers …</text>
+  <text class="mono" x="40" y="176">## Printing</text>
+  <text class="mono" x="40" y="194">Printing costs 0.10 EUR per…</text>
+  <path class="arrow-accent" d="M 558,141 H 334"/>
+  <rect class="box-info" x="560" y="110" width="180" height="62" rx="8"/>
+  <text class="label" x="650" y="136" text-anchor="middle">what was printed</text>
+  <text class="mono" x="650" y="156" text-anchor="middle">[:60]</text>
+</svg>
+<figcaption>The amber strip is the 60-character preview. <strong>The search was right; the preview hid the matching
+part.</strong> When a result looks wrong, print the whole chunk before blaming the embeddings.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+  <li><strong>The embedding model is not pulled.</strong> If you skipped <code>ollama pull nomic-embed-text</code>,
+  the first embedding call fails with an error from Ollama saying the model was not found.</li>
+  <li><strong>Ollama is not running.</strong> Unlike labs 04 and 05, this lab calls a model; you get a connection
+  error. Start the Ollama app (or <code>ollama serve</code>) first.</li>
+  <li><strong>Mixing embedding models.</strong> If you build and dump the store with one model, then load it with a
+  different <code>HARBOR_EMBED_MODEL</code>, the question vectors no longer match the stored ones. Results become
+  nonsense, or the comparison fails if the vector lengths differ. Re-embed when you change models.</li>
+  <li><strong>Treating scores as absolute.</strong> 0.6 is not "good" or "bad" by itself; compare candidates for the
+  same question.</li>
+  <li><strong>Passing a dict as <code>filter</code>.</strong> <code>InMemoryVectorStore</code> expects a function
+  (<code>lambda d: …</code>). Other stores use their own filter syntax, so check the store's docs when you switch.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+  <li>Change <code>k=2</code> to <code>k=4</code> on line 23 and watch the scores fall off after the best match.</li>
+  <li>Add your own question to the list on line 21, for example <code>"Where can I print in colour?"</code>, and check
+  which file wins.</li>
+  <li>Change the filter on line 28 to <code>endswith("fees.md")</code> and search for <code>"open on Sunday"</code>
+  again. You get the two fees chunks: a filter can force results that are not relevant at all.</li>
+  <li>Change line 35 to print the whole chunk (remove <code>[:60]</code>) and find the Printing section in it.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>An embedding is a list of numbers (768 for <code>nomic-embed-text</code>); similar meanings give similar
+  vectors.</li>
+  <li><code>InMemoryVectorStore.from_documents</code> embeds every chunk once and keeps text, vector and metadata
+  together.</li>
+  <li><code>similarity_search_with_score</code> returns the <code>k</code> nearest chunks with cosine-similarity scores;
+  compare scores within one search.</li>
+  <li>A <code>filter</code> function restricts the search by metadata before scoring.</li>
+  <li><code>dump</code>/<code>load</code> save the vectors to JSON so you do not re-embed; you still need the same
+  embedding model for questions.</li>
+  <li>"printing price" found the right chunk: Printing shares a chunk with Wi-Fi at 400 characters. Next, lab 07
+  compares different ways of retrieving and finally answers questions.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="05-text-splitters.html"><small>← Previous · Step 05</small>Text splitters</a>
+<a class="next" href="07-retrievers.html"><small>Next · Step 07 →</small>Retrievers and a RAG chain</a>
+</nav>
+</main>
+</body>
+</html>

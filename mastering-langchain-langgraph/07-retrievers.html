@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>07 · Retrievers and a RAG chain</title>
+<meta name="description" content="Compare vector, MMR, BM25, hybrid and multi-query retrievers on 12 questions, then answer with RAG. Book chapter 9.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 07/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 07 of 16 · Hands-on lab</div>
+  <h1>Retrievers and a RAG chain</h1>
+  <p class="lead">Compare vector, MMR, BM25, hybrid and multi-query retrievers on 12 questions, then answer with RAG. Book chapter 9.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 9 · Retrievers</strong> (Part III of the book). This lab is our own hands-on
+exercise on the same topic; the ideas are explained in our own words.</div>
+
+<h2>Goal</h2>
+<p>Lab 06 searched the vector store directly. In LangChain, the standard interface for "give me the chunks for this
+question" is a <a class="term" href="glossary.html#retriever">retriever</a>. In this lab you build five retrievers
+(vector, <a class="term" href="glossary.html#mmr">MMR</a>, <a class="term" href="glossary.html#bm25">BM25</a>,
+<a class="term" href="glossary.html#hybrid-search">hybrid</a> and
+<a class="term" href="glossary.html#multi-query">multi-query</a>), score them on 12 test questions, and then plug the
+best one into a complete <a class="term" href="glossary.html#rag">RAG</a> <a class="term" href="glossary.html#chain">chain</a>
+that answers with llama3.2. The results include real failures, and they are the most useful part of the lab.</p>
+
+<h2>The idea in brief</h2>
+<p>Retrieval is the last stage of the pipeline before the model answers. The concept chapter
+<a href="rag-pipeline.html">The RAG pipeline</a> describes each retriever type. The key ideas:</p>
+<ul>
+  <li>A retriever is a <a class="term" href="glossary.html#runnable">runnable</a>: you call
+  <code>.invoke("question")</code> and get a list of Documents. Because all retrievers share that interface, you can
+  swap one for another without changing the rest of the chain.</li>
+  <li>Different retrievers fail differently. Vector search understands paraphrases but can miss exact words; BM25
+  matches exact words but not synonyms. Combining them (hybrid) often beats both.</li>
+  <li>You cannot judge a retriever by trying one question. You need a small test set with known answers, which is what
+  <code>evals/questions.jsonl</code> is.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="How each of the five retrievers chooses chunks: vector by meaning, MMR by meaning plus variety, BM25 by matching words, hybrid by fusing BM25 and vector, multi-query by asking the model for rephrasings">
+  <rect class="box" x="20" y="14" width="140" height="44" rx="8"/>
+  <text class="title" x="90" y="41" text-anchor="middle">vector</text>
+  <text class="label" x="180" y="34">embed the question, return the 2 nearest chunks</text>
+  <text class="small" x="180" y="52">store.as_retriever(search_kwargs={"k": 2})</text>
+  <rect class="box" x="20" y="76" width="140" height="44" rx="8"/>
+  <text class="title" x="90" y="103" text-anchor="middle">MMR</text>
+  <text class="label" x="180" y="96">fetch the 6 nearest, keep 2 that are relevant and different</text>
+  <text class="small" x="180" y="114">search_type="mmr", fetch_k=6</text>
+  <rect class="box2" x="20" y="138" width="140" height="44" rx="8"/>
+  <text class="title" x="90" y="165" text-anchor="middle">BM25</text>
+  <text class="label" x="180" y="158">count matching words (rare words weigh more), no embeddings</text>
+  <text class="small" x="180" y="176">BM25Retriever.from_documents(chunks, k=2)</text>
+  <rect class="box-ok" x="20" y="200" width="140" height="44" rx="8"/>
+  <text class="title" x="90" y="227" text-anchor="middle">hybrid</text>
+  <text class="label" x="180" y="220">run BM25 and vector, merge the two ranked lists</text>
+  <text class="small" x="180" y="238">EnsembleRetriever(weights=[0.5, 0.5])</text>
+  <rect class="box-info" x="20" y="262" width="140" height="44" rx="8"/>
+  <text class="title" x="90" y="289" text-anchor="middle">multi-query</text>
+  <text class="label" x="180" y="282">ask llama3.2 for rephrasings, run vector search for each</text>
+  <text class="small" x="180" y="300">MultiQueryRetriever.from_llm(retriever=dense, llm=…)</text>
+</svg>
+<figcaption>The five retrievers in the lab, top to bottom as in the code. <strong>All five take a question and return
+Documents</strong>; only how they pick the Documents differs.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to BM25? Keyword search with a smart score</summary>
+<p>BM25 is a classic search-engine formula. It splits the question and every chunk into words and scores a chunk
+higher when it contains the question's words, especially words that are rare across all chunks ("laser" counts more
+than "the"). It needs no model and no embeddings, so it is fast and fully predictable. Its weakness: "colour" and
+"color" are different words to it, and so are "kids" and "junior". The LangChain version here
+(<code>BM25Retriever</code>, from <code>langchain_community</code>) uses the <code>rank-bm25</code> package and, by
+default, splits text on spaces only.</p>
+</details>
+
+<details class="primer"><summary>New to MMR? Relevance plus variety</summary>
+<p>Maximal Marginal Relevance first fetches more candidates than you need (<code>fetch_k=6</code>), takes the most
+similar one, and then keeps picking the candidate that is similar to the question <em>but different from what was
+already picked</em>. It avoids returning two nearly identical chunks. The flip side: if the second-best chunk was
+the right one but looked like the first, MMR may swap it for something less relevant.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+  <li>Create <code>evals/questions.jsonl</code>: 12 test questions, each with the file that holds the answer.</li>
+  <li>Create <code>labs/07_retrievers.py</code>. It uses all four functions of <code>harbor/knowledge.py</code>,
+  including <code>format_docs</code> for the first time.</li>
+  <li>Check that <code>pyproject.toml</code> lists <code>langchain-classic</code> (for <code>EnsembleRetriever</code>
+  and <code>MultiQueryRetriever</code>) and <code>rank-bm25</code> (for <code>BM25Retriever</code>). Both are in the
+  project's dependencies, so <code>uv</code> installed them already.</li>
+  <li>Make sure Ollama is running with <code>llama3.2</code> and <code>nomic-embed-text</code>, then run
+  <code>uv run python -m labs.07_retrievers</code>. It makes many model calls (multi-query asks the model once per
+  question, then the RAG part asks five questions), so expect it to take a while.</li>
+</ol>
+
+<h2>The test questions</h2>
+<p>A <code>.jsonl</code> file ("JSON Lines") has one complete JSON object per line. That makes it easy to append
+cases and to read line by line.</p>
+
+<pre data-file="evals/questions.jsonl" data-lang="json" data-tag="complete file"><code>{"question": "How long can I keep a DVD?", "source": "loans.md", "answer": "7 days"}
+{"question": "How many times can I renew a book?", "source": "loans.md", "answer": "twice"}
+{"question": "What happens if I owe 20 EUR?", "source": "fees.md", "answer": "card blocked for borrowing"}
+{"question": "Do kids pay late fees?", "source": "fees.md", "answer": "no, junior cards never pay late fees"}
+{"question": "Is the Northside branch open on Monday?", "source": "branches.md", "answer": "no"}
+{"question": "When is story time for children?", "source": "branches.md", "answer": "Wednesday at 4 pm at the Lighthouse Branch"}
+{"question": "What is the Wi-Fi password?", "source": "digital.md", "answer": "no password needed (HarborLibrary-Guest)"}
+{"question": "How much is a colour print?", "source": "digital.md", "answer": "0.50 EUR per page"}
+{"question": "Can I book a study room for a group of five?", "source": "rooms.md", "answer": "yes, rooms for 2 to 6 people"}
+{"question": "What do I need before using the laser cutter?", "source": "rooms.md", "answer": "a free 1-hour safety session"}
+{"question": "I'm visiting for a month. Can I borrow books?", "source": "membership.md", "answer": "yes, a temporary card for 10 EUR"}
+{"question": "What documents do I need to sign up?", "source": "membership.md", "answer": "photo ID and proof of address"}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–12</td><td><code>{"question": …, "source": …, "answer": …}</code></td><td>Every line has the same three keys.
+<code>question</code> is what a library user might ask. <code>source</code> is the policy file that contains the
+answer; the lab checks whether a retriever brings back a chunk from that file. <code>answer</code> is the correct
+answer in a few words, for you to compare the RAG answers with (the lab does not grade answers
+automatically).</td></tr>
+<tr><td>1–4</td><td><code>loans.md</code>, <code>fees.md</code></td><td>The first four lines are also the first four questions of the RAG
+part. Line 3 (20 EUR) needs a small reasoning step: 20 is "15 EUR or more". Line 4 (kids) uses a different word
+than the policy ("junior cards").</td></tr>
+<tr><td>7, 8</td><td><code>digital.md</code></td><td>Wi-Fi password and colour print. Both answers live in the same chunk (lab 06).
+Note the British "colour" here and the American "color" in the policy.</td></tr>
+<tr><td>11</td><td><code>"I'm visiting for a month. Can I borrow books?"</code></td><td>The hardest one: the policy says "Visitors
+can buy a temporary card", with almost no shared words.</td></tr>
+</table></div>
+
+<h2>The lab script</h2>
+
+<pre data-file="labs/07_retrievers.py" data-lang="py" data-tag="complete file"><code>"""Lab 07: compare retrievers on 12 questions, then answer with a RAG chain."""
+import json
+import logging
+import sys
+from pathlib import Path
+
+from langchain_classic.retrievers import EnsembleRetriever, MultiQueryRetriever
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+
+from harbor.config import ROOT, get_model
+from harbor.knowledge import build_vector_store, format_docs, load_policies, split
+
+chunks = split(load_policies())
+store = build_vector_store(chunks)
+questions = [json.loads(line) for line in open(ROOT / "evals" / "questions.jsonl", encoding="utf-8")]
+
+dense = store.as_retriever(search_kwargs={"k": 2})
+mmr = store.as_retriever(search_type="mmr", search_kwargs={"k": 2, "fetch_k": 6})
+bm25 = BM25Retriever.from_documents(chunks, k=2)
+hybrid = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.5, 0.5])
+multi = MultiQueryRetriever.from_llm(retriever=dense, llm=get_model())
+
+print("1) Did the right file come back in the results?")
+for name, retriever in [("vector", dense), ("MMR", mmr), ("BM25", bm25), ("hybrid", hybrid), ("multi-query", multi)]:
+    hits, misses = 0, []
+    for q in questions:
+        files = {Path(d.metadata["source"]).name for d in retriever.invoke(q["question"])}
+        if q["source"] in files:
+            hits += 1
+        else:
+            misses.append(q["question"])
+    print(f"   {name:&lt;12} {hits}/{len(questions)}   missed: {misses}")
+
+# Multi-query asks the model for other phrasings of the question. Turn on its log to see them.
+print("\n   The phrasings multi-query generated for 'What is the Wi-Fi password?':")
+logging.basicConfig(stream=sys.stdout, format="   %(message)s")
+logging.getLogger("langchain_classic.retrievers.multi_query").setLevel(logging.INFO)
+multi.invoke("What is the Wi-Fi password?")
+
+# 2. A RAG chain: retrieve -&gt; fill the prompt -&gt; model -&gt; string.
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You answer questions about Harbor City Library using only the context below. "
+               "If the context does not contain the answer, say you don't know. "
+               "End with the source file in brackets.\n\nContext:\n{context}"),
+    ("human", "{question}"),
+])
+rag = {"context": hybrid | format_docs, "question": RunnablePassthrough()} | prompt | get_model() | StrOutputParser()
+
+print("\n2) RAG answers")
+for q in questions[:4] + [{"question": "Can I bring my dog to the library?"}]:
+    print(f"   Q: {q['question']}\n   A: {rag.invoke(q['question'])}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 07: compare retrievers …"""</code></td><td>Docstring with the two parts of the lab.</td></tr>
+<tr><td>2–5</td><td><code>import json</code>, <code>logging</code>, <code>sys</code>, <code>from pathlib import Path</code></td><td><code>json</code>
+parses each line of the test file; <code>logging</code> and <code>sys</code> make the multi-query retriever print its
+generated questions; <code>Path</code> gives short file names.</td></tr>
+<tr><td>7</td><td><code>from langchain_classic.retrievers import EnsembleRetriever, MultiQueryRetriever</code></td><td>These two moved to
+the <code>langchain-classic</code> package in LangChain 1.x. The old path <code>langchain.retrievers</code> no longer
+exists, so older tutorials fail here with a <code>ModuleNotFoundError</code>.</td></tr>
+<tr><td>8</td><td><code>from langchain_community.retrievers import BM25Retriever</code></td><td>BM25 lives in
+<code>langchain-community</code>; this import prints the same DeprecationWarning as lab 04 (the code still
+works).</td></tr>
+<tr><td>9</td><td><code>from langchain_core.output_parsers import StrOutputParser</code></td><td>An
+<a class="term" href="glossary.html#output-parser">output parser</a> that turns the model's message into a plain
+string.</td></tr>
+<tr><td>10</td><td><code>from langchain_core.prompts import ChatPromptTemplate</code></td><td>The
+<a class="term" href="glossary.html#prompt-template">prompt template</a> from lab 03.</td></tr>
+<tr><td>11</td><td><code>from langchain_core.runnables import RunnablePassthrough</code></td><td>A runnable that returns its input
+unchanged; used to pass the question through to the prompt.</td></tr>
+<tr><td>13</td><td><code>from harbor.config import ROOT, get_model</code></td><td><code>ROOT</code> is the project folder;
+<code>get_model()</code> returns llama3.2 with temperature 0.</td></tr>
+<tr><td>14</td><td><code>from harbor.knowledge import build_vector_store, format_docs, load_policies, split</code></td><td>All four
+shared functions from lab 05.</td></tr>
+<tr><td>16</td><td><code>chunks = split(load_policies())</code></td><td>The same 12 chunks as lab 06. They are kept in a variable
+because BM25 needs them too.</td></tr>
+<tr><td>17</td><td><code>store = build_vector_store(chunks)</code></td><td>Embeds the chunks into an
+<code>InMemoryVectorStore</code> (calls Ollama).</td></tr>
+<tr><td>18</td><td><code>questions = [json.loads(line) for line in open(ROOT / "evals" / "questions.jsonl", encoding="utf-8")]</code></td><td>Reads
+the test file line by line and parses each line into a dict.</td></tr>
+<tr><td>20</td><td><code>dense = store.as_retriever(search_kwargs={"k": 2})</code></td><td>Wraps the vector store as a retriever.
+"Dense" is a common name for embedding-based search (the vectors are full of numbers), as opposed to "sparse" keyword
+search. <code>search_kwargs</code> are passed to the store's search: 2 results.</td></tr>
+<tr><td>21</td><td><code>mmr = store.as_retriever(search_type="mmr", search_kwargs={"k": 2, "fetch_k": 6})</code></td><td>Same
+store, MMR search: fetch 6 candidates, return 2 diverse ones.</td></tr>
+<tr><td>22</td><td><code>bm25 = BM25Retriever.from_documents(chunks, k=2)</code></td><td>Builds a keyword index over the same chunks.
+No embeddings involved.</td></tr>
+<tr><td>23</td><td><code>hybrid = EnsembleRetriever(retrievers=[bm25, dense], weights=[0.5, 0.5])</code></td><td>Runs both
+retrievers and merges their lists with weighted Reciprocal Rank Fusion (explained below). Equal weights: neither
+method is preferred.</td></tr>
+<tr><td>24</td><td><code>multi = MultiQueryRetriever.from_llm(retriever=dense, llm=get_model())</code></td><td>Asks the model to rewrite
+the question in 3 ways, runs <code>dense</code> for each rewrite, and returns the unique union of all results.</td></tr>
+<tr><td>26</td><td><code>print("1) Did the right file come back in the results?")</code></td><td>Part 1 heading.</td></tr>
+<tr><td>27</td><td><code>for name, retriever in [("vector", dense), …, ("multi-query", multi)]:</code></td><td>Loops over the
+five retrievers with a display name for each. This only works because they all have the same
+<code>.invoke</code> interface.</td></tr>
+<tr><td>28</td><td><code>hits, misses = 0, []</code></td><td>A counter and a list of missed questions, reset for each retriever.</td></tr>
+<tr><td>29–30</td><td><code>files = {Path(d.metadata["source"]).name for d in retriever.invoke(q["question"])}</code></td><td>Runs the
+retriever and collects the file names of the returned chunks in a set (duplicates collapse).</td></tr>
+<tr><td>31–34</td><td><code>if q["source"] in files: hits += 1 else: misses.append(q["question"])</code></td><td>A hit means the expected
+file is among the results. This is a simple, honest metric, but note what it does not check: whether the chunk that
+came back actually holds the answer.</td></tr>
+<tr><td>35</td><td><code>print(f"   {name:&lt;12} {hits}/{len(questions)}   missed: {misses}")</code></td><td>One line per retriever:
+score out of 12 and the missed questions.</td></tr>
+<tr><td>38</td><td><code>print("\n   The phrasings multi-query generated for 'What is the Wi-Fi password?':")</code></td><td>Introduces
+the log output that follows.</td></tr>
+<tr><td>39</td><td><code>logging.basicConfig(stream=sys.stdout, format="   %(message)s")</code></td><td>Sends log messages to the normal
+output (not stderr) with three spaces of indentation, so they appear in order with the prints.</td></tr>
+<tr><td>40</td><td><code>logging.getLogger("langchain_classic.retrievers.multi_query").setLevel(logging.INFO)</code></td><td>The
+multi-query retriever logs its generated questions at INFO level; this switches that one logger on.</td></tr>
+<tr><td>41</td><td><code>multi.invoke("What is the Wi-Fi password?")</code></td><td>Runs it once just to see the log; the returned
+Documents are ignored.</td></tr>
+<tr><td>44–49</td><td><code>prompt = ChatPromptTemplate.from_messages([("system", "…Context:\n{context}"), ("human", "{question}")])</code></td><td>The
+RAG prompt. The system message gives three rules: use only the context, say you don't know if it is missing, and end
+with the source file in brackets. <code>{context}</code> will hold the retrieved chunks, <code>{question}</code> the
+user's question. Lines 45–47 are one string split over three lines (Python joins adjacent strings).</td></tr>
+<tr><td>50</td><td><code>rag = {"context": hybrid | format_docs, "question": RunnablePassthrough()} | prompt | get_model() | StrOutputParser()</code></td><td>The
+whole chain in <a class="term" href="glossary.html#lcel">LCEL</a>. The dict runs two branches on the same input (the
+question string): <code>hybrid | format_docs</code> retrieves and formats the chunks, <code>RunnablePassthrough()</code>
+keeps the question. The resulting dict fills the prompt, the model answers, the parser returns text. The hybrid
+retriever is used because it scored best.</td></tr>
+<tr><td>52</td><td><code>print("\n2) RAG answers")</code></td><td>Part 2 heading.</td></tr>
+<tr><td>53</td><td><code>for q in questions[:4] + [{"question": "Can I bring my dog to the library?"}]:</code></td><td>The first four
+test questions plus one the policies cannot answer, to see whether the model admits it.</td></tr>
+<tr><td>54</td><td><code>print(f"   Q: {q['question']}\n   A: {rag.invoke(q['question'])}")</code></td><td>Runs the chain and prints
+the question and the answer.</td></tr>
+</table></div>
+
+<h2>How the hybrid retriever merges two lists</h2>
+<p><code>EnsembleRetriever</code> does not compare BM25 scores with cosine scores (they are on different scales). It
+only uses each document's <strong>rank</strong> in each list. Every document gets
+<code>weight / (rank + 60)</code> from each list it appears in, the parts are added, and the documents are sorted by
+the total. A chunk that both methods rank highly wins. Note that the fused list keeps every document from both lists,
+so hybrid can return up to 4 chunks here while vector, MMR and BM25 return 2.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Reciprocal rank fusion: a BM25 list and a vector list are combined by adding weight divided by rank plus 60 for each document, then sorted">
+  <rect class="box2" x="20" y="20" width="200" height="100" rx="8"/>
+  <text class="label" x="120" y="44" text-anchor="middle">BM25 ranking</text>
+  <text class="mono" x="40" y="70">1. chunk A</text>
+  <text class="mono" x="40" y="94">2. chunk B</text>
+  <rect class="box" x="20" y="134" width="200" height="100" rx="8"/>
+  <text class="label" x="120" y="158" text-anchor="middle">vector ranking</text>
+  <text class="mono" x="40" y="184">1. chunk B</text>
+  <text class="mono" x="40" y="208">2. chunk C</text>
+  <path class="arrow" d="M 220,70 H 278"/>
+  <path class="arrow" d="M 220,184 H 278"/>
+  <rect class="box-info" x="280" y="50" width="230" height="150" rx="8"/>
+  <text class="label" x="395" y="76" text-anchor="middle">add 0.5 / (rank + 60)</text>
+  <text class="mono" x="300" y="106">A: 0.5/61</text>
+  <text class="mono" x="300" y="130">B: 0.5/62 + 0.5/61</text>
+  <text class="mono" x="300" y="154">C: 0.5/62</text>
+  <text class="small" x="395" y="184" text-anchor="middle">same weight for both lists</text>
+  <path class="arrow-accent" d="M 510,125 H 548"/>
+  <rect class="box-ok" x="550" y="60" width="190" height="130" rx="8"/>
+  <text class="label" x="645" y="86" text-anchor="middle">fused result</text>
+  <text class="mono" x="570" y="114">1. chunk B</text>
+  <text class="mono" x="570" y="138">2. chunk A</text>
+  <text class="mono" x="570" y="162">3. chunk C</text>
+</svg>
+<figcaption>Chunks A, B and C are illustrative; the formula and the constant 60 are what <code>EnsembleRetriever</code>
+uses by default. <strong>Agreement between the two methods counts most</strong>, and everything either method found
+is kept.</figcaption>
+</figure>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="command"><code>uv run python -m labs.07_retrievers</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>C:\Users\Ahsene\AppData\Local\Temp\claude\C--HandsOn-Codevolution-doc\4b7165ab-a959-4267-ab73-570ee601e0b7\scratchpad\guide-lclg\lab\labs\07_retrievers.py:8: DeprecationWarning: `langchain-community` is being sunset and is no longer actively maintained. See https://github.com/langchain-ai/langchain-community/issues/674 for details and migration guidance toward standalone integration packages.
+  from langchain_community.retrievers import BM25Retriever
+1) Did the right file come back in the results?
+   vector       11/12   missed: ["I'm visiting for a month. Can I borrow books?"]
+   MMR          11/12   missed: ['How much is a colour print?']
+   BM25         12/12   missed: []
+   hybrid       12/12   missed: []
+   multi-query  11/12   missed: ["I'm visiting for a month. Can I borrow books?"]
+
+   The phrasings multi-query generated for 'What is the Wi-Fi password?':
+   Generated queries: ['Here are three alternative versions of the user question to retrieve relevant documents from a vector database:', '1. How can I access the wireless network at my home or office?', '2. What is the default network name and password for a typical Wi-Fi connection?', '3. Can you provide a list of common Wi-Fi network names and passwords that are commonly used in public places?', "These alternative questions aim to capture the user's intent in a more nuanced way, taking into account the context and potential variations in language. By using different phrasing and wording, we can increase the chances of retrieving relevant documents that address the user's query."]
+
+2) RAG answers
+   Q: How long can I keep a DVD?
+   A: You can keep a DVD for 7 days. [loans.md]
+   Q: How many times can I renew a book?
+   A: You can renew a book twice, adding a new full loan period from the day you renew. [loans.md]
+   Q: What happens if I owe 20 EUR?
+   A: I don't know. [fees.md]
+   Q: Do kids pay late fees?
+   A: Yes, kids do pay late fees. According to the context, Junior cards never pay late fees.
+   Q: Can I bring my dog to the library?
+   A: I don't know. [branches.md]</code></pre>
+
+<div class="callout ok"><strong>What you should see</strong>
+<ul>
+  <li>The DeprecationWarning for <code>langchain-community</code> (from line 8), then five score lines. Ours:
+  vector 11/12, MMR 11/12, BM25 12/12, hybrid 12/12, multi-query 11/12. BM25 does not use a model, so its line should
+  match exactly; the others can differ by a question.</li>
+  <li>A <code>Generated queries: [...]</code> line: a Python list of strings produced by llama3.2. Expect different
+  wording on your machine.</li>
+  <li>Five <code>Q:</code>/<code>A:</code> pairs. The first two should be right; the other three show the failures
+  discussed below (yours may fail differently).</li>
+</ul></div>
+
+<h2>Part 1: what the scores tell you</h2>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Bar chart of hits out of 12: vector 11, MMR 11, BM25 12, hybrid 12, multi-query 11">
+  <text class="label" x="20" y="22">Right file in the results, out of 12 questions (real run)</text>
+  <text class="label" x="20" y="57">vector</text>
+  <rect class="box" x="130" y="40" width="495" height="26" rx="6"/>
+  <text class="small" x="635" y="58">11/12</text>
+  <text class="label" x="20" y="95">MMR</text>
+  <rect class="box" x="130" y="78" width="495" height="26" rx="6"/>
+  <text class="small" x="635" y="96">11/12</text>
+  <text class="label" x="20" y="133">BM25</text>
+  <rect class="box-ok" x="130" y="116" width="540" height="26" rx="6"/>
+  <text class="small" x="680" y="134">12/12</text>
+  <text class="label" x="20" y="171">hybrid</text>
+  <rect class="box-ok" x="130" y="154" width="540" height="26" rx="6"/>
+  <text class="small" x="680" y="172">12/12</text>
+  <text class="label" x="20" y="209">multi-query</text>
+  <rect class="box-info" x="130" y="192" width="495" height="26" rx="6"/>
+  <text class="small" x="635" y="210">11/12</text>
+</svg>
+<figcaption>Bar length is proportional to hits (45 px per question). <strong>On this small, word-rich data set, plain
+keyword search was as good as anything</strong>; that is a reason to always test BM25 before reaching for something
+fancier.</figcaption>
+</figure>
+
+<ul>
+  <li><strong>Vector missed "I'm visiting for a month. Can I borrow books?"</strong> The question and the policy
+  ("Visitors can buy a temporary card") share almost no words or phrasing, so the two nearest chunks by meaning came
+  from other files.</li>
+  <li><strong>MMR missed "How much is a colour print?"</strong>, a question plain vector search got right. Since MMR
+  always keeps the single most similar chunk and then swaps the rest for variety, the likely story is that the
+  <code>digital.md</code> chunk was second-best and got replaced by a "more different" one.</li>
+  <li><strong>BM25 got all 12</strong>, but read the metric carefully. For the visitor question we ran BM25 offline
+  (it needs no model) and it returned the <code>membership.md</code> chunk "Card types", which mentions temporary cards
+  but <em>not</em> the 10 EUR price, which is in the other <code>membership.md</code> chunk. Right file, not quite the
+  right chunk.</li>
+  <li><strong>Hybrid got all 12</strong>, partly because it returns up to 4 chunks while the others return 2. More
+  chunks means more chances to include the right file, and also more text in the prompt.</li>
+  <li><strong>Multi-query missed the same visitor question as vector</strong>, because every rewrite still goes through
+  the same vector search.</li>
+</ul>
+
+<h3>Multi-query: when the rewrites go wrong</h3>
+<p>Look at the generated queries for "What is the Wi-Fi password?". The retriever's built-in prompt asks for "3
+different versions" separated by new lines, and its parser treats <strong>every non-empty line</strong> of the
+answer as one query. llama3.2 wrote five lines: an introduction ("Here are three alternative versions…"), three
+questions, and a closing paragraph. All five were searched as if they were questions. Worse, the three real rewrites
+drifted away from the library: "access the wireless network at my home or office", "default network name and
+password for a typical Wi-Fi connection", "common Wi-Fi network names and passwords … in public places". The model did
+not know the question was about Harbor City Library, so it "improved" it into a generic one.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Multi-query flow: llama3.2 returns five lines; the preamble and closing lines are wrongly used as queries and the three questions drift to home Wi-Fi">
+  <rect class="box2" x="20" y="120" width="160" height="60" rx="8"/>
+  <text class="label" x="100" y="146" text-anchor="middle">"What is the</text>
+  <text class="label" x="100" y="164" text-anchor="middle">Wi-Fi password?"</text>
+  <path class="arrow" d="M 180,150 H 208"/>
+  <rect class="box-solid" x="210" y="120" width="110" height="60" rx="8"/>
+  <text class="title on-solid" x="265" y="155" text-anchor="middle">llama3.2</text>
+  <path class="arrow" d="M 320,150 H 348"/>
+  <rect class="box-bad" x="350" y="14" width="390" height="40" rx="8"/>
+  <text class="small" x="364" y="38">"Here are three alternative versions…" (preamble)</text>
+  <rect class="box-warn" x="350" y="64" width="390" height="40" rx="8"/>
+  <text class="small" x="364" y="88">"1. …wireless network at my home or office?"</text>
+  <rect class="box-warn" x="350" y="114" width="390" height="40" rx="8"/>
+  <text class="small" x="364" y="138">"2. …default network name and password…?"</text>
+  <rect class="box-warn" x="350" y="164" width="390" height="40" rx="8"/>
+  <text class="small" x="364" y="188">"3. …common Wi-Fi names… in public places?"</text>
+  <rect class="box-bad" x="350" y="214" width="390" height="40" rx="8"/>
+  <text class="small" x="364" y="238">"These alternative questions aim to…" (closing text)</text>
+  <text class="small" x="350" y="282">each line → one vector search (k=2) → unique union of results</text>
+</svg>
+<figcaption>The real output, shortened. Red: lines that are not questions at all; amber: questions that lost the
+library context. <strong>A line-based parser trusts the model to follow the format exactly</strong>, and a 3B model
+often does not.</figcaption>
+</figure>
+<p>It still scored 11/12 because the vector search on those lines often lands on the right file anyway, and the
+union of five searches returns many chunks. Two fixes you could try: pass your own <code>prompt=</code> to
+<code>from_llm</code> that says "output only the questions, one per line, about a public library", and pass
+<code>include_original=True</code> so the user's own question is always searched too.</p>
+
+<h2>Part 2: the RAG chain and its failures</h2>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="RAG chain: the question goes into a dict with two branches, hybrid retriever piped into format_docs, and a passthrough; then prompt, llama3.2 and StrOutputParser">
+  <rect class="box2" x="20" y="84" width="110" height="50" rx="8"/>
+  <text class="label" x="75" y="114" text-anchor="middle">question</text>
+  <path class="arrow" d="M 130,100 L 168,62"/>
+  <path class="arrow" d="M 130,118 L 168,156"/>
+  <rect class="zone" x="160" y="14" width="250" height="192" rx="8"/>
+  <text class="small" x="172" y="32">dict = runs both branches</text>
+  <rect class="box-ok" x="176" y="40" width="218" height="52" rx="8"/>
+  <text class="mono" x="285" y="62" text-anchor="middle">hybrid | format_docs</text>
+  <text class="small" x="285" y="80" text-anchor="middle">→ "context"</text>
+  <rect class="box" x="176" y="130" width="218" height="52" rx="8"/>
+  <text class="mono" x="285" y="152" text-anchor="middle">RunnablePassthrough()</text>
+  <text class="small" x="285" y="170" text-anchor="middle">→ "question"</text>
+  <path class="arrow" d="M 410,110 H 438"/>
+  <rect class="box-info" x="440" y="84" width="90" height="50" rx="8"/>
+  <text class="label" x="485" y="114" text-anchor="middle">prompt</text>
+  <path class="arrow" d="M 530,110 H 548"/>
+  <rect class="box-solid" x="550" y="84" width="90" height="50" rx="8"/>
+  <text class="label on-solid" x="595" y="114" text-anchor="middle">llama3.2</text>
+  <path class="arrow" d="M 640,110 H 658"/>
+  <rect class="box" x="660" y="84" width="80" height="50" rx="8"/>
+  <text class="label" x="700" y="106" text-anchor="middle">StrOutput</text>
+  <text class="label" x="700" y="124" text-anchor="middle">Parser</text>
+</svg>
+<figcaption>Line 50 as a picture. The <code>|</code> operator connects runnables; a dict becomes a step that runs its
+branches on the same input. <strong>The question is used twice: once to search, once in the prompt.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to RAG chains? What the model actually receives</summary>
+<p>For "How long can I keep a DVD?", <code>format_docs</code> turns the retrieved chunks into text like
+<code>[loans.md]</code> followed by the chunk, a blank line, the next <code>[file]</code> and chunk, and so on. That
+string replaces <code>{context}</code> in the system message. So the model sees: rules, then the policy text with file
+names, then the question. That is why it can end with <code>[loans.md]</code>: it copies a tag it sees in the context.
+It does not check anything; it only writes text that fits.</p>
+</details>
+
+<p>The first two answers are correct and cite the right file ("7 days [loans.md]", "twice … [loans.md]"). The other
+three are worth studying:</p>
+
+<div class="table-wrap"><table>
+<tr><th>Question</th><th>Answer (real)</th><th>What went wrong</th></tr>
+<tr><td>What happens if I owe 20 EUR?</td><td><code>I don't know. [fees.md]</code></td><td>Retrieval worked: the fees chunk with
+"If you owe 15 EUR or more, your card is blocked" was in the context (BM25, run offline, returns it, and hybrid keeps
+everything BM25 returns). The model did not apply the rule to 20 EUR. A generation failure, not a retrieval
+failure.</td></tr>
+<tr><td>Do kids pay late fees?</td><td><code>Yes, kids do pay late fees. According to the context, Junior cards never pay late fees.</code></td><td>The
+answer contradicts itself in two sentences, and drops the source tag. The context said the right thing; the model
+did not connect "kids" with "junior cards" before it started writing "Yes".</td></tr>
+<tr><td>Can I bring my dog to the library?</td><td><code>I don't know. [branches.md]</code></td><td>"I don't know" is correct (no policy
+mentions pets). But a retriever always returns chunks, even when none is relevant, and the model attached a source tag
+to a non-answer. A reader would think <code>branches.md</code> says something about dogs.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Diagnosis: for each failed answer, was the right text retrieved, and did the model use it correctly">
+  <text class="label" x="200" y="24" text-anchor="middle">Right text retrieved?</text>
+  <text class="label" x="420" y="24" text-anchor="middle">Model used it well?</text>
+  <text class="label" x="540" y="24">Lesson</text>
+  <rect class="box" x="20" y="40" width="110" height="56" rx="8"/>
+  <text class="label" x="75" y="73" text-anchor="middle">20 EUR</text>
+  <circle class="dot-ok" cx="200" cy="68" r="9"/>
+  <text class="small" x="216" y="72">yes</text>
+  <circle class="dot-bad" cx="420" cy="68" r="9"/>
+  <text class="small" x="436" y="72">no rule applied</text>
+  <text class="small" x="540" y="72">better prompt or model</text>
+  <rect class="box" x="20" y="110" width="110" height="56" rx="8"/>
+  <text class="label" x="75" y="143" text-anchor="middle">kids</text>
+  <circle class="dot-ok" cx="200" cy="138" r="9"/>
+  <text class="small" x="216" y="142">yes</text>
+  <circle class="dot-bad" cx="420" cy="138" r="9"/>
+  <text class="small" x="436" y="142">contradicts</text>
+  <text class="small" x="540" y="142">check answers, not just files</text>
+  <rect class="box" x="20" y="180" width="110" height="56" rx="8"/>
+  <text class="label" x="75" y="213" text-anchor="middle">dog</text>
+  <circle class="dot-warn" cx="200" cy="208" r="9"/>
+  <text class="small" x="216" y="212">nothing exists</text>
+  <circle class="dot-warn" cx="420" cy="208" r="9"/>
+  <text class="small" x="436" y="212">fake source tag</text>
+  <text class="small" x="540" y="212">a tag is not evidence</text>
+</svg>
+<figcaption>Split every RAG failure into two questions. <strong>Retrieval scores alone (part 1) would have called all
+three of these a success</strong>; you also have to read the answers.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+  <li><strong>Importing from the old path.</strong> <code>from langchain.retrievers import EnsembleRetriever</code>
+  fails in LangChain 1.x with <code>ModuleNotFoundError</code>; use <code>langchain_classic.retrievers</code> and make
+  sure <code>langchain-classic</code> is installed.</li>
+  <li><strong>Missing <code>rank-bm25</code>.</strong> <code>BM25Retriever</code> is only a wrapper; without the
+  <code>rank-bm25</code> package it raises an ImportError asking you to install it.</li>
+  <li><strong>Looking for the multi-query log in the wrong place.</strong> Without lines 39–40 you see no generated
+  queries at all, because the logger's default level hides INFO messages.</li>
+  <li><strong>Forgetting <code>format_docs</code>.</strong> <code>{"context": hybrid, …}</code> would put the Python
+  repr of a list of Document objects into the prompt: it works, but the model sees <code>Document(metadata=…)</code>
+  noise and no clean <code>[file]</code> tags.</li>
+  <li><strong>Trusting the source tag.</strong> As the dog question shows, the bracketed file name is text the model
+  copied, not proof. For real citations, return the retrieved Documents alongside the answer from your own code.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+  <li>Change BM25 to <code>k=1</code> on line 22. BM25 then drops to 8/12 (we checked this offline, since BM25 needs
+  no model): with only one chunk per question, a near miss becomes a miss. Watch what happens to the hybrid line,
+  which now gets fewer BM25 chunks.</li>
+  <li>Add <code>include_original=True</code> to <code>MultiQueryRetriever.from_llm(...)</code> on line 24. Your own
+  question is then searched as well as the rewrites.</li>
+  <li>Add a test case to <code>evals/questions.jsonl</code>, for example
+  <code>{"question": "Can I renew a DVD?", "source": "loans.md", "answer": "yes, twice"}</code>, and run again: the
+  scores are now out of 13.</li>
+  <li>Make the system prompt stricter, for example add "If a rule gives a threshold, compare the user's number with it."
+  and ask the 20 EUR question again. Note what changes, and remember that one run proves little with a small
+  model.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>A retriever turns a question into a list of Documents; all retrievers share <code>.invoke</code>, so they are
+  easy to swap and compare.</li>
+  <li>On our 12 questions: vector 11, MMR 11, BM25 12, hybrid 12, multi-query 11. Keyword search was hard to beat on this
+  data.</li>
+  <li>Hybrid (<code>EnsembleRetriever</code>) fuses ranks, not scores, and keeps everything both lists found.</li>
+  <li>Multi-query treated the model's preamble and closing lines as queries, and its rewrites drifted to home Wi-Fi.</li>
+  <li>The RAG chain is <code>{"context": hybrid | format_docs, "question": RunnablePassthrough()} | prompt | model |
+  StrOutputParser()</code>.</li>
+  <li>Failures: "I don't know" for 20 EUR although the rule was retrieved, a self-contradicting kids answer, and a source
+  tag on a non-answer. Check answers, not only retrieval. Next, lab 08 rebuilds this pipeline as a LangGraph graph.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="06-vector-store.html"><small>← Previous · Step 06</small>Embeddings and a vector store</a>
+<a class="next" href="08-langgraph-basics.html"><small>Next · Step 08 →</small>LangGraph fundamentals</a>
+</nav>
+</main>
+</body>
+</html>

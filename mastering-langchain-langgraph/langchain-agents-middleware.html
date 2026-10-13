@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 5 · LangChain agents and middleware</title>
+<meta name="description" content="create_agent, runtime context, structured responses, and the middleware hooks around model and tool calls. Read with book Part V (chapters 15-16).">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 5/6</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 5 of 6</div>
+  <h1>LangChain agents and middleware</h1>
+  <p class="lead">create_agent, runtime context, structured responses, and the middleware hooks around model and tool calls. Read with book Part V (chapters 15-16).</p>
+</section>
+<div class="callout">Read with <strong>Part V · LangChain Agent (chapters 15–16)</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>In Part 4 of this guide you built an <a class="term" href="glossary.html#agent">agent</a> by hand: a
+<a class="term" href="glossary.html#langgraph">LangGraph</a> <a class="term" href="glossary.html#graph">graph</a> with a model
+<a class="term" href="glossary.html#node">node</a>, a tools node and a <a class="term" href="glossary.html#conditional-edge">conditional edge</a>
+between them. LangChain 1.x packages that exact loop into one function, <code>create_agent</code>, and adds a clean way to
+plug extra behaviour around every model call and every tool call: <a class="term" href="glossary.html#middleware">middleware</a>.</p>
+
+<p>This chapter explains what <code>create_agent</code> builds, how to pass information that the model must <em>not</em>
+control (who is logged in), how to get a typed object back instead of free text, and how middleware hooks work, in which
+order they run, and which ready-made middleware ships with the installed <code>langchain</code> 1.4.5.</p>
+
+<div class="callout ok"><p><strong>Why this matters for your project.</strong> The Harbor City Library assistant reads
+member accounts and can place holds. Those are exactly the places where an agent needs guard rails: the model must never
+choose <em>whose</em> account to read (<a href="11-checkpointers.html">lab 11</a> showed it will), an email address typed by a
+visitor should not reach the model, a runaway loop must stop, and a person should approve every hold.
+<a href="14-create-agent.html">Lab 14</a> and <a href="15-middleware.html">lab 15</a> add each of these in a few lines.</p></div>
+
+<h2>From a hand-written graph to <code>create_agent</code></h2>
+
+<details class="primer"><summary>New to agents? What "agent" means in this guide</summary>
+<p>An agent is a program where a language model decides, step by step, what to do next. The model can answer directly, or
+it can ask to run a <a class="term" href="glossary.html#tool">tool</a> (a normal Python function with a name, a description and
+typed arguments). Your code runs the tool, gives the result back to the model, and asks again. That repeat-until-done cycle
+is the <a class="term" href="glossary.html#agent-loop">agent loop</a>. The model never runs code itself; it only writes a
+request such as <code>check_availability(item_id="B006")</code>, which is called <a class="term" href="glossary.html#tool-calling">tool calling</a>.</p>
+</details>
+
+<p>Labs 09 to 13 wrote the loop out in full in <code>harbor/agent_graph.py</code>: create a <code>StateGraph</code>, add a
+<code>"model"</code> node that calls the model with the tools bound, add a <code>"tools"</code> node
+(<a class="term" href="glossary.html#toolnode">ToolNode</a>), connect them with <code>tools_condition</code>, and compile. That is
+about fifteen lines, and every agent you write needs the same fifteen lines.</p>
+
+<p><a class="term" href="glossary.html#create-agent">create_agent</a> (imported from <code>langchain.agents</code>) writes them
+for you. Here is the call from lab 14:</p>
+
+<pre data-lang="py" data-tag="from lab 14"><code>agent = create_agent(
+    model=get_model(),
+    tools=[search_catalog, check_availability, my_account],
+    system_prompt="You are Harbor City Library's assistant. Use the tools. Answer briefly.",
+    context_schema=Visitor,
+    checkpointer=InMemorySaver(),
+)</code></pre>
+
+<p>The result is not a new kind of object. It is a compiled LangGraph graph, the same type you got from
+<code>builder.compile()</code> in lab 08. That is why everything you learned in Part 4 still works on it:
+<code>invoke</code>, <code>stream</code>, a <a class="term" href="glossary.html#checkpointer">checkpointer</a> with a
+<code>thread_id</code>, <code>get_state</code>, <a class="term" href="glossary.html#interrupt">interrupts</a> and
+<code>Command(resume=...)</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Comparison: labs 09 to 13 build the agent graph by hand in six calls, lab 14 builds the same graph with one create_agent call">
+  <rect class="zone" x="10" y="10" width="360" height="226" rx="8"/>
+  <text class="title" x="190" y="34" text-anchor="middle">Labs 09–13: by hand</text>
+  <rect class="box" x="30" y="48" width="320" height="26" rx="8"/>
+  <text class="mono" x="190" y="66" text-anchor="middle">StateGraph(MessagesState)</text>
+  <rect class="box" x="30" y="80" width="320" height="26" rx="8"/>
+  <text class="mono" x="190" y="98" text-anchor="middle">add_node("model", call_model)</text>
+  <rect class="box" x="30" y="112" width="320" height="26" rx="8"/>
+  <text class="mono" x="190" y="130" text-anchor="middle">add_node("tools", ToolNode(tools))</text>
+  <rect class="box" x="30" y="144" width="320" height="26" rx="8"/>
+  <text class="mono" x="190" y="162" text-anchor="middle">add_conditional_edges(...)</text>
+  <rect class="box" x="30" y="176" width="320" height="26" rx="8"/>
+  <text class="mono" x="190" y="194" text-anchor="middle">add_edge("tools", "model")</text>
+  <text class="small" x="190" y="224" text-anchor="middle">then compile(checkpointer=...)</text>
+  <rect class="zone" x="390" y="10" width="360" height="226" rx="8"/>
+  <text class="title" x="570" y="34" text-anchor="middle">Lab 14: one call</text>
+  <rect class="box-info" x="410" y="96" width="320" height="44" rx="8"/>
+  <text class="mono" x="570" y="123" text-anchor="middle">create_agent(model, tools, ...)</text>
+  <text class="small" x="570" y="170" text-anchor="middle">system_prompt, checkpointer, context_schema,</text>
+  <text class="small" x="570" y="186" text-anchor="middle">response_format and middleware are options</text>
+  <path class="arrow" d="M 190,238 V 252 H 300"/>
+  <path class="arrow" d="M 570,238 V 252 H 462"/>
+  <rect class="box-solid" x="302" y="240" width="158" height="44" rx="8"/>
+  <text class="on-solid" x="381" y="260" text-anchor="middle">Same compiled</text>
+  <text class="on-solid" x="381" y="276" text-anchor="middle">LangGraph graph</text>
+</svg>
+<figcaption>Left: the loop written in <code>harbor/agent_graph.py</code>. Right: the lab 14 call. <strong>Both produce a compiled graph, so invoke, stream, threads and interrupts work the same way.</strong></figcaption>
+</figure>
+
+<h3>The parameters you will use most</h3>
+<div class="table-wrap"><table>
+<tr><th>Parameter</th><th>What it does</th><th>In the labs</th></tr>
+<tr><td><code>model</code></td><td>The chat model. An instance (like our <code>ChatOllama</code>) or a string such as <code>"provider:model-name"</code> that LangChain turns into a model for you.</td><td><code>get_model()</code> from <code>harbor/config.py</code> (llama3.2 through <a class="term" href="glossary.html#ollama">Ollama</a>).</td></tr>
+<tr><td><code>tools</code></td><td>The list of tools the model may call. Plain functions with type hints and a docstring are accepted too; LangChain wraps them.</td><td><code>search_catalog</code>, <code>check_availability</code>, <code>my_account</code>; lab 15 uses <code>ALL_TOOLS</code>.</td></tr>
+<tr><td><code>system_prompt</code></td><td>A string (or a <code>SystemMessage</code>) placed before the conversation on every model call. It is not stored in the message history.</td><td>"You are Harbor City Library's assistant…"</td></tr>
+<tr><td><code>checkpointer</code></td><td>Saves the state after each step, per <a class="term" href="glossary.html#thread">thread</a>. Needed for multi-turn memory and for pausing (human in the loop).</td><td><code>InMemorySaver()</code> in labs 14 and 15.</td></tr>
+<tr><td><code>store</code></td><td>A long-term <a class="term" href="glossary.html#store">store</a> shared across threads (see <a href="12-memory.html">lab 12</a>). Tools reach it through <code>runtime.store</code>.</td><td>Not used in Part 5.</td></tr>
+<tr><td><code>context_schema</code></td><td>The type of the per-run context object (next section).</td><td><code>Visitor</code> dataclass.</td></tr>
+<tr><td><code>response_format</code></td><td>Asks for a typed final answer (see "Structured responses").</td><td><code>Availability</code> in lab 14.</td></tr>
+<tr><td><code>middleware</code></td><td>An ordered list of hooks that run around model and tool calls.</td><td>Four entries in lab 15.</td></tr>
+<tr><td><code>name</code></td><td>A name for the graph, useful when this agent becomes a node or sub-agent inside a bigger graph.</td><td>Not used.</td></tr>
+</table></div>
+
+<h2>What the graph looks like inside</h2>
+
+<p>Lab 14 prints the nodes that <code>create_agent</code> built. The real output is
+<code>['__start__', 'model', 'tools', '__end__']</code>: the same two working nodes as the hand-written version.
+<code>__start__</code> and <code>__end__</code> are LangGraph's entry and exit points.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The create_agent graph: start goes to model; model goes to tools when it asked for tools, otherwise to end; tools go back to model">
+  <rect class="box2" x="20" y="80" width="110" height="44" rx="8"/>
+  <text class="mono" x="75" y="107" text-anchor="middle">__start__</text>
+  <path class="arrow" d="M 130,102 H 216"/>
+  <rect class="box-solid" x="218" y="80" width="140" height="44" rx="8"/>
+  <text class="on-solid" x="288" y="107" text-anchor="middle">model</text>
+  <path class="arrow-accent" d="M 358,92 H 496"/>
+  <text class="label accent" x="427" y="82" text-anchor="middle">tool calls?</text>
+  <rect class="box-info" x="498" y="70" width="140" height="44" rx="8"/>
+  <text x="568" y="97" text-anchor="middle">tools</text>
+  <path class="arrow" d="M 568,114 V 160 H 288 V 126"/>
+  <text class="small" x="430" y="176" text-anchor="middle">tool results (ToolMessages) go back to the model</text>
+  <path class="arrow-ok" d="M 288,80 V 40 H 646"/>
+  <text class="label ok" x="460" y="32" text-anchor="middle">no tool calls: final answer</text>
+  <rect class="box-ok" x="648" y="18" width="100" height="44" rx="8"/>
+  <text class="mono" x="698" y="45" text-anchor="middle">__end__</text>
+</svg>
+<figcaption>The model node runs the model with the tools bound. If the reply contains tool calls, the tools node runs them and loops back; if not, the run ends. <strong>This is the agent loop from lab 09, built for you.</strong></figcaption>
+</figure>
+
+<p>The state of this graph is a dictionary with a <code>"messages"</code> list (plus a few internal keys, and
+<code>"structured_response"</code> when you ask for one). You pass <code>{"messages": [("user", "...")]}</code> and get back
+the whole conversation, including every <a class="term" href="glossary.html#ai-message">AI message</a> with its tool calls and
+every tool result. Lab 14 reads the tool calls out of that list to print which tools the model used.</p>
+
+<h2>When to use <code>create_agent</code> and when to write the graph</h2>
+
+<p>Both are LangGraph underneath, so this is a choice about how much you write yourself, not about power.</p>
+
+<ul>
+<li><strong>Use <code>create_agent</code></strong> when your program is "a model with tools, looping until it answers". Add
+behaviour with middleware instead of new nodes. This covers most assistants, including the library one.</li>
+<li><strong>Write a <code>StateGraph</code></strong> when the flow is not one loop: fixed steps in a set order (classify, then
+retrieve, then answer, as in <a href="08-langgraph-basics.html">lab 08</a>), several branches that run in parallel, custom state
+keys that several nodes share, or several agents that hand work to each other.</li>
+<li><strong>Mix them.</strong> A <code>create_agent</code> agent is a compiled graph, so it can be one node inside a larger
+hand-written graph.</li>
+<li><strong>No loop at all?</strong> If the model is called once in a fixed pipeline (prompt, model, parser), a plain
+<a class="term" href="glossary.html#lcel">LCEL</a> <a class="term" href="glossary.html#chain">chain</a> is enough
+(see <a href="runnables-typing.html">the next chapter</a>).</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Decision tree: one model call in a fixed pipeline means an LCEL chain; a model with tools looping means create_agent; a custom multi-step or multi-agent flow means a StateGraph">
+  <rect class="box" x="230" y="14" width="300" height="44" rx="8"/>
+  <text x="380" y="41" text-anchor="middle">Does the model decide what to do next?</text>
+  <path class="arrow" d="M 300,58 V 86 H 150 V 104"/>
+  <text class="label" x="215" y="80" text-anchor="middle">no</text>
+  <path class="arrow" d="M 460,58 V 86 H 560 V 104"/>
+  <text class="label" x="512" y="80" text-anchor="middle">yes</text>
+  <rect class="box-info" x="20" y="106" width="260" height="44" rx="8"/>
+  <text x="150" y="126" text-anchor="middle">Fixed pipeline, one model call</text>
+  <text class="small" x="150" y="142" text-anchor="middle">prompt | model | parser</text>
+  <rect class="box" x="400" y="106" width="320" height="44" rx="8"/>
+  <text x="560" y="133" text-anchor="middle">Is it one model-and-tools loop?</text>
+  <path class="arrow" d="M 150,150 V 196"/>
+  <rect class="box-solid" x="50" y="198" width="200" height="44" rx="8"/>
+  <text class="on-solid" x="150" y="225" text-anchor="middle">LCEL chain</text>
+  <path class="arrow" d="M 480,150 V 196"/>
+  <text class="label" x="462" y="178" text-anchor="end">yes</text>
+  <path class="arrow" d="M 640,150 V 196"/>
+  <text class="label" x="658" y="178">no</text>
+  <rect class="box-ok" x="380" y="198" width="200" height="44" rx="8"/>
+  <text x="480" y="218" text-anchor="middle">create_agent</text>
+  <text class="small" x="480" y="234" text-anchor="middle">+ middleware</text>
+  <rect class="box-warn" x="590" y="198" width="160" height="44" rx="8"/>
+  <text x="670" y="218" text-anchor="middle">StateGraph</text>
+  <text class="small" x="670" y="234" text-anchor="middle">your own nodes</text>
+</svg>
+<figcaption>A rule of thumb, not a law: start with the simplest box that fits. <strong>You can always embed a create_agent agent inside a bigger StateGraph later.</strong></figcaption>
+</figure>
+
+<h2>Runtime context: identity comes from the app, not the model</h2>
+
+<p>In <a href="11-checkpointers.html">lab 11</a> a visitor in a fresh conversation asked "What is my member id?". llama3.2 called
+<code>get_member_account('M-1001')</code>, an id it copied from the example in the tool's description, and showed Lea Martin's
+account to someone who was not Lea. Nothing was hacked: the tool simply accepted <code>member_id</code> as an argument, and
+<strong>anything that is a tool argument is chosen by the model</strong>.</p>
+
+<p>The fix is to take identity out of the model's hands. Your application already knows who is logged in (a session, a token,
+a login form). It passes that fact to the agent as <a class="term" href="glossary.html#runtime-context">runtime context</a>: a
+small object given to <code>invoke</code> that tools and middleware can read, but that the model never sees and cannot change.</p>
+
+<pre data-lang="py" data-tag="from lab 14"><code>@dataclass
+class Visitor:
+    member_id: str  # set by the application after login, never by the model
+
+
+@tool
+def my_account(runtime: ToolRuntime[Visitor]) -&gt; str:
+    """Show the logged-in member's own loans, holds and fees."""
+    m = MEMBERS[runtime.context.member_id]
+    ...
+
+agent.invoke({"messages": [("user", text)]}, config, context=Visitor(member_id="M-1002"))</code></pre>
+
+<p>Three pieces work together:</p>
+<ol>
+<li><code>context_schema=Visitor</code> tells <code>create_agent</code> the type of the context object.</li>
+<li><code>context=Visitor(member_id="M-1002")</code> on each <code>invoke</code> supplies the value for this run. In a web app
+this comes from the session, never from the chat text.</li>
+<li>A tool parameter annotated <code>ToolRuntime[Visitor]</code> is filled in by LangChain when the tool runs.
+<code>runtime.context</code> is your <code>Visitor</code>. The parameter is <strong>removed from the schema the model sees</strong>:
+we checked, and the JSON schema sent for <code>my_account</code> has no properties at all. The model can call the tool, but it
+cannot pass a member id.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Before and after: in lab 11 the model chooses the member id and leaks another member's account; in lab 14 the app puts the member id in the runtime context and the tool reads it">
+  <text class="title bad" x="20" y="28">Lab 11: the model picks whose data to read</text>
+  <rect class="box" x="20" y="40" width="170" height="52" rx="8"/>
+  <text x="105" y="62" text-anchor="middle">"What is my</text>
+  <text x="105" y="80" text-anchor="middle">member id?"</text>
+  <path class="arrow" d="M 190,66 H 224"/>
+  <rect class="box-warn" x="226" y="40" width="230" height="52" rx="8"/>
+  <text x="341" y="62" text-anchor="middle">model writes</text>
+  <text class="mono" x="341" y="80" text-anchor="middle">member_id="M-1001"</text>
+  <path class="arrow-bad" d="M 456,66 H 514"/>
+  <rect class="box-bad" x="516" y="40" width="224" height="52" rx="8"/>
+  <text x="628" y="62" text-anchor="middle">Lea Martin's account</text>
+  <text class="small" x="628" y="80" text-anchor="middle">shown to someone else</text>
+  <text class="title ok" x="20" y="140">Lab 14: the app supplies identity</text>
+  <rect class="box" x="20" y="152" width="170" height="52" rx="8"/>
+  <text x="105" y="174" text-anchor="middle">login session</text>
+  <text class="small" x="105" y="192" text-anchor="middle">(your app)</text>
+  <path class="arrow-ok" d="M 190,178 H 224"/>
+  <rect class="box-info" x="226" y="152" width="230" height="52" rx="8"/>
+  <text class="mono" x="341" y="174" text-anchor="middle">context=Visitor(</text>
+  <text class="mono" x="341" y="192" text-anchor="middle">member_id="M-1002")</text>
+  <path class="arrow-ok" d="M 456,178 H 514"/>
+  <rect class="box-ok" x="516" y="152" width="224" height="52" rx="8"/>
+  <text class="mono" x="628" y="174" text-anchor="middle">my_account()</text>
+  <text class="small" x="628" y="192" text-anchor="middle">reads runtime.context</text>
+  <text class="small" x="380" y="236" text-anchor="middle">The model can only decide whether to call my_account, not for whom.</text>
+</svg>
+<figcaption>Top: identity as a tool argument (the model fills it). Bottom: identity as runtime context (the app fills it). <strong>Never let the model choose whose data a tool reads or writes.</strong></figcaption>
+</figure>
+
+<p>Be honest about what this does and does not fix. In the real lab 14 run, llama3.2 still ignored <code>my_account</code> for
+"What do I owe, and what do I have on loan?", called <code>check_availability('B004')</code> (again the example id from a tool
+description) and then asked the visitor for their library card number. Runtime context closed the privacy hole; it did not make a
+3-billion-parameter model pick the right tool. The same code with <code>HARBOR_MODEL=gemma4</code> called <code>my_account</code>
+with no arguments and answered correctly for M-1002 (one loan due 2026-10-25, no fees), and for the availability question called
+<code>search_catalog</code> then <code>check_availability('B006')</code> and gave the correct "4 of 5 copies" answer. Lab 14's page
+shows both outputs.</p>
+
+<h3>What else <code>ToolRuntime</code> gives a tool</h3>
+<div class="table-wrap"><table>
+<tr><th>Attribute</th><th>What it holds</th></tr>
+<tr><td><code>runtime.context</code></td><td>Your context object (here a <code>Visitor</code>).</td></tr>
+<tr><td><code>runtime.state</code></td><td>The current graph <a class="term" href="glossary.html#state">state</a>, for example the messages so far.</td></tr>
+<tr><td><code>runtime.store</code></td><td>The long-term store passed to <code>create_agent(store=...)</code>, if any.</td></tr>
+<tr><td><code>runtime.config</code></td><td>The run's config (thread id, tags, callbacks).</td></tr>
+<tr><td><code>runtime.tool_call_id</code></td><td>The id of the tool call being answered, needed if the tool returns a <code>Command</code> that updates state.</td></tr>
+<tr><td><code>runtime.stream_writer</code></td><td>A function to send custom progress updates to a <code>stream_mode="custom"</code> stream.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to <code>ToolRuntime[Visitor]</code>? What the square brackets mean</summary>
+<p><code>ToolRuntime</code> is a <em>generic</em> class: a class that takes a type as a parameter, the way <code>list[str]</code>
+means "a list whose items are strings". <code>ToolRuntime[Visitor]</code> means "a runtime whose <code>context</code> is a
+<code>Visitor</code>". Python does not check this while the program runs; it is a <a class="term" href="glossary.html#type-hint">type hint</a>
+that lets your editor autocomplete <code>runtime.context.member_id</code> and warn you about typos. LangChain also uses the
+annotation to recognise the parameter and hide it from the model. The next chapter,
+<a href="runnables-typing.html">Runnables, LCEL, typing and Pydantic</a>, explains generics and dataclasses in more detail.</p>
+</details>
+
+<h2>Structured responses: a typed final answer</h2>
+
+<p>An agent normally ends with a text message. Sometimes your code needs fields instead: a title, a number of copies, a branch
+name. <code>response_format</code> asks the agent to finish with a validated object, which appears in the result under
+<code>"structured_response"</code>. This is the agent version of <code>with_structured_output</code> from
+<a href="02-structured-output.html">lab 02</a> (<a class="term" href="glossary.html#structured-output">structured output</a>).</p>
+
+<pre data-lang="py" data-tag="from lab 14"><code>class Availability(BaseModel):
+    title: str
+    copies_available: int
+    branch: str
+
+
+for label, strategy in [("ToolStrategy", ToolStrategy(Availability)), ("ProviderStrategy", ProviderStrategy(Availability))]:
+    typed = create_agent(get_model(), [search_catalog, check_availability], response_format=strategy,
+                         system_prompt="Find the item with search_catalog, then check_availability.")
+    result = typed.invoke({"messages": [("user", "Is 'Build Your Own Radio' available?")]})</code></pre>
+
+<p>There are two ways to get a structured answer out of a model, and LangChain names them as strategies. Lab 14 runs the same
+question once with each, so you can compare them:</p>
+<div class="table-wrap"><table>
+<tr><th>Strategy</th><th>How it works</th><th>Needs</th></tr>
+<tr><td><code>ToolStrategy(schema)</code></td><td>Your schema is turned into one more tool (here a tool named <code>Availability</code>). The agent is finished when the model calls that tool; its arguments are validated and become <code>structured_response</code>. If validation fails, by default (<code>handle_errors=True</code>) the error goes back to the model so it can try again.</td><td>Any model that supports tool calling.</td></tr>
+<tr><td><code>ProviderStrategy(schema)</code></td><td>The provider's own "JSON output that matches this schema" feature constrains what the model writes.</td><td>A model and provider with native structured output support.</td></tr>
+<tr><td>a bare schema, e.g. <code>response_format=Availability</code></td><td>LangChain picks for you: provider strategy if the model's profile says it supports native structured output, otherwise tool strategy.</td><td>Nothing extra.</td></tr>
+</table></div>
+
+<p>For a bare schema, which one would our model get? We checked in the installed packages: our <code>ChatOllama</code> instance
+reports no model profile, so LangChain would fall back to the <strong>tool strategy</strong>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Lab 14 results for both strategies: with ToolStrategy the models called catalog tools but ended with text, so structured_response was None; with ProviderStrategy no tools were called and the object was filled with invented values">
+  <rect class="box" x="230" y="12" width="300" height="40" rx="8"/>
+  <text x="380" y="37" text-anchor="middle">"Is 'Build Your Own Radio' available?"</text>
+  <path class="arrow" d="M 300,52 V 66 H 190 V 78"/>
+  <path class="arrow" d="M 460,52 V 66 H 570 V 78"/>
+  <rect class="box-info" x="20" y="80" width="340" height="40" rx="8"/>
+  <text class="mono" x="190" y="105" text-anchor="middle">ToolStrategy(Availability)</text>
+  <rect class="box-info" x="400" y="80" width="340" height="40" rx="8"/>
+  <text class="mono" x="570" y="105" text-anchor="middle">ProviderStrategy(Availability)</text>
+  <path class="arrow" d="M 190,120 V 138"/>
+  <path class="arrow" d="M 570,120 V 138"/>
+  <rect class="box-ok" x="20" y="140" width="340" height="52" rx="8"/>
+  <text x="190" y="162" text-anchor="middle">catalog tools were called</text>
+  <text class="small" x="190" y="180" text-anchor="middle">llama3.2: 1 tool · gemma4: 2 tools</text>
+  <rect class="box-warn" x="400" y="140" width="340" height="52" rx="8"/>
+  <text x="570" y="162" text-anchor="middle">no tools called</text>
+  <text class="small" x="570" y="180" text-anchor="middle">JSON is forced from the first step</text>
+  <path class="arrow-bad" d="M 190,192 V 210"/>
+  <path class="arrow-bad" d="M 570,192 V 210"/>
+  <rect class="box-bad" x="20" y="212" width="340" height="52" rx="8"/>
+  <text x="190" y="234" text-anchor="middle">ended with plain text</text>
+  <text class="mono" x="190" y="252" text-anchor="middle">structured_response: None</text>
+  <rect class="box-bad" x="400" y="212" width="340" height="52" rx="8"/>
+  <text x="570" y="234" text-anchor="middle">a valid object, invented values</text>
+  <text class="mono" x="570" y="252" text-anchor="middle">branch='Main Branch'</text>
+  <text class="small" x="380" y="288" text-anchor="middle">Truth from the catalog: 1 of 1 copies at Central Library. Both models, same pattern.</text>
+</svg>
+<figcaption>Real lab 14 runs with llama3.2 and gemma4. <strong>The tool strategy kept the tools but lost the typed answer; the provider strategy kept the type but skipped the tools, so its values were made up.</strong></figcaption>
+</figure>
+
+<p>Look at the details in the outputs. With <code>ToolStrategy</code>, llama3.2 called <code>check_availability</code> and gemma4
+called <code>search_catalog</code> then <code>check_availability</code>, but both finished with a text message instead of calling the
+<code>Availability</code> tool, so there was nothing to validate and <code>structured_response</code> was <code>None</code>. With
+<code>ProviderStrategy</code>, neither model called any tool: the reply had to be JSON matching the schema from the very first step,
+so they filled it in straight away. llama3.2 returned <code>Availability(title='Function call', copies_available=1, branch='Main Branch')</code>;
+gemma4 got the title right but said 5 copies at "Main Branch". The catalog says 1 of 1 at Central Library, and the library has no
+Main Branch. The object passed validation because a schema checks shape, not truth (the same lesson as lab 02).</p>
+
+<p>With these local models, a typed final answer <em>from the agent itself</em> was not reliable. A sturdier pattern is to let the
+agent do its normal tool work, then make a separate, single <code>with_structured_output</code> call that only has to copy facts from
+the tool results into the schema. We did not run this in the labs; the code below builds without error in the installed versions,
+but test it with your own model:</p>
+
+<pre data-lang="py" data-tag="illustrative · not run in the labs"><code>agent = create_agent(get_model(), [search_catalog, check_availability],
+                     system_prompt="Find the item with search_catalog, then check_availability.")
+result = agent.invoke({"messages": [("user", "Is 'Build Your Own Radio' available?")]})
+
+# Step 2: one structured call that only copies facts from the tool results.
+facts = "\n".join(m.content for m in result["messages"] if m.type == "tool")
+extract = get_model().with_structured_output(Availability)
+answer = extract.invoke(f"Fill in the fields using only these tool results:\n{facts}")</code></pre>
+
+<p>Whatever pattern you use, check for <code>None</code> before using a structured result, and compare the values against the tool
+output in your tests.</p>
+<h2>Middleware: hooks around the agent loop</h2>
+
+<details class="primer"><summary>New to middleware? The idea in one paragraph</summary>
+<p>Middleware is code that sits <em>between</em> two parts of a system and sees everything that passes. Web frameworks use it to
+check logins or log every request without touching each page. In a LangChain agent, middleware sits between the agent loop and
+the model or the tools. A middleware can look at the state, change it, change the request sent to the model, retry a failed
+call, stop the run, or pause it for a human. You add it with <code>create_agent(..., middleware=[...])</code>; the agent's own
+code does not change.</p>
+</details>
+
+<p>Each middleware implements one or more <strong>hooks</strong>. There are two kinds. <em>Node-style</em> hooks run at a fixed
+point, receive <code>(state, runtime)</code>, and may return a dictionary of state updates (or <code>None</code> for "no change"). <em>Wrap-style</em> hooks receive the
+<code>request</code> plus a <code>handler</code> function that performs the real call; they decide whether to call it, how many times, and what
+to do with the result.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Hook</th><th>Kind</th><th>When it runs</th><th>Typical use</th></tr>
+<tr><td><code>before_agent</code></td><td>node</td><td>Once per <code>invoke</code>, before the loop starts.</td><td>Load data, check input once.</td></tr>
+<tr><td><code>before_model</code></td><td>node</td><td>Before every model call.</td><td>Trim or summarise history, redact PII, count calls.</td></tr>
+<tr><td><code>wrap_model_call</code></td><td>wrap</td><td>Around every model call.</td><td>Change the prompt, model or tool list for this call; retry; fall back to another model.</td></tr>
+<tr><td><code>after_model</code></td><td>node</td><td>After every model reply, before tools run.</td><td>Inspect tool calls, pause for approval, stop a loop.</td></tr>
+<tr><td><code>wrap_tool_call</code></td><td>wrap</td><td>Around every tool execution.</td><td>Retry a tool, catch its errors, block or edit a call.</td></tr>
+<tr><td><code>after_agent</code></td><td>node</td><td>Once, after the loop ends.</td><td>Log the outcome, clean up.</td></tr>
+</table></div>
+
+<p>Node-style hooks become real nodes in the graph. When we built an agent with a <code>@before_model</code> function named
+<code>x</code> and an <code>@after_agent</code> function named <code>y</code>, the node list became
+<code>['__start__', 'model', 'x.before_model', 'y.after_agent', '__end__']</code>. Wrap-style hooks add no node: they wrap the
+existing <code>model</code> and <code>tools</code> nodes from the inside. Every hook also has an async twin
+(<code>abefore_model</code>, <code>awrap_model_call</code>, …) used when you call <code>ainvoke</code>.</p>
+
+<h3>In which order do several middleware run?</h3>
+
+<p>The list order matters. We verified it with two tracing middleware, <code>middleware=[A, B]</code>, on a fake model that called one
+tool and then answered:</p>
+<ul>
+<li><code>before_agent</code> and <code>before_model</code> run <strong>in list order</strong>: A, then B.</li>
+<li>Wrap hooks <strong>nest</strong>: the first in the list is the outermost layer. A's <code>wrap_model_call</code> starts, calls
+B's, which calls the model; B finishes first, then A.</li>
+<li><code>after_model</code> and <code>after_agent</code> run in <strong>reverse</strong> order: B, then A. Think of layers of an
+onion: you leave through them in the opposite order you entered.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 500" role="img" aria-label="Order of hooks for middleware A then B: before hooks A then B, wrap hooks nested with A outside B, after hooks B then A, and the loop repeats while the model asks for tools">
+  <text class="label" x="20" y="44">before_agent</text>
+  <rect class="box" x="240" y="24" width="200" height="34" rx="8"/>
+  <text class="mono" x="340" y="46" text-anchor="middle">A.before_agent</text>
+  <path class="arrow" d="M 440,41 H 498"/>
+  <rect class="box" x="500" y="24" width="200" height="34" rx="8"/>
+  <text class="mono" x="600" y="46" text-anchor="middle">B.before_agent</text>
+  <text class="label" x="20" y="100">before_model</text>
+  <rect class="box" x="240" y="80" width="200" height="34" rx="8"/>
+  <text class="mono" x="340" y="102" text-anchor="middle">A.before_model</text>
+  <path class="arrow" d="M 440,97 H 498"/>
+  <rect class="box" x="500" y="80" width="200" height="34" rx="8"/>
+  <text class="mono" x="600" y="102" text-anchor="middle">B.before_model</text>
+  <text class="label" x="20" y="186">wrap_model_call</text>
+  <rect class="box2" x="240" y="134" width="460" height="96" rx="8"/>
+  <text class="small" x="252" y="150">A.wrap_model_call (outer)</text>
+  <rect class="box" x="256" y="158" width="428" height="62" rx="8"/>
+  <text class="small" x="268" y="176">B.wrap_model_call (inner)</text>
+  <rect class="box-solid" x="420" y="178" width="150" height="34" rx="8"/>
+  <text class="on-solid" x="495" y="200" text-anchor="middle">model call</text>
+  <text class="label" x="20" y="270">after_model</text>
+  <rect class="box" x="240" y="250" width="200" height="34" rx="8"/>
+  <text class="mono" x="340" y="272" text-anchor="middle">B.after_model</text>
+  <path class="arrow" d="M 440,267 H 498"/>
+  <rect class="box" x="500" y="250" width="200" height="34" rx="8"/>
+  <text class="mono" x="600" y="272" text-anchor="middle">A.after_model</text>
+  <text class="label" x="20" y="356">wrap_tool_call</text>
+  <rect class="box2" x="240" y="304" width="460" height="96" rx="8"/>
+  <text class="small" x="252" y="320">A.wrap_tool_call (outer)</text>
+  <rect class="box" x="256" y="328" width="428" height="62" rx="8"/>
+  <text class="small" x="268" y="346">B.wrap_tool_call (inner)</text>
+  <rect class="box-info" x="420" y="348" width="150" height="34" rx="8"/>
+  <text x="495" y="370" text-anchor="middle">tool runs</text>
+  <path class="arrow-accent dashed" d="M 700,352 H 740 V 97 H 704"/>
+  <text class="small accent" x="20" y="390">loop while the model asks for tools</text>
+  <text class="label" x="20" y="452">after_agent</text>
+  <rect class="box" x="240" y="432" width="200" height="34" rx="8"/>
+  <text class="mono" x="340" y="454" text-anchor="middle">B.after_agent</text>
+  <path class="arrow" d="M 440,449 H 498"/>
+  <rect class="box" x="500" y="432" width="200" height="34" rx="8"/>
+  <text class="mono" x="600" y="454" text-anchor="middle">A.after_agent</text>
+  <text class="small" x="380" y="490" text-anchor="middle">Order verified offline with middleware=[A, B] in langchain 1.4.5.</text>
+</svg>
+<figcaption>Time flows down. "before" hooks run A then B; wrap hooks nest with A outside; "after" hooks run B then A. <strong>Put the middleware that must see the original input first, and the one that must see the final, cleaned state last.</strong></figcaption>
+</figure>
+
+<p>Lab 15 shows why this matters. Its custom <code>log_calls</code> hook is first in the list and <code>PIIMiddleware</code> second.
+The real output: the log line printed <code>'My email is sam.okoro@example.com. Is item B006 available?'</code>, but the message the
+model saw was <code>'My email is [REDACTED_EMAIL]. Is item B006 available?'</code>. The logger ran before the redaction. If your logs
+must never contain an email, put the PII middleware before the logger.</p>
+
+<h2>The built-in middleware used in lab 15</h2>
+
+<p>Lab 15 builds one agent with four middleware:</p>
+<pre data-lang="py" data-tag="from lab 15"><code>middleware=[
+    log_calls,
+    PIIMiddleware("email", strategy="redact"),                    # emails never reach the model
+    ModelCallLimitMiddleware(run_limit=4, exit_behavior="end"),   # stop runaway loops
+    HumanInTheLoopMiddleware(interrupt_on={"place_hold": True}),  # a person approves every hold
+],</code></pre>
+
+<h3><code>PIIMiddleware</code>: personal data</h3>
+<p><a class="term" href="glossary.html#pii">PII</a> (personally identifiable information) is data that points to a real person: an
+email, a card number, an IP address. <code>PIIMiddleware(pii_type, strategy=...)</code> detects one type. Built-in types are
+<code>"email"</code>, <code>"credit_card"</code>, <code>"ip"</code>, <code>"mac_address"</code> and <code>"url"</code>; you can name your own
+type and pass a regex or a function as <code>detector</code>. Strategies: <code>"redact"</code> (replace with
+<code>[REDACTED_EMAIL]</code>), <code>"mask"</code> (keep the last characters), <code>"hash"</code> (a stable placeholder, so the same
+email always maps to the same token) and <code>"block"</code> (raise an error). By default it checks the user's input before each model
+call; <code>apply_to_output=True</code> and <code>apply_to_tool_results=True</code> extend it to the model's replies and to tool
+results. It replaces the text in the conversation state itself, which is why lab 15 can print the redacted message from
+<code>r["messages"][0]</code>.</p>
+
+<h3><code>ModelCallLimitMiddleware</code>: a budget for the loop</h3>
+<p>A confused model can call tools forever. <code>run_limit</code> caps model calls in one <code>invoke</code>;
+<code>thread_limit</code> caps them across the whole conversation (it needs a checkpointer to remember the count). When the limit is hit,
+<code>exit_behavior="end"</code> stops the run with an explanatory AI message, and <code>"error"</code> raises an exception instead.
+On a local model this also protects your machine: lab 02 showed what one runaway generation can do to an Ollama server.</p>
+
+<h3><code>HumanInTheLoopMiddleware</code>: approve, edit or reject</h3>
+<p>This is the <a class="term" href="glossary.html#human-in-the-loop">human-in-the-loop</a> pattern from
+<a href="13-hitl-time-travel-streaming.html">lab 13</a>, without writing <code>interrupt()</code> yourself.
+<code>interrupt_on={"place_hold": True}</code> means: after the model proposes a <code>place_hold</code> call, pause before it runs.
+The middleware works in <code>after_model</code>, so it sees the proposed tool calls before the tools node. The run returns with
+<code>"__interrupt__"</code>; its value lists the <code>action_requests</code> (tool name, arguments, and a description). Lab 15 printed
+<code>[('place_hold', {'item_id': 'B010', 'member_id': 'M-1002'})]</code>. You resume with one decision per paused call:</p>
+
+<pre data-lang="py" data-tag="illustrative · checked offline"><code>from langgraph.types import Command
+
+# approve: run the call as proposed
+Command(resume={"decisions": [{"type": "approve"}]})
+
+# edit: run a corrected call instead
+Command(resume={"decisions": [{"type": "edit",
+                               "edited_action": {"name": "place_hold",
+                                                 "args": {"member_id": "M-1002", "item_id": "B011"}}}]})
+
+# reject: do not run it, and tell the model why (what lab 15 does)
+Command(resume={"decisions": [{"type": "reject", "message": "Holds on B010 are paused this week."}]})</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Human in the loop: the model proposes place_hold, the middleware pauses the run, a person decides approve, edit or reject, and each decision leads to a different tool outcome">
+  <rect class="box-solid" x="14" y="104" width="150" height="56" rx="8"/>
+  <text class="on-solid" x="89" y="126" text-anchor="middle">model proposes</text>
+  <text class="on-solid" x="89" y="144" text-anchor="middle">place_hold(...)</text>
+  <path class="arrow" d="M 164,132 H 196"/>
+  <rect class="box-warn" x="198" y="104" width="160" height="56" rx="8"/>
+  <text x="278" y="126" text-anchor="middle">run pauses</text>
+  <text class="mono" x="278" y="144" text-anchor="middle">__interrupt__</text>
+  <path class="arrow" d="M 358,132 H 390"/>
+  <rect class="box" x="392" y="104" width="110" height="56" rx="8"/>
+  <text x="447" y="126" text-anchor="middle">a person</text>
+  <text x="447" y="144" text-anchor="middle">decides</text>
+  <path class="arrow-ok" d="M 502,120 V 44 H 536"/>
+  <path class="arrow" d="M 502,132 H 536"/>
+  <path class="arrow-bad" d="M 502,144 V 220 H 536"/>
+  <rect class="box-ok" x="538" y="18" width="210" height="52" rx="8"/>
+  <text x="643" y="40" text-anchor="middle">approve</text>
+  <text class="small" x="643" y="58" text-anchor="middle">tool runs as proposed</text>
+  <rect class="box-info" x="538" y="106" width="210" height="52" rx="8"/>
+  <text x="643" y="128" text-anchor="middle">edit</text>
+  <text class="small" x="643" y="146" text-anchor="middle">tool runs with new args</text>
+  <rect class="box-bad" x="538" y="194" width="210" height="52" rx="8"/>
+  <text x="643" y="216" text-anchor="middle">reject + message</text>
+  <text class="small" x="643" y="234" text-anchor="middle">tool skipped, model told why</text>
+</svg>
+<figcaption>The middleware pauses after the model's reply and before the tools node. <strong>Only a resume with a decision lets the run continue, so a hold is never placed without a person.</strong></figcaption>
+</figure>
+
+<p>After the reject in lab 15, the model received a tool message starting "User rejected the tool call for <code>place_hold</code> with
+reason: …" and answered the visitor that holds on B010 are paused this week. When the reviewer edits a call, the middleware adds a note
+to the tool result telling the model a person replaced its call, so the model does not try the original again. You can restrict
+which decisions are allowed per tool with an <code>InterruptOnConfig</code> dictionary, for example
+<code>{"place_hold": {"allowed_decisions": ["approve", "reject"]}}</code>. The installed version also knows a fourth decision,
+<code>"respond"</code>, where the person answers on behalf of the tool. Remember that pausing needs a checkpointer and a
+<code>thread_id</code>: the paused state has to be saved somewhere.</p>
+
+<h2>More ready-made middleware</h2>
+
+<p>The installed <code>langchain.agents.middleware</code> module ships more classes. The labs do not run them; the descriptions below
+come from their documentation and signatures in langchain 1.4.5, and every example call below builds an agent without error in our
+offline check. Check the official docs for current options before using them.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Middleware</th><th>What it does</th><th>Example</th></tr>
+<tr><td><code>SummarizationMiddleware</code></td><td>When the history passes a trigger (tokens, messages or a fraction of the <a class="term" href="glossary.html#context-window">context window</a>), a model summarises the older messages and the most recent ones are kept. Long-conversation memory without overflowing the model.</td><td><code>SummarizationMiddleware(model=get_model(), trigger=("tokens", 3000), keep=("messages", 10))</code></td></tr>
+<tr><td><code>ToolCallLimitMiddleware</code></td><td>Like the model call limit, but counts tool calls, for all tools or one <code>tool_name</code>. Default <code>exit_behavior="continue"</code> blocks the extra calls with an error message and lets the model carry on.</td><td><code>ToolCallLimitMiddleware(tool_name="place_hold", run_limit=1)</code></td></tr>
+<tr><td><code>ModelFallbackMiddleware</code></td><td>If the main model call fails, try other models in order.</td><td><code>ModelFallbackMiddleware(backup_model)</code></td></tr>
+<tr><td><code>ModelRetryMiddleware</code></td><td>Retry a failed model call with exponential backoff (<code>max_retries</code>, <code>backoff_factor</code>, <code>initial_delay</code>). <code>on_failure="continue"</code> turns the final error into an AI message; <code>"error"</code> raises.</td><td><code>ModelRetryMiddleware(max_retries=2)</code></td></tr>
+<tr><td><code>ToolRetryMiddleware</code></td><td>The same for tool calls, optionally only for some <code>tools</code>. With <code>on_failure="continue"</code> the model gets a tool message describing the error.</td><td><code>ToolRetryMiddleware(max_retries=2, tools=["search_catalog"])</code></td></tr>
+<tr><td><code>LLMToolSelectorMiddleware</code></td><td>Before the main call, asks a (possibly smaller) model which tools are relevant and sends only those. Helps when an agent has many tools.</td><td><code>LLMToolSelectorMiddleware(max_tools=3, always_include=["my_account"])</code></td></tr>
+<tr><td><code>ContextEditingMiddleware</code></td><td>When the input grows past a token threshold, clears older tool results (keeping the latest few) and leaves a placeholder.</td><td><code>ContextEditingMiddleware(edits=[ClearToolUsesEdit(trigger=4000, keep=3)])</code></td></tr>
+<tr><td><code>TodoListMiddleware</code></td><td>Gives the agent a <code>write_todos</code> tool and instructions to plan multi-step work as a to-do list kept in state.</td><td><code>TodoListMiddleware()</code></td></tr>
+</table></div>
+
+<p>The module also contains middleware for running shell commands, searching files, emulating tools with a model and more; those are
+beyond this guide.</p>
+
+<h2>Writing your own middleware</h2>
+
+<p>There are two ways to write one, and they produce the same kind of object.</p>
+
+<h3>A decorated function: one hook</h3>
+<p>For a single hook, decorate a function. Lab 15's logger is a <code>@before_model</code> function that returns <code>None</code>
+("no state change"). The decorators are <code>before_agent</code>, <code>before_model</code>, <code>after_model</code>,
+<code>after_agent</code>, <code>wrap_model_call</code>, <code>wrap_tool_call</code>, plus <code>dynamic_prompt</code>, a shortcut that
+builds the system prompt for each call. This example turns tool crashes into a message the model can read, and builds the prompt
+from the runtime context:</p>
+
+<pre data-lang="py" data-tag="illustrative · checked offline"><code>from langchain.agents.middleware import dynamic_prompt, wrap_tool_call
+from langchain_core.messages import ToolMessage
+
+
+@wrap_tool_call
+def friendly_errors(request, handler):
+    try:
+        return handler(request)  # run the real tool
+    except Exception as e:
+        return ToolMessage(f"Tool failed: {e}. Try another id.", tool_call_id=request.tool_call["id"])
+
+
+@dynamic_prompt
+def by_branch(request):
+    return f"You are the assistant of {request.runtime.context.branch}."</code></pre>
+
+<p><code>by_branch</code> assumes a context dataclass that has a <code>branch</code> field, passed with <code>context_schema</code>. A node-style
+hook can also return a dictionary such as <code>{"messages": [...]}</code> to update the state, and, when declared with
+<code>@before_model(can_jump_to=["end"])</code>, return <code>{"jump_to": "end"}</code> to stop the run early.</p>
+
+<h3>A class: several hooks and settings</h3>
+<p>When a middleware needs settings or more than one hook, subclass <code>AgentMiddleware</code> and override the hooks you need. This
+is the tracer we used to verify the order above (<code>name</code> must be unique per instance, because node names are built from it):</p>
+
+<pre data-lang="py" data-tag="illustrative · checked offline"><code>from langchain.agents.middleware import AgentMiddleware
+
+
+class Trace(AgentMiddleware):
+    def __init__(self, tag):
+        super().__init__()
+        self.tag = tag
+
+    @property
+    def name(self):
+        return "Trace" + self.tag
+
+    def before_model(self, state, runtime):
+        print(self.tag, "before_model,", len(state["messages"]), "messages")
+
+    def wrap_model_call(self, request, handler):
+        print(self.tag, "wrap_model_call: in")
+        response = handler(request)  # call the next layer, finally the model
+        print(self.tag, "wrap_model_call: out")
+        return response
+
+    def after_model(self, state, runtime):
+        print(self.tag, "after_model")
+
+
+agent = create_agent(model, tools, middleware=[Trace("A"), Trace("B")])</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Comparison of a decorated function middleware and a class middleware">
+  <rect class="zone" x="10" y="10" width="360" height="210" rx="8"/>
+  <text class="title" x="190" y="36" text-anchor="middle">Decorated function</text>
+  <rect class="box" x="30" y="50" width="320" height="30" rx="8"/>
+  <text class="mono" x="190" y="70" text-anchor="middle">@before_model</text>
+  <text x="40" y="106">one hook per function</text>
+  <text x="40" y="130">no settings of its own</text>
+  <text x="40" y="154">quick logging, small checks</text>
+  <text class="small" x="40" y="194">lab 15: log_calls</text>
+  <rect class="zone" x="390" y="10" width="360" height="210" rx="8"/>
+  <text class="title" x="570" y="36" text-anchor="middle">Subclass of AgentMiddleware</text>
+  <rect class="box" x="410" y="50" width="320" height="30" rx="8"/>
+  <text class="mono" x="570" y="70" text-anchor="middle">class Trace(AgentMiddleware)</text>
+  <text x="420" y="106">several hooks in one object</text>
+  <text x="420" y="130">settings in __init__</text>
+  <text x="420" y="154">reusable, configurable tools</text>
+  <text class="small" x="420" y="194">all built-ins are written this way</text>
+</svg>
+<figcaption>Both become an <code>AgentMiddleware</code> in the list. <strong>Start with a decorator; switch to a class when you need settings or more than one hook.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>Pitfalls and misconceptions</strong></p>
+<ul>
+<li><strong>"The system prompt protects private data."</strong> It does not. If a tool takes <code>member_id</code> as an argument, the
+model chooses it (lab 11). Put identity in runtime context and read it with <code>ToolRuntime</code>.</li>
+<li><strong>Assuming <code>structured_response</code> is always there.</strong> With the tool strategy, a model that answers in text leaves it
+<code>None</code> (lab 14, with both llama3.2 and gemma4). Check for <code>None</code>.</li>
+<li><strong>"It validated, so it is correct."</strong> With the provider strategy, both models skipped the tools and returned a valid
+<code>Availability</code> object with invented values ("Main Branch"). Validation checks the shape, never the facts.</li>
+<li><strong>Ignoring middleware order.</strong> A logger placed before <code>PIIMiddleware</code> logs the raw email (lab 15). "before" hooks run
+in list order, "after" hooks in reverse.</li>
+<li><strong>Human in the loop without a checkpointer.</strong> A pause must be saved to be resumed; pass a checkpointer and a
+<code>thread_id</code>, and resume on the same thread.</li>
+<li><strong>Forgetting <code>handler(request)</code> in a wrap hook.</strong> If you never call it, the model or tool never runs. Call it
+once (or several times, for retries) and return its result.</li>
+<li><strong>Two instances of the same custom class with the same <code>name</code>.</strong> Node names come from <code>name</code>; give each
+instance a distinct one.</li>
+<li><strong>Expecting middleware to make a weak model smart.</strong> Limits, retries and approvals make an agent safer and more predictable,
+not more accurate. Lab 14's wrong tool choice (llama3.2) came from the model, not the framework.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>create_agent</code> builds the same model ⇄ tools LangGraph loop you wrote by hand; the result is a compiled graph.</li>
+<li>Its main options: <code>model</code>, <code>tools</code>, <code>system_prompt</code>, <code>checkpointer</code>, <code>store</code>, <code>context_schema</code>, <code>response_format</code>, <code>middleware</code>.</li>
+<li>Runtime context carries facts the app knows (who is logged in); tools read it through <code>ToolRuntime</code>, and the model cannot see or set it.</li>
+<li><code>response_format</code> uses a tool strategy (an extra tool) or a provider strategy (forced JSON). In lab 14 the first gave <code>None</code> and the second skipped the tools and invented values, with both local models; a separate structured call after the agent is sturdier.</li>
+<li>Six hooks: <code>before_agent</code>, <code>before_model</code>, <code>wrap_model_call</code>, <code>after_model</code>, <code>wrap_tool_call</code>, <code>after_agent</code>. "Before" in list order, wraps nested, "after" reversed.</li>
+<li>Built-ins cover PII, call limits, human approval, summarisation, retries, fallbacks, tool selection, context editing and to-do lists.</li>
+<li>Write your own with a decorator (one hook) or an <code>AgentMiddleware</code> subclass (several hooks, settings).</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://docs.langchain.com/oss/python/langchain/agents">LangChain docs: Agents (create_agent)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/runtime">LangChain docs: Runtime and context</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/tools">LangChain docs: Tools (including ToolRuntime)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/structured-output">LangChain docs: Structured output</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/middleware/overview">LangChain docs: Middleware overview</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/middleware/built-in">LangChain docs: Built-in middleware</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/middleware/custom">LangChain docs: Custom middleware</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/human-in-the-loop">LangChain docs: Human-in-the-loop</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/guardrails">LangChain docs: Guardrails</a></li>
+<li><a href="https://reference.langchain.com/python/langchain/middleware">API reference: langchain.agents.middleware</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="langgraph-agents.html"><small>← Chapter 4</small>Agents with LangGraph</a>
+<a class="next" href="runnables-typing.html"><small>Chapter 6 →</small>Runnables, LCEL, typing and Pydantic</a>
+</nav>
+</main>
+</body>
+</html>

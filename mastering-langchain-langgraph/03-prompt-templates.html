@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 · Prompt templates</title>
+<meta name="description" content="Templates with variables, chat history and few-shot examples, piped into the model as a chain. Book chapter 5.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 03/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 03 of 16 · Hands-on lab</div>
+  <h1>Prompt templates</h1>
+  <p class="lead">Templates with variables, chat history and few-shot examples, piped into the model as a chain. Book chapter 5.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 5 · Prompt Templates</strong> of the book (Part II · Integrations and
+Utilities for LLMs in LangChain). This lab is our own hands-on exercise; it does not reproduce the book's examples.</div>
+
+<p class="lead">So far every prompt was a string typed straight into <code>invoke</code>. Real applications reuse the
+same instructions with different values: another branch, another language, another question. In this lab you build
+<a class="term" href="glossary.html#prompt-template">prompt templates</a> with variables, connect them to the model
+as a <a class="term" href="glossary.html#chain">chain</a>, slot a whole conversation into a prompt, and teach an
+output style with examples. You will also catch the model inventing facts twice.</p>
+
+<h2>Goal</h2>
+<ul>
+<li>Build a <code>ChatPromptTemplate</code> and see exactly which messages it produces with
+<code>format_messages</code>.</li>
+<li>Write your first chain, <code>prompt | model | StrOutputParser()</code>, and call it with a dictionary.</li>
+<li>Insert chat history with <code>MessagesPlaceholder</code> and examples with
+<code>FewShotChatMessagePromptTemplate</code>.</li>
+<li>Recognise a <a class="term" href="glossary.html#hallucination">hallucination</a> when the model has no data to go
+on.</li>
+</ul>
+
+<h2>The idea in brief</h2>
+<p>A prompt template is a recipe for a list of messages, with <code>{placeholders}</code> that you fill in at call
+time. Templates, models and parsers are all <a class="term" href="glossary.html#runnable">runnables</a>: objects with
+<code>invoke</code>, <code>stream</code> and <code>batch</code>. The <code>|</code> operator connects runnables so the
+output of one becomes the input of the next — that is <a class="term" href="glossary.html#lcel">LCEL</a>, which
+<a href="16-runnables-lcel.html">lab 16</a> explores in depth. The concept chapter
+<a href="chat-models-prompts.html">Chat models, structured output and prompts</a> (section "Prompt templates") covers
+partial variables and the other template types.</p>
+
+<h2>Actions</h2>
+<ol class="steps">
+<li>Open <code>labs/03_prompt_templates.py</code> in the <code>harbor-library-ai</code> project (setup in
+<a href="01-chat-models.html">lab 01</a>). Nothing to install.</li>
+<li>Read the code and the table. Part 1 never calls the model; parts 2–4 each call it once.</li>
+<li>With Ollama running, run <code>uv run python -m labs.03_prompt_templates</code>.</li>
+</ol>
+
+<pre data-file="labs/03_prompt_templates.py" data-lang="py" data-tag="complete file"><code>"""Lab 03: reusable prompts with variables, chat history and examples."""
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate, MessagesPlaceholder
+
+from harbor.config import get_model
+
+model = get_model()
+
+# 1. A template with variables. format_messages shows exactly what the model will receive.
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are the assistant of Harbor City Library's {branch}. Answer in {language}, in one sentence."),
+    ("human", "{question}"),
+])
+filled = prompt.format_messages(branch="Lighthouse Branch", language="French", question="When is story time?")
+for m in filled:
+    print(f"{m.type:&gt;6}: {m.content}")
+
+# 2. Prompt | model | parser: a chain. The parser turns the AIMessage into a plain string.
+chain = prompt | model | StrOutputParser()
+print("\n2) chain:", chain.invoke({"branch": "Central Library", "language": "English", "question": "Do you have a maker space?"}))
+
+# 3. MessagesPlaceholder: slot a whole conversation into the prompt.
+with_history = ChatPromptTemplate.from_messages([
+    ("system", "You are a friendly librarian. Use the conversation so far."),
+    MessagesPlaceholder("history"),
+    ("human", "{question}"),
+])
+history = [HumanMessage("My name is Lea and I love science fiction."), AIMessage("Nice to meet you, Lea!")]
+print("\n3) history:", (with_history | model | StrOutputParser()).invoke({"history": history, "question": "What's my name and favourite genre?"}))
+
+# 4. Few-shot: show the model examples of the exact output style you want.
+examples = [
+    {"title": "The Quiet Engine", "tag": "science fiction · adults · 2021"},
+    {"title": "The Little Crab Who Could", "tag": "children · picture book · 2020"},
+]
+few_shot = FewShotChatMessagePromptTemplate(
+    examples=examples,
+    example_prompt=ChatPromptTemplate.from_messages([("human", "{title}"), ("ai", "{tag}")]),
+)
+tagger = ChatPromptTemplate.from_messages([
+    ("system", "Reply with a short catalog tag in the same style as the examples, nothing else."),
+    few_shot,
+    ("human", "{title}"),
+]) | model | StrOutputParser()
+print("\n4) few-shot:", tagger.invoke({"title": "Tides of Harbor City: A History"}))</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 03: …"""</code></td><td>Docstring.</td></tr>
+<tr><td>2</td><td><code>from langchain_core.messages import AIMessage, HumanMessage</code></td><td>Message classes,
+used to write the sample conversation in part 3.</td></tr>
+<tr><td>3</td><td><code>from langchain_core.output_parsers import StrOutputParser</code></td><td>An
+<a class="term" href="glossary.html#output-parser">output parser</a> that takes an <code>AIMessage</code> and returns
+its text as a plain <code>str</code>.</td></tr>
+<tr><td>4</td><td><code>from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate,
+MessagesPlaceholder</code></td><td>The three template tools of this lab: the main chat template, the examples block,
+and the slot for a list of messages.</td></tr>
+<tr><td>6</td><td><code>from harbor.config import get_model</code></td><td>The shared model factory.</td></tr>
+<tr><td>8</td><td><code>model = get_model()</code></td><td>llama3.2 with our standard settings.</td></tr>
+<tr><td>11–14</td><td><code>ChatPromptTemplate.from_messages([("system", "…{branch}… {language}…"), ("human",
+"{question}")])</code></td><td>Builds a template from <code>(role, text)</code> pairs. Words in curly braces become
+input variables: <code>branch</code>, <code>language</code>, <code>question</code>. Nothing is sent to the model
+here.</td></tr>
+<tr><td>15</td><td><code>filled = prompt.format_messages(branch="Lighthouse Branch", language="French",
+question="When is story time?")</code></td><td>Fills the variables and returns the real list of message objects. The
+best way to debug a prompt: you see exactly what the model would get.</td></tr>
+<tr><td>16–17</td><td><code>for m in filled: print(f"{m.type:&gt;6}: {m.content}")</code></td><td>Prints each message.
+<code>m.type</code> is the role (<code>"system"</code>, <code>"human"</code>); <code>:&gt;6</code> in the f-string
+right-aligns it in 6 characters so the colons line up.</td></tr>
+<tr><td>20</td><td><code>chain = prompt | model | StrOutputParser()</code></td><td>A chain of three steps: the template
+turns a dict into messages, the model turns messages into an <code>AIMessage</code>, the parser turns that into a
+string.</td></tr>
+<tr><td>21</td><td><code>chain.invoke({"branch": "Central Library", "language": "English", "question": "Do you have a
+maker space?"})</code></td><td>A chain is called with <strong>one dictionary</strong> whose keys are the template's
+variables. The result is a <code>str</code>, so no <code>.content</code> is needed.</td></tr>
+<tr><td>24–28</td><td><code>with_history = ChatPromptTemplate.from_messages([…, MessagesPlaceholder("history"),
+…])</code></td><td>A template with a slot named <code>history</code>. At call time that slot is replaced by
+<em>a whole list of messages</em>, not by text.</td></tr>
+<tr><td>29</td><td><code>history = [HumanMessage("My name is Lea …"), AIMessage("Nice to meet you, Lea!")]</code></td>
+<td>A short earlier conversation, written by hand. In a real app it would come from memory (labs 11–12).</td></tr>
+<tr><td>30</td><td><code>(with_history | model | StrOutputParser()).invoke({"history": history, "question":
+…})</code></td><td>Builds the chain inline and calls it. The dict gives the list for <code>history</code> and the text
+for <code>question</code>.</td></tr>
+<tr><td>33–36</td><td><code>examples = [{"title": …, "tag": …}, …]</code></td><td>Two example input/output pairs: a
+book title and the catalog tag we would like for it.</td></tr>
+<tr><td>37–40</td><td><code>FewShotChatMessagePromptTemplate(examples=examples, example_prompt=…)</code></td><td>Turns
+each example into messages using <code>example_prompt</code>: the title as a human message, the tag as an AI message.
+Two examples give four messages.</td></tr>
+<tr><td>41–45</td><td><code>tagger = ChatPromptTemplate.from_messages([("system", …), few_shot, ("human",
+"{title}")]) | model | StrOutputParser()</code></td><td>The full prompt — instruction, the examples, then the new
+title — piped into the model and parser in one expression.</td></tr>
+<tr><td>46</td><td><code>tagger.invoke({"title": "Tides of Harbor City: A History"})</code></td><td>Asks for a tag for
+a real catalog item (B002 in <code>data/catalog.csv</code>).</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="format_messages fills the template: the system text with branch and language placeholders and the human question placeholder, plus the values Lighthouse Branch, French and When is story time, give a system message and a human message">
+  <rect x="20" y="20" width="300" height="100" rx="8" class="box2"/>
+  <text x="34" y="44" class="label">ChatPromptTemplate</text>
+  <text x="34" y="68" class="small mono">system: …Library's {branch}.</text>
+  <text x="34" y="84" class="small mono">        Answer in {language}, …</text>
+  <text x="34" y="106" class="small mono">human:  {question}</text>
+  <rect x="20" y="134" width="300" height="70" rx="8" class="box-info"/>
+  <text x="34" y="156" class="small mono">branch="Lighthouse Branch"</text>
+  <text x="34" y="174" class="small mono">language="French"</text>
+  <text x="34" y="192" class="small mono">question="When is story time?"</text>
+  <path class="arrow" d="M 320,70 H 350 V 106 H 368"/>
+  <path class="arrow" d="M 320,169 H 350 V 118 H 368"/>
+  <rect x="370" y="88" width="120" height="46" rx="8" class="box-solid"/>
+  <text x="430" y="116" text-anchor="middle" class="small mono on-solid">format_messages</text>
+  <path class="arrow" d="M 490,111 H 518"/>
+  <rect x="520" y="40" width="220" height="142" rx="8" class="box-ok"/>
+  <text x="534" y="64" class="label">SystemMessage</text>
+  <text x="534" y="84" class="small">"… Library's Lighthouse Branch.</text>
+  <text x="534" y="100" class="small">Answer in French, in one</text>
+  <text x="534" y="116" class="small">sentence."</text>
+  <text x="534" y="146" class="label">HumanMessage</text>
+  <text x="534" y="166" class="small">"When is story time?"</text>
+</svg>
+<figcaption>Part 1, with the real filled text. <strong>A template is a function from values to messages</strong>; the
+model is not involved yet.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="The chain prompt pipe model pipe StrOutputParser: a dict goes into the prompt, which produces messages, the model produces an AIMessage, and the parser produces a plain string">
+  <rect x="20" y="50" width="110" height="50" rx="8" class="box2"/>
+  <text x="75" y="80" text-anchor="middle" class="mono">dict</text>
+  <path class="arrow" d="M 130,75 H 158"/>
+  <rect x="160" y="50" width="120" height="50" rx="8" class="box-info"/>
+  <text x="220" y="80" text-anchor="middle" class="mono">prompt</text>
+  <path class="arrow" d="M 280,75 H 318"/>
+  <text x="299" y="40" text-anchor="middle" class="small">messages</text>
+  <rect x="320" y="50" width="120" height="50" rx="8" class="box-solid"/>
+  <text x="380" y="80" text-anchor="middle" class="mono on-solid">model</text>
+  <path class="arrow" d="M 440,75 H 478"/>
+  <text x="459" y="40" text-anchor="middle" class="small">AIMessage</text>
+  <rect x="480" y="50" width="160" height="50" rx="8" class="box-info"/>
+  <text x="560" y="80" text-anchor="middle" class="mono">StrOutputParser</text>
+  <path class="arrow" d="M 640,75 H 668"/>
+  <rect x="670" y="50" width="70" height="50" rx="8" class="box-ok"/>
+  <text x="705" y="80" text-anchor="middle" class="mono">str</text>
+  <text x="380" y="140" text-anchor="middle" class="small">chain = prompt | model | StrOutputParser()   →   chain.invoke({"branch": …, "language": …, "question": …})</text>
+</svg>
+<figcaption>Each <code>|</code> passes one step's output to the next. <strong>The chain's input is the first step's
+input (a dict); its output is the last step's output (a string).</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to the <code>|</code> pipe? Why it works on LangChain objects</summary>
+<p>In plain Python <code>|</code> means "bitwise or". LangChain classes redefine it (with the <code>__or__</code>
+method) so that <code>a | b</code> builds a new runnable that calls <code>a</code>, then feeds the result to
+<code>b</code>. The chain is itself a runnable, so it has <code>invoke</code>, <code>stream</code> and
+<code>batch</code> too, and you can pipe it into more steps. Nothing runs when you write the chain; only when you call
+it.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="MessagesPlaceholder: the history slot between the system message and the question is replaced by the two earlier messages, a human message from Lea and an AI greeting, so the model can answer with her name and genre">
+  <text x="20" y="26" class="title">What the model receives in part 3</text>
+  <rect x="20" y="40" width="440" height="32" rx="6" class="box-info"/>
+  <text x="32" y="61" class="small">system · "You are a friendly librarian. Use the conversation so far."</text>
+  <rect x="20" y="80" width="440" height="80" rx="8" class="zone"/>
+  <text x="32" y="98" class="small accent">MessagesPlaceholder("history") becomes:</text>
+  <rect x="34" y="106" width="412" height="22" rx="6" class="box2"/>
+  <text x="44" y="122" class="small">human · "My name is Lea and I love science fiction."</text>
+  <rect x="34" y="132" width="412" height="22" rx="6" class="box2"/>
+  <text x="44" y="148" class="small">ai · "Nice to meet you, Lea!"</text>
+  <rect x="20" y="168" width="440" height="32" rx="6" class="box2"/>
+  <text x="32" y="189" class="small">human · "What's my name and favourite genre?"</text>
+  <path class="arrow" d="M 460,140 H 498"/>
+  <rect x="500" y="110" width="240" height="60" rx="8" class="box-ok"/>
+  <text x="512" y="134" class="small">"Your name is Lea, and your</text>
+  <text x="512" y="152" class="small">favourite genre is science fiction!"</text>
+  <text x="20" y="226" class="small">The model has no memory of its own: it knows Lea only because the history is inside this prompt.</text>
+</svg>
+<figcaption>Part 3 with the real answer. <strong>"Memory" in a chat app means re-sending earlier messages</strong>; a
+placeholder is where they go. <a href="11-checkpointers.html">Lab 11</a> stores them automatically.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to few-shot prompting? Teaching by example</summary>
+<p>Instead of describing the output format in words, you show the model a few finished examples ("shots") as if it had
+already answered them. Models copy patterns very well, so the style, length and separators of your examples tend to
+appear in the answer. That is <a class="term" href="glossary.html#few-shot">few-shot</a> prompting. What examples
+cannot do is give the model facts it doesn't have — as part 4 shows.</p>
+</details>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="terminal"><code>uv run python -m labs.03_prompt_templates</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>system: You are the assistant of Harbor City Library's Lighthouse Branch. Answer in French, in one sentence.
+ human: When is story time?
+
+2) chain: Yes, we have a well-equipped makerspace called the "Innovation Studio" where patrons can access a variety of tools and technologies, including 3D printers, laser cutters, and sewing machines, to support their creative projects and learning endeavors.
+
+3) history: Your name is Lea, and your favourite genre is science fiction!
+
+4) few-shot: historical fiction · adults · 2019</code></pre>
+
+<h3>Reading the output</h3>
+<p><strong>Lines 1–2</strong> are the filled template from part 1: the variables are replaced, and nothing else. The
+model never saw them, so there is no French answer — that is expected.</p>
+
+<p><strong>Line 4 is a hallucination.</strong> The chain answered confidently that Central Library has "a
+well-equipped makerspace called the "Innovation Studio"". Our data (<code>data/policies/rooms.md</code>) does describe a
+maker space at the Central Library, with two 3D printers, a laser cutter and sewing machines — but it has no name, and
+the model never saw that file. Nothing in this prompt contains library data, so the model filled the gap with a
+plausible-sounding answer. The equipment list sounds right only because maker spaces usually have such machines; the
+name is invented, and the rules that matter (the free safety session before using the laser cutter, 0.05 EUR per gram
+of 3D printing) are missing. The cure is to put the real policy text into the prompt: that is
+<a class="term" href="glossary.html#rag">retrieval-augmented generation</a>, built in
+<a href="07-retrievers.html">lab 07</a>.</p>
+
+<p><strong>Line 6</strong> is correct: the name and genre came from the history placeholder.</p>
+
+<p><strong>Line 8 copies the style but invents the facts.</strong> The tag
+<code>historical fiction · adults · 2019</code> follows the examples' "words · words · year" pattern perfectly. But
+<code>data/catalog.csv</code> says item B002, "Tides of Harbor City: A History" by Jonas Field, is <strong>local
+history</strong> (not fiction) from <strong>2008</strong> (not 2019). The model only saw the title; the genre and year
+are guesses.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Two hallucinations compared with the project data: the chain invented a maker space called Innovation Studio while rooms.md describes an unnamed maker space with a safety session; the few-shot tagger answered historical fiction 2019 while catalog.csv says local history 2008">
+  <text x="20" y="26" class="label">the model said</text>
+  <text x="400" y="26" class="label">our data says</text>
+  <rect x="20" y="40" width="340" height="80" rx="8" class="box-bad"/>
+  <text x="34" y="64" class="small">Part 2 · chain</text>
+  <text x="34" y="86" class="small">a makerspace called</text>
+  <text x="34" y="104" class="small">the "Innovation Studio"</text>
+  <path class="arrow-bad" d="M 360,80 H 398"/>
+  <rect x="400" y="40" width="340" height="80" rx="8" class="box-ok"/>
+  <text x="414" y="64" class="small mono">data/policies/rooms.md</text>
+  <text x="414" y="86" class="small">"The maker space at the Central Library" —</text>
+  <text x="414" y="104" class="small">no name; safety session for the laser cutter</text>
+  <rect x="20" y="136" width="340" height="80" rx="8" class="box-bad"/>
+  <text x="34" y="160" class="small">Part 4 · few-shot</text>
+  <text x="34" y="182" class="small mono">historical fiction · adults · 2019</text>
+  <path class="arrow-bad" d="M 360,176 H 398"/>
+  <rect x="400" y="136" width="340" height="80" rx="8" class="box-ok"/>
+  <text x="414" y="160" class="small mono">data/catalog.csv · B002</text>
+  <text x="414" y="182" class="small">Jonas Field · 2008</text>
+  <text x="414" y="200" class="small">genre: local history</text>
+</svg>
+<figcaption>Real answers against our real files. <strong>Templates shape how the model talks, not what it knows: if a
+fact isn't in the prompt, a small model will often make one up.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The message sequence built by the few-shot template: a system instruction, two example pairs of human title and AI tag, then the new title, followed by the model's tag">
+  <rect x="20" y="16" width="520" height="26" rx="6" class="box-info"/>
+  <text x="32" y="34" class="small">system · "Reply with a short catalog tag in the same style as the examples …"</text>
+  <rect x="20" y="50" width="520" height="104" rx="8" class="zone"/>
+  <text x="552" y="106" class="small accent">few_shot:</text>
+  <text x="552" y="122" class="small accent">2 examples →</text>
+  <text x="552" y="138" class="small accent">4 messages</text>
+  <rect x="32" y="58" width="240" height="20" rx="6" class="box2"/>
+  <text x="42" y="73" class="small">human · "The Quiet Engine"</text>
+  <rect x="290" y="80" width="240" height="20" rx="6" class="box-ok"/>
+  <text x="300" y="95" class="small">ai · "science fiction · adults · 2021"</text>
+  <rect x="32" y="104" width="240" height="20" rx="6" class="box2"/>
+  <text x="42" y="119" class="small">human · "The Little Crab Who Could"</text>
+  <rect x="290" y="126" width="240" height="20" rx="6" class="box-ok"/>
+  <text x="300" y="141" class="small">ai · "children · picture book · 2020"</text>
+  <rect x="20" y="164" width="252" height="26" rx="6" class="box2"/>
+  <text x="32" y="182" class="small">human · "Tides of Harbor City: A History"</text>
+  <path class="arrow" d="M 272,177 H 300 V 210 H 318"/>
+  <rect x="320" y="198" width="220" height="26" rx="6" class="box-warn"/>
+  <text x="330" y="216" class="small">"historical fiction · adults · 2019"</text>
+  <text x="552" y="216" class="small">the model's reply</text>
+</svg>
+<figcaption>The examples look like an earlier conversation, so the model continues the pattern. <strong>The format came
+out right; the content was guessed.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> First the two filled messages (identical to ours —
+part 1 doesn't involve the model). Then three model answers. Yours will be worded differently and may or may not
+invent a name for the maker space, but expect: a confident answer to the maker-space question, a correct "Lea /
+science fiction" answer, and a tag of the form <code>… · … · year</code>.</div>
+
+<div class="callout warn"><strong>Common mistakes.</strong>
+<ul>
+<li><strong>A missing variable</strong> → <code>format_messages</code> without <code>question=…</code> raises
+<code>KeyError: 'question'</code>; a chain called without a key raises <code>KeyError: "Input to ChatPromptTemplate is
+missing variables {'history'}. …"</code>. Check <code>prompt.input_variables</code> to see what a template needs.</li>
+<li><strong>Calling a chain with a string</strong> → a template with several variables needs a dict:
+<code>chain.invoke({"branch": …, "language": …, "question": …})</code>.</li>
+<li><strong>Literal curly braces</strong> → text such as <code>{"title": …}</code> inside a template is read as a
+variable. Double the braces (<code>{{</code> and <code>}}</code>) to mean real braces.</li>
+<li><strong>Passing text to a placeholder</strong> → <code>MessagesPlaceholder("history")</code> expects a list of
+messages, not one long string.</li>
+<li><strong>Adding <code>.content</code> after a chain that ends in <code>StrOutputParser</code></strong> → the result
+is already a <code>str</code>: <code>AttributeError: 'str' object has no attribute 'content'</code>.</li>
+<li><strong>Trusting fluent answers</strong> → part 2 and part 4 sound sure of themselves and are partly invented.
+Without data in the prompt, check every fact.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Inspect the variables.</strong> Add <code>print(prompt.input_variables, with_history.input_variables)</code>
+at the end. You get <code>['branch', 'language', 'question']</code> and <code>['history', 'question']</code>.</li>
+<li><strong>Break it on purpose.</strong> In line 15 remove <code>question="When is story time?"</code> and run: the lab
+stops with <code>KeyError: 'question'</code> before any model call. Put it back.</li>
+<li><strong>Take the memory away.</strong> In line 30 pass <code>"history": []</code>. The model can no longer know
+Lea's name; it typically says it doesn't know or asks you.</li>
+<li><strong>Give the facts.</strong> In line 46 use the title
+<code>"Tides of Harbor City: A History (local history, 2008)"</code>. With the facts in the prompt, the tag uses them —
+a tiny preview of what retrieval will do in <a href="07-retrievers.html">lab 07</a>.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><code>ChatPromptTemplate.from_messages([(role, text), …])</code> makes a reusable prompt; <code>{name}</code> marks
+a variable; <code>format_messages(…)</code> shows the result without calling the model.</li>
+<li><code>prompt | model | StrOutputParser()</code> is a chain: dict in, string out.</li>
+<li><code>MessagesPlaceholder("history")</code> inserts a list of messages — that is how chat history reaches the
+model.</li>
+<li><code>FewShotChatMessagePromptTemplate</code> turns examples into fake earlier turns; the model copies their
+style.</li>
+<li>Templates control the form, not the facts: without retrieval llama3.2 invented the "Innovation Studio" and a 2019
+date (the catalog says 2008).</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="02-structured-output.html"><small>← Previous · Step 02</small>Structured output</a>
+<a class="next" href="04-document-loaders.html"><small>Next · Step 04 →</small>Document loaders</a>
+</nav>
+</main>
+</body>
+</html>

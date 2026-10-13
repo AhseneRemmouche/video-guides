@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 6 · Runnables, LCEL, typing and Pydantic</title>
+<meta name="description" content="The Runnable interface behind every chain, composition, and the Python typing and Pydantic it relies on. Read with book Part VI (chapters 17-18).">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 6/6</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 6 of 6</div>
+  <h1>Runnables, LCEL, typing and Pydantic</h1>
+  <p class="lead">The Runnable interface behind every chain, composition, and the Python typing and Pydantic it relies on. Read with book Part VI (chapters 17-18).</p>
+</section>
+<div class="callout">Read with <strong>Part VI · Appendixes (chapters 17–18)</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>Every lab in this guide used two kinds of plumbing without stopping to look at it. The first is LangChain's
+<a class="term" href="glossary.html#runnable">Runnable</a> interface: the reason a prompt, a model, a parser, a
+<a class="term" href="glossary.html#retriever">retriever</a> and even a compiled LangGraph graph all have <code>invoke</code>,
+<code>batch</code> and <code>stream</code>, and the reason you can join them with <code>|</code>. The second is Python's typing
+system and the <a class="term" href="glossary.html#pydantic">Pydantic</a> library, which describe the <em>shape</em> of the data
+flowing through all that plumbing: what a tool accepts, what the graph's <a class="term" href="glossary.html#state">state</a> holds,
+what structured output must look like.</p>
+
+<p>This chapter takes both apart. It follows <a href="16-runnables-lcel.html">lab 16</a>, which rebuilds the pieces one by one, and
+points back to the code you already ran.</p>
+
+<div class="callout ok"><p><strong>Why this matters for your project.</strong> When a chain breaks, the error is almost always about
+shape: a prompt that expected <code>{context}</code> got a string, a tool argument had the wrong type, a model's JSON failed
+validation. Knowing what each Runnable takes and returns, and how type hints and Pydantic models become the
+<a class="term" href="glossary.html#json-schema">JSON schemas</a> a model sees, turns those errors from mysteries into one-line fixes.</p></div>
+
+<h2>The Runnable interface: one shape for every component</h2>
+
+<p>A Runnable is any object that takes one input and produces one output through a fixed set of methods. LangChain's prompt
+templates, chat models, <a class="term" href="glossary.html#output-parser">output parsers</a>, retrievers and tools are Runnables. So
+is any function you wrap in <code>RunnableLambda</code>, and so is a compiled LangGraph graph (we checked: the lab 11–13 agent graph
+passes <code>isinstance(graph, Runnable)</code>). Because they share one interface, you learn the methods once.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Method</th><th>What it does</th><th>Seen in</th></tr>
+<tr><td><code>invoke(input)</code></td><td>Run once, return the output.</td><td>Every lab.</td></tr>
+<tr><td><code>batch([in1, in2, ...])</code></td><td>Run on many inputs (in parallel threads by default), return a list of outputs in the same order.</td><td>Labs 01 and 16 (<code>count.batch(["a", "abc", "hello"])</code> gave <code>[1, 3, 5]</code>).</td></tr>
+<tr><td><code>stream(input)</code></td><td>Yield the output in pieces as they are produced. For a model, the pieces are tokens.</td><td>Labs 01 and 13 (<a class="term" href="glossary.html#streaming">streaming</a>).</td></tr>
+<tr><td><code>ainvoke</code>, <code>abatch</code>, <code>astream</code></td><td>The <a class="term" href="glossary.html#async">async</a> versions, used with <code>await</code> inside async code (web servers, MCP clients).</td><td>Lab 10 (MCP is async).</td></tr>
+<tr><td><code>astream_events</code></td><td>An async stream of detailed events from every inner step (start, chunk, end), for building UIs.</td><td>Not used.</td></tr>
+<tr><td><code>batch_as_completed</code></td><td>Like <code>batch</code>, but yields each result as soon as it is ready, with its index.</td><td>Not used.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Six different LangChain components all expose the same Runnable methods invoke, batch, stream and their async versions">
+  <rect class="box" x="14" y="14" width="112" height="44" rx="8"/>
+  <text x="70" y="41" text-anchor="middle">prompt</text>
+  <rect class="box" x="138" y="14" width="112" height="44" rx="8"/>
+  <text x="194" y="41" text-anchor="middle">chat model</text>
+  <rect class="box" x="262" y="14" width="112" height="44" rx="8"/>
+  <text x="318" y="41" text-anchor="middle">parser</text>
+  <rect class="box" x="386" y="14" width="112" height="44" rx="8"/>
+  <text x="442" y="41" text-anchor="middle">retriever</text>
+  <rect class="box" x="510" y="14" width="112" height="44" rx="8"/>
+  <text x="566" y="41" text-anchor="middle">your function</text>
+  <rect class="box" x="634" y="14" width="112" height="44" rx="8"/>
+  <text x="690" y="41" text-anchor="middle">graph</text>
+  <path class="arrow" d="M 70,58 V 96"/>
+  <path class="arrow" d="M 194,58 V 96"/>
+  <path class="arrow" d="M 318,58 V 96"/>
+  <path class="arrow" d="M 442,58 V 96"/>
+  <path class="arrow" d="M 566,58 V 96"/>
+  <path class="arrow" d="M 690,58 V 96"/>
+  <rect class="box-solid" x="14" y="98" width="732" height="50" rx="8"/>
+  <text class="on-solid" x="380" y="120" text-anchor="middle">Runnable interface</text>
+  <text class="on-solid" x="380" y="138" text-anchor="middle">invoke · batch · stream · ainvoke · abatch · astream</text>
+  <rect class="box-info" x="14" y="170" width="356" height="62" rx="8"/>
+  <text x="192" y="196" text-anchor="middle">same methods everywhere</text>
+  <text class="small" x="192" y="216" text-anchor="middle">learn them once, use them on any component</text>
+  <rect class="box-info" x="390" y="170" width="356" height="62" rx="8"/>
+  <text x="568" y="196" text-anchor="middle">composable with |</text>
+  <text class="small" x="568" y="216" text-anchor="middle">the output of one becomes the input of the next</text>
+</svg>
+<figcaption>"your function" means a function wrapped in <code>RunnableLambda</code>; "graph" means a compiled LangGraph graph. <strong>One interface is what makes LangChain pieces snap together.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to async? What <code>ainvoke</code> and <code>await</code> are for</summary>
+<p>Most of the time a program calling a model is <em>waiting</em>: for the network, for Ollama to generate tokens. Normal
+("synchronous") code blocks during that wait. Async code, written with <code>async def</code> and <code>await</code>, lets one
+Python process start many waits at once and continue whichever finishes first. That is how a web server answers many visitors
+with one process. You only need the <code>a</code>-methods when you are already inside async code; in a plain script,
+<code>invoke</code> is simpler. Running an async function from a script needs <code>asyncio.run(...)</code>, as
+<a href="10-mcp.html">lab 10</a> does for the MCP client.</p>
+</details>
+
+<h2>Composition with <code>|</code>: RunnableSequence</h2>
+
+<p><a class="term" href="glossary.html#lcel">LCEL</a> (LangChain Expression Language) is not a separate language. It is the
+<code>|</code> operator on Runnables. <code>a | b</code> builds a <code>RunnableSequence</code>: invoking it invokes <code>a</code>,
+then passes <code>a</code>'s output to <code>b</code>. Lab 16 shows it with two tiny functions:</p>
+
+<pre data-lang="py" data-tag="from lab 16"><code>shout = RunnableLambda(lambda text: text.upper())
+count = RunnableLambda(len)
+chain = shout | count
+chain.invoke("library")   # the real output printed: RunnableSequence -&gt; 7</code></pre>
+
+<p>The <a class="term" href="glossary.html#chain">chain</a> from <a href="03-prompt-templates.html">lab 03</a>,
+<code>prompt | model | StrOutputParser()</code>, is exactly the same thing with three bigger pieces. The trick to reading any chain
+is to know the type that travels along each arrow:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Types flowing through prompt, model and parser: a dict becomes a ChatPromptValue, then an AIMessage, then a string">
+  <rect class="box2" x="10" y="70" width="110" height="50" rx="8"/>
+  <text x="65" y="92" text-anchor="middle">dict</text>
+  <text class="small" x="65" y="110" text-anchor="middle">{"question": ...}</text>
+  <path class="arrow" d="M 120,95 H 150"/>
+  <rect class="box-solid" x="152" y="70" width="110" height="50" rx="8"/>
+  <text class="on-solid" x="207" y="100" text-anchor="middle">prompt</text>
+  <path class="arrow" d="M 262,95 H 292"/>
+  <rect class="box2" x="294" y="70" width="140" height="50" rx="8"/>
+  <text class="mono" x="364" y="100" text-anchor="middle">ChatPromptValue</text>
+  <path class="arrow" d="M 434,95 H 452"/>
+  <rect class="box-solid" x="454" y="70" width="90" height="50" rx="8"/>
+  <text class="on-solid" x="499" y="100" text-anchor="middle">model</text>
+  <path class="arrow" d="M 544,95 H 562"/>
+  <rect class="box2" x="564" y="70" width="90" height="50" rx="8"/>
+  <text class="mono" x="609" y="100" text-anchor="middle">AIMessage</text>
+  <path class="arrow" d="M 654,95 H 672"/>
+  <rect class="box-ok" x="674" y="70" width="76" height="50" rx="8"/>
+  <text x="712" y="92" text-anchor="middle">parser</text>
+  <text class="small" x="712" y="110" text-anchor="middle">→ str</text>
+  <text class="small" x="380" y="30" text-anchor="middle">prompt | model | StrOutputParser()   (lab 03)</text>
+  <text class="small" x="380" y="160" text-anchor="middle">dark boxes are Runnables; light boxes are the values passed between them</text>
+  <text class="small" x="380" y="180" text-anchor="middle">a mismatch (e.g. a str where the prompt expects a dict) is the most common chain error</text>
+</svg>
+<figcaption>Each step's output type must be what the next step accepts. <strong>Read a chain by writing down the type on every arrow.</strong></figcaption>
+</figure>
+
+<p>Two details are worth knowing. First, plain Python values on either side of <code>|</code> are converted for you: a function
+becomes a <code>RunnableLambda</code> and a dictionary becomes a <code>RunnableParallel</code> (next section), as long as one side is
+already a Runnable. That is why <code>retriever | format_docs</code> works in lab 07 and lab 16 even though <code>format_docs</code> is a
+normal function. Second, streaming flows through a sequence only as far as each step can stream. A model and a
+<code>StrOutputParser</code> pass tokens along; a plain function waits for its whole input. On our two-lambda chain,
+<code>list(chain.stream("abc"))</code> gives a single chunk, <code>[3]</code>.</p>
+
+<h2>Dicts, RunnableParallel, RunnablePassthrough and <code>.assign</code></h2>
+
+<p>A <code>RunnableParallel</code> runs several Runnables on the <em>same</em> input and returns a dict of their outputs. You write it
+either as <code>RunnableParallel(upper=shout, length=count)</code> or as a plain dict inside a chain. Lab 16 printed
+<code>{'upper': 'HARBOR', 'length': 6}</code> for the input <code>"harbor"</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="RunnableParallel sends the same input harbor to two branches, upper and length, and collects their outputs in a dict">
+  <rect class="box2" x="14" y="70" width="120" height="44" rx="8"/>
+  <text class="mono" x="74" y="97" text-anchor="middle">"harbor"</text>
+  <path class="arrow" d="M 134,86 H 170 V 42 H 238"/>
+  <path class="arrow" d="M 134,98 H 170 V 142 H 238"/>
+  <rect class="box-solid" x="240" y="20" width="200" height="44" rx="8"/>
+  <text class="on-solid" x="340" y="47" text-anchor="middle">upper = shout</text>
+  <rect class="box-solid" x="240" y="120" width="200" height="44" rx="8"/>
+  <text class="on-solid" x="340" y="147" text-anchor="middle">length = count</text>
+  <path class="arrow" d="M 440,42 H 480 V 86 H 506"/>
+  <path class="arrow" d="M 440,142 H 480 V 98 H 506"/>
+  <rect class="box-ok" x="508" y="70" width="240" height="44" rx="8"/>
+  <text class="mono" x="628" y="97" text-anchor="middle">{'upper': 'HARBOR', 'length': 6}</text>
+  <text class="small" x="340" y="92" text-anchor="middle">same input to every branch</text>
+</svg>
+<figcaption>Real lab 16 output. <strong>A dict in a chain means "run each value on the same input, collect results under these keys".</strong></figcaption>
+</figure>
+
+<p>Two helpers make dicts easy to build:</p>
+<ul>
+<li><code>RunnablePassthrough()</code> returns its input unchanged. In a parallel step it means "also keep the original input under
+this key". Lab 07's RAG chain uses it so the question reaches the prompt next to the retrieved context:
+<code>{"context": hybrid | format_docs, "question": RunnablePassthrough()} | prompt | ...</code>.</li>
+<li><code>RunnablePassthrough.assign(key=runnable)</code> takes a dict, computes one new key from it, and returns the dict with the new
+key <em>added</em>. Lab 16 printed <code>{'text': 'open on Sunday', 'words': 3}</code>: the original key kept, <code>words</code> added.</li>
+</ul>
+
+<p>Lab 16 combines both into a RAG chain that keeps its intermediate values, which a plain <code>prompt | model | parser</code> chain
+throws away:</p>
+
+<pre data-lang="py" data-tag="from lab 16"><code>rag = (
+    RunnableParallel(context=retriever | format_docs, question=RunnablePassthrough())
+    | RunnablePassthrough.assign(answer=prompt | get_model() | StrOutputParser())
+)
+result: Answer = rag.invoke("How much does 3D printing cost?")</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Lab 16 RAG chain: the question goes to a parallel step that builds context and keeps the question, then assign adds an answer key, giving a dict with context, question and answer">
+  <rect class="box2" x="10" y="96" width="130" height="50" rx="8"/>
+  <text x="75" y="117" text-anchor="middle">question</text>
+  <text class="small" x="75" y="135" text-anchor="middle">a plain str</text>
+  <path class="arrow" d="M 140,121 H 160"/>
+  <rect class="zone" x="162" y="20" width="250" height="200" rx="8"/>
+  <text class="label" x="287" y="40" text-anchor="middle">RunnableParallel</text>
+  <rect class="box-solid" x="176" y="54" width="222" height="56" rx="8"/>
+  <text class="on-solid" x="287" y="77" text-anchor="middle">context =</text>
+  <text class="on-solid" x="287" y="95" text-anchor="middle">retriever | format_docs</text>
+  <rect class="box-solid" x="176" y="136" width="222" height="56" rx="8"/>
+  <text class="on-solid" x="287" y="159" text-anchor="middle">question =</text>
+  <text class="on-solid" x="287" y="177" text-anchor="middle">RunnablePassthrough()</text>
+  <path class="arrow" d="M 412,121 H 432"/>
+  <rect class="box-info" x="434" y="86" width="140" height="70" rx="8"/>
+  <text x="504" y="108" text-anchor="middle">.assign(</text>
+  <text x="504" y="126" text-anchor="middle">answer=prompt</text>
+  <text x="504" y="144" text-anchor="middle">| model | parser)</text>
+  <path class="arrow" d="M 574,121 H 594"/>
+  <rect class="box-ok" x="596" y="70" width="154" height="102" rx="8"/>
+  <text class="mono" x="673" y="98" text-anchor="middle">context</text>
+  <text class="mono" x="673" y="122" text-anchor="middle">question</text>
+  <text class="mono" x="673" y="146" text-anchor="middle">answer</text>
+  <text class="small" x="380" y="242" text-anchor="middle">Real answer: "3D printing costs 0.05 EUR per gram of material." (rooms.md was the first context chunk)</text>
+</svg>
+<figcaption>The parallel step turns a string into a dict; <code>.assign</code> adds a key without dropping the others. <strong>Keeping the context lets you show sources or evaluate retrieval next to the answer.</strong></figcaption>
+</figure>
+
+<h2>RunnableLambda: any function as a Runnable</h2>
+
+<p><code>RunnableLambda(fn)</code> wraps a function that takes <strong>one</strong> argument. If you need several values, pass a dict and
+read its keys, as the <code>.assign</code> example does with <code>lambda d: len(d["text"].split())</code>. Wrapping gives the
+function every Runnable method for free: lab 16 calls <code>count.batch(...)</code> on <code>len</code>. Use it for small glue steps
+(formatting documents, picking a key, cleaning text). If the function grows into real logic with branches and loops, that is a sign
+the work belongs in a LangGraph <a class="term" href="glossary.html#node">node</a> instead.</p>
+
+<h2>Config: tags, names, callbacks and concurrency</h2>
+
+<p>Every Runnable method takes an optional second argument, <code>config</code>, a dictionary (typed as <code>RunnableConfig</code>)
+that travels to every inner step. You have used it since lab 11 without the name: <code>{"configurable": {"thread_id": "sam"}}</code>
+is a config.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Key</th><th>What it is for</th></tr>
+<tr><td><code>configurable</code></td><td>Values read by components at run time, such as LangGraph's <code>thread_id</code>.</td></tr>
+<tr><td><code>tags</code>, <code>metadata</code></td><td>Labels attached to the run and every inner step, so traces (for example in <a class="term" href="glossary.html#langsmith">LangSmith</a>) can be filtered.</td></tr>
+<tr><td><code>run_name</code></td><td>A readable name for this run in traces instead of "RunnableSequence".</td></tr>
+<tr><td><code>callbacks</code></td><td>Objects notified when steps start, stream and end; logging and tracing tools plug in here.</td></tr>
+<tr><td><code>max_concurrency</code></td><td>The most inner calls <code>batch</code> may run at once. Useful with a local model that can only serve one request at a time.</td></tr>
+<tr><td><code>recursion_limit</code></td><td>The most steps a LangGraph graph may take before it stops with an error.</td></tr>
+</table></div>
+
+<pre data-lang="py" data-tag="illustrative · checked offline"><code>count.batch(["a", "abc"], config={"max_concurrency": 2})
+chain.invoke("x", config={"tags": ["lab16"], "run_name": "shout-then-count", "metadata": {"branch": "central"}})
+named = chain.with_config(run_name="shout-then-count")   # bake the config into a new Runnable</code></pre>
+
+<h2>Retries, fallbacks and failing safely</h2>
+
+<p>Real calls fail: a network blip, a model server that is restarting, a parser that meets bad JSON. Runnables have two wrappers for
+this, both shown in lab 16.</p>
+<ul>
+<li><code>.with_retry(stop_after_attempt=3, wait_exponential_jitter=False)</code> runs the step again when it raises. The other options
+are <code>retry_if_exception_type</code> (which exceptions count; by default any <code>Exception</code>) and the backoff settings. Lab 16's
+<code>flaky</code> function raises <code>ConnectionError</code> twice; the printed result was
+<code>ok after 3 attempts: ping</code>. Lab 16 turns off the random waiting between attempts (the "jitter") so the demo runs instantly;
+for real network calls, leave it on.</li>
+<li><code>.with_fallbacks([other])</code> tries the next Runnable when the first raises (filter with <code>exceptions_to_handle</code>). Lab 16's
+<code>broken</code> step divides by zero, and the output was <code>fallback answer</code>. A common use is a second model: a local
+model as the backup for a hosted one, or the other way round.</li>
+<li><code>batch(inputs, return_exceptions=True)</code> returns the exception object in place of a failed item instead of failing the
+whole batch. We checked: <code>RunnableLambda(lambda x: 1/x).batch([1, 0], return_exceptions=True)</code> gives
+<code>[1.0, ZeroDivisionError('division by zero')]</code>.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="with_retry: attempts one and two raise ConnectionError, attempt three succeeds; with_fallbacks: the main step raises ZeroDivisionError and the fallback answers">
+  <text class="title" x="20" y="30">with_retry(stop_after_attempt=3)</text>
+  <rect class="box-bad" x="20" y="44" width="200" height="44" rx="8"/>
+  <text x="120" y="64" text-anchor="middle">attempt 1</text>
+  <text class="small" x="120" y="80" text-anchor="middle">ConnectionError</text>
+  <path class="arrow" d="M 220,66 H 258"/>
+  <rect class="box-bad" x="260" y="44" width="200" height="44" rx="8"/>
+  <text x="360" y="64" text-anchor="middle">attempt 2</text>
+  <text class="small" x="360" y="80" text-anchor="middle">ConnectionError</text>
+  <path class="arrow" d="M 460,66 H 498"/>
+  <rect class="box-ok" x="500" y="44" width="240" height="44" rx="8"/>
+  <text x="620" y="64" text-anchor="middle">attempt 3</text>
+  <text class="small mono" x="620" y="80" text-anchor="middle">ok after 3 attempts: ping</text>
+  <text class="title" x="20" y="138">with_fallbacks([...])</text>
+  <rect class="box-bad" x="20" y="152" width="200" height="44" rx="8"/>
+  <text x="120" y="172" text-anchor="middle">broken step</text>
+  <text class="small" x="120" y="188" text-anchor="middle">ZeroDivisionError</text>
+  <path class="arrow" d="M 220,174 H 258"/>
+  <rect class="box-ok" x="260" y="152" width="200" height="44" rx="8"/>
+  <text x="360" y="172" text-anchor="middle">fallback Runnable</text>
+  <text class="small mono" x="360" y="188" text-anchor="middle">fallback answer</text>
+  <text class="small" x="480" y="172">retry: same step again</text>
+  <text class="small" x="480" y="190">fallback: a different step</text>
+</svg>
+<figcaption>Both results are the real lab 16 output. <strong>Retry when the failure is temporary; fall back when the step itself may be unavailable.</strong></figcaption>
+</figure>
+
+<h2>Schemas: every Runnable can describe its input and output</h2>
+
+<p><code>get_input_jsonschema()</code> and <code>get_output_jsonschema()</code> return a JSON schema for what a Runnable accepts and
+returns. For the lab 16 prompt, the input schema lists <code>required: ['context', 'question']</code>: the template's variables. That is a
+quick way to find out what dict a chain expects before you call it, and a schema is also what you would publish if you served the
+chain as an API. The output schema of <code>prompt | get_model()</code> is titled
+<code>ChatOllamaOutput</code>.</p>
+
+<h2>When LCEL is enough, and when to move to LangGraph</h2>
+
+<div class="table-wrap"><table>
+<tr><th>LCEL chain is enough</th><th>Use LangGraph</th></tr>
+<tr><td>The steps always run in the same order.</td><td>The next step depends on a decision (a router, as in <a href="08-langgraph-basics.html">lab 08</a>).</td></tr>
+<tr><td>The model is called once or a fixed number of times.</td><td>The model loops with tools until it is done (labs 09–15).</td></tr>
+<tr><td>Data flows forward only.</td><td>Steps read and write a shared state; you need to go back.</td></tr>
+<tr><td>Nothing has to survive between calls.</td><td>You need threads, checkpoints, memory, interrupts or time travel.</td></tr>
+</table></div>
+<p>The two mix well: any chain can be a LangGraph node's body, and a compiled graph is a Runnable you can put in a chain. The current
+official docs centre on <code>create_agent</code> and LangGraph; the Runnable pieces live on in <code>langchain_core</code> as the
+lower-level toolkit underneath both. The previous chapter, <a href="langchain-agents-middleware.html">LangChain agents and middleware</a>, has a decision tree.</p>
+
+<h2>Python typing for this code</h2>
+
+<details class="primer"><summary>New to type hints? What they are, and what they are not</summary>
+<p>A <a class="term" href="glossary.html#type-hint">type hint</a> is a note in the code saying what type a variable, argument or return
+value should have: <code>def check_availability(item_id: str) -&gt; str</code>. Plain Python does <strong>not</strong> check hints when the
+program runs; a wrong type goes through silently. Hints help in three ways: your editor autocompletes and warns, type checkers such as
+mypy or pyright find mistakes before you run, and <strong>libraries can read them</strong>. That last point is why they matter so much
+here: LangChain reads a tool's hints to build the schema the model sees, LangGraph reads the state's hints to decide how to merge updates,
+and Pydantic reads a model's hints to validate data.</p>
+</details>
+
+<div class="table-wrap"><table>
+<tr><th>Form</th><th>Meaning</th><th>Where in the labs</th></tr>
+<tr><td><code>str</code>, <code>int</code>, <code>float</code>, <code>bool</code></td><td>The basic types.</td><td>Every tool: <code>search_catalog(query: str) -&gt; str</code>.</td></tr>
+<tr><td><code>list[str]</code>, <code>dict[str, int]</code></td><td>A list of strings; a dict from strings to ints. The part in brackets describes the items.</td><td>Lab 08 state: <code>docs: list[Document]</code>.</td></tr>
+<tr><td><code>int | None</code></td><td>"An int, or <code>None</code>". The older spelling is <code>Optional[int]</code>; they mean the same. Optional in this sense does not mean "may be left out"; it means "may be None".</td><td>Lab 02: <code>max_pages: int | None</code>.</td></tr>
+<tr><td><code>Literal["children", "teens", "adults"]</code></td><td>Only these exact values. In a schema it becomes an <code>enum</code>, which strongly guides the model.</td><td>Lab 02 <code>audience</code>; lab 08 <code>Route</code>.</td></tr>
+<tr><td><code>TypedDict</code></td><td>A <a class="term" href="glossary.html#typeddict">dict with named, typed keys</a>. At run time it is a normal dict. <code>total=False</code> makes every key optional.</td><td>Lab 08 <code>State</code>; lab 16 <code>Answer</code>.</td></tr>
+<tr><td><code>@dataclass</code></td><td>A class whose fields are listed with hints; Python writes <code>__init__</code> for you. A light container, no validation.</td><td>Lab 14 <code>Visitor</code> (runtime context).</td></tr>
+<tr><td><code>Annotated[T, extra]</code></td><td>Type <code>T</code> plus extra information for libraries. LangGraph reads a <a class="term" href="glossary.html#reducer">reducer</a> from it; LangChain reads a tool argument's description from it.</td><td><code>MessagesState</code>: <code>Annotated[list[AnyMessage], add_messages]</code>.</td></tr>
+<tr><td><code>ToolRuntime[Visitor]</code></td><td>A generic class with a type parameter: "a runtime whose context is a <code>Visitor</code>".</td><td>Lab 14 <code>my_account</code>.</td></tr>
+</table></div>
+
+<p>Lab 16 adds a hint to a plain variable, <code>result: Answer = rag.invoke(...)</code>. It changes nothing at run time (we checked
+that a <code>TypedDict</code> happily holds a wrong type), but it tells your editor and the next reader which three keys come back.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Comparison of TypedDict, dataclass and Pydantic BaseModel: what each is at run time, whether it validates, and where the labs use it">
+  <rect class="box" x="14" y="14" width="236" height="44" rx="8"/>
+  <text class="title" x="132" y="41" text-anchor="middle">TypedDict</text>
+  <rect class="box" x="262" y="14" width="236" height="44" rx="8"/>
+  <text class="title" x="380" y="41" text-anchor="middle">@dataclass</text>
+  <rect class="box-solid" x="510" y="14" width="236" height="44" rx="8"/>
+  <text class="on-solid" x="628" y="41" text-anchor="middle">Pydantic BaseModel</text>
+  <text x="132" y="88" text-anchor="middle">a plain dict</text>
+  <text x="380" y="88" text-anchor="middle">a small class</text>
+  <text x="628" y="88" text-anchor="middle">a class with validation</text>
+  <rect class="box-warn" x="34" y="104" width="196" height="34" rx="8"/>
+  <text x="132" y="126" text-anchor="middle">not checked</text>
+  <rect class="box-warn" x="282" y="104" width="196" height="34" rx="8"/>
+  <text x="380" y="126" text-anchor="middle">not checked</text>
+  <rect class="box-ok" x="530" y="104" width="196" height="34" rx="8"/>
+  <text x="628" y="126" text-anchor="middle">checked and converted</text>
+  <text class="small" x="132" y="168" text-anchor="middle">best for: LangGraph state</text>
+  <text class="small" x="380" y="168" text-anchor="middle">best for: runtime context</text>
+  <text class="small" x="628" y="168" text-anchor="middle">best for: data from a model</text>
+  <text class="mono" x="132" y="200" text-anchor="middle">lab 08 State</text>
+  <text class="mono" x="380" y="200" text-anchor="middle">lab 14 Visitor</text>
+  <text class="mono" x="628" y="200" text-anchor="middle">lab 02 BookRequest</text>
+  <text class="small" x="380" y="236" text-anchor="middle">All three can describe a structured output or state schema; only Pydantic rejects bad data.</text>
+</svg>
+<figcaption>Three ways to describe a record. <strong>Validate where data comes from outside your code (a model, a user); a lighter type is fine where your own code builds the value.</strong></figcaption>
+</figure>
+
+<h3>Annotated with reducers: how LangGraph merges updates</h3>
+
+<p>In a LangGraph state, a node returns only the keys it changes. For a plain key, the new value <strong>replaces</strong> the old one.
+For a key annotated with a reducer, LangGraph calls the reducer with the old and the new value. <code>operator.add</code> concatenates lists;
+<code>add_messages</code> appends messages but <strong>replaces</strong> a message that has the same <code>id</code>. That last rule is
+exactly what fixed the time-travel bug in <a href="13-hitl-time-travel-streaming.html">lab 13</a>: a new message was appended until we reused
+the original message's id. We checked this small graph offline:</p>
+
+<pre data-lang="py" data-tag="illustrative · checked offline"><code>import operator
+from typing import Annotated, TypedDict
+
+from langgraph.graph.message import add_messages
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]     # append, or replace by id
+    visited: Annotated[list[str], operator.add]  # concatenate lists
+    step: int                                    # no reducer: overwrite
+
+# start {"visited": ["start"], "step": 0}; node a returns {"visited": ["a"], "step": 1};
+# node b returns {"visited": ["b"], "step": 2}
+# final state: {'messages': [], 'visited': ['start', 'a', 'b'], 'step': 2}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Reducer versus overwrite: a key with operator.add keeps old items and adds new ones, a plain key is replaced by the new value">
+  <text class="title" x="20" y="30">visited: Annotated[list[str], operator.add]</text>
+  <rect class="box2" x="20" y="44" width="160" height="40" rx="8"/>
+  <text class="mono" x="100" y="69" text-anchor="middle">["start"]</text>
+  <text x="200" y="69" text-anchor="middle">+</text>
+  <rect class="box-info" x="220" y="44" width="120" height="40" rx="8"/>
+  <text class="mono" x="280" y="69" text-anchor="middle">["a"]</text>
+  <path class="arrow-ok" d="M 340,64 H 398"/>
+  <rect class="box-ok" x="400" y="44" width="200" height="40" rx="8"/>
+  <text class="mono" x="500" y="69" text-anchor="middle">["start", "a"]</text>
+  <text class="title" x="20" y="128">step: int   (no reducer)</text>
+  <rect class="box2" x="20" y="142" width="160" height="40" rx="8"/>
+  <text class="mono" x="100" y="167" text-anchor="middle">1</text>
+  <text x="200" y="167" text-anchor="middle">←</text>
+  <rect class="box-info" x="220" y="142" width="120" height="40" rx="8"/>
+  <text class="mono" x="280" y="167" text-anchor="middle">2</text>
+  <path class="arrow-bad" d="M 340,162 H 398"/>
+  <rect class="box-warn" x="400" y="142" width="200" height="40" rx="8"/>
+  <text class="mono" x="500" y="167" text-anchor="middle">2</text>
+  <text class="small" x="620" y="70">old value kept</text>
+  <text class="small" x="620" y="168">old value replaced</text>
+</svg>
+<figcaption>Left box: the current value; middle: what a node returned; right: the new state. <strong>The type hint is not decoration here: the reducer inside <code>Annotated</code> changes how the graph behaves.</strong></figcaption>
+</figure>
+
+<h2>Pydantic: shapes that are checked</h2>
+
+<p><a class="term" href="glossary.html#pydantic">Pydantic</a> (version 2.14 in our project) turns a class with type hints into a validator.
+You subclass <code>BaseModel</code>, list fields with hints, and every time you create an instance Pydantic checks and converts the
+data. Lab 02's <code>BookRequest</code> is a full example. The parts you will use most:</p>
+
+<ul>
+<li><strong>The class docstring</strong> becomes the schema's <code>description</code>. LangChain sends it to the model, so write it for the
+model.</li>
+<li><strong><code>Field(description=...)</code></strong> describes one field to the model. This is your main lever on what the model puts there.</li>
+<li><strong>Defaults</strong>: <code>Field(default=None)</code> makes a field optional; <code>Field(default_factory=list)</code> gives each instance
+its own new empty list.</li>
+<li><strong>Constraints</strong>: <code>max_length</code> / <code>min_length</code> on strings and lists, <code>gt</code> / <code>ge</code> /
+<code>lt</code> / <code>le</code> on numbers, <code>pattern</code> on strings. They are checked in Python <em>and</em> written into the JSON
+schema: <code>max_length=4</code> on a list becomes <code>"maxItems": 4</code>, and <code>gt=0</code> becomes <code>"exclusiveMinimum": 0</code>.
+In lab 02, Ollama enforced that <code>maxItems</code> while generating, which stopped the runaway "e-book" list.</li>
+</ul>
+
+<pre data-lang="py" data-tag="illustrative · checked offline"><code>from typing import Literal
+
+from pydantic import BaseModel, Field, ValidationError
+
+
+class BookRequest(BaseModel):
+    """A visitor's request for something to read."""
+    genre: str = Field(description="One genre, like 'mystery'")
+    formats: list[Literal["book", "e-book", "audiobook"]] = Field(default_factory=list, max_length=4)
+    max_pages: int | None = Field(default=None, gt=0)
+
+
+r = BookRequest(genre="mystery", formats=["book"])
+r.model_dump()        # {'genre': 'mystery', 'formats': ['book'], 'max_pages': None}
+r.model_dump_json()   # '{"genre":"mystery","formats":["book"],"max_pages":null}'
+BookRequest.model_validate({"genre": "poetry"})   # build from a dict: formats=[] max_pages=None
+
+try:
+    BookRequest(genre="mystery", formats=["book"] * 5, max_pages=-3)
+except ValidationError as e:
+    print(e)</code></pre>
+
+<p>The last call fails, and the error lists every problem at once, with the field, the rule and the bad input. This is the real text
+from our run:</p>
+
+<pre data-lang="text" data-tag="real output · pydantic 2.14.1"><code>2 validation errors for BookRequest
+formats
+  List should have at most 4 items after validation, not 5 [type=too_long, input_value=['book', 'book', 'book', 'book', 'book'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.14/v/too_long
+max_pages
+  Input should be greater than 0 [type=greater_than, input_value=-3, input_type=int]
+    For further information visit https://errors.pydantic.dev/2.14/v/greater_than</code></pre>
+
+<p><code>BookRequest.model_json_schema()</code> returns the schema as a dict. For this class it contains the description, an
+<code>enum</code> for the formats, <code>"maxItems": 4</code>, <code>"exclusiveMinimum": 0</code> and <code>"required": ["genre"]</code>: only
+fields without a default are required.</p>
+
+<h3>How LangChain turns your types into tool and output schemas</h3>
+
+<p>The model never sees your Python. It sees JSON schemas, built from your hints:</p>
+<ul>
+<li><strong>Tools.</strong> <code>@tool</code> reads the function's name, docstring and argument hints. Wrap a hint in
+<code>Annotated[str, "Member id like M-1001"]</code> and the text becomes that argument's description; pass
+<code>@tool(args_schema=SomeModel)</code> to use a Pydantic class instead. Special parameters such as <code>runtime: ToolRuntime</code> are
+left out (the previous chapter). We checked a <code>place_hold</code> written this way: the schema has both arguments as
+<code>required</code>, and <code>member_id</code> carries its description. (Lab 11's privacy bug came from exactly such an example id in a
+description.)</li>
+<li><strong>Structured output.</strong> <code>with_structured_output(BookRequest)</code> and <code>create_agent(response_format=...)</code>
+send the schema to the model (as a tool, or as the provider's JSON format), then validate the reply with the same class. A reply that
+breaks a rule becomes a <code>ValidationError</code>, or, with <code>include_raw=True</code>, a <code>parsing_error</code> next to
+<code>parsed: None</code>, as in lab 02.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="A Pydantic class or typed function becomes a JSON schema; LangChain sends it to the model as tool parameters or an output format; the model's JSON reply is validated back into an object or a ValidationError">
+  <rect class="box-solid" x="14" y="100" width="150" height="60" rx="8"/>
+  <text class="on-solid" x="89" y="125" text-anchor="middle">Python types</text>
+  <text class="on-solid" x="89" y="143" text-anchor="middle">BaseModel, hints</text>
+  <path class="arrow" d="M 164,130 H 194"/>
+  <rect class="box" x="196" y="100" width="150" height="60" rx="8"/>
+  <text x="271" y="125" text-anchor="middle">JSON schema</text>
+  <text class="small" x="271" y="143" text-anchor="middle">maxItems, enum, required</text>
+  <path class="arrow" d="M 346,118 H 366 V 60 H 384"/>
+  <path class="arrow" d="M 346,142 H 366 V 200 H 384"/>
+  <rect class="box-info" x="386" y="34" width="170" height="52" rx="8"/>
+  <text x="471" y="56" text-anchor="middle">tool parameters</text>
+  <text class="small" x="471" y="74" text-anchor="middle">@tool, bind_tools</text>
+  <rect class="box-info" x="386" y="174" width="170" height="52" rx="8"/>
+  <text x="471" y="196" text-anchor="middle">output format</text>
+  <text class="small" x="471" y="214" text-anchor="middle">with_structured_output</text>
+  <path class="arrow" d="M 556,60 H 574 V 118 H 590"/>
+  <path class="arrow" d="M 556,200 H 574 V 142 H 590"/>
+  <rect class="box2" x="592" y="100" width="154" height="60" rx="8"/>
+  <text x="669" y="125" text-anchor="middle">model writes</text>
+  <text x="669" y="143" text-anchor="middle">JSON arguments</text>
+  <path class="arrow-ok" d="M 669,160 V 272 H 560"/>
+  <rect class="box-ok" x="300" y="252" width="258" height="40" rx="8"/>
+  <text x="429" y="277" text-anchor="middle">validated object or ValidationError</text>
+  <text class="small" x="160" y="277" text-anchor="middle">same class checks the reply</text>
+</svg>
+<figcaption>One class serves twice: it describes what the model must produce, then checks what it produced. <strong>A schema constrains the shape of the answer, never its truth (lab 02, lab 14).</strong></figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>Pitfalls and misconceptions</strong></p>
+<ul>
+<li><strong>"Type hints are checked."</strong> Not by plain Python. Only Pydantic models (and libraries that read hints) enforce them. A
+<code>TypedDict</code> or dataclass will hold a wrong type silently.</li>
+<li><strong>Passing a string where a chain expects a dict.</strong> A prompt with <code>{context}</code> and <code>{question}</code> needs a dict
+with both keys; check <code>get_input_jsonschema()</code>. Put a <code>RunnableParallel</code> in front to build the dict from one string.</li>
+<li><strong>A <code>RunnableLambda</code> with two parameters.</strong> It receives one input. Pass a dict and read its keys.</li>
+<li><strong>Retrying something that will never succeed.</strong> <code>with_retry</code> on a bug (a typo, a bad schema) only wastes time; restrict
+it with <code>retry_if_exception_type</code> to temporary errors such as <code>ConnectionError</code>.</li>
+<li><strong>A mutable default.</strong> Write <code>Field(default_factory=list)</code>, not a shared list, for list fields.</li>
+<li><strong>Forgetting the reducer.</strong> Without <code>add_messages</code> (or <code>MessagesState</code>), each node's messages overwrite the
+history instead of extending it.</li>
+<li><strong>"Optional means I can leave it out."</strong> <code>int | None</code> only allows <code>None</code>; Pydantic still requires the field
+unless it has a default.</li>
+<li><strong>Trusting a validated object.</strong> Validation proves the shape. Lab 02's duplicate format and invented page count, and lab 14's
+"Main Branch", all passed.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Prompts, models, parsers, retrievers, tools, wrapped functions and compiled graphs are all Runnables with <code>invoke</code>, <code>batch</code>, <code>stream</code> and async twins.</li>
+<li><code>a | b</code> is a <code>RunnableSequence</code>; a dict is a <code>RunnableParallel</code>; <code>RunnablePassthrough</code> keeps the input and <code>.assign</code> adds keys.</li>
+<li>A config dict carries <code>configurable</code> (thread ids), tags, metadata, run names, callbacks and <code>max_concurrency</code> to every step.</li>
+<li><code>with_retry</code> repeats a failing step, <code>with_fallbacks</code> switches to another, <code>return_exceptions=True</code> keeps a batch going.</li>
+<li><code>get_input_jsonschema()</code> tells you what a chain expects; lab 16's prompt needs <code>context</code> and <code>question</code>.</li>
+<li>Type hints are read by libraries: <code>Literal</code> becomes an enum, <code>Annotated</code> carries reducers and descriptions, <code>ToolRuntime[Visitor]</code> is a generic.</li>
+<li>Pydantic validates data, reports every error at once, and its constraints (like <code>max_length</code> → <code>maxItems</code>) shape the schema the model sees.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://reference.langchain.com/python/langchain-core/runnables">API reference: langchain_core.runnables</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/models">LangChain docs: Models (invoke, stream, batch, structured output)</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langchain/tools">LangChain docs: Tools and their schemas</a></li>
+<li><a href="https://docs.langchain.com/oss/python/langgraph/graph-api">LangGraph docs: Graph API (state, reducers)</a></li>
+<li><a href="https://docs.python.org/3/library/typing.html">Python docs: typing</a></li>
+<li><a href="https://docs.python.org/3/library/dataclasses.html">Python docs: dataclasses</a></li>
+<li><a href="https://typing.python.org/en/latest/">Python typing documentation and guides</a></li>
+<li><a href="https://docs.pydantic.dev/latest/concepts/models/">Pydantic docs: Models</a></li>
+<li><a href="https://docs.pydantic.dev/latest/concepts/fields/">Pydantic docs: Fields</a></li>
+<li><a href="https://docs.pydantic.dev/latest/concepts/json_schema/">Pydantic docs: JSON Schema</a></li>
+<li><a href="https://docs.pydantic.dev/latest/errors/validation_errors/">Pydantic docs: Validation errors</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="langchain-agents-middleware.html"><small>← Chapter 5</small>LangChain agents and middleware</a>
+<a class="next" href="index.html"><small>Done →</small>Contents</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12 · Short-term and long-term memory</title>
+<meta name="description" content="Trim long conversations and remember a member&#x27;s preferences across threads with a store. Book chapter 13.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 12/16</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 12 of 16 · Hands-on lab</div>
+  <h1>Short-term and long-term memory</h1>
+  <p class="lead">Trim long conversations and remember a member&#x27;s preferences across threads with a store. Book chapter 13.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout">Read with <strong>chapter 13 · Implementing Memory</strong> of the book (Part IV · Build Agents with LangGraph).
+This lab is our own example on the Harbor City Library project; it does not reproduce the book's code.</div>
+
+<p><strong>Goal.</strong> <a href="11-checkpointers.html">Lab 11</a> gave each conversation its own history. That raises two
+new problems. First, a long conversation keeps growing, and every model call sends all of it. Second, what a member tells
+the assistant in one conversation is gone in the next one, because each thread is separate. In this lab you solve both:
+you <strong>trim</strong> the history that goes to the model (<a class="term" href="glossary.html#short-term-memory">short-term memory</a>),
+and you save facts in a <a class="term" href="glossary.html#store">store</a> that every thread of the same member can read
+(<a class="term" href="glossary.html#long-term-memory">long-term memory</a>).</p>
+
+<h2>The idea in brief</h2>
+<p><strong>Short-term memory</strong> is the conversation of one thread, kept by the checkpointer. It is limited by the model's
+<a class="term" href="glossary.html#context-window">context window</a> (8192 <a class="term" href="glossary.html#token">tokens</a>
+in this project) and by speed: more tokens, slower answers. <code>trim_messages</code> keeps only the most recent part.</p>
+<p><strong>Long-term memory</strong> is information that outlives a single conversation, such as a member's preferences.
+LangGraph keeps it in a <em>store</em>, a key-value database organised in folders called
+<a class="term" href="glossary.html#namespace">namespaces</a>. The store is shared by all threads; the namespace decides whose
+facts you read. The concept chapter <a href="langgraph-agents.html">Agents with LangGraph</a> compares the two kinds of
+memory in more depth.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Short-term memory is per thread and kept by the checkpointer; long-term memory is a store shared by the monday and friday threads of member M-1002 through a namespace">
+  <rect class="zone" x="10" y="10" width="400" height="240" rx="8"/>
+  <text class="title" x="210" y="34" text-anchor="middle">Short-term: per thread (checkpointer)</text>
+  <rect class="box" x="30" y="50" width="170" height="90" rx="8"/>
+  <text class="title" x="115" y="74" text-anchor="middle">thread "monday"</text>
+  <text class="small" x="115" y="96" text-anchor="middle">its own messages</text>
+  <text class="small" x="115" y="114" text-anchor="middle">trimmed before</text>
+  <text class="small" x="115" y="128" text-anchor="middle">each model call</text>
+  <rect class="box" x="220" y="50" width="170" height="90" rx="8"/>
+  <text class="title" x="305" y="74" text-anchor="middle">thread "friday"</text>
+  <text class="small" x="305" y="96" text-anchor="middle">starts empty:</text>
+  <text class="small" x="305" y="114" text-anchor="middle">cannot see monday's</text>
+  <text class="small" x="305" y="128" text-anchor="middle">messages</text>
+  <text class="small" x="210" y="172" text-anchor="middle">both threads belong to member M-1002</text>
+  <text class="small" x="210" y="188" text-anchor="middle">(config: member_id, set by the app)</text>
+  <rect class="zone" x="450" y="10" width="300" height="240" rx="8"/>
+  <text class="title" x="600" y="34" text-anchor="middle">Long-term: shared store</text>
+  <rect class="box-info" x="470" y="60" width="260" height="110" rx="8"/>
+  <text class="mono" x="600" y="86" text-anchor="middle">("members", "M-1002",</text>
+  <text class="mono" x="600" y="104" text-anchor="middle">"preferences")</text>
+  <text class="small" x="600" y="128" text-anchor="middle">note-0: "Remember: I only</text>
+  <text class="small" x="600" y="144" text-anchor="middle">read books in large print."</text>
+  <path class="arrow-accent" d="M 60,140 V 222 H 600 V 172"/>
+  <text class="label" x="330" y="216" text-anchor="middle">monday: put</text>
+  <path class="arrow-ok" d="M 468,100 H 392"/>
+  <text class="label" x="430" y="90" text-anchor="middle">friday:</text>
+  <text class="label" x="430" y="120" text-anchor="middle">search</text>
+</svg>
+<figcaption>Two kinds of memory in this lab. <strong>Threads cannot see each other; the store can be read from any thread,
+and the namespace decides whose facts you get.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to tokens and context windows? Why a long chat is a problem</summary>
+<p>Models read text as <a class="term" href="glossary.html#token">tokens</a> (pieces of words; in English roughly four characters
+each). The context window is the maximum number of tokens a model can read in one request: the system message, the whole
+history and the new question together. This project sets it to 8192 tokens in <code>harbor/config.py</code>. If the history
+grows past it, the oldest text is cut off in an uncontrolled way, and long before that every answer gets slower, because the
+model must read everything again on each call. Trimming decides <em>yourself</em> what is dropped.</p>
+</details>
+
+<details class="primer"><summary>New to key-value stores and namespaces? How the store is organised</summary>
+<p>A key-value store saves a value (here a small dictionary such as <code>{"text": "..."}</code>) under a key (here
+<code>"note-0"</code>). A namespace is a tuple of strings that works like a folder path:
+<code>("members", "M-1002", "preferences")</code> is the "preferences" folder of member M-1002. <code>store.put(namespace, key,
+value)</code> saves one item; <code>store.search(namespace)</code> lists the items in that folder (up to 10 by default).
+<code>InMemoryStore</code> keeps everything in memory, like <code>InMemorySaver</code> in lab 11; LangGraph also has
+database-backed stores, and stores can add semantic search when you give them an embedding model.</p>
+</details>
+
+<h2>Actions</h2>
+<ol class="steps">
+<li>In the project folder, create <code>labs/12_memory.py</code> with the content below. It does not use the shared agent
+graph: it builds a smaller graph with a single model node and no tools, so the memory behaviour is easy to see.</li>
+<li>Run it: <code>uv run python -m labs.12_memory</code>. Ollama must be running with <code>llama3.2</code>.</li>
+<li>Compare part 1 (trimming, no model call) with part 2 (two threads that share one store).</li>
+</ol>
+
+<h2>The lab: <code>labs/12_memory.py</code></h2>
+
+<pre data-file="labs/12_memory.py" data-lang="py" data-tag="complete file"><code>"""Lab 12: short-term memory (keep the conversation small) and long-term memory (facts across threads)."""
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, trim_messages
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
+
+from harbor.config import get_model
+
+model = get_model()
+
+# 1. Short-term: trim_messages keeps only the most recent part of a long conversation.
+history = []
+for i in range(1, 7):
+    history += [HumanMessage(f"Question {i}: tell me about branch number {i}."), AIMessage(f"Answer {i}: ...")]
+kept = trim_messages(history, max_tokens=40, token_counter="approximate", strategy="last", start_on="human")
+print(f"1) trim_messages: {len(history)} messages -&gt; {len(kept)} kept:", [m.content[:11] for m in kept])
+
+# 2. Long-term: a store holds facts by namespace, shared by every thread of the same member.
+store = InMemoryStore()
+
+
+def call_model(state: MessagesState, config, *, store: BaseStore):
+    member = config["configurable"]["member_id"]
+    namespace = ("members", member, "preferences")
+    last = state["messages"][-1].content
+    if last.lower().startswith("remember"):  # a deliberately simple rule for what to save
+        store.put(namespace, f"note-{len(store.search(namespace))}", {"text": last})
+    notes = [item.value["text"] for item in store.search(namespace)]
+    system = SystemMessage("You are Harbor City Library's assistant. Answer briefly. "
+                           f"What this member asked you to remember: {notes or 'nothing yet'}")
+    recent = trim_messages(state["messages"], max_tokens=500, token_counter="approximate", strategy="last",
+                           start_on="human")
+    return {"messages": [model.invoke([system] + recent)]}
+
+
+builder = StateGraph(MessagesState)
+builder.add_node("model", call_model)
+builder.add_edge(START, "model")
+graph = builder.compile(checkpointer=InMemorySaver(), store=store)
+
+
+def ask(thread, text):
+    config = {"configurable": {"thread_id": thread, "member_id": "M-1002"}}
+    print(f"   [{thread}] {text}\n   -&gt; {graph.invoke({'messages': [('user', text)]}, config)['messages'][-1].content}")
+
+
+print("\n2) Long-term memory across two threads of member M-1002:")
+ask("monday", "Remember: I only read books in large print.")
+ask("friday", "Can you suggest how I should look for a new novel?")
+print("   stored:", [i.value for i in store.search(("members", "M-1002", "preferences"))])</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 12: short-term memory ... and long-term memory ..."""</code></td><td>Docstring naming the two parts of the lab.</td></tr>
+<tr><td>2</td><td><code>from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, trim_messages</code></td><td>The three <a class="term" href="glossary.html#message">message</a> types, and <code>trim_messages</code>, a helper that cuts a message list down to a token budget.</td></tr>
+<tr><td>3</td><td><code>from langgraph.checkpoint.memory import InMemorySaver</code></td><td>The checkpointer from lab 11: it keeps each thread's conversation (short-term memory).</td></tr>
+<tr><td>4</td><td><code>from langgraph.graph import START, MessagesState, StateGraph</code></td><td>Graph building blocks, as in lab 08.</td></tr>
+<tr><td>5</td><td><code>from langgraph.store.base import BaseStore</code></td><td>The common type of all stores. Used only as a type hint on line 23, which also tells LangGraph to inject the store.</td></tr>
+<tr><td>6</td><td><code>from langgraph.store.memory import InMemoryStore</code></td><td>A store that lives in memory: fine for a lab, lost when the program ends.</td></tr>
+<tr><td>8</td><td><code>from harbor.config import get_model</code></td><td>The project's model factory (llama3.2).</td></tr>
+<tr><td>10</td><td><code>model = get_model()</code></td><td>Created once at module level. No <code>bind_tools</code>: this graph has no tools.</td></tr>
+<tr><td>13–15</td><td><code>history = []</code> and the loop</td><td>Builds a fake conversation of 6 questions and 6 answers (12 messages). <code>range(1, 7)</code> gives 1 to 6; <code>+=</code> adds both messages of each round to the list.</td></tr>
+<tr><td>16</td><td><code>kept = trim_messages(history, max_tokens=40, token_counter="approximate", strategy="last", start_on="human")</code></td><td>Keeps at most 40 tokens. <code>token_counter="approximate"</code> estimates tokens from the number of characters, so no tokenizer or model is needed. <code>strategy="last"</code> keeps the newest messages and drops the oldest. <code>start_on="human"</code> makes the kept part begin with a human message, so the model never sees an answer whose question was cut away.</td></tr>
+<tr><td>17</td><td><code>print(f"1) trim_messages: ...", [m.content[:11] for m in kept])</code></td><td>Prints the counts and the first 11 characters of each kept message, enough to see which rounds survived.</td></tr>
+<tr><td>20</td><td><code>store = InMemoryStore()</code></td><td>The long-term store, shared by every thread of the graph.</td></tr>
+<tr><td>23</td><td><code>def call_model(state: MessagesState, config, *, store: BaseStore):</code></td><td>A node can ask LangGraph for extra inputs. A parameter named <code>config</code> receives the run's config; the keyword-only parameter <code>store</code> (after the <code>*</code>) receives the store given to <code>compile()</code> on line 40.</td></tr>
+<tr><td>24</td><td><code>member = config["configurable"]["member_id"]</code></td><td>Who is talking. It comes from the config that <em>the app</em> passes (line 44), not from anything the model or the user typed. That is the lesson from lab 11's leak, applied here.</td></tr>
+<tr><td>25</td><td><code>namespace = ("members", member, "preferences")</code></td><td>This member's "preferences" folder in the store. Another member gets another folder, so their notes never mix.</td></tr>
+<tr><td>26</td><td><code>last = state["messages"][-1].content</code></td><td>The text of the newest message, the one the user just sent.</td></tr>
+<tr><td>27–28</td><td><code>if last.lower().startswith("remember"): store.put(namespace, f"note-{len(store.search(namespace))}", {"text": last})</code></td><td>The deliberately simple rule: a message that starts with "remember" is saved as a new note. The key is <code>note-0</code>, <code>note-1</code>, ..., numbered by how many notes exist. (Because <code>search</code> returns at most 10 items by default, this numbering would start overwriting after 10 notes; fine for a demo, not for a product.)</td></tr>
+<tr><td>29</td><td><code>notes = [item.value["text"] for item in store.search(namespace)]</code></td><td>Reads back all notes of this member. Each search result is an item with a <code>.value</code> (the dictionary saved by <code>put</code>), a <code>.key</code> and the namespace.</td></tr>
+<tr><td>30–31</td><td><code>system = SystemMessage("... What this member asked you to remember: {notes or 'nothing yet'}")</code></td><td>Puts the notes into the system message. This is how long-term memory reaches the model: as text in the prompt. <code>notes or 'nothing yet'</code> prints a friendly text when the list is empty.</td></tr>
+<tr><td>32–33</td><td><code>recent = trim_messages(state["messages"], max_tokens=500, ...)</code></td><td>Short-term memory in practice: send at most about 500 tokens of this thread's history. The checkpointer still stores everything; only what is <em>sent</em> is trimmed.</td></tr>
+<tr><td>34</td><td><code>return {"messages": [model.invoke([system] + recent)]}</code></td><td>Calls the model with the system message (with notes) plus the trimmed history, and appends the reply to the state.</td></tr>
+<tr><td>37–39</td><td><code>builder = StateGraph(MessagesState)</code> ... <code>add_edge(START, "model")</code></td><td>The smallest possible chat graph: one node. With no outgoing edge, the run ends after the model answers.</td></tr>
+<tr><td>40</td><td><code>graph = builder.compile(checkpointer=InMemorySaver(), store=store)</code></td><td>Compiles with both kinds of memory: the checkpointer (per thread) and the store (across threads).</td></tr>
+<tr><td>43–45</td><td><code>def ask(thread, text): config = {"configurable": {"thread_id": thread, "member_id": "M-1002"}} ...</code></td><td>One turn. The config carries the thread and the member. In a real app <code>member_id</code> would come from the login session. The print shows the question and the last message of the result, the answer.</td></tr>
+<tr><td>49</td><td><code>ask("monday", "Remember: I only read books in large print.")</code></td><td>Thread "monday": the message starts with "Remember", so it is saved to the store.</td></tr>
+<tr><td>50</td><td><code>ask("friday", "Can you suggest how I should look for a new novel?")</code></td><td>A different thread: its history is empty, but the same member's notes are in the system message.</td></tr>
+<tr><td>51</td><td><code>print("   stored:", [i.value for i in store.search(("members", "M-1002", "preferences"))])</code></td><td>Shows exactly what the store holds at the end.</td></tr>
+</table></div>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="command"><code>uv run python -m labs.12_memory</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) trim_messages: 12 messages -&gt; 2 kept: ['Question 6:', 'Answer 6: .']
+
+2) Long-term memory across two threads of member M-1002:
+   [monday] Remember: I only read books in large print.
+   -&gt; I've noted that you prefer large print books. I'll make sure to check the print size before recommending or shelving books for you.
+   [friday] Can you suggest how I should look for a new novel?
+   -&gt; I can help you with that. Since you mentioned you only read in large print, I can suggest checking our large print fiction section or browsing through our large print bestseller lists. You can also ask one of our librarians for personalized recommendations. Would you like me to show you where those sections are?
+   stored: [{'text': 'Remember: I only read books in large print.'}]</code></pre>
+
+<div class="callout ok"><p><strong>What you should see</strong></p>
+<ul>
+<li><strong>Part 1:</strong> <code>12 messages -&gt; 2 kept: ['Question 6:', 'Answer 6: .']</code>. Only the last round fits in
+40 approximate tokens. This part is computed without the model, so your numbers will be the same.</li>
+<li><strong>Part 2, friday thread:</strong> the answer starts from the stored preference: "Since you mentioned you only read in
+large print". The friday thread never saw the monday message; the fact came from the store through the system message.</li>
+<li><strong><code>stored:</code></strong> exactly one note, <code>{'text': 'Remember: I only read books in large print.'}</code>.
+The friday question did not start with "remember", so nothing new was saved.</li>
+</ul></div>
+
+<h2>Short-term memory: what <code>trim_messages</code> did</h2>
+<p>Each fake question is about 15 tokens by the approximate count and each short answer about 9, so the last round costs about
+24 tokens. Adding the round before it would need about 48, more than the budget of 40. So the newest round is kept and the
+first five rounds are dropped.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Twelve messages as bars; the ten oldest are dropped and the last question and answer are kept because they fit in 40 approximate tokens">
+  <text class="title" x="20" y="30">history: 12 messages (Q1 A1 ... Q6 A6)</text>
+  <rect class="box-bad" x="20" y="50" width="52" height="40" rx="6"/><text class="small" x="46" y="74" text-anchor="middle">Q1</text>
+  <rect class="box-bad" x="78" y="50" width="52" height="40" rx="6"/><text class="small" x="104" y="74" text-anchor="middle">A1</text>
+  <rect class="box-bad" x="136" y="50" width="52" height="40" rx="6"/><text class="small" x="162" y="74" text-anchor="middle">Q2</text>
+  <rect class="box-bad" x="194" y="50" width="52" height="40" rx="6"/><text class="small" x="220" y="74" text-anchor="middle">A2</text>
+  <rect class="box-bad" x="252" y="50" width="52" height="40" rx="6"/><text class="small" x="278" y="74" text-anchor="middle">Q3</text>
+  <rect class="box-bad" x="310" y="50" width="52" height="40" rx="6"/><text class="small" x="336" y="74" text-anchor="middle">A3</text>
+  <rect class="box-bad" x="368" y="50" width="52" height="40" rx="6"/><text class="small" x="394" y="74" text-anchor="middle">Q4</text>
+  <rect class="box-bad" x="426" y="50" width="52" height="40" rx="6"/><text class="small" x="452" y="74" text-anchor="middle">A4</text>
+  <rect class="box-bad" x="484" y="50" width="52" height="40" rx="6"/><text class="small" x="510" y="74" text-anchor="middle">Q5</text>
+  <rect class="box-bad" x="542" y="50" width="52" height="40" rx="6"/><text class="small" x="568" y="74" text-anchor="middle">A5</text>
+  <rect class="box-ok" x="620" y="50" width="56" height="40" rx="6"/><text class="small" x="648" y="74" text-anchor="middle">Q6</text>
+  <rect class="box-ok" x="682" y="50" width="56" height="40" rx="6"/><text class="small" x="710" y="74" text-anchor="middle">A6</text>
+  <path class="line dashed" d="M 607,40 V 140"/>
+  <text class="label" x="300" y="120" text-anchor="middle">dropped (strategy="last" removes the oldest first)</text>
+  <text class="label" x="680" y="120" text-anchor="middle">kept: ≈24 tokens</text>
+  <rect class="box2" x="20" y="150" width="720" height="36" rx="8"/>
+  <text x="380" y="173" text-anchor="middle">max_tokens=40 · keeping Q5 A5 too would need ≈48 · start_on="human" keeps Q6 first</text>
+</svg>
+<figcaption>Part 1 of the lab. Token counts are the approximate counter's estimates. <strong>Trimming changes only what is
+sent to the model; the checkpointer still keeps the full history.</strong></figcaption>
+</figure>
+
+<p>Trimming is the simplest short-term strategy. Others you will meet: deleting old messages from the state for good, or
+replacing old rounds with a summary written by the model. Each trades detail for size; trimming simply forgets the oldest part.</p>
+
+<h2>Long-term memory: one node, step by step</h2>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Flow inside call_model: read member from config, maybe save a note, search notes, build the system message, trim history, call the model">
+  <rect class="box" x="10" y="60" width="110" height="64" rx="8"/>
+  <text class="label" x="65" y="86" text-anchor="middle">member from</text>
+  <text class="mono" x="65" y="106" text-anchor="middle">config</text>
+  <path class="arrow" d="M 120,92 H 136"/>
+  <rect class="box-warn" x="138" y="60" width="130" height="64" rx="8"/>
+  <text class="label" x="203" y="86" text-anchor="middle">starts with</text>
+  <text class="label" x="203" y="104" text-anchor="middle">"remember"?</text>
+  <path class="arrow-accent" d="M 203,124 V 160"/>
+  <rect class="box-info" x="138" y="162" width="130" height="36" rx="8"/>
+  <text class="mono" x="203" y="185" text-anchor="middle">store.put</text>
+  <path class="arrow" d="M 268,92 H 284"/>
+  <rect class="box-info" x="286" y="60" width="110" height="64" rx="8"/>
+  <text class="mono" x="341" y="86" text-anchor="middle">store</text>
+  <text class="mono" x="341" y="104" text-anchor="middle">.search</text>
+  <path class="arrow" d="M 396,92 H 412"/>
+  <rect class="box" x="414" y="60" width="110" height="64" rx="8"/>
+  <text class="label" x="469" y="86" text-anchor="middle">notes into</text>
+  <text class="label" x="469" y="104" text-anchor="middle">system msg</text>
+  <path class="arrow" d="M 524,92 H 540"/>
+  <rect class="box" x="542" y="60" width="90" height="64" rx="8"/>
+  <text class="mono" x="587" y="86" text-anchor="middle">trim</text>
+  <text class="small" x="587" y="104" text-anchor="middle">≈500 tokens</text>
+  <path class="arrow" d="M 632,92 H 648"/>
+  <rect class="box-solid" x="650" y="60" width="100" height="64" rx="8"/>
+  <text class="on-solid" x="700" y="97" text-anchor="middle">model</text>
+  <text class="small" x="212" y="148">yes: save as note-N</text>
+  <text class="small" x="590" y="160" text-anchor="middle">lines 24–34 of labs/12_memory.py</text>
+</svg>
+<figcaption>What <code>call_model</code> does on every turn. <strong>Long-term memory reaches the model only as text in the
+prompt</strong>; the model itself remembers nothing between calls.</figcaption>
+</figure>
+
+<p>On Monday, the message starts with "Remember", so <code>put</code> saves it as <code>note-0</code>, then <code>search</code>
+reads it straight back into the system message. On Friday, in a thread with no history, <code>search</code> finds the same
+note because the namespace (member M-1002) is the same, and the model's answer uses it.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Sequence: monday thread saves a note into the store; friday thread later searches the same namespace and the model answers using the large print preference">
+  <text class="title" x="100" y="26" text-anchor="middle">monday thread</text>
+  <text class="title" x="380" y="26" text-anchor="middle">store (M-1002)</text>
+  <text class="title" x="660" y="26" text-anchor="middle">friday thread</text>
+  <path class="line dashed" d="M 100,36 V 260"/>
+  <path class="line dashed" d="M 380,36 V 260"/>
+  <path class="line dashed" d="M 660,36 V 260"/>
+  <path class="arrow-accent" d="M 100,70 H 378"/>
+  <text class="label" x="240" y="62" text-anchor="middle">1. put note-0 (large print)</text>
+  <path class="arrow" d="M 380,110 H 102"/>
+  <text class="label" x="240" y="102" text-anchor="middle">2. search → 1 note</text>
+  <text class="small" x="240" y="130" text-anchor="middle">3. "I've noted ... large print books."</text>
+  <path class="arrow" d="M 660,170 H 382"/>
+  <text class="label" x="520" y="162" text-anchor="middle">4. search (0 messages in thread)</text>
+  <path class="arrow-ok" d="M 380,200 H 658"/>
+  <text class="label" x="520" y="192" text-anchor="middle">5. → the same 1 note</text>
+  <text class="small" x="520" y="226" text-anchor="middle">6. "Since you mentioned you only read</text>
+  <text class="small" x="520" y="242" text-anchor="middle">in large print, ..."</text>
+</svg>
+<figcaption>Time flows down. <strong>The friday thread never saw monday's messages; it got the fact from the store.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>Look closely at the answers.</strong> This graph has no tools and no policy documents. The
+monday answer promises to "check the print size before recommending or shelving books", and the friday answer mentions a
+"large print fiction section" and "bestseller lists". None of that exists in the project's data: the model made it up to sound
+helpful. Memory gave it the <em>preference</em> correctly; it did not give it facts about the library. In a real assistant you
+would combine memory with tools or retrieval (labs 07 and 09).</p></div>
+
+<h2>Deciding what to remember: real apps are more careful</h2>
+<p>The rule on line 27, "save any message that starts with <em>remember</em>", is deliberately simple so the mechanism is easy
+to see. Real applications think much harder about what goes into long-term memory:</p>
+<ul>
+<li><strong>Privacy.</strong> Saved text can contain personal data (health, address, reading habits). Store only what the
+feature needs, and keep it in the member's own namespace so it can never appear in another member's prompt.</li>
+<li><strong>Consent.</strong> Tell people what is remembered and let them turn it off. "Remember" as an explicit command is
+actually a reasonable consent signal; silently extracting facts from every message is not.</li>
+<li><strong>Viewing and deletion.</strong> Members should be able to see and delete their notes. With a store this is
+<code>store.search(namespace)</code> and <code>store.delete(namespace, key)</code>; in many countries the law requires it.</li>
+<li><strong>Quality.</strong> Many apps let the model extract structured facts ("prefers large print") instead of saving raw
+messages, deduplicate them, and update old facts instead of piling up new ones.</li>
+<li><strong>Who decides the namespace.</strong> As in line 24, the member id must come from the app, never from the
+conversation. Otherwise lab 11's leak would now leak stored preferences too.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Comparison of short-term and long-term memory: scope, storage, size problem and the tool used in this lab">
+  <rect class="box-info" x="20" y="20" width="350" height="164" rx="8"/>
+  <text class="title" x="195" y="46" text-anchor="middle">Short-term memory</text>
+  <text class="label" x="40" y="76">Scope: one thread</text>
+  <text class="label" x="40" y="100">Kept by: checkpointer</text>
+  <text class="label" x="40" y="124">Problem: grows every turn</text>
+  <text class="label" x="40" y="148">This lab: trim_messages</text>
+  <text class="small" x="40" y="170">(12 → 2 messages, max_tokens=40)</text>
+  <rect class="box-ok" x="390" y="20" width="350" height="164" rx="8"/>
+  <text class="title" x="565" y="46" text-anchor="middle">Long-term memory</text>
+  <text class="label" x="410" y="76">Scope: all threads of a member</text>
+  <text class="label" x="410" y="100">Kept by: store, per namespace</text>
+  <text class="label" x="410" y="124">Problem: what to save, and privacy</text>
+  <text class="label" x="410" y="148">This lab: store.put / store.search</text>
+  <text class="small" x="410" y="170">(1 note, used by the friday thread)</text>
+</svg>
+<figcaption>Side by side. <strong>Most real assistants use both:</strong> a trimmed conversation plus a few stored facts in
+the system message.</figcaption>
+</figure>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Forgetting <code>store=store</code> in <code>compile()</code>.</strong> Then LangGraph has no store to inject into
+<code>call_model</code>: the <code>store</code> parameter receives <code>None</code>, and the first call fails with
+<code>AttributeError: 'NoneType' object has no attribute 'search'</code> (or <code>'put'</code>, for a "Remember" message).</li>
+<li><strong>Missing <code>member_id</code> in the config.</strong> Line 24 then fails with <code>KeyError: 'member_id'</code>.
+Every call needs both <code>thread_id</code> and <code>member_id</code> inside <code>"configurable"</code>.</li>
+<li><strong>Putting the member id in the namespace from user text.</strong> Anyone could then read anyone's notes by typing
+another id. Take it from the login.</li>
+<li><strong>Trimming so hard that the question is lost.</strong> A tiny <code>max_tokens</code> can leave nothing useful. Without
+<code>start_on="human"</code> the kept part may start with an answer whose question is gone.</li>
+<li><strong>Expecting <code>InMemoryStore</code> to survive a restart.</strong> Like <code>InMemorySaver</code>, it lives in the
+process. Use a database-backed store for real users.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol class="steps">
+<li><strong>Change the budget.</strong> On line 16, set <code>max_tokens=60</code>, then <code>80</code>. With the approximate
+counter we measured 4 kept messages for 60 and 6 for 80 (part 1 needs no model, so it runs in a second; you can stop the
+program with <kbd>Ctrl</kbd>+<kbd>C</kbd> after the first line).</li>
+<li><strong>Another member's folder.</strong> At the end, add
+<code>print(store.search(("members", "M-1003", "preferences")))</code>. It prints <code>[]</code>: M-1002's note lives only in
+M-1002's namespace, so a thread of member M-1003 would get <code>nothing yet</code> in its system message.</li>
+<li><strong>Two notes.</strong> Add <code>ask("monday", "Remember: I prefer the Northside Branch.")</code> before the friday
+call. The final <code>stored:</code> line now lists two notes, <code>note-0</code> and <code>note-1</code>.</li>
+<li><strong>Forget on request.</strong> At the end, add <code>store.delete(("members", "M-1002", "preferences"), "note-0")</code>
+and print the search again: the list is empty.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Short-term memory is one thread's conversation; <code>trim_messages</code> sends only the newest part to the model (12
+messages became 2 with a 40-token budget).</li>
+<li>Long-term memory lives in a store, organised by namespaces such as <code>("members", "M-1002", "preferences")</code>, and
+is shared by every thread.</li>
+<li>A node gets the store by declaring a <code>store</code> parameter; <code>put</code> saves, <code>search</code> reads, and
+the notes reach the model as text in the system message.</li>
+<li>The friday thread used the large-print preference saved on Monday, but the model still invented library sections.</li>
+<li>The "Remember:" rule is a demo. Real apps decide carefully what to store, with privacy, consent and deletion in mind, and
+always take the member id from the app.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="11-checkpointers.html"><small>← Previous · Step 11</small>Checkpointers and threads</a>
+<a class="next" href="13-hitl-time-travel-streaming.html"><small>Next · Step 13 →</small>Human in the loop, time travel and streaming</a>
+</nav>
+</main>
+</body>
+</html>
