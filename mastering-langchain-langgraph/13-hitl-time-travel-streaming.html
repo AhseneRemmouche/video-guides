@@ -19,11 +19,11 @@
 </defs></svg>
 <header class="top"><div class="wrap">
   <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
-  <span class="meta"><a href="glossary.html">Glossary</a> · Step 13/16</span>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 13/17</span>
 </div></header>
 <main class="wrap">
 <section class="hero">
-  <div class="eyebrow">Step 13 of 16 · Hands-on lab</div>
+  <div class="eyebrow">Step 13 of 17 · Hands-on lab</div>
   <h1>Human in the loop, time travel and streaming</h1>
   <p class="lead">Pause before a write action for approval, fork a past checkpoint, and stream tokens. Book chapter 14.</p>
   <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
@@ -61,9 +61,24 @@ an approval lets it run. The agent waits as long as needed, because its state is
 call return <code>"yes"</code>. Returned <em>from</em> a node, <code>Command(goto="tools")</code> or
 <code>Command(goto=END, update={...})</code> says where the graph goes next and, optionally, what to add to the state, so the node
 itself does the routing instead of a separate edge.</p>
+<div data-only="ts"><p>In TypeScript, <code>Command</code> comes from <code>@langchain/langgraph</code> and takes one options object:
+<code>new Command({ resume: "yes" })</code>, <code>new Command({ goto: "tools" })</code> or
+<code>new Command({ goto: END, update: {...} })</code>. One extra rule in LangGraph.js: a node that returns a
+<code>Command</code> must list the places it may go when you add it, <code>addNode("approve", approve, { ends: ["tools", END] })</code>,
+so the graph knows those exits exist.</p></div>
 </details>
 
 <h2>Actions</h2>
+<div data-only="ts"><ol class="steps">
+<li>Create <code>labs/13-hitl-streaming.ts</code> in the <code>harbor-library-ai-ts</code> folder with the content below. It
+builds its own graph with all four tools (<code>ALL_TOOLS</code> includes <code>placeHold</code>, whose tool name is
+<code>place_hold</code>) and an extra <code>approve</code> node, and reuses the system message <code>SYSTEM</code> from
+<code>src/agent-graph.ts</code>.</li>
+<li>Run it: <code>pnpm lab 13</code> (Ollama running, <code>llama3.2</code> pulled). In this lab the "librarian" is the code
+itself: lines 52 and 60 answer "yes" and "no". In a real app a person would click a button (page 17 builds exactly that).</li>
+<li>Read the output in four parts: pause and approve, refuse, time travel, streaming.</li>
+</ol></div>
+<div data-only="py">
 <ol class="steps">
 <li>Create <code>labs/13_hitl_streaming.py</code> in the project folder with the content below. It builds its own graph with all
 four tools (<code>ALL_TOOLS</code> includes <code>place_hold</code>) and an extra <code>approve</code> node, and reuses the
@@ -72,10 +87,11 @@ system message <code>SYSTEM</code> from <code>harbor/agent_graph.py</code>.</li>
 "librarian" is the code itself: lines 52 and 59 answer "yes" and "no". In a real app a person would click a button.</li>
 <li>Read the output in four parts: pause and approve, refuse, time travel, streaming.</li>
 </ol>
+</div>
 
-<h2>The lab: <code>labs/13_hitl_streaming.py</code></h2>
+<h2>The lab: <span data-only="py"><code>labs/13_hitl_streaming.py</code></span><span data-only="ts"><code>labs/13-hitl-streaming.ts</code></span></h2>
 
-<pre data-file="labs/13_hitl_streaming.py" data-lang="py" data-tag="complete file"><code>"""Lab 13: pause for a human before a write action, go back in time, and stream."""
+<div class="code-tabs"><pre data-file="labs/13_hitl_streaming.py" data-lang="py" data-tag="complete file"><code>"""Lab 13: pause for a human before a write action, go back in time, and stream."""
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -155,10 +171,137 @@ for token, meta in graph.stream({"messages": [("user", "In one sentence, what ca
                                 {"configurable": {"thread_id": "stream"}}, stream_mode="messages"):
     if meta["langgraph_node"] == "model" and token.content:
         print(token.content, end="", flush=True)
-print()</code></pre>
+print()</code></pre><pre data-file="labs/13-hitl-streaming.ts" data-lang="ts" data-tag="complete file"><code>// Lab 13: pause for a human before a write action, go back in time, and stream.
+import { AIMessage, HumanMessage, isAIMessage } from "@langchain/core/messages";
+import { Command, END, MemorySaver, MessagesAnnotation, START, StateGraph, interrupt, isInterrupted, type StateSnapshot } from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { SYSTEM } from "../src/agent-graph.js";
+import { ALL_TOOLS } from "../src/catalog.js";
+import { getModel } from "../src/config.js";
+
+const model = getModel().bindTools(ALL_TOOLS);
+type State = typeof MessagesAnnotation.State;
+
+async function callModel(state: State) {
+  return { messages: [await model.invoke([SYSTEM, ...state.messages])] };
+}
+
+/** Pause before any place_hold call and ask a librarian. Other tools run without asking. */
+function approve(state: State) {
+  const last = state.messages.at(-1);
+  const holds = last &amp;&amp; isAIMessage(last) ? (last.tool_calls ?? []).filter((c) =&gt; c.name === "place_hold") : [];
+  if (holds.length) {
+    const decision = interrupt({ question: "Approve this hold?", calls: holds });
+    if (decision !== "yes") {
+      const refused = new AIMessage("A librarian did not approve this hold, so I did not place it.");
+      return new Command({ goto: END, update: { messages: [refused] } });
+    }
+  }
+  return new Command({ goto: "tools" });
+}
+
+function route(state: State) {
+  const last = state.messages.at(-1);
+  return last &amp;&amp; isAIMessage(last) &amp;&amp; last.tool_calls?.length ? "approve" : END;
+}
+
+const graph = new StateGraph(MessagesAnnotation)
+  .addNode("model", callModel)
+  .addNode("approve", approve, { ends: ["tools", END] }) // a node that returns Command lists where it may go
+  .addNode("tools", new ToolNode(ALL_TOOLS))
+  .addEdge(START, "model")
+  .addConditionalEdges("model", route, ["approve", END])
+  .addEdge("tools", "model")
+  .compile({ checkpointer: new MemorySaver() });
+
+// 1. Human in the loop: the run stops at interrupt() and waits.
+const config = { configurable: { thread_id: "hold-1" } };
+const request = "I'm member M-1002. Please place a hold on item B003 for me.";
+let result = await graph.invoke({ messages: [{ role: "user", content: request }] }, config);
+console.log("1) Paused:", isInterrupted(result));
+if (isInterrupted(result)) {
+  console.log("   waiting for:", JSON.stringify(result.__interrupt__[0].value));
+  console.log("   next node:", (await graph.getState(config)).next);
+  result = await graph.invoke(new Command({ resume: "yes" }), config); // the librarian approves
+  console.log("   after 'yes':", result.messages.at(-1)?.content);
+}
+
+// 2. The same request, refused.
+const config2 = { configurable: { thread_id: "hold-2" } };
+result = await graph.invoke({ messages: [{ role: "user", content: request }] }, config2);
+if (isInterrupted(result)) {
+  console.log("   after 'no': ", (await graph.invoke(new Command({ resume: "no" }), config2)).messages.at(-1)?.content);
+}
+
+// 3. Time travel: list the checkpoints of thread hold-1 and replay from an earlier one with a changed message.
+const history: StateSnapshot[] = [];
+for await (const snap of graph.getStateHistory(config)) history.push(snap);
+console.log(`\n3) Thread hold-1 has ${history.length} checkpoints (newest first):`);
+for (const snap of history) {
+  console.log(`   step ${String(snap.metadata?.step).padStart(2)}  next=${JSON.stringify(snap.next)}  messages=${(snap.values.messages ?? []).length}`);
+}
+const firstInput = history.find((s) =&gt; s.next.length === 1 &amp;&amp; s.next[0] === "model" &amp;&amp; s.values.messages?.length === 1)!;
+const original = firstInput.values.messages[0];
+// Reusing the message id REPLACES that message; a message without its id would be appended instead.
+const edited = new HumanMessage({ content: "I'm member M-1002. Is item B006 available?", id: original.id });
+const fork = await graph.updateState(firstInput.config, { messages: [edited] });
+const replayed = await graph.invoke(null, fork);
+console.log("   forked run answered:", replayed.messages.at(-1)?.content);
+let count = 0;
+for await (const _ of graph.getStateHistory(config)) count++;
+console.log(`   the thread now has ${count} checkpoints; the old branch is still there`);
+
+// 4. Streaming: 'messages' mode yields the model's tokens as they are generated.
+process.stdout.write("\n4) streamMode 'messages': ");
+const stream = await graph.stream(
+  { messages: [{ role: "user", content: "In one sentence, what can I do at the maker space?" }] },
+  { configurable: { thread_id: "stream" }, streamMode: "messages" },
+);
+for await (const [token, meta] of stream) {
+  if (meta.langgraph_node === "model" &amp;&amp; token.content) process.stdout.write(String(token.content));
+}
+console.log();</code></pre></div>
 
 <h3>Line by line</h3>
-<div class="table-wrap"><table class="lines">
+<div data-only="ts"><div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>// Lab 13: pause for a human before a write action, ...</code></td><td>A comment naming the three features.</td></tr>
+<tr><td>2</td><td><code>import { AIMessage, HumanMessage, isAIMessage } from "@langchain/core/messages";</code></td><td><code>AIMessage</code> for the refusal text the graph writes itself; <code>HumanMessage</code> for the edited question in the time-travel part; <code>isAIMessage</code> checks that a message came from the model before we read its <code>tool_calls</code> (only AI messages have them, and TypeScript makes us check).</td></tr>
+<tr><td>3</td><td><code>import { Command, END, MemorySaver, MessagesAnnotation, START, StateGraph, interrupt, isInterrupted, type StateSnapshot } from "@langchain/langgraph";</code></td><td>Everything LangGraph-related comes from one package: the graph parts, <code>MemorySaver</code> (the in-memory <a class="term" href="glossary.html#checkpointer">checkpointer</a>; interrupts and time travel need one), the two human-in-the-loop building blocks <code>interrupt</code> and <code>Command</code>, <code>isInterrupted</code> to test a result, and the <code>StateSnapshot</code> type for the history list. <code>type</code> marks an import that only exists for the type checker.</td></tr>
+<tr><td>4</td><td><code>import { ToolNode } from "@langchain/langgraph/prebuilt";</code></td><td>Runs the tool calls. No <code>toolsCondition</code> this time: our own <code>route</code> sends tool calls to <code>approve</code> first.</td></tr>
+<tr><td>5–7</td><td><code>import { SYSTEM } ...</code>, <code>{ ALL_TOOLS }</code>, <code>{ getModel }</code></td><td>The shared system message, all four tools including <code>place_hold</code>, and the model factory. The <code>.js</code> endings are how <a class="term" href="glossary.html#esm">ES modules</a> name files; <a class="term" href="glossary.html#tsx">tsx</a> maps them to the <code>.ts</code> files.</td></tr>
+<tr><td>9</td><td><code>const model = getModel().bindTools(ALL_TOOLS);</code></td><td>The model may now ask for <code>place_hold</code> too.</td></tr>
+<tr><td>10</td><td><code>type State = typeof MessagesAnnotation.State;</code></td><td>A short name for the state type (an object with a <code>messages</code> list), used by the three functions below.</td></tr>
+<tr><td>12–14</td><td><code>async function callModel(state: State) { return { messages: [await model.invoke([SYSTEM, ...state.messages])] }; }</code></td><td>The same model node as in <code>src/agent-graph.ts</code>. <code>...</code> spreads the history after the system message.</td></tr>
+<tr><td>16–17</td><td><code>/** Pause before any place_hold call ... */ function approve(state: State) {</code></td><td>The gate between "the model asked for tools" and "the tools run".</td></tr>
+<tr><td>18–19</td><td><code>const last = state.messages.at(-1);</code> <code>const holds = ... .filter((c) =&gt; c.name === "place_hold") : [];</code></td><td>The last message is the model's request. Keep only its <code>place_hold</code> calls; read-only tools pass without asking. <code>at(-1)</code> is the last item; <code>?? []</code> uses an empty list when <code>tool_calls</code> is missing.</td></tr>
+<tr><td>20–21</td><td><code>if (holds.length) { const decision = interrupt({ question: "Approve this hold?", calls: holds });</code></td><td><a class="term" href="glossary.html#interrupt">interrupt()</a> stops the run here and returns the object to the caller (inside <code>result.__interrupt__</code>). When the run is resumed, LangGraph runs this node <strong>again from its first line</strong>, and this time <code>interrupt()</code> returns the resume value instead of stopping. So keep code before <code>interrupt()</code> free of side effects.</td></tr>
+<tr><td>22–25</td><td><code>if (decision !== "yes") { const refused = new AIMessage(...); return new Command({ goto: END, update: { messages: [refused] } }); }</code></td><td>Anything but "yes" refuses: add an explanation message and finish without running the tools. Checking <code>!== "yes"</code> (rather than <code>=== "no"</code>) is the safe default: a typo or an empty answer also refuses.</td></tr>
+<tr><td>27</td><td><code>return new Command({ goto: "tools" });</code></td><td>Approved, or no hold at all: continue to the tools node.</td></tr>
+<tr><td>30–33</td><td><code>function route(state: State) { ... ? "approve" : END; }</code></td><td>After the model: any tool call goes through <code>approve</code>; a plain answer ends the run.</td></tr>
+<tr><td>35–38</td><td><code>new StateGraph(MessagesAnnotation).addNode("model", callModel).addNode("approve", approve, { ends: ["tools", END] }).addNode("tools", new ToolNode(ALL_TOOLS))</code></td><td>Three nodes, chained in one expression. Their names are what you will see in <code>next=[...]</code> and in streaming metadata. <strong>New in TypeScript:</strong> <code>{ ends: ["tools", END] }</code> declares where <code>approve</code> may jump with <code>Command</code>. The Python lab did not need this; in LangGraph.js, leave it out and the graph does not know about those exits.</td></tr>
+<tr><td>39–41</td><td><code>.addEdge(START, "model")</code>; <code>.addConditionalEdges("model", route, ["approve", END])</code>; <code>.addEdge("tools", "model")</code></td><td>The list <code>["approve", END]</code> declares where <code>route</code> may go. There is no edge out of <code>approve</code>: it routes itself with <code>Command</code>.</td></tr>
+<tr><td>42</td><td><code>.compile({ checkpointer: new MemorySaver() });</code></td><td>The checkpointer makes pausing, resuming and time travel possible.</td></tr>
+<tr><td>45–47</td><td><code>const config = { configurable: { thread_id: "hold-1" } };</code> <code>const request = "I'm member M-1002. Please place a hold on item B003 for me.";</code> <code>let result = await graph.invoke(...)</code></td><td>Part 1. Sam (M-1002) asks for a hold on B003, which has 0 of 4 copies on the shelf, so a hold makes sense. <code>invoke</code> returns when the graph finishes <em>or</em> pauses. <code>let</code> (not <code>const</code>) because <code>result</code> is reassigned later.</td></tr>
+<tr><td>48</td><td><code>console.log("1) Paused:", isInterrupted(result));</code></td><td><strong>JS difference:</strong> instead of looking for the key <code>"__interrupt__"</code> yourself, call <code>isInterrupted(result)</code>. It returns <code>true</code> for a paused run, and it also tells TypeScript that <code>result.__interrupt__</code> exists inside the <code>if</code>.</td></tr>
+<tr><td>49–50</td><td><code>if (isInterrupted(result)) { ... JSON.stringify(result.__interrupt__[0].value)</code></td><td>A list of interrupts (several nodes could pause at once); <code>.value</code> is the object passed to <code>interrupt()</code>: the question and the exact tool call. <code>JSON.stringify</code> prints it on one line.</td></tr>
+<tr><td>51</td><td><code>(await graph.getState(config)).next</code></td><td>The node that will run when resumed: <code>[ 'approve' ]</code> (an array; Python shows a tuple).</td></tr>
+<tr><td>52–53</td><td><code>result = await graph.invoke(new Command({ resume: "yes" }), config);</code></td><td>The librarian approves. Same <code>thread_id</code>, so LangGraph loads the paused state, reruns <code>approve</code>, which now gets <code>"yes"</code>, and continues to the tools and the model's final answer. <code>?.content</code> on line 53 reads the content only if a last message exists.</td></tr>
+<tr><td>57–61</td><td>thread <code>"hold-2"</code>, <code>new Command({ resume: "no" })</code></td><td>Part 2: the same request on a new thread, refused. The answer is the fixed <code>AIMessage</code> from line 23; the model is not called again.</td></tr>
+<tr><td>64–65</td><td><code>const history: StateSnapshot[] = [];</code> <code>for await (const snap of graph.getStateHistory(config)) history.push(snap);</code></td><td>Part 3. All checkpoints of thread <code>hold-1</code>, newest first. <strong>JS difference:</strong> <code>getStateHistory</code> is an <a class="term" href="glossary.html#async-iterator">async iterator</a> (it may read from a database), so you collect it with <code>for await</code> instead of <code>list(...)</code>.</td></tr>
+<tr><td>66–69</td><td><code>for (const snap of history) { console.log(`   step ${String(snap.metadata?.step).padStart(2)} ...`) }</code></td><td>One line per checkpoint: the step number from its metadata, the next node, and the message count. <code>padStart(2)</code> right-aligns the step in two characters; the backticks make a template string with <code>${...}</code> holes.</td></tr>
+<tr><td>70</td><td><code>const firstInput = history.find((s) =&gt; s.next.length === 1 &amp;&amp; s.next[0] === "model" &amp;&amp; s.values.messages?.length === 1)!;</code></td><td>Finds the checkpoint just before the model first ran: one message (the request), next node <code>model</code>. <code>find</code> returns the first match; the <code>!</code> at the end tells TypeScript "I know this is not undefined".</td></tr>
+<tr><td>71</td><td><code>const original = firstInput.values.messages[0];</code></td><td>The original user message. We need its <code>id</code>.</td></tr>
+<tr><td>72–73</td><td><code>const edited = new HumanMessage({ content: "I'm member M-1002. Is item B006 available?", id: original.id });</code></td><td>A different question <strong>with the same id</strong> as the original. The <code>messages</code> <a class="term" href="glossary.html#reducer">reducer</a> replaces a message whose id already exists, and appends one with a new id. See "The bug we hit" below.</td></tr>
+<tr><td>74</td><td><code>const fork = await graph.updateState(firstInput.config, { messages: [edited] });</code></td><td>Writes a new checkpoint whose parent is the old one (<code>firstInput.config</code> points at it). It returns the config of the new checkpoint, the start of a new branch.</td></tr>
+<tr><td>75</td><td><code>const replayed = await graph.invoke(null, fork);</code></td><td><code>null</code> as input means "no new input, just continue from this checkpoint". The graph runs forward from the fork.</td></tr>
+<tr><td>76–79</td><td><code>console.log("   forked run answered:", ...)</code>; <code>for await (const _ of graph.getStateHistory(config)) count++;</code></td><td>The forked answer, then a second pass over the history only to count the checkpoints (<code>_</code> is a name for a value we do not use).</td></tr>
+<tr><td>82</td><td><code>process.stdout.write("\n4) streamMode 'messages': ");</code></td><td>Part 4. <code>process.stdout.write</code> prints without adding a newline, so the answer continues on the same line (<code>console.log</code> always ends the line).</td></tr>
+<tr><td>83–86</td><td><code>const stream = await graph.stream({...}, { configurable: { thread_id: "stream" }, streamMode: "messages" });</code></td><td><code>stream</code> yields while the graph runs. The stream mode goes inside the config object. With <code>"messages"</code> each item is a pair: a message chunk (a few characters of the model's output) and a metadata object.</td></tr>
+<tr><td>87–89</td><td><code>for await (const [token, meta] of stream) { if (meta.langgraph_node === "model" &amp;&amp; token.content) process.stdout.write(String(token.content)); }</code></td><td><code>[token, meta]</code> unpacks each pair. <code>langgraph_node</code> names the node that produced the chunk; keep only the model's text, skip empty chunks (for example a tool-call chunk). Each piece is written to the screen as it arrives.</td></tr>
+<tr><td>90</td><td><code>console.log();</code></td><td>Ends the line after the streamed answer.</td></tr>
+</table></div></div>
+<div data-only="py"><div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
 <tr><td>1</td><td><code>"""Lab 13: pause for a human before a write action, ..."""</code></td><td>Docstring listing the three features.</td></tr>
 <tr><td>2</td><td><code>from langchain_core.messages import AIMessage, HumanMessage</code></td><td><code>AIMessage</code> for the refusal text the graph writes itself; <code>HumanMessage</code> for the edited question in the time-travel part.</td></tr>
@@ -195,7 +338,7 @@ print()</code></pre>
 <tr><td>76–78</td><td><code>for token, meta in graph.stream({...}, {"configurable": {"thread_id": "stream"}}, stream_mode="messages"):</code></td><td>Part 4. <code>stream</code> yields while the graph runs. With <code>stream_mode="messages"</code> each item is a pair: a message chunk (a few characters of the model's output) and a metadata dictionary. <code>end=""</code> on line 76 keeps the answer on the same line.</td></tr>
 <tr><td>79–80</td><td><code>if meta["langgraph_node"] == "model" and token.content: print(token.content, end="", flush=True)</code></td><td><code>langgraph_node</code> names the node that produced the chunk; keep only the model's text, skip empty chunks (for example a tool-call chunk). <code>flush=True</code> pushes each piece to the screen immediately instead of buffering.</td></tr>
 <tr><td>81</td><td><code>print()</code></td><td>Ends the line after the streamed answer.</td></tr>
-</table></div>
+</table></div></div>
 
 <figure class="diagram">
 <svg viewBox="0 0 760 250" role="img" aria-label="Lab 13 graph: START to model; route sends tool calls to approve or ends; approve either interrupts and on no goes to END, or goes to tools; tools back to model">
@@ -227,9 +370,10 @@ tools go straight through. <strong>A refused hold never reaches the tools node.<
 </figure>
 
 <h2>Run it</h2>
-<pre data-lang="sh" data-tag="command"><code>uv run python -m labs.13_hitl_streaming</code></pre>
+<div data-only="py"><pre data-lang="sh" data-tag="command"><code>uv run python -m labs.13_hitl_streaming</code></pre></div>
+<div data-only="ts"><p>From the <code>harbor-library-ai-ts</code> folder: <code>pnpm lab 13</code></p></div>
 
-<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) Paused: True
+<div data-only="py"><pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) Paused: True
    waiting for: {'question': 'Approve this hold?', 'calls': [{'name': 'place_hold', 'args': {'item_id': 'B003', 'member_id': 'M-1002'}, 'id': 'f4f2f73e-e284-4e41-a5ea-82dcda7f926c', 'type': 'tool_call'}]}
    next node: ('approve',)
    after 'yes': Hold placed on "Learning Python the Gentle Way" for you, M-1002. The item will be held for 7 days, and we will notify you when it is available for pickup.
@@ -245,9 +389,43 @@ tools go straight through. <strong>A refused hold never reaches the tools node.<
    forked run answered: The item B006, "The Little Crab Who Could", is available for borrowing at the Lighthouse Branch of Harbor City Library. You can check it out with your library card.
    the thread now has 11 checkpoints; the old branch is still there
 
-4) stream_mode='messages': You can use the maker space to create and prototype your own projects, such as woodworking, sewing, 3D printing, and more, with access to various tools and equipment.</code></pre>
+4) stream_mode='messages': You can use the maker space to create and prototype your own projects, such as woodworking, sewing, 3D printing, and more, with access to various tools and equipment.</code></pre></div>
+<div data-only="ts"><pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>1) Paused: true
+   waiting for: {"question":"Approve this hold?","calls":[{"name":"place_hold","args":{"item_id":"B003","member_id":"M-1002"},"id":"0e9d0693-b377-4003-9bde-f6a398d58b61","type":"tool_call"}]}
+   next node: [ 'approve' ]
+   after 'yes': Hold placed on "Learning Python the Gentle Way" for you, M-1002. The item will be held for 7 days, and we will notify you when it is available for pickup.
+   after 'no':  A librarian did not approve this hold, so I did not place it.
 
-<div class="callout ok"><p><strong>What you should see</strong></p>
+3) Thread hold-1 has 6 checkpoints (newest first):
+   step  4  next=[]  messages=4
+   step  3  next=["model"]  messages=3
+   step  2  next=["tools"]  messages=2
+   step  1  next=["approve"]  messages=2
+   step  0  next=["model"]  messages=1
+   step -1  next=["__start__"]  messages=0
+   forked run answered: The item B006, "The Little Crab Who Could", is available for borrowing at the Lighthouse Branch of Harbor City Library. You can check it out with your library card.
+   the thread now has 11 checkpoints; the old branch is still there
+
+4) streamMode 'messages': You can use the maker space to create and prototype your own projects, such as woodworking, sewing, 3D printing, and more, with access to various tools and equipment.</code></pre></div>
+
+<div class="callout ok" data-only="ts"><p><strong>What you should see</strong></p>
+<ul>
+<li><strong>Part 1:</strong> <code>Paused: true</code>, the interrupt payload with the exact call
+(<code>place_hold</code>, <code>"item_id":"B003"</code>, <code>"member_id":"M-1002"</code>), <code>next node: [ 'approve' ]</code>,
+then the answer after "yes": the hold was placed on "Learning Python the Gentle Way".</li>
+<li><strong>Part 2:</strong> <code>A librarian did not approve this hold, so I did not place it.</code></li>
+<li><strong>Part 3:</strong> 6 checkpoints for thread <code>hold-1</code> (steps 4 down to -1), a forked answer about B006, and
+<code>the thread now has 11 checkpoints</code>.</li>
+<li><strong>Part 4:</strong> one sentence that appears piece by piece in your terminal. (In the saved output file you only see the
+finished line.)</li>
+<li>The tool call ids and the wording will differ. If the model does not call <code>place_hold</code> at all, there is no
+pause and lines 50–53 are skipped; run again.</li>
+<li>Our TypeScript run gave the same answers, word for word, as the Python run on the same laptop: same checkpoints, same
+fork, same streamed sentence. Only the printing differs (<code>true</code> and <code>[ 'approve' ]</code> instead of
+<code>True</code> and <code>('approve',)</code>).</li>
+</ul></div>
+
+<div class="callout ok" data-only="py"><p><strong>What you should see</strong></p>
 <ul>
 <li><strong>Part 1:</strong> <code>Paused: True</code>, the interrupt payload with the exact call
 (<code>place_hold</code>, <code>item_id 'B003'</code>, <code>member_id 'M-1002'</code>), <code>next node: ('approve',)</code>, then
@@ -302,8 +480,8 @@ paused node starts again from its first line on resume</strong>, and <code>inter
 
 <p>Two details of the output are worth a second look. The model's text after "yes" says "we will notify you when it is
 available"; the tool actually returned "We keep it for 7 days once it is back". The fact is right, the extra promise is the
-model's own. And <code>place_hold</code> only changes the in-memory copy of the member data (line 52 of
-<code>harbor/catalog.py</code>), so nothing is written to <code>data/members.json</code>.</p>
+model's own. And <code>place_hold</code> only changes the in-memory copy of the member data (<span data-only="py">line 52 of
+<code>harbor/catalog.py</code></span><span data-only="ts">line 81 of <code>src/catalog.ts</code></span>), so nothing is written to <code>data/members.json</code>.</p>
 
 <h2>Part 3: time travel</h2>
 <p>Thread <code>hold-1</code> kept a checkpoint after every step. Reading the list from the bottom (oldest) up: the empty
@@ -338,31 +516,33 @@ approved and heading to <code>tools</code> (step 2), the tool result back to the
   <text class="small" x="580" y="130" text-anchor="middle">3 msgs</text>
   <text class="small" x="700" y="130" text-anchor="middle">4 msgs</text>
   <rect class="box-warn" x="100" y="156" width="180" height="56" rx="8"/>
-  <text class="label" x="190" y="180" text-anchor="middle">first_input (line 66)</text>
-  <text class="small" x="190" y="198" text-anchor="middle">the fork point</text>
+  <text class="label" x="190" y="180" text-anchor="middle">the fork point (step 0)</text>
+  <text class="small" x="190" y="198" text-anchor="middle">first_input / firstInput</text>
   <text class="small" x="500" y="186" text-anchor="middle">row 2 = "next", row 3 = messages in the state</text>
 </svg>
-<figcaption>The six snapshots printed in part 3, oldest on the left. <strong>Line 66 picks step 0: next is
+<figcaption>The six snapshots printed in part 3, oldest on the left. <strong><span data-only="py">Line 66</span><span data-only="ts">Line 70</span> picks step 0: next is
 <code>model</code> and the state holds exactly one message, the original request.</strong></figcaption>
 </figure>
 
 <p>The plan: at step 0, swap the request for a different question ("Is item B006 available?") and let the graph run again
 from there. <code>update_state</code> writes the change as a new checkpoint, and <code>invoke(None, fork)</code> continues from
-it.</p>
+it.<span data-only="ts"> In TypeScript: <code>await graph.updateState(...)</code> and <code>await graph.invoke(null, fork)</code>.</span></p>
 
 <h3>The bug we hit: the edit was appended, not replaced</h3>
-<p>Our first version created the edited message without an id:</p>
-
+<p>Our first version created the edited message without an id<span data-only="ts"> (we hit this in Python first; in
+TypeScript the same mistake is <code>new HumanMessage("I'm member M-1002. Is item B006 available?")</code> with no
+<code>id</code>, and the reducer behaves the same way)</span>:</p>
+<div data-only="py">
 <pre data-lang="py" data-tag="the version that answered nothing"><code>edited = HumanMessage("I'm member M-1002. Is item B006 available?")
-fork = graph.update_state(first_input.config, {"messages": [edited]})</code></pre>
+fork = graph.update_state(first_input.config, {"messages": [edited]})</code></pre></div>
 
-<p>The fork ran, and printed an empty answer. The reason is the <code>messages</code> reducer of <code>MessagesState</code>:
+<p>The fork ran, and printed an empty answer. The reason is the <code>messages</code> reducer of <code>MessagesState</code><span data-only="ts"> (<code>MessagesAnnotation</code> in TypeScript)</span>:
 <code>update_state</code> goes through the same reducer as a node's return value, and that reducer <strong>appends</strong> any
 message whose id it has not seen. LangChain gives every message a fresh id, so the state at the fork became
 <em>[hold request, B006 question]</em>. The model still saw the hold request, asked for <code>place_hold</code> again, and the
 run stopped once more at the approval <code>interrupt()</code>. The last message of that paused result was the model's tool-call
 message, which has no text, so "forked run answered:" printed nothing.</p>
-<p>The fix is line 69: give the new message the <strong>same id</strong> as the original (<code>id=original.id</code>). For a
+<p>The fix is <span data-only="py">line 69</span><span data-only="ts">line 73 of the TypeScript file</span>: give the new message the <strong>same id</strong> as the original (<code>id=original.id</code><span data-only="ts">, in TypeScript <code>id: original.id</code></span>). For a
 known id the reducer <strong>replaces</strong> the message in place, so the state at the fork is just <em>[B006 question]</em>.</p>
 
 <figure class="diagram">
@@ -438,7 +618,8 @@ you explore "what if the user had asked something else?". Both add new checkpoin
 <p><code>invoke</code> waits for the whole answer. <code>stream</code> yields pieces while the graph works. LangGraph has several
 stream modes: <code>"values"</code> (the full state after each step), <code>"updates"</code> (what each node returned, used in
 lab 08) and <code>"messages"</code> (the model's output token by token). With <code>"messages"</code>, every item is a
-<code>(chunk, metadata)</code> pair, and <code>metadata["langgraph_node"]</code> tells which node was running. That matters as
+<code>(chunk, metadata)</code> pair, and <code>metadata["langgraph_node"]</code><span data-only="ts"> (<code>meta.langgraph_node</code>; the pair is unpacked with
+<code>const [token, meta]</code>)</span> tells which node was running. That matters as
 soon as a graph has more than one node that calls a model, or a tools node that also produces messages.</p>
 
 <figure class="diagram">
@@ -461,11 +642,11 @@ soon as a graph has more than one node that calls a model, or a tools node that 
   <rect class="box-ok" x="580" y="56" width="160" height="68" rx="8"/>
   <text class="label" x="660" y="80" text-anchor="middle">filter: node is</text>
   <text class="label" x="660" y="98" text-anchor="middle">"model" and text</text>
-  <text class="small" x="660" y="116" text-anchor="middle">print(end="", flush=True)</text>
+  <text class="small" x="660" y="116" text-anchor="middle">print without a newline</text>
   <rect class="box2" x="20" y="150" width="720" height="36" rx="8"/>
   <text class="mono" x="380" y="173" text-anchor="middle">You can use the maker space to create and prototype ...</text>
 </svg>
-<figcaption>Lines 77–80. The exact way the text is cut into chunks is up to the model server (the split shown is
+<figcaption><span data-only="py">Lines 77–80.</span><span data-only="ts">Lines 83–89.</span> The exact way the text is cut into chunks is up to the model server (the split shown is
 illustrative). <strong>Streaming changes when you see the answer, not what the answer is.</strong></figcaption>
 </figure>
 
@@ -476,8 +657,15 @@ its general knowledge, partly right and partly invented. Streaming made the answ
 
 <div class="callout warn"><p><strong>Common mistakes</strong></p>
 <ul>
-<li><strong>No checkpointer.</strong> The graph still pauses, but <code>Command(resume=...)</code> fails with
+<li data-only="py"><strong>No checkpointer.</strong> The graph still pauses, but <code>Command(resume=...)</code> fails with
 <code>RuntimeError: Cannot use Command(resume=...) without checkpointer</code>.</li>
+<li data-only="ts"><strong>No checkpointer.</strong> There is no saved state to resume from, so <code>new Command({ resume })</code>
+cannot work. Always pass <code>{ checkpointer }</code> to <code>compile</code>.</li>
+<li data-only="ts"><strong>Forgetting <code>{ ends: [...] }</code>.</strong> In LangGraph.js a node that returns a
+<code>Command</code> must list where it may go when you add it (line 37).</li>
+<li data-only="ts"><strong>Forgetting <code>await</code> or <code>for await</code>.</strong> <code>invoke</code>,
+<code>getState</code>, <code>updateState</code> return promises and <code>getStateHistory</code> and <code>stream</code> return
+async iterators. Without <code>await</code> you print <code>Promise { &lt;pending&gt; }</code> instead of the value.</li>
 <li><strong>Resuming on a different <code>thread_id</code>.</strong> The resume must use the config of the paused thread, or
 there is nothing to resume.</li>
 <li><strong>Side effects before <code>interrupt()</code>.</strong> The node runs again from the top on resume, so anything
@@ -489,7 +677,20 @@ also print empty tool-call chunks, or text from other nodes.</li>
 </ul></div>
 
 <h2>Try it yourself</h2>
-<ol class="steps">
+<div data-only="ts"><ol class="steps">
+<li><strong>Any other answer refuses.</strong> On line 52 change <code>"yes"</code> to <code>"maybe"</code>. The line labelled
+<code>after 'yes':</code> now shows the refusal message, because line 22 accepts only exactly <code>"yes"</code>.</li>
+<li><strong>Reproduce the bug.</strong> On line 73 remove <code>, id: original.id</code> and run again. The forked run stops at
+the approval again and the "forked run answered:" line is empty if the model asks for <code>place_hold</code> again (as
+llama3.2 did for us in Python). Put the id back afterwards.</li>
+<li><strong>See the pause on the fork.</strong> With the bug reproduced, add
+<code>console.log((await graph.getState(config)).next);</code> after line 76. If the fork paused, it prints
+<code>[ 'approve' ]</code>: the new branch is waiting for a librarian.</li>
+<li><strong>Watch other stream modes.</strong> Copy lines 83–86 into a new block with <code>streamMode: "updates"</code> and
+<code>console.log</code> each item. You get one object per finished node (<code>model</code>, then possibly
+<code>approve</code> and <code>tools</code>) instead of tokens.</li>
+</ol></div>
+<div data-only="py"><ol class="steps">
 <li><strong>Any other answer refuses.</strong> On line 52 change <code>"yes"</code> to <code>"maybe"</code>. The line labelled
 <code>after 'yes':</code> now shows the refusal message, because line 25 accepts only exactly <code>"yes"</code>.</li>
 <li><strong>Reproduce the bug.</strong> On line 69 remove <code>, id=original.id</code> and run again. The forked run stops at the
@@ -501,9 +702,23 @@ for a librarian.</li>
 <li><strong>Watch other stream modes.</strong> Copy lines 77–78 into a new loop with <code>stream_mode="updates"</code> and print
 each item. You get one dictionary per finished node (<code>model</code>, then possibly <code>approve</code> and
 <code>tools</code>) instead of tokens.</li>
-</ol>
+</ol></div>
 
-<div class="recap"><strong>Recap</strong><ul>
+<div class="recap"><strong>Recap</strong><ul data-only="ts">
+<li><code>interrupt(payload)</code> pauses inside a node; <code>isInterrupted(result)</code> is <code>true</code>,
+<code>result.__interrupt__[0].value</code> holds the payload and <code>(await graph.getState(config)).next</code> shows
+<code>[ 'approve' ]</code>.</li>
+<li><code>new Command({ resume: "yes" })</code> on the same thread reruns the paused node from the top, and
+<code>interrupt()</code> returns the answer; "no" led to the refusal message without touching the tools. A node that returns
+a <code>Command</code> declares its exits with <code>{ ends: [...] }</code>.</li>
+<li><code>getStateHistory</code> is an async iterator (<code>for await</code>) over every checkpoint (6 for the approved run);
+<code>updateState</code> on an old one plus <code>invoke(null, fork)</code> creates a new branch (11 checkpoints, the old
+branch kept).</li>
+<li>The <code>messages</code> reducer appends messages with new ids and replaces those with a known id: reuse
+<code>original.id</code> to edit a message.</li>
+<li><code>streamMode: "messages"</code> yields <code>[chunk, metadata]</code> pairs; filter on
+<code>meta.langgraph_node</code>. Streaming shows text sooner; it does not make it more accurate.</li>
+</ul><ul data-only="py">
 <li><code>interrupt(payload)</code> pauses inside a node; the result contains <code>__interrupt__</code> and
 <code>get_state(config).next</code> shows <code>('approve',)</code>.</li>
 <li><code>Command(resume="yes")</code> on the same thread reruns the paused node from the top, and <code>interrupt()</code>

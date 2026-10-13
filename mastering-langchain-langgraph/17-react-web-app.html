@@ -1,0 +1,1089 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>17 · The React web app</title>
+<meta name="description" content="Put the agent behind a small Node server and a React chat with sources, a tool-call log and an approval card. TypeScript only.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Mastering LangChain &amp; LangGraph · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 17/17</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 17 of 17 · Hands-on lab</div>
+  <h1>The React web app</h1>
+  <p class="lead">Put the agent behind a small Node server and a React chat with sources, a tool-call log and an approval card. TypeScript only.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout"><strong>TypeScript only.</strong> This page has no book chapter and no Python version. It builds on <a href="09-tools.html">lab 09</a> (tools), <a href="13-hitl-time-travel-streaming.html">lab 13</a> (pausing for approval and streaming) and <a href="15-middleware.html">lab 15</a> (middleware), and puts the same library <a class="term" href="glossary.html#agent">agent</a> in a web page. The code is in the folder <code>harbor-library-ai-ts</code>, under <code>server/</code> and <code>web/</code>.</div>
+
+<h2>Goal</h2>
+<p>Turn the agent from the terminal labs into a small web app that a visitor can use in a browser. The visitor types a question and
+watches the answer appear word by word. Under each answer they see which policy files were looked up. A side panel lists every
+<a class="term" href="glossary.html#tool">tool</a> call and its result. When the agent wants to place a hold, an approval card appears and
+a librarian clicks Approve or Reject. You will read every file of the app, from the server to the last line of the user interface.</p>
+
+<h2>The idea in brief</h2>
+<ul>
+<li><strong>Two programs, two terminals.</strong> A <a class="term" href="glossary.html#nodejs">Node.js</a> server (<code>server/</code>) owns the
+agent, the tools and the model. A <a class="term" href="glossary.html#react">React</a> app (<code>web/</code>) runs in the browser and only
+shows things. The browser never talks to <a class="term" href="glossary.html#ollama">Ollama</a> directly.</li>
+<li><strong>The agent is the one from lab 15</strong>, built with <code>createAgent</code>, plus one new tool, <code>search_policies</code>,
+which wraps the <a class="term" href="glossary.html#retriever">retriever</a> from labs 04–07. Human approval before <code>place_hold</code> comes
+from <code>humanInTheLoopMiddleware</code>, and a <code>MemorySaver</code> <a class="term" href="glossary.html#checkpointer">checkpointer</a> gives
+each conversation its own memory.</li>
+<li><strong>The server streams.</strong> Two <a class="term" href="glossary.html#api-endpoint">API endpoints</a>, <code>POST /api/chat</code> and
+<code>POST /api/resume</code>, run the agent and send what happens as <a class="term" href="glossary.html#sse">Server-Sent Events</a>: answer
+tokens, tool calls, tool results, an approval request, and "done".</li>
+<li><strong>The browser reacts.</strong> Each event changes a piece of React state, and React redraws the parts of the page that depend on
+it.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Architecture: the browser talks only to the Vite dev server on port 5173, which serves the React app and forwards /api requests to the Hono server on port 8787; the Hono server runs the createAgent agent, which calls Ollama on the same computer">
+  <rect class="zone" x="10" y="10" width="170" height="230" rx="8"/>
+  <text class="title" x="95" y="34" text-anchor="middle">Browser</text>
+  <rect class="zone" x="200" y="10" width="550" height="230" rx="8"/>
+  <text class="title" x="475" y="34" text-anchor="middle">Your computer (two terminals + Ollama)</text>
+  <rect class="box-ok" x="25" y="70" width="140" height="70" rx="8"/>
+  <text x="95" y="96" text-anchor="middle">React app</text>
+  <text class="small" x="95" y="114" text-anchor="middle">App.tsx, sse.ts</text>
+  <text class="small" x="95" y="130" text-anchor="middle">localhost:5173</text>
+  <rect class="box" x="225" y="70" width="140" height="70" rx="8"/>
+  <text x="295" y="96" text-anchor="middle">Vite dev server</text>
+  <text class="small" x="295" y="114" text-anchor="middle">pnpm web · :5173</text>
+  <text class="small" x="295" y="130" text-anchor="middle">proxy /api</text>
+  <rect class="box-info" x="405" y="70" width="140" height="70" rx="8"/>
+  <text x="475" y="96" text-anchor="middle">Hono server</text>
+  <text class="small" x="475" y="114" text-anchor="middle">pnpm server · :8787</text>
+  <text class="small" x="475" y="130" text-anchor="middle">server/index.ts</text>
+  <rect class="box-solid" x="585" y="70" width="150" height="70" rx="8"/>
+  <text class="on-solid" x="660" y="96" text-anchor="middle">createAgent</text>
+  <text class="on-solid small" x="660" y="114" text-anchor="middle">server/agent.ts</text>
+  <text class="on-solid small" x="660" y="130" text-anchor="middle">5 tools + memory</text>
+  <rect class="box2" x="585" y="180" width="150" height="46" rx="8"/>
+  <text x="660" y="200" text-anchor="middle">Ollama</text>
+  <text class="small" x="660" y="216" text-anchor="middle">llama3.2, nomic-embed</text>
+  <path class="arrow" d="M165,95 H221"/>
+  <path class="arrow" d="M225,115 H169"/>
+  <path class="arrow" d="M365,95 H401"/>
+  <path class="arrow" d="M405,115 H369"/>
+  <path class="arrow" d="M545,95 H581"/>
+  <path class="arrow" d="M585,115 H549"/>
+  <path class="arrow" d="M650,140 V176"/>
+  <path class="arrow" d="M670,176 V144"/>
+  <text class="small" x="193" y="62" text-anchor="middle">POST</text>
+  <text class="small" x="383" y="62" text-anchor="middle">/api/*</text>
+  <text class="small" x="193" y="160" text-anchor="middle">events</text>
+  <text class="small" x="383" y="160" text-anchor="middle">events</text>
+  <text class="small" x="225" y="200">The page itself (HTML, TSX, CSS) also comes from Vite.</text>
+  <text class="small" x="225" y="218">Only the server knows the agent, the tools and the data.</text>
+</svg>
+<figcaption>Requests go left to right, events come back right to left. The browser only ever talks to port 5173; Vite forwards anything under <code>/api</code> to port 8787. <strong>The agent, the tools and the member data stay on the server.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to React? Components, state and why the page redraws itself</summary>
+<p><a class="term" href="glossary.html#react">React</a> is a library for building user interfaces out of
+<a class="term" href="glossary.html#react-component">components</a>: functions that return a description of what the screen should look like,
+written in JSX (HTML-like tags inside TypeScript, in <code>.tsx</code> files). You never change the page by hand. Instead you keep the
+data that matters in <em>state</em>, created with the <a class="term" href="glossary.html#react-hook">hook</a> <code>useState</code>. Calling a
+state setter, such as <code>setMessages(...)</code>, tells React "this data changed"; React calls your component again and updates only the
+parts of the page that differ. In this app, every event from the server becomes one or two setter calls, and the chat, the side panel and
+the approval card follow automatically.</p>
+</details>
+
+<details class="primer"><summary>New to Server-Sent Events? How a server streams to a browser</summary>
+<p>A normal HTTP request gets one reply and is finished. With <a class="term" href="glossary.html#sse">Server-Sent Events (SSE)</a>, the
+server keeps the reply open and writes small text messages into it whenever it has something new. Each message has an
+<code>event:</code> line (its type) and a <code>data:</code> line (its content), and ends with a blank line. This is how the answer appears
+word by word: each new <a class="term" href="glossary.html#token">token</a> from the model becomes one event. It is the web version of the
+<a class="term" href="glossary.html#streaming">streaming</a> you saw in <a href="13-hitl-time-travel-streaming.html">lab 13</a>.</p>
+</details>
+
+<details class="primer"><summary>New to web servers? What an API endpoint and Hono are</summary>
+<p>A web server listens on a port (here 8787) and answers requests. An <a class="term" href="glossary.html#api-endpoint">API endpoint</a> is
+one address plus a method, like <code>POST /api/chat</code>, that runs a piece of your code and returns data instead of a web page.
+<a class="term" href="glossary.html#hono">Hono</a> is a small TypeScript framework for writing such servers: you create an app, register a
+function per endpoint with <code>app.post(path, handler)</code>, and start it. The handler receives a context object <code>c</code> with the
+request (<code>c.req</code>) and helpers to build the response.</p>
+</details>
+
+<h2>Run it</h2>
+<ol class="steps">
+<li>Open a terminal in the project folder <code>harbor-library-ai-ts</code>. If you have not done it yet for the earlier labs, run
+<code>pnpm install</code>.</li>
+<li>Check that Ollama is running and has both models: <code>ollama list</code> should show <code>llama3.2</code> and
+<code>nomic-embed-text</code>. The server needs the embedding model as soon as it starts.</li>
+<li>Start the API server: <code>pnpm server</code>. It builds the policy search index first (a few seconds), then prints
+<code>Harbor assistant API on http://localhost:8787</code>. Leave this terminal open.</li>
+<li>Open a <strong>second</strong> terminal in the same folder and start the web app: <code>pnpm web</code>. Vite prints the address of the
+app.</li>
+<li>Open <code>http://localhost:5173</code> in your browser. Click one of the example questions (it fills the input box), then
+<strong>Send</strong>.</li>
+<li>To stop, press <kbd>Ctrl</kbd>+<kbd>C</kbd> in each terminal.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Wireframe of the app: a header with the title and a New conversation button, a chat column with a user question, an answer with a Looked up in line and an approval card, and a side panel listing tool calls">
+  <rect class="ui-window" x="10" y="10" width="740" height="310" rx="8"/>
+  <rect class="ui-chrome" x="10" y="10" width="740" height="28" rx="8"/>
+  <text class="small mono" x="30" y="29">localhost:5173</text>
+  <text class="small accent" x="30" y="60">HARBOR CITY LIBRARY</text>
+  <text class="title" x="30" y="80">Ask the library assistant</text>
+  <rect class="ui-button-ghost" x="590" y="56" width="140" height="28" rx="8"/>
+  <text class="label accent" x="660" y="75" text-anchor="middle">New conversation</text>
+  <rect class="box" x="30" y="96" width="420" height="210" rx="8"/>
+  <rect class="ui-bubble-user" x="200" y="108" width="236" height="28" rx="8"/>
+  <text class="small ui-on-user" x="318" y="126" text-anchor="middle">How much is the late fee for a book?</text>
+  <rect class="ui-bubble-ai" x="44" y="144" width="300" height="46" rx="8"/>
+  <text class="small" x="56" y="162">0.20 EUR per item per day, up to 5 EUR…</text>
+  <text class="small" x="56" y="180">Looked up in: fees.md, digital.md</text>
+  <rect class="box-warn" x="44" y="198" width="392" height="62" rx="8"/>
+  <text class="label" x="56" y="216">A librarian must approve this action</text>
+  <text class="small mono" x="56" y="232">place_hold({"item_id":"B007",…})</text>
+  <rect class="ui-button" x="56" y="238" width="70" height="18" rx="4"/>
+  <text class="small on-solid" x="91" y="251" text-anchor="middle">Approve</text>
+  <rect class="ui-button-ghost" x="134" y="238" width="70" height="18" rx="4"/>
+  <text class="small accent" x="169" y="251" text-anchor="middle">Reject</text>
+  <rect class="ui-field" x="44" y="268" width="320" height="28" rx="6"/>
+  <text class="small" x="56" y="286">Type a question</text>
+  <rect class="ui-button" x="372" y="268" width="64" height="28" rx="6"/>
+  <text class="label on-solid" x="404" y="286" text-anchor="middle">Send</text>
+  <rect class="box" x="470" y="96" width="260" height="210" rx="8"/>
+  <text class="title" x="484" y="118">What the agent did</text>
+  <text class="small mono" x="484" y="144">1. search_policies({"question":…})</text>
+  <rect class="ui-skeleton" x="498" y="152" width="214" height="30" rx="4"/>
+  <text class="small" x="506" y="171">[fees.md] …</text>
+  <text class="small mono" x="484" y="206">2. place_hold({"item_id":"B007",…})</text>
+  <text class="small" x="498" y="224">waiting for approval</text>
+</svg>
+<figcaption>Illustration (simplified) of what <code>App.tsx</code> draws: header, chat column with the approval card and the input, and the "What the agent did" panel. In the real app the approval card only appears while a hold is waiting. <strong>Each area on screen is driven by one piece of React state.</strong></figcaption>
+</figure>
+
+<h2>The server: <code>server/agent.ts</code></h2>
+<p>This file builds the agent once, when the server starts, and exports it. It reuses the shared code from <code>src/</code>: the model
+settings, the four catalog tools and the policy search pipeline.</p>
+<pre data-file="server/agent.ts" data-lang="ts" data-tag="complete file"><code>// The agent behind the web app: catalog tools, a policy search tool, memory per conversation,
+// and a librarian's approval before any hold is placed.
+import { MemorySaver } from "@langchain/langgraph";
+import { createAgent, humanInTheLoopMiddleware, tool } from "langchain";
+import { z } from "zod";
+import { ALL_TOOLS } from "../src/catalog.js";
+import { getModel } from "../src/config.js";
+import { buildVectorStore, formatDocs } from "../src/knowledge.js";
+
+const retriever = (await buildVectorStore()).asRetriever({ k: 2 });
+
+const searchPolicies = tool(
+  async ({ question }) =&gt; formatDocs(await retriever.invoke(question)),
+  {
+    name: "search_policies",
+    description: "Search the library's rules: cards, loans, renewals, late fees, branches and opening hours, " +
+      "rooms and the maker space, Wi-Fi, printing and e-books. Returns text tagged with its source file.",
+    schema: z.object({ question: z.string() }),
+  },
+);
+
+export const agent = createAgent({
+  model: getModel(),
+  tools: [searchPolicies, ...ALL_TOOLS],
+  systemPrompt: "You are Harbor City Library's assistant. Use search_policies for questions about rules, fees, " +
+    "rooms and opening hours, and the catalog tools for books and member accounts. " +
+    "Name the source file when you answer from a policy. Answer briefly.",
+  middleware: [humanInTheLoopMiddleware({ interruptOn: { place_hold: true } })],
+  checkpointer: new MemorySaver(), // one memory per conversation (thread_id), kept while the server runs
+});</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>// The agent behind the web app: ...</code></td><td>A comment that says what the file is for.</td></tr>
+<tr><td>3</td><td><code>import { MemorySaver } from "@langchain/langgraph";</code></td><td>The in-memory <a class="term" href="glossary.html#checkpointer">checkpointer</a> (the TypeScript name for Python's <code>InMemorySaver</code>). It stores each conversation's state while the server runs.</td></tr>
+<tr><td>4</td><td><code>import { createAgent, humanInTheLoopMiddleware, tool } from "langchain";</code></td><td>The agent builder from lab 14, the approval middleware from lab 15, and <code>tool()</code>, which turns a function into a tool.</td></tr>
+<tr><td>5</td><td><code>import { z } from "zod";</code></td><td><a class="term" href="glossary.html#zod">Zod</a> describes the tool's input so the model knows which arguments to send.</td></tr>
+<tr><td>6</td><td><code>import { ALL_TOOLS } from "../src/catalog.js";</code></td><td>The four catalog tools: <code>search_catalog</code>, <code>check_availability</code>, <code>get_member_account</code> and <code>place_hold</code>. The import says <code>.js</code> although the file is <code>catalog.ts</code>: in an <a class="term" href="glossary.html#esm">ES module</a> project, imports name the file as it will be after compiling, and <a class="term" href="glossary.html#tsx">tsx</a> and TypeScript map it back to the <code>.ts</code> file.</td></tr>
+<tr><td>7</td><td><code>import { getModel } from "../src/config.js";</code></td><td>The shared chat model (<code>llama3.2</code> with <code>numCtx</code>, <code>numPredict: 512</code> and <code>think: false</code>).</td></tr>
+<tr><td>8</td><td><code>import { buildVectorStore, formatDocs } from "../src/knowledge.js";</code></td><td>The policy pipeline from labs 04–07: load, split, embed into a <code>MemoryVectorStore</code>, and format chunks with their file name.</td></tr>
+<tr><td>10</td><td><code>const retriever = (await buildVectorStore()).asRetriever({ k: 2 });</code></td><td>Builds the vector store once, at start-up (this is the pause before the server prints its address), and turns it into a retriever that returns the 2 closest chunks. The <code>await</code> sits at the top level of the file, outside any function; ES modules allow this.</td></tr>
+<tr><td>12</td><td><code>const searchPolicies = tool(</code></td><td>Starts the new tool. <code>tool(fn, options)</code> takes the function to run and a description of it.</td></tr>
+<tr><td>13</td><td><code>async ({ question }) =&gt; formatDocs(await retriever.invoke(question)),</code></td><td>The tool's work: search the policies for the question and return the chunks as one text, each chunk starting with its file name in brackets, like <code>[fees.md]</code>. The web app reads those tags to show "Looked up in".</td></tr>
+<tr><td>15</td><td><code>name: "search_policies",</code></td><td>The name the model uses to call the tool, and the name the server sends to the browser.</td></tr>
+<tr><td>16–17</td><td><code>description: "Search the library's rules: ..." + "..."</code></td><td>Tells the model when to use this tool. Listing the topics (fees, rooms, Wi-Fi, e-books…) helps a small model pick it. The <code>+</code> joins two strings so the line stays short.</td></tr>
+<tr><td>18</td><td><code>schema: z.object({ question: z.string() }),</code></td><td>The tool takes one text argument, <code>question</code>.</td></tr>
+<tr><td>22</td><td><code>export const agent = createAgent({</code></td><td>Builds the agent and exports it, so <code>server/index.ts</code> can import it.</td></tr>
+<tr><td>23</td><td><code>model: getModel(),</code></td><td>The chat model.</td></tr>
+<tr><td>24</td><td><code>tools: [searchPolicies, ...ALL_TOOLS],</code></td><td>Five tools: the new one plus the four catalog tools. <code>...</code> (spread) copies the items of <code>ALL_TOOLS</code> into this list.</td></tr>
+<tr><td>25–27</td><td><code>systemPrompt: "You are Harbor City Library's assistant. ..."</code></td><td>The system message: which tool to use for which kind of question, name the source file, answer briefly.</td></tr>
+<tr><td>28</td><td><code>middleware: [humanInTheLoopMiddleware({ interruptOn: { place_hold: true } })],</code></td><td>Pauses the run whenever the model asks for <code>place_hold</code>, exactly as in lab 15. The other tools run without asking.</td></tr>
+<tr><td>29</td><td><code>checkpointer: new MemorySaver(),</code></td><td>Saves each conversation by its <code>thread_id</code>. Needed for two things: the agent remembers earlier questions, and a paused run can be resumed. It lives in memory, so it is lost when the server stops.</td></tr>
+</table></div>
+
+<h2>The server: <code>server/index.ts</code></h2>
+<p>This file is the web server. It has two endpoints and one helper, <code>relay</code>, that runs the agent and turns everything that
+happens into events for the browser.</p>
+<pre data-file="server/index.ts" data-lang="ts" data-tag="complete file"><code>// A small HTTP server for the web app. Run: pnpm server  (then pnpm web in a second terminal)
+//   POST /api/chat    { threadId, message }            -&gt; a stream of events
+//   POST /api/resume  { threadId, approve, reason? }   -&gt; continues a run that paused for approval
+// Events are Server-Sent Events: "token" (answer text), "tool_call", "tool_result", "approval", "done", "error".
+import { serve } from "@hono/node-server";
+import { isAIMessage, isToolMessage, type BaseMessage } from "@langchain/core/messages";
+import { Command, isInterrupted } from "@langchain/langgraph";
+import { Hono } from "hono";
+import { streamSSE, type SSEStreamingApi } from "hono/streaming";
+import type { HITLRequest } from "langchain";
+import { agent } from "./agent.js";
+
+type AgentInput = Parameters&lt;typeof agent.stream&gt;[0];
+
+/** Run the agent and forward what happens to the browser, step by step. */
+async function relay(sse: SSEStreamingApi, input: AgentInput, threadId: string) {
+  const send = (event: string, data: unknown) =&gt; sse.writeSSE({ event, data: JSON.stringify(data) });
+  try {
+    const stream = await agent.stream(input, {
+      configurable: { thread_id: threadId },
+      streamMode: ["messages", "updates"], // tokens as they are written, and each finished step
+    });
+    for await (const [mode, chunk] of stream) {
+      if (mode === "messages") {
+        const [token, meta] = chunk;
+        // Only text the model writes; tool results also pass through this stream.
+        if (meta.langgraph_node === "model_request" &amp;&amp; typeof token.content === "string" &amp;&amp; token.content) {
+          await send("token", token.content);
+        }
+        continue;
+      }
+      if (isInterrupted&lt;HITLRequest&gt;(chunk)) { // the run paused before place_hold: ask the librarian
+        const request = chunk.__interrupt__[0].value!;
+        await send("approval", request.actionRequests.map((a) =&gt; ({ name: a.name, args: a.args })));
+        continue;
+      }
+      for (const update of Object.values(chunk)) {
+        const messages = (update as { messages?: BaseMessage[] } | undefined)?.messages ?? [];
+        for (const m of messages) {
+          if (isAIMessage(m)) {
+            for (const call of m.tool_calls ?? []) await send("tool_call", { id: call.id, name: call.name, args: call.args });
+          } else if (isToolMessage(m)) {
+            await send("tool_result", { id: m.tool_call_id, name: m.name, content: String(m.content) });
+          }
+        }
+      }
+    }
+    await send("done", {});
+  } catch (error) {
+    await send("error", (error as Error).message);
+  }
+}
+
+const app = new Hono();
+
+app.post("/api/chat", async (c) =&gt; {
+  const { threadId, message } = await c.req.json&lt;{ threadId: string; message: string }&gt;();
+  return streamSSE(c, (sse) =&gt; relay(sse, { messages: [{ role: "user", content: message }] }, threadId));
+});
+
+app.post("/api/resume", async (c) =&gt; {
+  const { threadId, approve, reason } = await c.req.json&lt;{ threadId: string; approve: boolean; reason?: string }&gt;();
+  const decision = approve
+    ? { type: "approve" as const }
+    : { type: "reject" as const, message: `A librarian rejected this hold: ${reason || "no reason given"}.` };
+  return streamSSE(c, (sse) =&gt; relay(sse, new Command({ resume: { decisions: [decision] } }) as AgentInput, threadId));
+});
+
+const port = Number(process.env.PORT ?? 8787);
+serve({ fetch: app.fetch, port });
+console.log(`Harbor assistant API on http://localhost:${port}`);</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–4</td><td><code>// A small HTTP server for the web app. ...</code></td><td>A summary of the two endpoints, their request bodies and the six event types. Worth keeping at the top of any server file.</td></tr>
+<tr><td>5</td><td><code>import { serve } from "@hono/node-server";</code></td><td>Runs a <a class="term" href="glossary.html#hono">Hono</a> app on Node.js's built-in HTTP server. Hono itself also runs in other places (Deno, Bun, edge platforms); this adapter is the Node part.</td></tr>
+<tr><td>6</td><td><code>import { isAIMessage, isToolMessage, type BaseMessage } from "@langchain/core/messages";</code></td><td>Two checks that tell what kind of message an object is, and the common message type. <code>type</code> marks an import used only for type checking; it disappears at run time.</td></tr>
+<tr><td>7</td><td><code>import { Command, isInterrupted } from "@langchain/langgraph";</code></td><td><code>Command</code> resumes a paused run (lab 13); <code>isInterrupted</code> recognises the chunk that says the run paused.</td></tr>
+<tr><td>8</td><td><code>import { Hono } from "hono";</code></td><td>The web framework.</td></tr>
+<tr><td>9</td><td><code>import { streamSSE, type SSEStreamingApi } from "hono/streaming";</code></td><td><code>streamSSE</code> builds a response that stays open and carries <a class="term" href="glossary.html#sse">Server-Sent Events</a>; <code>SSEStreamingApi</code> is the type of the object you write events with.</td></tr>
+<tr><td>10</td><td><code>import type { HITLRequest } from "langchain";</code></td><td>The shape of the value the approval middleware puts in its interrupt (it has <code>actionRequests</code>). Used only for type checking.</td></tr>
+<tr><td>11</td><td><code>import { agent } from "./agent.js";</code></td><td>The agent built in the previous file. Importing it runs that file once, so the vector store is built when the server starts.</td></tr>
+<tr><td>13</td><td><code>type AgentInput = Parameters&lt;typeof agent.stream&gt;[0];</code></td><td>"The type of the first argument of <code>agent.stream</code>." Instead of writing the input type by hand, we ask TypeScript to read it from the function. Used on lines 16 and 66.</td></tr>
+<tr><td>15</td><td><code>/** Run the agent and forward what happens to the browser, step by step. */</code></td><td>A doc comment; editors show it when you hover over <code>relay</code>.</td></tr>
+<tr><td>16</td><td><code>async function relay(sse: SSEStreamingApi, input: AgentInput, threadId: string) {</code></td><td>One function for both endpoints: it gets the event writer, the agent input (a new message, or a resume command) and the conversation id.</td></tr>
+<tr><td>17</td><td><code>const send = (event: string, data: unknown) =&gt; sse.writeSSE({ event, data: JSON.stringify(data) });</code></td><td>A small helper that writes one event. <code>JSON.stringify</code> turns any value into text; it also turns line breaks inside the text into <code>\n</code>, so each event's data is a single line, which is what the browser code expects.</td></tr>
+<tr><td>18</td><td><code>try {</code></td><td>Any error while the agent runs is caught on line 49 and sent to the browser instead of crashing the request.</td></tr>
+<tr><td>19</td><td><code>const stream = await agent.stream(input, {</code></td><td>Starts the agent in streaming mode. Unlike <code>invoke</code>, it returns pieces while it works.</td></tr>
+<tr><td>20</td><td><code>configurable: { thread_id: threadId },</code></td><td>Which conversation this is. The checkpointer loads its earlier messages, and a resume finds the paused run.</td></tr>
+<tr><td>21</td><td><code>streamMode: ["messages", "updates"],</code></td><td>Two stream modes at once: <code>"messages"</code> gives each token as the model writes it; <code>"updates"</code> gives what each step added to the state when the step finishes (and the interrupt, when the run pauses).</td></tr>
+<tr><td>23</td><td><code>for await (const [mode, chunk] of stream) {</code></td><td>Reads the stream piece by piece; the stream is an <a class="term" href="glossary.html#async-iterator">async iterator</a>, so <code>for await</code> waits for each piece. With two modes, every piece is a pair: the mode name and its data.</td></tr>
+<tr><td>24–25</td><td><code>if (mode === "messages") {<br>  const [token, meta] = chunk;</code></td><td>A <code>"messages"</code> piece is itself a pair: a message fragment and metadata about where it came from.</td></tr>
+<tr><td>26–29</td><td><code>if (meta.langgraph_node === "model_request" &amp;&amp; typeof token.content === "string" &amp;&amp; token.content) {<br>  await send("token", token.content);<br>}</code></td><td>Forwards only text written by the model. <code>model_request</code> is the name of the model node in a <code>createAgent</code> graph (Python calls it <code>model</code>). Without this filter, tool results would also be shown as if the model had written them. Empty fragments (for example while the model writes a tool call) are skipped.</td></tr>
+<tr><td>30</td><td><code>continue;</code></td><td>Done with this piece; go to the next one.</td></tr>
+<tr><td>32</td><td><code>if (isInterrupted&lt;HITLRequest&gt;(chunk)) {</code></td><td>An <code>"updates"</code> piece that contains <code>__interrupt__</code> means the run paused before <code>place_hold</code>. The <code>&lt;HITLRequest&gt;</code> tells TypeScript what the interrupt's value looks like.</td></tr>
+<tr><td>33</td><td><code>const request = chunk.__interrupt__[0].value!;</code></td><td>The first (and here only) interrupt's value. The <code>!</code> tells TypeScript "this is not undefined"; the middleware always sets it.</td></tr>
+<tr><td>34</td><td><code>await send("approval", request.actionRequests.map((a) =&gt; ({ name: a.name, args: a.args })));</code></td><td>Sends the waiting tool calls (name and arguments) to the browser, which shows the approval card. The stream then ends, because the run is paused.</td></tr>
+<tr><td>37</td><td><code>for (const update of Object.values(chunk)) {</code></td><td>Any other <code>"updates"</code> piece is an object of the form <code>{ nodeName: whatTheNodeAdded }</code>. We do not care which node it was, only what it added.</td></tr>
+<tr><td>38</td><td><code>const messages = (update as { messages?: BaseMessage[] } | undefined)?.messages ?? [];</code></td><td>Gets the new messages of that step, or an empty list. <code>as</code> tells TypeScript the shape; <code>?.</code> and <code>??</code> handle steps (such as middleware steps) that add nothing.</td></tr>
+<tr><td>39–41</td><td><code>for (const m of messages) {<br>  if (isAIMessage(m)) {<br>    for (const call of m.tool_calls ?? []) await send("tool_call", { id: call.id, name: call.name, args: call.args });</code></td><td>When the model's message asks for tools, send one <code>tool_call</code> event per call, with its <code>id</code>. The id is what links a call to its result later.</td></tr>
+<tr><td>42–44</td><td><code>} else if (isToolMessage(m)) {<br>  await send("tool_result", { id: m.tool_call_id, name: m.name, content: String(m.content) });</code></td><td>When a tool has run, send its result with <code>tool_call_id</code>, the id of the call it answers.</td></tr>
+<tr><td>48</td><td><code>await send("done", {});</code></td><td>Tells the browser this run is over.</td></tr>
+<tr><td>49–51</td><td><code>} catch (error) {<br>  await send("error", (error as Error).message);</code></td><td>If anything fails (Ollama not running, for example), the browser gets an <code>error</code> event with the message.</td></tr>
+<tr><td>54</td><td><code>const app = new Hono();</code></td><td>Creates the web app.</td></tr>
+<tr><td>56</td><td><code>app.post("/api/chat", async (c) =&gt; {</code></td><td>Registers the endpoint for a new question. <code>c</code> is the request context.</td></tr>
+<tr><td>57</td><td><code>const { threadId, message } = await c.req.json&lt;{ threadId: string; message: string }&gt;();</code></td><td>Reads the JSON body sent by the browser. The type in angle brackets only informs TypeScript; nothing checks the body at run time (a Zod schema would, in a real app).</td></tr>
+<tr><td>58</td><td><code>return streamSSE(c, (sse) =&gt; relay(sse, { messages: [{ role: "user", content: message }] }, threadId));</code></td><td>Opens an event stream and runs <code>relay</code> with the user's message as input. The response stays open until <code>relay</code> finishes.</td></tr>
+<tr><td>61–62</td><td><code>app.post("/api/resume", async (c) =&gt; {<br>  const { threadId, approve, reason } = ...</code></td><td>The endpoint the approval card calls: which conversation, approve or not, and an optional reason (<code>reason?</code>).</td></tr>
+<tr><td>63–65</td><td><code>const decision = approve<br>  ? { type: "approve" as const }<br>  : { type: "reject" as const, message: `A librarian rejected this hold: ${reason || "no reason given"}.` };</code></td><td>Builds the decision for the middleware. <code>as const</code> keeps the exact text <code>"approve"</code> as the type, which the middleware requires. The reject message is a full sentence because the JavaScript middleware passes it to the model word for word as the tool result (lab 15 showed why that matters).</td></tr>
+<tr><td>66</td><td><code>return streamSSE(c, (sse) =&gt; relay(sse, new Command({ resume: { decisions: [decision] } }) as AgentInput, threadId));</code></td><td>Resumes the paused run with one decision, and streams what follows (the hold being placed, then the answer). <code>as AgentInput</code> is needed because the type of <code>agent.stream</code>'s input does not list <code>Command</code>, although it works.</td></tr>
+<tr><td>69</td><td><code>const port = Number(process.env.PORT ?? 8787);</code></td><td>The port: the <code>PORT</code> environment variable if set, otherwise 8787. If you change it, change the proxy in <code>web/vite.config.ts</code> too.</td></tr>
+<tr><td>70</td><td><code>serve({ fetch: app.fetch, port });</code></td><td>Starts listening.</td></tr>
+<tr><td>71</td><td><code>console.log(`Harbor assistant API on http://localhost:${port}`);</code></td><td>The line you see in the terminal when the server is ready.</td></tr>
+</table></div>
+
+<h3>What travels over the wire for a normal question</h3>
+<figure class="diagram">
+<svg viewBox="0 0 760 420" role="img" aria-label="Sequence of a policy question: the browser posts to /api/chat, the server streams the agent, the model asks for search_policies, the server sends tool_call and tool_result events, then token events while the model writes, then done">
+  <rect class="box" x="20" y="10" width="140" height="30" rx="8"/>
+  <text class="label" x="90" y="30" text-anchor="middle">browser</text>
+  <rect class="box" x="230" y="10" width="140" height="30" rx="8"/>
+  <text class="label" x="300" y="30" text-anchor="middle">Hono relay()</text>
+  <rect class="box" x="430" y="10" width="140" height="30" rx="8"/>
+  <text class="label" x="500" y="30" text-anchor="middle">agent</text>
+  <rect class="box" x="610" y="10" width="130" height="30" rx="8"/>
+  <text class="label" x="675" y="30" text-anchor="middle">llama3.2</text>
+  <path class="line dashed" d="M90,40 V405"/>
+  <path class="line dashed" d="M300,40 V405"/>
+  <path class="line dashed" d="M500,40 V405"/>
+  <path class="line dashed" d="M675,40 V405"/>
+  <path class="arrow" d="M90,70 H296"/>
+  <text class="small" x="195" y="64" text-anchor="middle">1 POST /api/chat</text>
+  <path class="arrow" d="M300,100 H496"/>
+  <text class="small" x="400" y="94" text-anchor="middle">2 agent.stream(...)</text>
+  <path class="arrow" d="M500,130 H671"/>
+  <text class="small" x="587" y="124" text-anchor="middle">3 question</text>
+  <path class="arrow" d="M675,160 H504"/>
+  <text class="small" x="587" y="154" text-anchor="middle">4 search_policies</text>
+  <path class="arrow-accent" d="M300,190 H94"/>
+  <text class="small" x="195" y="184" text-anchor="middle">5 event: tool_call</text>
+  <rect class="box-info" x="440" y="200" width="120" height="26" rx="8"/>
+  <text class="small" x="500" y="217" text-anchor="middle">6 tool runs</text>
+  <path class="arrow-accent" d="M300,250 H94"/>
+  <text class="small" x="195" y="244" text-anchor="middle">7 event: tool_result</text>
+  <path class="arrow" d="M500,280 H671"/>
+  <text class="small" x="587" y="274" text-anchor="middle">8 chunks [fees.md]…</text>
+  <path class="arrow" d="M675,310 H504"/>
+  <text class="small" x="587" y="304" text-anchor="middle">9 answer, token by token</text>
+  <path class="arrow-accent" d="M300,340 H94"/>
+  <text class="small" x="195" y="334" text-anchor="middle">10 event: token (many)</text>
+  <path class="arrow-ok" d="M300,385 H94"/>
+  <text class="small" x="195" y="379" text-anchor="middle">11 event: done</text>
+</svg>
+<figcaption>Time flows down. The browser makes one request and receives many events on the same open response. Events 5 and 7 come from the <code>"updates"</code> stream mode, event 10 from <code>"messages"</code>. <strong>The visitor sees the tool call in the side panel before the answer starts.</strong></figcaption>
+</figure>
+
+<h2>The web app: <code>web/vite.config.ts</code></h2>
+<p><a class="term" href="glossary.html#vite">Vite</a> is the development server for the front end. It turns the <code>.tsx</code> files into
+JavaScript the browser can run, reloads the page when you save a file, and here also forwards API requests to the agent server.</p>
+<pre data-file="web/vite.config.ts" data-lang="ts" data-tag="complete file"><code>import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  root: import.meta.dirname,
+  plugins: [react()],
+  server: {
+    port: 5173,
+    // The browser talks to Vite only; Vite forwards /api to the agent server, so no CORS setup is needed.
+    proxy: { "/api": "http://localhost:8787" },
+  },
+});</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import react from "@vitejs/plugin-react";</code></td><td>Vite's React plugin: it handles JSX and makes edits to components show up without a full page reload.</td></tr>
+<tr><td>2</td><td><code>import { defineConfig } from "vite";</code></td><td>A helper that gives your editor auto-completion and type checks for the config object.</td></tr>
+<tr><td>4</td><td><code>export default defineConfig({</code></td><td>Vite reads the default export of this file.</td></tr>
+<tr><td>5</td><td><code>root: import.meta.dirname,</code></td><td>The app's root folder is the folder of this file, <code>web/</code>, where <code>index.html</code> lives. <code>import.meta.dirname</code> is the ES-module way to get the current folder in Node.js.</td></tr>
+<tr><td>6</td><td><code>plugins: [react()],</code></td><td>Turns the React plugin on.</td></tr>
+<tr><td>7–8</td><td><code>server: {<br>  port: 5173,</code></td><td>The dev server's port, the address you open in the browser.</td></tr>
+<tr><td>9–10</td><td><code>proxy: { "/api": "http://localhost:8787" },</code></td><td>Every request whose path starts with <code>/api</code> is forwarded to the Hono server. For the browser, the page and the API come from the same address, so it applies no cross-origin (CORS) rules and the server needs no CORS setup.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/index.html</code> and <code>web/src/main.tsx</code></h2>
+<p>The HTML page is almost empty. React fills it in.</p>
+<pre data-file="web/index.html" data-lang="html" data-tag="complete file"><code>&lt;!doctype html&gt;
+&lt;html lang="en"&gt;
+  &lt;head&gt;
+    &lt;meta charset="utf-8" /&gt;
+    &lt;meta name="viewport" content="width=device-width, initial-scale=1" /&gt;
+    &lt;title&gt;Harbor City Library Assistant&lt;/title&gt;
+  &lt;/head&gt;
+  &lt;body&gt;
+    &lt;div id="root"&gt;&lt;/div&gt;
+    &lt;script type="module" src="/src/main.tsx"&gt;&lt;/script&gt;
+  &lt;/body&gt;
+&lt;/html&gt;</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>&lt;!doctype html&gt;<br>&lt;html lang="en"&gt;</code></td><td>A modern HTML page in English (the language helps screen readers).</td></tr>
+<tr><td>4–5</td><td><code>&lt;meta charset="utf-8" /&gt;<br>&lt;meta name="viewport" ... /&gt;</code></td><td>Text encoding, and the line that makes the page use the real screen width on phones.</td></tr>
+<tr><td>6</td><td><code>&lt;title&gt;Harbor City Library Assistant&lt;/title&gt;</code></td><td>The browser tab's title.</td></tr>
+<tr><td>9</td><td><code>&lt;div id="root"&gt;&lt;/div&gt;</code></td><td>The empty box React draws the whole app into.</td></tr>
+<tr><td>10</td><td><code>&lt;script type="module" src="/src/main.tsx"&gt;&lt;/script&gt;</code></td><td>Loads the app's entry file. Browsers cannot run TypeScript; Vite converts <code>main.tsx</code> to JavaScript when the browser asks for it.</td></tr>
+</table></div>
+
+<pre data-file="web/src/main.tsx" data-lang="tsx" data-tag="complete file"><code>import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./styles.css";
+
+createRoot(document.getElementById("root")!).render(
+  &lt;StrictMode&gt;
+    &lt;App /&gt;
+  &lt;/StrictMode&gt;,
+);</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { StrictMode } from "react";</code></td><td>A wrapper that turns on extra checks during development, to catch common mistakes early. It does nothing in a production build.</td></tr>
+<tr><td>2</td><td><code>import { createRoot } from "react-dom/client";</code></td><td>The function that connects React to a real element of the page.</td></tr>
+<tr><td>3</td><td><code>import App from "./App";</code></td><td>The main <a class="term" href="glossary.html#react-component">component</a>. No extension is needed here: Vite (and the <code>"Bundler"</code> setting in <code>web/tsconfig.json</code>) find <code>App.tsx</code>.</td></tr>
+<tr><td>4</td><td><code>import "./styles.css";</code></td><td>Importing a CSS file is a Vite feature: it adds the styles to the page.</td></tr>
+<tr><td>6</td><td><code>createRoot(document.getElementById("root")!).render(</code></td><td>Finds the <code>&lt;div id="root"&gt;</code> from <code>index.html</code> and draws into it. The <code>!</code> says "this element exists", because <code>getElementById</code> could return <code>null</code>.</td></tr>
+<tr><td>7–9</td><td><code>&lt;StrictMode&gt;<br>  &lt;App /&gt;<br>&lt;/StrictMode&gt;,</code></td><td>Draws the <code>App</code> component inside <code>StrictMode</code>. This is JSX, which is why the file ends in <code>.tsx</code>.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/src/sse.ts</code></h2>
+<p>The browser has a built-in reader for Server-Sent Events, <code>EventSource</code>, but it can only send GET requests without a body.
+Our endpoints need a JSON body, so this file sends a POST with <code>fetch</code> and reads the event stream itself.</p>
+<pre data-file="web/src/sse.ts" data-lang="ts" data-tag="complete file"><code>// POST a JSON body and read the Server-Sent Events that come back.
+// (The browser's EventSource only does GET requests, so we read the stream ourselves.)
+export type AgentEvent =
+  | { event: "token"; data: string }
+  | { event: "tool_call"; data: { id: string; name: string; args: Record&lt;string, unknown&gt; } }
+  | { event: "tool_result"; data: { id: string; name: string; content: string } }
+  | { event: "approval"; data: { name: string; args: Record&lt;string, unknown&gt; }[] }
+  | { event: "done"; data: Record&lt;string, never&gt; }
+  | { event: "error"; data: string };
+
+export async function postEvents(url: string, body: unknown, onEvent: (e: AgentEvent) =&gt; void) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) throw new Error(`Server answered ${response.status}`);
+
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    // Events are separated by a blank line; each has "event: ..." and "data: ..." lines.
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop()!; // the last piece may be incomplete: keep it for the next read
+    for (const block of blocks) {
+      const event = block.match(/^event: (.*)$/m)?.[1];
+      const data = block.match(/^data: (.*)$/m)?.[1];
+      if (event &amp;&amp; data !== undefined) onEvent({ event, data: JSON.parse(data) } as AgentEvent);
+    }
+  }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>// POST a JSON body and read the Server-Sent Events that come back. ...</code></td><td>Says why this file exists instead of using <code>EventSource</code>.</td></tr>
+<tr><td>3–9</td><td><code>export type AgentEvent =<br>  | { event: "token"; data: string }<br>  | ...</code></td><td>One type that lists the six events the server can send and the shape of each one's data. This kind of type (a "discriminated union") lets TypeScript know, inside <code>case "tool_call":</code>, that <code>data</code> has <code>id</code>, <code>name</code> and <code>args</code>. It must match what <code>server/index.ts</code> sends.</td></tr>
+<tr><td>11</td><td><code>export async function postEvents(url: string, body: unknown, onEvent: (e: AgentEvent) =&gt; void) {</code></td><td>Takes the address, the body to send, and a function to call for every event that arrives. The promise it returns finishes when the stream ends.</td></tr>
+<tr><td>12–16</td><td><code>const response = await fetch(url, { method: "POST", headers: {...}, body: JSON.stringify(body) });</code></td><td>Sends the request. The <code>content-type</code> header tells the server the body is JSON.</td></tr>
+<tr><td>17</td><td><code>if (!response.ok || !response.body) throw new Error(`Server answered ${response.status}`);</code></td><td>Stops with a clear error if the server answered with an error status (for example 502 when the API server is not running) or without a body.</td></tr>
+<tr><td>19</td><td><code>const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();</code></td><td>The body arrives as bytes, in pieces. <code>TextDecoderStream</code> turns the bytes into text, and the reader hands out the text pieces one by one.</td></tr>
+<tr><td>20</td><td><code>let buffer = "";</code></td><td>Holds text that has arrived but does not yet form a complete event.</td></tr>
+<tr><td>21–23</td><td><code>for (;;) {<br>  const { value, done } = await reader.read();<br>  if (done) break;</code></td><td>A loop with no condition: read the next piece, and leave the loop when the server closes the stream.</td></tr>
+<tr><td>24</td><td><code>buffer += value;</code></td><td>Adds the new text to whatever was left over.</td></tr>
+<tr><td>26</td><td><code>const blocks = buffer.split(/\r?\n\r?\n/);</code></td><td>Cuts the text at blank lines, the separator between events. <code>\r?</code> also accepts Windows-style line endings.</td></tr>
+<tr><td>27</td><td><code>buffer = blocks.pop()!;</code></td><td>The last piece may be an event cut in half by the network. Keep it for the next read instead of parsing it now.</td></tr>
+<tr><td>28–30</td><td><code>const event = block.match(/^event: (.*)$/m)?.[1];<br>const data = block.match(/^data: (.*)$/m)?.[1];</code></td><td>Reads the event type and the data from their lines. The <code>m</code> flag makes <code>^</code> and <code>$</code> match at the start and end of each line; <code>?.[1]</code> gives <code>undefined</code> if the line is missing.</td></tr>
+<tr><td>31</td><td><code>if (event &amp;&amp; data !== undefined) onEvent({ event, data: JSON.parse(data) } as AgentEvent);</code></td><td>Turns the JSON text back into a value and hands the event to the app. <code>as AgentEvent</code> trusts that the server sent one of the six known shapes.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="How sse.ts reassembles events: network pieces arrive cut at random places, the buffer is split at blank lines, complete events are parsed and the incomplete last piece is kept for the next read">
+  <text class="label" x="20" y="26">Pieces as they arrive from the network (cut anywhere):</text>
+  <rect class="box2" x="20" y="38" width="250" height="34" rx="8"/>
+  <text class="small mono" x="30" y="59">event: token↵data: "0.20"↵↵event: to</text>
+  <rect class="box2" x="280" y="38" width="250" height="34" rx="8"/>
+  <text class="small mono" x="290" y="59">ken↵data: " EUR"↵↵event: done↵da</text>
+  <rect class="box2" x="540" y="38" width="200" height="34" rx="8"/>
+  <text class="small mono" x="550" y="59">ta: {}↵↵</text>
+  <path class="arrow" d="M145,72 V100"/>
+  <text class="label" x="20" y="118">After the first read, split at the blank line:</text>
+  <rect class="box-ok" x="20" y="128" width="250" height="34" rx="8"/>
+  <text class="small mono" x="30" y="149">token · "0.20"  → onEvent</text>
+  <rect class="box-warn" x="280" y="128" width="250" height="34" rx="8"/>
+  <text class="small mono" x="290" y="149">"event: to"  → kept in buffer</text>
+  <path class="arrow" d="M405,162 V186"/>
+  <rect class="box-ok" x="280" y="190" width="250" height="30" rx="8"/>
+  <text class="small mono" x="290" y="209">next read: token · " EUR"</text>
+  <text class="small" x="560" y="140">↵ = line break</text>
+  <text class="small" x="560" y="156">↵↵ = end of event</text>
+</svg>
+<figcaption>Illustrative pieces; the real cut points depend on the network. <strong>Only complete events are parsed; the unfinished tail waits in <code>buffer</code> (line 27).</strong></figcaption>
+</figure>
+
+<h2>The web app: <code>web/src/App.tsx</code></h2>
+<p>The whole user interface is one <a class="term" href="glossary.html#react-component">component</a>. Read it in four parts: the state
+(lines 15–21), the event handler <code>handle</code> (27–54), the actions that start a request (56–91), and the JSX that draws the page
+(96–158).</p>
+<pre data-file="web/src/App.tsx" data-lang="tsx" data-tag="complete file"><code>import { useState, type FormEvent } from "react";
+import { postEvents, type AgentEvent } from "./sse";
+
+type Message = { role: "user" | "assistant"; text: string; sources: string[] };
+type Step = { id: string; name: string; args: Record&lt;string, unknown&gt;; result?: string };
+type Approval = { name: string; args: Record&lt;string, unknown&gt; }[];
+
+const EXAMPLES = [
+  "How much is the late fee for a book?",
+  "Do you have books by Mara Quint? Is one on the shelf?",
+  "I'm member M-1001. Please place a hold on B007.",
+];
+
+export default function App() {
+  const [threadId, setThreadId] = useState(() =&gt; crypto.randomUUID()); // one memory per conversation
+  const [messages, setMessages] = useState&lt;Message[]&gt;([]);
+  const [steps, setSteps] = useState&lt;Step[]&gt;([]);
+  const [approval, setApproval] = useState&lt;Approval | null&gt;(null);
+  const [reason, setReason] = useState("");
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Change only the last message (the answer being written).
+  const updateLast = (change: (m: Message) =&gt; Message) =&gt;
+    setMessages((all) =&gt; [...all.slice(0, -1), change(all[all.length - 1])]);
+
+  function handle(e: AgentEvent) {
+    switch (e.event) {
+      case "token":
+        updateLast((m) =&gt; ({ ...m, text: m.text + e.data }));
+        break;
+      case "tool_call": {
+        const call = e.data;
+        setSteps((all) =&gt; (all.some((s) =&gt; s.id === call.id) ? all : [...all, call]));
+        break;
+      }
+      case "tool_result": {
+        const result = e.data;
+        setSteps((all) =&gt; all.map((s) =&gt; (s.id === result.id ? { ...s, result: result.content } : s)));
+        if (result.name === "search_policies") {
+          const files = [...result.content.matchAll(/\[([\w-]+\.md)\]/g)].map((match) =&gt; match[1]);
+          updateLast((m) =&gt; ({ ...m, sources: [...new Set([...m.sources, ...files])] }));
+        }
+        break;
+      }
+      case "approval":
+        setApproval(e.data);
+        updateLast((m) =&gt; (m.text ? m : { ...m, text: "Paused: a librarian must approve this first." }));
+        break;
+      case "error":
+        updateLast((m) =&gt; ({ ...m, text: `${m.text}\n[Error: ${e.data}]` }));
+        break;
+    }
+  }
+
+  async function run(url: string, body: unknown, userText?: string) {
+    setBusy(true);
+    setMessages((all) =&gt; [
+      ...all,
+      ...(userText ? [{ role: "user" as const, text: userText, sources: [] }] : []),
+      { role: "assistant", text: "", sources: [] },
+    ]);
+    try {
+      await postEvents(url, body, handle);
+    } catch (error) {
+      handle({ event: "error", data: (error as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function send(event: FormEvent) {
+    event.preventDefault();
+    const text = input.trim();
+    if (!text || busy) return;
+    setInput("");
+    void run("/api/chat", { threadId, message: text }, text);
+  }
+
+  function decide(approve: boolean) {
+    setApproval(null);
+    void run("/api/resume", { threadId, approve, reason });
+    setReason("");
+  }
+
+  function newConversation() {
+    setThreadId(crypto.randomUUID());
+    setMessages([]);
+    setSteps([]);
+    setApproval(null);
+  }
+
+  // What an answer shows before its first word arrives.
+  const placeholder = (isLast: boolean) =&gt; (isLast &amp;&amp; busy ? "…" : "");
+
+  return (
+    &lt;div className="page"&gt;
+      &lt;header&gt;
+        &lt;div&gt;
+          &lt;p className="eyebrow"&gt;Harbor City Library&lt;/p&gt;
+          &lt;h1&gt;Ask the library assistant&lt;/h1&gt;
+        &lt;/div&gt;
+        &lt;button className="ghost" onClick={newConversation} disabled={busy}&gt;New conversation&lt;/button&gt;
+      &lt;/header&gt;
+
+      &lt;main&gt;
+        &lt;section className="chat" aria-label="Conversation"&gt;
+          {messages.length === 0 &amp;&amp; (
+            &lt;div className="empty"&gt;
+              &lt;p&gt;Ask about opening hours, fees, rooms or the catalog. Try:&lt;/p&gt;
+              {EXAMPLES.map((q) =&gt; (
+                &lt;button key={q} className="example" onClick={() =&gt; setInput(q)}&gt;{q}&lt;/button&gt;
+              ))}
+            &lt;/div&gt;
+          )}
+          {messages.map((m, i) =&gt; (
+            &lt;article key={i} className={`bubble ${m.role}`}&gt;
+              &lt;p&gt;{m.text || placeholder(i === messages.length - 1)}&lt;/p&gt;
+              {m.sources.length &gt; 0 &amp;&amp; &lt;p className="sources"&gt;Looked up in: {m.sources.join(", ")}&lt;/p&gt;}
+            &lt;/article&gt;
+          ))}
+
+          {approval &amp;&amp; (
+            &lt;div className="approval" role="alert"&gt;
+              &lt;strong&gt;A librarian must approve this action&lt;/strong&gt;
+              {approval.map((a, i) =&gt; (
+                &lt;code key={i}&gt;{a.name}({JSON.stringify(a.args)})&lt;/code&gt;
+              ))}
+              &lt;input value={reason} onChange={(e) =&gt; setReason(e.target.value)} placeholder="Reason if you reject (optional)" /&gt;
+              &lt;div className="row"&gt;
+                &lt;button onClick={() =&gt; decide(true)}&gt;Approve&lt;/button&gt;
+                &lt;button className="ghost" onClick={() =&gt; decide(false)}&gt;Reject&lt;/button&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          )}
+
+          &lt;form onSubmit={send}&gt;
+            &lt;input value={input} onChange={(e) =&gt; setInput(e.target.value)} placeholder="Type a question" disabled={busy || !!approval} /&gt;
+            &lt;button disabled={busy || !!approval || !input.trim()}&gt;Send&lt;/button&gt;
+          &lt;/form&gt;
+        &lt;/section&gt;
+
+        &lt;aside aria-label="What the agent did"&gt;
+          &lt;h2&gt;What the agent did&lt;/h2&gt;
+          {steps.length === 0 &amp;&amp; &lt;p className="muted"&gt;Tool calls appear here as they happen.&lt;/p&gt;}
+          &lt;ol&gt;
+            {steps.map((s) =&gt; (
+              &lt;li key={s.id}&gt;
+                &lt;code&gt;{s.name}({JSON.stringify(s.args)})&lt;/code&gt;
+                {s.result !== undefined ? &lt;pre&gt;{s.result}&lt;/pre&gt;
+                  : &lt;span className="muted"&gt; {approval ? "waiting for approval" : "running…"}&lt;/span&gt;}
+              &lt;/li&gt;
+            ))}
+          &lt;/ol&gt;
+        &lt;/aside&gt;
+      &lt;/main&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { useState, type FormEvent } from "react";</code></td><td><code>useState</code> is the <a class="term" href="glossary.html#react-hook">hook</a> that gives a component memory between redraws. <code>FormEvent</code> is the type of a form's submit event.</td></tr>
+<tr><td>2</td><td><code>import { postEvents, type AgentEvent } from "./sse";</code></td><td>The stream reader and the event type from the previous file.</td></tr>
+<tr><td>4</td><td><code>type Message = { role: "user" | "assistant"; text: string; sources: string[] };</code></td><td>One chat bubble: who wrote it, its text, and the policy files looked up for it.</td></tr>
+<tr><td>5</td><td><code>type Step = { id: string; name: string; args: Record&lt;string, unknown&gt;; result?: string };</code></td><td>One line of the "What the agent did" panel: a tool call and, once it has run, its result. <code>result?</code> means "may be missing".</td></tr>
+<tr><td>6</td><td><code>type Approval = { name: string; args: Record&lt;string, unknown&gt; }[];</code></td><td>The tool calls waiting for a librarian. <code>[]</code> at the end makes it a list.</td></tr>
+<tr><td>8–12</td><td><code>const EXAMPLES = [ ... ];</code></td><td>Three example questions shown on an empty chat: a policy question, a catalog question and a hold request.</td></tr>
+<tr><td>14</td><td><code>export default function App() {</code></td><td>The component. React calls this function every time the state changes, and draws what it returns.</td></tr>
+<tr><td>15</td><td><code>const [threadId, setThreadId] = useState(() =&gt; crypto.randomUUID());</code></td><td>The conversation id, sent with every request so the server's checkpointer can find this conversation's memory. Passing a function (<code>() =&gt; ...</code>) means a new id is made only once, on the first draw, not on every redraw.</td></tr>
+<tr><td>16</td><td><code>const [messages, setMessages] = useState&lt;Message[]&gt;([]);</code></td><td>The chat bubbles. <code>&lt;Message[]&gt;</code> tells TypeScript what the list will hold, since it starts empty.</td></tr>
+<tr><td>17</td><td><code>const [steps, setSteps] = useState&lt;Step[]&gt;([]);</code></td><td>The tool calls for the side panel.</td></tr>
+<tr><td>18</td><td><code>const [approval, setApproval] = useState&lt;Approval | null&gt;(null);</code></td><td>The pending approval, or <code>null</code> when nothing is waiting. The card is shown only when it is not <code>null</code>.</td></tr>
+<tr><td>19</td><td><code>const [reason, setReason] = useState("");</code></td><td>The text of the "Reason if you reject" box.</td></tr>
+<tr><td>20</td><td><code>const [input, setInput] = useState("");</code></td><td>The text of the question box.</td></tr>
+<tr><td>21</td><td><code>const [busy, setBusy] = useState(false);</code></td><td><code>true</code> while a request is running; used to disable buttons and show "…".</td></tr>
+<tr><td>23–25</td><td><code>const updateLast = (change: (m: Message) =&gt; Message) =&gt;<br>  setMessages((all) =&gt; [...all.slice(0, -1), change(all[all.length - 1])]);</code></td><td>A helper that changes only the last bubble (the answer being written). It never edits the old list: it builds a new list with all bubbles but the last, plus a changed copy of the last. React notices a change only when it gets a <em>new</em> object. Passing a function to <code>setMessages</code> (<code>(all) =&gt; ...</code>) makes React give us the latest list, which matters because many events arrive quickly one after another.</td></tr>
+<tr><td>27–28</td><td><code>function handle(e: AgentEvent) {<br>  switch (e.event) {</code></td><td>Called once per event from the server. The <code>switch</code> picks the code for each event type.</td></tr>
+<tr><td>29–31</td><td><code>case "token":<br>  updateLast((m) =&gt; ({ ...m, text: m.text + e.data }));</code></td><td>Adds the new piece of text to the answer. <code>{ ...m, text: ... }</code> copies the bubble and replaces its text. This is what makes the answer appear word by word.</td></tr>
+<tr><td>32–34</td><td><code>case "tool_call": {<br>  const call = e.data;<br>  setSteps((all) =&gt; (all.some((s) =&gt; s.id === call.id) ? all : [...all, call]));</code></td><td>Adds the tool call to the side panel, <strong>unless a step with the same id is already there</strong>. When a paused run is resumed, the server sends the <code>place_hold</code> call again with the same id; without this check it would appear twice.</td></tr>
+<tr><td>37–39</td><td><code>case "tool_result": {<br>  const result = e.data;<br>  setSteps((all) =&gt; all.map((s) =&gt; (s.id === result.id ? { ...s, result: result.content } : s)));</code></td><td>Finds the step with the same id and attaches the result to it. This is why ids matter: the five tools could be called in any order, and the id is what pairs each result with its call.</td></tr>
+<tr><td>40–43</td><td><code>if (result.name === "search_policies") {<br>  const files = [...result.content.matchAll(/\[([\w-]+\.md)\]/g)].map((match) =&gt; match[1]);<br>  updateLast((m) =&gt; ({ ...m, sources: [...new Set([...m.sources, ...files])] }));</code></td><td>For a policy search, finds every <code>[something.md]</code> tag that <code>formatDocs</code> put in the result, and adds the file names to the answer's sources. <code>new Set(...)</code> removes duplicates. These are the files that were <em>retrieved</em>; the model may not have used all of them.</td></tr>
+<tr><td>46–48</td><td><code>case "approval":<br>  setApproval(e.data);<br>  updateLast((m) =&gt; (m.text ? m : { ...m, text: "Paused: a librarian must approve this first." }));</code></td><td>Shows the approval card. If the model wrote no text before asking for the tool, the empty answer bubble gets an explanation instead.</td></tr>
+<tr><td>50–51</td><td><code>case "error":<br>  updateLast((m) =&gt; ({ ...m, text: `${m.text}\n[Error: ${e.data}]` }));</code></td><td>Shows the error at the end of the answer. There is no <code>case "done"</code>: the end of the stream is handled by <code>finally</code> on line 67.</td></tr>
+<tr><td>56</td><td><code>async function run(url: string, body: unknown, userText?: string) {</code></td><td>Starts one request: a new question (with <code>userText</code>) or a resume (without).</td></tr>
+<tr><td>57</td><td><code>setBusy(true);</code></td><td>Disables the inputs while the agent works.</td></tr>
+<tr><td>58–62</td><td><code>setMessages((all) =&gt; [...all, ...(userText ? [{ role: "user" as const, ... }] : []), { role: "assistant", text: "", sources: [] }]);</code></td><td>Adds the user's bubble (only for a new question) and an empty assistant bubble that the <code>token</code> events will fill.</td></tr>
+<tr><td>63–64</td><td><code>try {<br>  await postEvents(url, body, handle);</code></td><td>Sends the request and calls <code>handle</code> for each event until the stream ends.</td></tr>
+<tr><td>65–66</td><td><code>} catch (error) {<br>  handle({ event: "error", data: (error as Error).message });</code></td><td>If the request itself fails (server not running, for example), show it like any other error.</td></tr>
+<tr><td>67–68</td><td><code>} finally {<br>  setBusy(false);</code></td><td>Whatever happened, re-enable the inputs.</td></tr>
+<tr><td>72–73</td><td><code>function send(event: FormEvent) {<br>  event.preventDefault();</code></td><td>Runs when the form is submitted (Send button or <kbd>Enter</kbd>). <code>preventDefault</code> stops the browser's default behaviour for forms, which is to reload the page.</td></tr>
+<tr><td>74–76</td><td><code>const text = input.trim();<br>if (!text || busy) return;<br>setInput("");</code></td><td>Ignores empty questions and double sends, then clears the box.</td></tr>
+<tr><td>77</td><td><code>void run("/api/chat", { threadId, message: text }, text);</code></td><td>Starts the request without waiting for it. <code>void</code> says "I am not awaiting this on purpose"; errors are handled inside <code>run</code>.</td></tr>
+<tr><td>80–83</td><td><code>function decide(approve: boolean) {<br>  setApproval(null);<br>  void run("/api/resume", { threadId, approve, reason });</code></td><td>Called by Approve and Reject. Hides the card and resumes the paused run in the same thread, with the reason typed in the box (empty if none).</td></tr>
+<tr><td>84</td><td><code>setReason("");</code></td><td>Clears the reason box for next time.</td></tr>
+<tr><td>86–91</td><td><code>function newConversation() {<br>  setThreadId(crypto.randomUUID());<br>  ...</code></td><td>A fresh thread id means a fresh memory on the server. The screen is cleared too. The old conversation still exists in the server's memory, but nothing points to it any more.</td></tr>
+<tr><td>94</td><td><code>const placeholder = (isLast: boolean) =&gt; (isLast &amp;&amp; busy ? "…" : "");</code></td><td>Shows "…" in the last bubble while the answer has not started.</td></tr>
+<tr><td>96–104</td><td><code>return (<br>  &lt;div className="page"&gt;<br>    &lt;header&gt; ... &lt;/header&gt;</code></td><td>The JSX the component draws. In JSX, the HTML attribute <code>class</code> is written <code>className</code>. The header holds the title and the New conversation button, disabled while busy.</td></tr>
+<tr><td>107</td><td><code>&lt;section className="chat" aria-label="Conversation"&gt;</code></td><td>The chat column. <code>aria-label</code> names the region for screen readers.</td></tr>
+<tr><td>108–115</td><td><code>{messages.length === 0 &amp;&amp; ( &lt;div className="empty"&gt; ... &lt;/div&gt; )}</code></td><td>Curly braces put TypeScript inside JSX. <code>condition &amp;&amp; (...)</code> draws the block only when the condition is true: here, the example questions on an empty chat. Clicking one only fills the input (<code>setInput(q)</code>); you still press Send.</td></tr>
+<tr><td>111–113</td><td><code>{EXAMPLES.map((q) =&gt; ( &lt;button key={q} ...&gt;{q}&lt;/button&gt; ))}</code></td><td>One button per example. <code>map</code> turns a list of data into a list of elements; <code>key</code> gives each one a stable name so React can tell them apart.</td></tr>
+<tr><td>116–121</td><td><code>{messages.map((m, i) =&gt; ( &lt;article key={i} className={`bubble ${m.role}`}&gt; ...</code></td><td>One bubble per message, styled <code>bubble user</code> or <code>bubble assistant</code>. Line 119 adds the "Looked up in: …" line when the message has sources.</td></tr>
+<tr><td>123–135</td><td><code>{approval &amp;&amp; ( &lt;div className="approval" role="alert"&gt; ... &lt;/div&gt; )}</code></td><td>The approval card, drawn only while <code>approval</code> is set. It shows each waiting call as <code>name({...args})</code>, an optional reason box, and the Approve and Reject buttons, which call <code>decide(true)</code> and <code>decide(false)</code>. <code>role="alert"</code> makes screen readers announce it.</td></tr>
+<tr><td>129</td><td><code>&lt;input value={reason} onChange={(e) =&gt; setReason(e.target.value)} ... /&gt;</code></td><td>A "controlled" input: its text comes from state, and every keystroke updates the state. Lines 138 and 112 work the same way for the question box.</td></tr>
+<tr><td>137–140</td><td><code>&lt;form onSubmit={send}&gt; ... disabled={busy || !!approval} ...</code></td><td>The question box and Send button. They are disabled while a request runs or an approval is waiting, so the visitor cannot start a second run on a paused thread. <code>!!approval</code> turns the value into <code>true</code> or <code>false</code>.</td></tr>
+<tr><td>143–155</td><td><code>&lt;aside aria-label="What the agent did"&gt; ... {steps.map((s) =&gt; ( &lt;li key={s.id}&gt; ...</code></td><td>The side panel: one list item per tool call, keyed by the call's id. If the result has arrived it is shown in a <code>&lt;pre&gt;</code>; otherwise "waiting for approval" (while the card is shown) or "running…".</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="React state flow: server events go into handle, which calls setMessages, setSteps or setApproval; React redraws the chat bubbles, the side panel and the approval card; button clicks call run, which posts to the server">
+  <rect class="box-info" x="20" y="20" width="150" height="46" rx="8"/>
+  <text x="95" y="40" text-anchor="middle">server events</text>
+  <text class="small" x="95" y="56" text-anchor="middle">via postEvents</text>
+  <rect class="box-solid" x="220" y="20" width="130" height="46" rx="8"/>
+  <text class="on-solid mono" x="285" y="48" text-anchor="middle">handle(e)</text>
+  <path class="arrow" d="M170,43 H216"/>
+  <rect class="box" x="400" y="10" width="160" height="30" rx="8"/>
+  <text class="small mono" x="480" y="30" text-anchor="middle">token, error</text>
+  <rect class="box" x="400" y="50" width="160" height="30" rx="8"/>
+  <text class="small mono" x="480" y="70" text-anchor="middle">tool_call, tool_result</text>
+  <rect class="box" x="400" y="90" width="160" height="30" rx="8"/>
+  <text class="small mono" x="480" y="110" text-anchor="middle">approval</text>
+  <path class="arrow" d="M350,35 L396,26"/>
+  <path class="arrow" d="M350,46 L396,62"/>
+  <path class="arrow" d="M350,58 L396,102"/>
+  <rect class="box2" x="580" y="10" width="160" height="30" rx="8"/>
+  <text class="small mono" x="660" y="30" text-anchor="middle">messages</text>
+  <rect class="box2" x="580" y="50" width="160" height="30" rx="8"/>
+  <text class="small mono" x="660" y="70" text-anchor="middle">steps (+ sources)</text>
+  <rect class="box2" x="580" y="90" width="160" height="30" rx="8"/>
+  <text class="small mono" x="660" y="110" text-anchor="middle">approval</text>
+  <path class="arrow" d="M560,25 H576"/>
+  <path class="arrow" d="M560,65 H576"/>
+  <path class="arrow" d="M560,105 H576"/>
+  <text class="small" x="660" y="140" text-anchor="middle">state (useState)</text>
+  <path class="arrow-accent" d="M660,146 V176"/>
+  <text class="small accent" x="672" y="166">React redraws</text>
+  <rect class="box-ok" x="400" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="455" y="204" text-anchor="middle">chat bubbles</text>
+  <rect class="box-ok" x="515" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="570" y="204" text-anchor="middle">side panel</text>
+  <rect class="box-ok" x="630" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="685" y="204" text-anchor="middle">approval card</text>
+  <rect class="box-warn" x="20" y="180" width="320" height="40" rx="8"/>
+  <text class="small" x="180" y="204" text-anchor="middle">clicks: Send → send(), Approve/Reject → decide()</text>
+  <path class="arrow" d="M396,200 H344"/>
+  <path class="arrow" d="M95,180 V70"/>
+  <text class="small" x="105" y="130">run(url, body)</text>
+  <text class="small" x="105" y="146">POSTs to the server</text>
+  <text class="small" x="20" y="260">The JSX never changes the page directly. It only reads state; events and clicks only change state.</text>
+  <text class="small" x="20" y="278">One loop: event → setter → redraw → click → request → more events.</text>
+</svg>
+<figcaption>Data flows in one direction: events change state, state decides what is drawn, and clicks start new requests. <strong>To change what the page shows, change the state, never the HTML.</strong></figcaption>
+</figure>
+
+<h3>Approving a hold: pause and resume</h3>
+<p>Ask "I'm member M-1001. Please place a hold on B007." The model asks for <code>place_hold</code>, the middleware pauses the run, and the
+first request ends with an <code>approval</code> event. Nothing happens until the librarian clicks. The click starts a <em>second</em>
+request, to <code>/api/resume</code>, in the same thread.</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 420" role="img" aria-label="Pause and resume sequence: the first request ends with an approval event and the run is saved; clicking Approve sends a second request to /api/resume, the agent resumes, place_hold runs, and the result and answer are streamed">
+  <rect class="box" x="20" y="10" width="150" height="30" rx="8"/>
+  <text class="label" x="95" y="30" text-anchor="middle">browser (App)</text>
+  <rect class="box" x="250" y="10" width="140" height="30" rx="8"/>
+  <text class="label" x="320" y="30" text-anchor="middle">Hono server</text>
+  <rect class="box" x="450" y="10" width="140" height="30" rx="8"/>
+  <text class="label" x="520" y="30" text-anchor="middle">agent + HITL</text>
+  <rect class="box" x="630" y="10" width="110" height="30" rx="8"/>
+  <text class="label" x="685" y="30" text-anchor="middle">MemorySaver</text>
+  <path class="line dashed" d="M95,40 V405"/>
+  <path class="line dashed" d="M320,40 V405"/>
+  <path class="line dashed" d="M520,40 V405"/>
+  <path class="line dashed" d="M685,40 V405"/>
+  <path class="arrow" d="M95,66 H316"/>
+  <text class="small" x="207" y="60" text-anchor="middle">1 POST /api/chat (hold B007)</text>
+  <path class="arrow" d="M320,92 H516"/>
+  <text class="small" x="420" y="86" text-anchor="middle">2 stream</text>
+  <rect class="box-info" x="450" y="102" width="140" height="26" rx="8"/>
+  <text class="small" x="520" y="119" text-anchor="middle">3 model: place_hold</text>
+  <path class="arrow" d="M520,148 H681"/>
+  <text class="small" x="602" y="142" text-anchor="middle">4 save paused run</text>
+  <path class="arrow-accent" d="M320,174 H99"/>
+  <text class="small" x="207" y="168" text-anchor="middle">5 tool_call, approval</text>
+  <rect class="box-warn" x="20" y="186" width="150" height="40" rx="8"/>
+  <text class="small" x="95" y="203" text-anchor="middle">card shown, waits</text>
+  <text class="small" x="95" y="218" text-anchor="middle">for a click</text>
+  <path class="arrow-accent" d="M95,250 H316"/>
+  <text class="small" x="207" y="244" text-anchor="middle">6 POST /api/resume (approve)</text>
+  <path class="arrow" d="M320,276 H516"/>
+  <text class="small" x="420" y="270" text-anchor="middle">7 Command(resume)</text>
+  <path class="arrow" d="M685,302 H524"/>
+  <text class="small" x="602" y="296" text-anchor="middle">8 load paused run</text>
+  <rect class="box-ok" x="440" y="312" width="160" height="26" rx="8"/>
+  <text class="small" x="520" y="329" text-anchor="middle">9 place_hold runs</text>
+  <path class="arrow-ok" d="M320,360 H99"/>
+  <text class="small" x="207" y="354" text-anchor="middle">10 tool_call (same id), tool_result</text>
+  <path class="arrow-ok" d="M320,392 H99"/>
+  <text class="small" x="207" y="386" text-anchor="middle">11 tokens, done</text>
+</svg>
+<figcaption>Two separate HTTP requests, joined by the thread id. Between steps 5 and 6 the run waits in the checkpointer, for as long as the librarian needs (but only while the server runs). In step 10 the same tool call arrives a second time; <strong>App.tsx skips it because its id is already in the panel</strong>. With Reject, step 9 is skipped and the model reads the rejection message instead.</figcaption>
+</figure>
+
+<h2>The web app: <code>web/src/styles.css</code></h2>
+<p>Plain CSS, no framework. You do not need to understand it to follow the app; here is what each group of lines does.</p>
+<pre data-file="web/src/styles.css" data-lang="css" data-tag="complete file"><code>:root {
+  --bg: #f4f6f8; --surface: #ffffff; --text: #17212b; --muted: #5a6875; --border: #dde3e9;
+  --accent: #0f6e8c; --accent-text: #ffffff; --user: #e3f1f6; --note: #fff5dc; --note-border: #e2b544;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #10171d; --surface: #182129; --text: #e6edf2; --muted: #9aa8b4; --border: #2a3742;
+    --accent: #4fb3d4; --accent-text: #0b1318; --user: #173341; --note: #2e2614; --note-border: #9a7a2a;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, "Segoe UI", Roboto, sans-serif; }
+.page { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+header { display: flex; justify-content: space-between; align-items: end; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.eyebrow { margin: 0; color: var(--accent); font-weight: 600; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; }
+h1 { margin: 2px 0 0; font-size: 1.6rem; }
+h2 { margin: 0 0 12px; font-size: 1rem; }
+main { display: grid; gap: 20px; grid-template-columns: 1fr; }
+@media (min-width: 860px) { main { grid-template-columns: 3fr 2fr; } }
+.chat, aside { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+.chat { display: flex; flex-direction: column; gap: 12px; }
+.bubble { max-width: 85%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; }
+.bubble p { margin: 0; }
+.bubble.user { align-self: flex-end; background: var(--user); }
+.bubble.assistant { align-self: flex-start; border: 1px solid var(--border); }
+.sources { margin-top: 6px !important; font-size: 13px; color: var(--muted); }
+.empty { color: var(--muted); display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.empty p { margin: 0; }
+.example { background: none; border: 1px dashed var(--border); color: var(--text); text-align: left; }
+.approval { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 10px; background: var(--note); border: 1px solid var(--note-border); }
+.row { display: flex; gap: 8px; }
+form { display: flex; gap: 8px; margin-top: auto; }
+input { flex: 1; min-width: 0; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); cursor: pointer; }
+button.ghost, button.example { background: transparent; color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+aside ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; }
+code { font: 13px ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+aside pre { margin: 4px 0 0; padding: 8px; max-height: 160px; overflow: auto; background: var(--bg); border-radius: 6px; font-size: 12px; white-space: pre-wrap; }
+.muted { color: var(--muted); font-size: 14px; }</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–5</td><td><code>:root { --bg: ...; --accent: ...; }</code></td><td>Colour variables for the light theme. Every rule below uses <code>var(--name)</code>, so the colours are defined in one place.</td></tr>
+<tr><td>6–12</td><td><code>@media (prefers-color-scheme: dark) { :root { ... } }</code></td><td>The same variables with dark colours, used automatically when the computer is in dark mode.</td></tr>
+<tr><td>13–14</td><td><code>* { box-sizing: border-box; }<br>body { ... }</code></td><td>Sizes include padding and borders; page background, text colour and font.</td></tr>
+<tr><td>15–21</td><td><code>.page</code>, <code>header</code>, <code>main { display: grid; ... }</code></td><td>Layout: a centred page, a header with the button on the right, and a grid that becomes two columns (chat and side panel) on screens at least 860 px wide.</td></tr>
+<tr><td>22–31</td><td><code>.chat</code>, <code>.bubble</code>, <code>.sources</code>, <code>.empty</code>, <code>.example</code></td><td>The chat column: user bubbles on the right, assistant bubbles on the left, the small "Looked up in" line and the example buttons. <code>white-space: pre-wrap</code> keeps the line breaks the model writes.</td></tr>
+<tr><td>32–33</td><td><code>.approval</code>, <code>.row</code></td><td>The approval card, in a note colour so it stands out, and the row of two buttons.</td></tr>
+<tr><td>34–39</td><td><code>form</code>, <code>input</code>, <code>button</code>, <code>button:focus-visible</code></td><td>The question form stays at the bottom of the chat (<code>margin-top: auto</code>); inputs and buttons get the theme colours, a dimmed look when disabled, and a visible outline for keyboard users.</td></tr>
+<tr><td>40–43</td><td><code>aside ol</code>, <code>code</code>, <code>aside pre</code>, <code>.muted</code></td><td>The side panel: the numbered list of tool calls, monospace code, and result boxes that scroll after 160 px.</td></tr>
+</table></div>
+
+<h2>Configuration: <code>web/tsconfig.json</code> and <code>package.json</code></h2>
+<p>The browser code has its own TypeScript settings, because it runs in a different place than the server: it has the DOM (the
+page's elements) instead of Node.js, and Vite, not Node.js, resolves its imports.</p>
+<pre data-file="web/tsconfig.json" data-lang="json" data-tag="complete file"><code>{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "vite.config.ts"]
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3</td><td><code>"target": "ES2023",</code></td><td>Which JavaScript version the type checker assumes. Modern browsers support it.</td></tr>
+<tr><td>4–5</td><td><code>"module": "ESNext",<br>"moduleResolution": "Bundler",</code></td><td>Imports are resolved the way a bundler like Vite does it, which is why <code>./App</code> works without an extension. The server's <code>tsconfig.json</code> uses <code>NodeNext</code> instead, which requires the <code>.js</code> extensions you saw in <code>server/</code>.</td></tr>
+<tr><td>6</td><td><code>"jsx": "react-jsx",</code></td><td>Understands JSX in <code>.tsx</code> files, using React's modern JSX transform (no need to import React in every file).</td></tr>
+<tr><td>7</td><td><code>"lib": ["ES2023", "DOM", "DOM.Iterable"],</code></td><td>Makes browser types available: <code>document</code>, <code>fetch</code>, <code>TextDecoderStream</code>, <code>crypto.randomUUID</code>.</td></tr>
+<tr><td>8</td><td><code>"types": ["vite/client"],</code></td><td>Vite's own types, for example so that <code>import "./styles.css"</code> type-checks.</td></tr>
+<tr><td>9</td><td><code>"strict": true,</code></td><td>The strict checks, as in the rest of the project. They are why the code needs <code>!</code> after <code>getElementById</code>.</td></tr>
+<tr><td>10</td><td><code>"noEmit": true,</code></td><td>TypeScript only checks; Vite does the converting.</td></tr>
+<tr><td>11</td><td><code>"skipLibCheck": true</code></td><td>Skips checking the type files of installed packages, which is faster and avoids errors you could not fix anyway.</td></tr>
+<tr><td>13</td><td><code>"include": ["src", "vite.config.ts"]</code></td><td>The files to check: the app and the Vite config. <code>pnpm typecheck</code> runs <code>tsc -p web</code> with this file.</td></tr>
+</table></div>
+
+<p>Last, the project's <code>package.json</code>. For this page the scripts matter most: they are the short commands you run with
+<code>pnpm</code>.</p>
+<pre data-file="package.json" data-lang="json" data-tag="complete file"><code>{
+  "name": "harbor-library-ai-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lab": "tsx scripts/lab.ts",
+    "mcp-server": "tsx src/mcp-server.ts",
+    "server": "tsx server/index.ts",
+    "web": "vite web",
+    "build:web": "vite build web",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit &amp;&amp; tsc --noEmit -p web"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.4"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@langchain/classic": "1.0.52",
+    "@langchain/community": "1.1.29",
+    "@langchain/core": "1.2.17",
+    "@langchain/langgraph": "1.5.0",
+    "@langchain/langgraph-checkpoint-sqlite": "1.1.0",
+    "@langchain/mcp-adapters": "2.0.1",
+    "@langchain/ollama": "1.3.0",
+    "@langchain/textsplitters": "1.0.2",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "d3-dsv": "2.0.0",
+    "dotenv": "18.0.7",
+    "hono": "4.13.13",
+    "langchain": "1.5.16",
+    "zod": "4.6.7"
+  },
+  "engines": {
+    "node": "&gt;=22"
+  }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>5</td><td><code>"type": "module",</code></td><td>Every <code>.ts</code> and <code>.js</code> file in the project is an <a class="term" href="glossary.html#esm">ES module</a> (<code>import</code>/<code>export</code>). This is what allows the top-level <code>await</code> in <code>server/agent.ts</code>.</td></tr>
+<tr><td>7</td><td><code>"lab": "tsx scripts/lab.ts",</code></td><td><code>pnpm lab 01</code> runs a lab with <a class="term" href="glossary.html#tsx">tsx</a>, which runs TypeScript directly without a build step.</td></tr>
+<tr><td>8</td><td><code>"mcp-server": "tsx src/mcp-server.ts",</code></td><td>Starts the MCP server of lab 10 on its own.</td></tr>
+<tr><td>9</td><td><code>"server": "tsx server/index.ts",</code></td><td><code>pnpm server</code>: starts the Hono API on port 8787.</td></tr>
+<tr><td>10</td><td><code>"web": "vite web",</code></td><td><code>pnpm web</code>: starts the Vite dev server with <code>web/</code> as its folder.</td></tr>
+<tr><td>11</td><td><code>"build:web": "vite build web",</code></td><td>Builds the app into static files for production. Not used in this guide.</td></tr>
+<tr><td>12</td><td><code>"test": "vitest run",</code></td><td>Runs the offline tests once with <a class="term" href="glossary.html#vitest">Vitest</a>.</td></tr>
+<tr><td>13</td><td><code>"typecheck": "tsc --noEmit &amp;&amp; tsc --noEmit -p web"</code></td><td>Checks the types of the server and labs, then of the web app with its own settings. <code>&amp;&amp;</code> runs the second check only if the first passes.</td></tr>
+<tr><td>15–20</td><td><code>"pnpm": { "onlyBuiltDependencies": ["better-sqlite3", "esbuild"] }</code></td><td><a class="term" href="glossary.html#pnpm">pnpm</a> does not run packages' install scripts unless you allow them. These two need one: <code>better-sqlite3</code> (the SQLite checkpointer of lab 11) and <code>esbuild</code> (used by tsx and Vite).</td></tr>
+<tr><td>21–32</td><td><code>"devDependencies": { ... "react": "19.3.0", ... "vite": "8.3.4", ... }</code></td><td>Tools and the front-end packages: React, Vite and its React plugin, TypeScript, tsx, Vitest, and type definitions. Exact versions, so your install matches ours.</td></tr>
+<tr><td>33–49</td><td><code>"dependencies": { "@hono/node-server": "2.1.5", ... "hono": "4.13.13", ... }</code></td><td>What the labs and the server need at run time: the LangChain packages, Zod, and for this page <code>hono</code> and <code>@hono/node-server</code>.</td></tr>
+<tr><td>50–52</td><td><code>"engines": { "node": "&gt;=22" }</code></td><td>The project needs Node.js 22 or newer (we used 24.15).</td></tr>
+</table></div>
+
+<h2>What you should see</h2>
+<div class="callout ok"><p><strong>What you should see.</strong> These are the runs we checked in Chrome. The wording of the answers will
+differ from ours, and sometimes the model chooses differently.</p>
+<ul>
+<li><strong>"How much is the late fee for a book?"</strong> The side panel shows a <code>search_policies</code> call and its result. The
+answer says 0.20 EUR per item per day, up to a maximum of 5 EUR per item, and under it: <em>Looked up in: fees.md, digital.md</em>. Two
+files, because the retriever returns the 2 closest chunks; that does not mean the answer used both.</li>
+<li><strong>"I'm member M-1001. Please place a hold on B007."</strong> The run pauses. The answer bubble says
+<em>Paused: a librarian must approve this first.</em> (unless the model wrote something first), and the card shows
+<code>place_hold({"item_id":"B007","member_id":"M-1001"})</code>. The side panel says "waiting for approval". Click
+<strong>Approve</strong>: the tool result appears, "Hold placed on Machine Learning for Curious Minds for Lea Martin…", followed by the
+model's answer.</li>
+</ul></div>
+
+<div class="callout warn"><p><strong>A source the model made up.</strong> While testing the server with <code>curl</code>, the model once ended an
+answer with "(Source: Search Policies, Section 3.3: Holds)". There is no section 3.3 in any policy file; the model invented a
+reference that looks official. This is why the app shows the "Looked up in" line from the real tool result, written by our code, and
+does not rely on the model to name its sources.</p></div>
+
+<div class="callout warn"><p><strong>Common problems.</strong></p>
+<ul>
+<li><strong>Port already in use.</strong> If <code>pnpm server</code> fails with <code>EADDRINUSE</code>, another program (often a server you
+started earlier and forgot) uses port 8787. Stop it, or start with another port (<code>PORT</code> variable) and change the proxy target in
+<code>web/vite.config.ts</code> to match. If 5173 is busy, Vite picks the next free port and prints it; open that address.</li>
+<li><strong>Ollama is not running.</strong> The server needs Ollama as soon as it starts, to embed the policies, so it fails before printing its
+address. If Ollama stops later, the answer bubble shows <code>[Error: ...]</code>. Start Ollama and check <code>ollama list</code>.</li>
+<li><strong>Only <code>pnpm web</code> is running.</strong> The page loads, but every question ends with "[Error: Server answered 502]", and the <code>pnpm web</code> terminal
+prints <code>http proxy error: /api/chat</code> with <code>ECONNREFUSED</code>, because the proxy has nowhere to forward <code>/api</code>. Start <code>pnpm server</code> in the other
+terminal.</li>
+<li><strong>The agent forgot the conversation.</strong> <code>MemorySaver</code> keeps conversations in the server's memory. Restarting
+<code>pnpm server</code> erases them all, including a hold that was waiting for
+approval: clicking Approve then has no paused run to resume. Click New conversation and ask again. For memory that survives restarts,
+use the SQLite checkpointer from <a href="11-checkpointers.html">lab 11</a>.</li>
+<li><strong>Answers vary.</strong> The same question can lead to different tool calls, a different wording, or no tool call at all (then no
+"Looked up in" line). With a small local model this is normal; check the side panel to see what really happened.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Reject with a reason.</strong> Ask for the B007 hold again, type a reason ("this copy is reserved for a class") and click
+Reject. Read the tool result in the side panel and compare it with the model's answer: did it describe the refusal correctly?</li>
+<li><strong>Check memory.</strong> Ask "What is the late fee for a book?", then "And with a junior card?" in the same conversation. Then click New
+conversation and ask only the second question. The difference is the thread id.</li>
+<li><strong>Show more chunks.</strong> In <code>server/agent.ts</code> line 10, change <code>k: 2</code> to <code>k: 4</code> and restart the
+server. The "Looked up in" line gets longer; does the answer get better?</li>
+<li><strong>Watch the raw events.</strong> Open the browser's developer tools (<kbd>F12</kbd>), tab Network, send a question and click the
+<code>chat</code> request. You can see the events arrive one by one.</li>
+<li><strong>Add an event.</strong> Make the server send <code>send("thread", threadId)</code> at the start of <code>relay</code>, add the case to the
+<code>AgentEvent</code> type in <code>sse.ts</code>, and run <code>pnpm typecheck</code>. TypeScript tells you where the new event is not
+handled yet.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>The app is two programs: a Hono server that owns the agent (<code>pnpm server</code>, port 8787) and a React app served by Vite
+(<code>pnpm web</code>, port 5173), which forwards <code>/api</code> to the server.</li>
+<li>The server runs <code>agent.stream</code> with the <code>"messages"</code> and <code>"updates"</code> modes and forwards tokens, tool
+calls, tool results, approval requests and errors as Server-Sent Events.</li>
+<li><code>sse.ts</code> reads those events from a POST response with <code>fetch</code>, because <code>EventSource</code> only does GET.</li>
+<li><code>App.tsx</code> keeps everything in <code>useState</code>; each event becomes a state change and React redraws the page. Tool calls
+are paired with results by id, and repeated ids are skipped.</li>
+<li>A hold is two requests in the same thread: <code>/api/chat</code> pauses with an approval event, <code>/api/resume</code> continues with
+the librarian's decision. The pause lives in <code>MemorySaver</code>, so it is lost if the server restarts.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="16-runnables-lcel.html"><small>← Previous · Step 16</small>Runnables and LCEL</a>
+<a class="next" href="index.html"><small>Done →</small>All steps</a>
+</nav>
+</main>
+</body>
+</html>
