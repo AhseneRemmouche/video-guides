@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04 · Build an eval set and a baseline</title>
+<meta name="description" content="Write 20 test questions, score a bot that knows nothing about the shop, and get the number to beat.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 04/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 04 of 14 · Hands-on lab</div>
+  <h1>Build an eval set and a baseline</h1>
+  <p class="lead">Write 20 test questions, score a bot that knows nothing about the shop, and get the number to beat.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<p>So far you have called a model and looked at what it says. From now on you will <strong>change</strong> the bot many times: add documents, rewrite prompts, add guardrails. Before any of that you need a way to tell whether a change made things better or worse. This lab builds that tool: 20 test questions with their expected answers, a small program that asks the bot every question and scores the answers, and a first score to beat.</p>
+
+<div class="callout"><strong>Goal of this lab.</strong> Write an <a class="term" href="glossary.html#eval-set">eval set</a> of 20 questions in a <a class="term" href="glossary.html#jsonl">JSONL</a> file, run a bot that knows <em>nothing</em> about the shop on it, and get its <a class="term" href="glossary.html#baseline">baseline</a> score with a cheap keyword check. Then look closely at where that check is wrong.</div>
+
+<h2>The idea in brief</h2>
+
+<p>An <strong>eval set</strong> is a fixed list of inputs, each with a way to decide whether the output is good. You write it once and run it after every change. The number it produces (here: the share of answers that pass) is your <a class="term" href="glossary.html#metric">metric</a>. Without it, "the new prompt seems better" is just a feeling based on the three questions you happened to try.</p>
+
+<p>A <strong>baseline</strong> is the score of the simplest version of the system. Here it is <code>llama3.2</code> with a one-line role prompt and no documents at all, so it can only answer from what it learned in training. It knows nothing about Trailhead Bikes, so it will guess. That is the point: the baseline shows how much the later work (retrieval in <a href="06-retrieval.html">lab 06</a>, grounded answers in <a href="07-rag.html">lab 07</a>) actually adds.</p>
+
+<p>The scoring here is the cheapest kind: a keyword check, a relaxed form of <a class="term" href="glossary.html#exact-match">exact match</a>. It is fast and free, and it is often wrong. In this lab you will find four of its mistakes by reading the answers, and in <a href="05-ai-judge.html">lab 05</a> you will replace it with something smarter. For the theory behind all of this, read the concept chapters <a href="evaluation-methods.html">Evaluation methods</a> and <a href="evaluating-systems.html">Evaluating AI systems</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The improvement loop: change the bot, run the eval set, compare the score with the baseline, keep or revert the change">
+  <text class="title" x="20" y="28">The loop every later lab follows</text>
+  <rect class="box-solid" x="20" y="60" width="150" height="60" rx="8"/>
+  <text class="on-solid" x="95" y="86" text-anchor="middle">Eval set</text>
+  <text class="on-solid" x="95" y="104" text-anchor="middle">20 questions</text>
+  <path class="arrow" d="M 170,90 H 206"/>
+  <rect class="box" x="208" y="60" width="150" height="60" rx="8"/>
+  <text x="283" y="86" text-anchor="middle">Run the bot</text>
+  <text class="small" x="283" y="104" text-anchor="middle">one answer each</text>
+  <path class="arrow" d="M 358,90 H 394"/>
+  <rect class="box-info" x="396" y="60" width="150" height="60" rx="8"/>
+  <text x="471" y="86" text-anchor="middle">Score</text>
+  <text class="small" x="471" y="104" text-anchor="middle">e.g. 30 % pass</text>
+  <path class="arrow" d="M 546,90 H 582"/>
+  <rect class="box-ok" x="584" y="60" width="156" height="60" rx="8"/>
+  <text x="662" y="86" text-anchor="middle">Compare</text>
+  <text class="small" x="662" y="104" text-anchor="middle">with the baseline</text>
+  <path class="arrow-accent dashed" d="M 662,122 V 170 H 283 V 124"/>
+  <text class="label accent" x="472" y="162" text-anchor="middle">change prompt, add documents, ... then run again</text>
+</svg>
+<figcaption>The eval set stays fixed; only the bot changes. <strong>The same questions, scored the same way, are what make two runs comparable.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to eval sets? Why write tests before improving anything</summary>
+<p>Programmers write tests so they can change code without fear: if a test turns red, the change broke something. An eval set plays the same role for an AI system, with two differences. First, the output is free text, so "pass" needs a rule that tolerates different wording. Second, the model is random and imperfect, so you do not expect 100 %; you watch the score go up or down.</p>
+<p>Write the eval set <em>before</em> improving the bot, for two reasons. You cannot measure progress without a starting number. And if you write the questions after tuning the bot, you will (without meaning to) pick questions the bot already handles well.</p>
+<p>A good eval set covers the things users really ask, includes a few hard or tricky cases, and includes questions the bot <strong>should refuse</strong>. Twenty questions is tiny (real projects use hundreds), but it is enough to see the method and it keeps each run to a few minutes on a laptop.</p>
+</details>
+
+<h2>What you will do</h2>
+
+<ol class="steps">
+<li>Create the folder <code>evals/</code> in the project root and the file <code>evals/qa.jsonl</code> with the 20 questions below.</li>
+<li>Create <code>aie/evalset.py</code> (read and write JSONL files).</li>
+<li>Create <code>aie/evaluate.py</code> (run the questions through the bot, score them, save the run).</li>
+<li>Create the folder <code>prompts/</code> and the file <code>prompts/baseline.txt</code> (the system prompt of the baseline bot).</li>
+<li>Create <code>aie/rag.py</code> (the function that answers one question; for now without documents).</li>
+<li>Create <code>labs/04_baseline_eval.py</code> and run it with <code>uv run python -m labs.04_baseline_eval</code>. Make sure Ollama is running.</li>
+<li>Read the output line by line, then open the new file <code>runs/baseline.jsonl</code>.</li>
+</ol>
+
+<h2>Step 1: the eval set, <code>evals/qa.jsonl</code></h2>
+
+<p>Each line is one test case. Every question was written from one of the 8 shop documents in <code>data/docs/</code>, and the expected keywords come straight from that document (for example, <code>returns.md</code> says "within 30 days", so q01 expects <code>30</code>).</p>
+
+<details class="primer"><summary>New to JSONL? One JSON object per line</summary>
+<p><a class="term" href="glossary.html#jsonl">JSONL</a> ("JSON Lines") is a text file where <strong>every line is a complete JSON object</strong>. It is not one big JSON array, so there is no <code>[</code> at the start and no comma between lines. That makes it easy to append one row, to read a huge file line by line, and to see in a diff exactly which case changed. Eval sets, run logs and training data are very often stored this way.</p>
+<p>JSON writes "nothing" as <code>null</code> and booleans as <code>true</code>/<code>false</code> (lower case). When Python reads them with <code>json.loads</code> they become <code>None</code>, <code>True</code> and <code>False</code>.</p>
+</details>
+
+<pre data-file="evals/qa.jsonl" data-lang="json" data-tag="complete file"><code>{"id": "q01", "question": "How many days do I have to return an item?", "must_include": ["30"], "source": "returns", "answerable": true}
+{"id": "q02", "question": "Can I return a helmet I already opened?", "must_include": ["hygiene"], "source": "returns", "answerable": true}
+{"id": "q03", "question": "Is return shipping free?", "must_include": ["100", "6.90"], "source": "returns", "answerable": true}
+{"id": "q04", "question": "How long is the warranty on the frame?", "must_include": ["lifetime"], "source": "warranty", "answerable": true}
+{"id": "q05", "question": "How long is my e-bike battery covered?", "must_include": ["2 years", "500"], "source": "warranty", "answerable": true}
+{"id": "q06", "question": "Where do I find the frame number?", "must_include": ["bottom bracket"], "source": "warranty", "answerable": true}
+{"id": "q07", "question": "Can I get express delivery for a complete bike?", "must_include": ["not available"], "source": "shipping", "answerable": true}
+{"id": "q08", "question": "Do you deliver to Switzerland?", "must_include": ["not"], "source": "shipping", "answerable": true}
+{"id": "q09", "question": "How much does standard shipping cost?", "must_include": ["9.90"], "source": "shipping", "answerable": true}
+{"id": "q10", "question": "Can I charge my battery in a cold garage at -5 degrees?", "must_include": ["0"], "source": "battery-care", "answerable": true}
+{"id": "q11", "question": "How long does it take to fully charge the battery with the fast charger?", "must_include": ["2.5"], "source": "battery-care", "answerable": true}
+{"id": "q12", "question": "My battery light blinks red three times. What does it mean?", "must_include": ["too cold or too hot"], "source": "battery-care", "answerable": true}
+{"id": "q13", "question": "I am 178 cm tall. Which frame size should I take?", "must_include": ["L"], "source": "sizing", "answerable": true}
+{"id": "q14", "question": "What does Trailhead Care Plus cost per year?", "must_include": ["149"], "source": "service-plans", "answerable": true}
+{"id": "q15", "question": "Is theft protection included in the basic Trailhead Care plan?", "must_include": ["Plus"], "source": "service-plans", "answerable": true}
+{"id": "q16", "question": "Is the Annecy store open on Monday?", "must_include": ["closed"], "source": "stores", "answerable": true}
+{"id": "q17", "question": "When should I drop off my bike for a full service?", "must_include": ["10 am"], "source": "stores", "answerable": true}
+{"id": "q18", "question": "Can I pay for a 1500 EUR bike in instalments?", "must_include": ["3 or 4"], "source": "orders-faq", "answerable": true}
+{"id": "q19", "question": "Who is the CEO of Trailhead?", "must_include": [], "source": null, "answerable": false}
+{"id": "q20", "question": "Do you sell skateboards?", "must_include": [], "source": null, "answerable": false}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"id": "q01"</code></td><td>A short, stable name for the case. Results, human labels (lab 05) and retrieval scores (lab 06) all refer to questions by this id, so never renumber them.</td></tr>
+<tr><td>1</td><td><code>"question": "How many days do I have to return an item?"</code></td><td>Exactly what a customer would type. Phrase questions the way real users do, not the way the document is written; otherwise the test is too easy.</td></tr>
+<tr><td>1</td><td><code>"must_include": ["30"]</code></td><td>The keywords a correct answer must contain. A list, because some answers need several facts. Matching ignores upper/lower case (see <code>evaluate.py</code>).</td></tr>
+<tr><td>1</td><td><code>"source": "returns"</code></td><td>Which document holds the answer: the file name <code>data/docs/returns.md</code> without <code>.md</code>. Lab 05's judge reads this document as the reference, and lab 06 checks that retrieval finds it.</td></tr>
+<tr><td>1</td><td><code>"answerable": true</code></td><td>Whether the documents contain the answer at all. It switches the scoring rule: answerable questions need the keywords; unanswerable ones need a refusal.</td></tr>
+<tr><td>3, 5</td><td><code>["100", "6.90"]</code>, <code>["2 years", "500"]</code></td><td>Two keywords: <em>all</em> must appear. Return shipping is free over 100 EUR, otherwise 6.90 EUR; the battery is covered 2 years or 500 cycles. An answer with only half the policy fails.</td></tr>
+<tr><td>7</td><td><code>["not available"]</code></td><td>The shipping document says express "is not available for complete bikes". A keyword phrase is strict: a correct answer worded differently ("we do not offer express") will fail. You will see this happen.</td></tr>
+<tr><td>8</td><td><code>["not"]</code></td><td>A one-word, very short keyword. It matches any answer that contains the letters "not" anywhere, even inside "note". A weak test; kept on purpose so you can see a false pass.</td></tr>
+<tr><td>13</td><td><code>["L"]</code></td><td>Frame size L for 175–185 cm. Because matching ignores case, this really checks for the letter "l", which almost every English sentence contains. Another deliberately weak keyword.</td></tr>
+<tr><td>2–18</td><td>(answerable cases)</td><td>Eighteen answerable questions spread over all 8 documents (returns, warranty, shipping, battery care, sizing, service plans, stores, orders), so the score is not dominated by one topic.</td></tr>
+<tr><td>19–20</td><td><code>"must_include": [], "source": null, "answerable": false</code></td><td>Two questions <strong>no document answers</strong>: the CEO's name and skateboards. The right behaviour is to say "I don't know" instead of inventing. Without such cases, a bot that confidently answers everything would look perfect. <code>null</code> means "no source document".</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Anatomy of one eval line: id, question, must_include, source and answerable, and which part of the program uses each field">
+  <text class="title" x="20" y="28">One line of qa.jsonl, and who uses each field</text>
+  <rect class="box" x="20" y="44" width="80" height="34" rx="8"/>
+  <text class="mono" x="60" y="66" text-anchor="middle">id</text>
+  <rect class="box" x="110" y="44" width="150" height="34" rx="8"/>
+  <text class="mono" x="185" y="66" text-anchor="middle">question</text>
+  <rect class="box-ok" x="270" y="44" width="160" height="34" rx="8"/>
+  <text class="mono" x="350" y="66" text-anchor="middle">must_include</text>
+  <rect class="box-info" x="440" y="44" width="130" height="34" rx="8"/>
+  <text class="mono" x="505" y="66" text-anchor="middle">source</text>
+  <rect class="box-warn" x="580" y="44" width="160" height="34" rx="8"/>
+  <text class="mono" x="660" y="66" text-anchor="middle">answerable</text>
+  <path class="line" d="M 60,78 V 120"/>
+  <path class="line" d="M 185,78 V 120"/>
+  <path class="line" d="M 350,78 V 120"/>
+  <path class="line" d="M 505,78 V 120"/>
+  <path class="line" d="M 660,78 V 120"/>
+  <text class="small" x="60" y="138" text-anchor="middle">links runs</text>
+  <text class="small" x="60" y="154" text-anchor="middle">and labels</text>
+  <text class="small" x="185" y="138" text-anchor="middle">sent to the bot</text>
+  <text class="small" x="350" y="138" text-anchor="middle">keyword check</text>
+  <text class="small" x="350" y="154" text-anchor="middle">(this lab)</text>
+  <text class="small" x="505" y="138" text-anchor="middle">judge reference</text>
+  <text class="small" x="505" y="154" text-anchor="middle">(lab 05, 06)</text>
+  <text class="small" x="660" y="138" text-anchor="middle">keywords or</text>
+  <text class="small" x="660" y="154" text-anchor="middle">refusal?</text>
+  <text class="small" x="20" y="186">Only the question goes to the model. Everything else is the answer key, kept out of the bot's sight.</text>
+</svg>
+<figcaption>Each field has one job. <strong>The bot sees only <code>question</code>; the other fields are the answer key.</strong></figcaption>
+</figure>
+
+<h2>Step 2: reading and writing JSONL, <code>aie/evalset.py</code></h2>
+
+<pre data-file="aie/evalset.py" data-lang="py" data-tag="complete file"><code>"""Read and write the JSONL files used for evaluation."""
+import json
+
+from aie.config import EVALS
+
+
+def load_jsonl(path):
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def save_jsonl(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def load_qa():
+    return load_jsonl(EVALS / "qa.jsonl")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Read and write the JSONL files used for evaluation."""</code></td><td>Module docstring: one sentence saying what the file is for.</td></tr>
+<tr><td>2</td><td><code>import json</code></td><td>Python's built-in JSON module: <code>json.loads</code> turns a text line into a dict, <code>json.dumps</code> does the reverse.</td></tr>
+<tr><td>4</td><td><code>from aie.config import EVALS</code></td><td>The path of the <code>evals/</code> folder, computed in <code>aie/config.py</code> from the project root. Using it means the code works whatever folder you start Python from.</td></tr>
+<tr><td>7</td><td><code>def load_jsonl(path):</code></td><td>Generic reader used for every JSONL file in the project (eval sets, runs, labels).</td></tr>
+<tr><td>8</td><td><code>with open(path, encoding="utf-8") as f:</code></td><td>Opens the file as text in UTF-8. Always give the encoding on Windows; the default there is not UTF-8 and characters such as "é" or "’" would break. <code>with</code> closes the file automatically.</td></tr>
+<tr><td>9</td><td><code>return [json.loads(line) for line in f if line.strip()]</code></td><td>Reads the file line by line and parses each line into a dict. <code>if line.strip()</code> skips empty lines (for example a blank line at the end), which would otherwise crash <code>json.loads</code>.</td></tr>
+<tr><td>12</td><td><code>def save_jsonl(path, rows):</code></td><td>The writer: takes a list of dicts and writes one per line.</td></tr>
+<tr><td>13</td><td><code>path.parent.mkdir(parents=True, exist_ok=True)</code></td><td>Creates the target folder (for example <code>runs/</code>) if it doesn't exist yet. <code>exist_ok=True</code> means "no error if it's already there". Without this line the first run fails with <code>FileNotFoundError</code>.</td></tr>
+<tr><td>14</td><td><code>open(path, "w", encoding="utf-8", newline="\n")</code></td><td><code>"w"</code> overwrites the file. <code>newline="\n"</code> forces Unix line endings even on Windows, so the file is identical on every machine and diffs stay clean.</td></tr>
+<tr><td>15–16</td><td><code>f.write(json.dumps(row, ensure_ascii=False) + "\n")</code></td><td>One JSON object per line. <code>ensure_ascii=False</code> keeps characters such as "é" readable instead of writing <code>é</code>.</td></tr>
+<tr><td>19–20</td><td><code>def load_qa(): return load_jsonl(EVALS / "qa.jsonl")</code></td><td>A shortcut for the one eval set every lab uses. The <code>/</code> joins paths (<code>pathlib</code>).</td></tr>
+</table></div>
+
+<h2>Step 3: running and scoring, <code>aie/evaluate.py</code></h2>
+
+<p>This module does three jobs: decide whether one answer passes (<code>keyword_pass</code>), run a whole question set and save every answer (<code>run</code>), and turn a run into a few numbers (<code>summary</code>). Later labs reuse it unchanged with better bots.</p>
+
+<pre data-file="aie/evaluate.py" data-lang="py" data-tag="complete file"><code>"""Run a question set through an answer function and score it with cheap, exact checks."""
+from aie.config import RUNS
+from aie.evalset import load_jsonl, save_jsonl
+
+REFUSALS = ("i don't know", "i do not know", "don't have information", "not able to find", "no information")
+
+
+def is_refusal(text):
+    return any(r in text.lower().replace("’", "'") for r in REFUSALS)
+
+
+def keyword_pass(question, answer):
+    """Answerable: every must_include string appears. Unanswerable: the answer says it doesn't know."""
+    if not question["answerable"]:
+        return is_refusal(answer)
+    return all(word.lower() in answer.lower() for word in question["must_include"])
+
+
+def run(name, questions, answer_fn):
+    """answer_fn(question_text) -&gt; {"answer": str, "chunks": [...], "reply": Reply}. Saves runs/&lt;name&gt;.jsonl."""
+    rows = []
+    for q in questions:
+        out = answer_fn(q["question"])
+        reply = out["reply"]
+        rows.append({
+            "id": q["id"], "question": q["question"], "answer": out["answer"], "chunks": out.get("chunks", []),
+            "keyword_pass": keyword_pass(q, out["answer"]),
+            "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens, "seconds": round(reply.seconds, 2),
+        })
+    save_jsonl(RUNS / f"{name}.jsonl", rows)
+    return rows
+
+
+def load_run(name):
+    return load_jsonl(RUNS / f"{name}.jsonl")
+
+
+def summary(rows):
+    n = len(rows)
+    return {
+        "cases": n,
+        "keyword_pass": sum(r["keyword_pass"] for r in rows) / n,
+        "avg_seconds": sum(r["seconds"] for r in rows) / n,
+        "avg_input_tokens": sum(r["input_tokens"] for r in rows) / n,
+    }</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>from aie.config import RUNS</code></td><td>The <code>runs/</code> folder where each run is saved.</td></tr>
+<tr><td>3</td><td><code>from aie.evalset import load_jsonl, save_jsonl</code></td><td>The two helpers from step 2.</td></tr>
+<tr><td>5</td><td><code>REFUSALS = ("i don't know", ...)</code></td><td>Phrases that count as "the bot declined". A tuple (fixed list). All lower case, because the answer is lower-cased before comparing. The list is short on purpose; you will see it miss a polite refusal.</td></tr>
+<tr><td>8–9</td><td><code>def is_refusal(text): return any(r in text.lower().replace("’", "'") for r in REFUSALS)</code></td><td>True if any refusal phrase appears in the answer. <code>.lower()</code> ignores case. <code>.replace("’", "'")</code> turns the curly apostrophe some models write into a straight one, so "don’t" still matches "don't". <code>any(...)</code> stops at the first match.</td></tr>
+<tr><td>12–13</td><td><code>def keyword_pass(question, answer):</code></td><td>The scoring rule for one answer. <code>question</code> is a row from <code>qa.jsonl</code> (a dict), <code>answer</code> is the bot's text. The docstring states the rule in one line.</td></tr>
+<tr><td>14–15</td><td><code>if not question["answerable"]: return is_refusal(answer)</code></td><td>Unanswerable questions (q19, q20) pass only if the bot declines. Inventing a CEO's name is a failure even if it sounds plausible.</td></tr>
+<tr><td>16</td><td><code>return all(word.lower() in answer.lower() for word in question["must_include"])</code></td><td>Answerable questions pass if <em>every</em> keyword appears somewhere in the answer, ignoring case. <code>in</code> on strings is a substring test: <code>"not" in "please note"</code> is <code>True</code>. That is both why the check is tolerant and why it gives false passes.</td></tr>
+<tr><td>19–20</td><td><code>def run(name, questions, answer_fn):</code></td><td>Runs every question through <code>answer_fn</code>, a function you pass in. Because the bot is a parameter, the same <code>run</code> works for the baseline, the RAG bot and every later version. The docstring documents what <code>answer_fn</code> must return.</td></tr>
+<tr><td>21–24</td><td><code>rows = []</code> ... <code>out = answer_fn(q["question"])</code> ... <code>reply = out["reply"]</code></td><td>Loops over the cases. Only the question text is passed to the bot, never the keywords. <code>reply</code> is the <code>Reply</code> object from <code>aie/llm.py</code> with token counts and seconds.</td></tr>
+<tr><td>25–29</td><td><code>rows.append({...})</code></td><td>One result row per question: id, question, the full answer, the ids of chunks used (empty for now), the pass/fail result, input and output <a class="term" href="glossary.html#token">tokens</a>, and the time rounded to 2 decimals. Saving cost and time next to quality lets later labs compare all three.</td></tr>
+<tr><td>26</td><td><code>out.get("chunks", [])</code></td><td><code>.get</code> with a default: if <code>answer_fn</code> returns no <code>"chunks"</code> key, store an empty list instead of crashing.</td></tr>
+<tr><td>30</td><td><code>save_jsonl(RUNS / f"{name}.jsonl", rows)</code></td><td>Writes <code>runs/baseline.jsonl</code> (for <code>name="baseline"</code>). Keeping every answer means you can re-read and re-score a run later without paying for the model again.</td></tr>
+<tr><td>31</td><td><code>return rows</code></td><td>Also returns the rows so the caller can print them.</td></tr>
+<tr><td>34–35</td><td><code>def load_run(name):</code></td><td>Reads a saved run back. Lab 07 uses it to compare a new run with the baseline.</td></tr>
+<tr><td>38–45</td><td><code>def summary(rows):</code></td><td>Turns rows into averages: number of cases, share of passes, seconds per answer, input tokens per answer. <code>sum(r["keyword_pass"] ...)</code> works because Python counts <code>True</code> as 1 and <code>False</code> as 0.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Decision tree of keyword_pass: unanswerable questions need a refusal phrase, answerable ones need every keyword as a substring">
+  <text class="title" x="20" y="28">How keyword_pass decides</text>
+  <rect class="box" x="290" y="44" width="180" height="40" rx="8"/>
+  <text x="380" y="69" text-anchor="middle">answerable?</text>
+  <path class="arrow" d="M 330,84 L 200,124"/>
+  <path class="arrow" d="M 430,84 L 560,124"/>
+  <text class="label" x="232" y="102">false</text>
+  <text class="label" x="508" y="102">true</text>
+  <rect class="box-info" x="40" y="126" width="300" height="56" rx="8"/>
+  <text x="190" y="150" text-anchor="middle">a REFUSALS phrase in answer?</text>
+  <text class="small" x="190" y="170" text-anchor="middle">"i don't know", "no information", ...</text>
+  <rect class="box-info" x="420" y="126" width="300" height="56" rx="8"/>
+  <text x="570" y="150" text-anchor="middle">every must_include word</text>
+  <text x="570" y="168" text-anchor="middle">is a substring of answer?</text>
+  <text class="small ok" x="190" y="206" text-anchor="middle">yes: PASS   no: fail</text>
+  <text class="small ok" x="570" y="206" text-anchor="middle">yes: PASS   no: fail</text>
+  <text class="small" x="20" y="236">Both sides lower-case the text first. Nothing checks whether the rest of the answer is true.</text>
+</svg>
+<figcaption>Two simple string tests. <strong>The check only looks for words; it never checks the meaning or the invented extras around them.</strong></figcaption>
+</figure>
+
+<h2>Step 4: the baseline prompt, <code>prompts/baseline.txt</code></h2>
+
+<p>Prompts live in text files, not inside Python strings. You can then compare two versions side by side, keep old ones, and say exactly which prompt produced which run (lab 08 builds on this).</p>
+
+<pre data-file="prompts/baseline.txt" data-lang="text" data-tag="complete file"><code>You are the customer support assistant of Trailhead Bikes, an online bike shop.
+Answer the customer's question in one to three sentences.</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>You are the customer support assistant of Trailhead Bikes, an online bike shop.</code></td><td>A role. This becomes the <a class="term" href="glossary.html#system-prompt">system prompt</a>. It tells the model who it is, but gives it no facts about the shop.</td></tr>
+<tr><td>2</td><td><code>Answer the customer's question in one to three sentences.</code></td><td>A length limit: short answers are faster, cheaper and easier to check. Notice what is missing: no documents and no "say I don't know if you are unsure". That is what makes it a baseline.</td></tr>
+</table></div>
+
+<h2>Step 5: answering one question, <code>aie/rag.py</code></h2>
+
+<p>This is the function the bot uses for every answer, now and in later labs. It has an optional <code>retriever</code>. <strong>With <code>retriever=None</code> (this lab), no documents are searched and the model answers from memory</strong>, meaning from whatever it learned in training. The full <a class="term" href="glossary.html#rag">RAG</a> path, where a <a class="term" href="glossary.html#retriever">retriever</a> finds relevant chunks and puts them into the prompt, is used from <a href="07-rag.html">lab 07</a> on.</p>
+
+<pre data-file="aie/rag.py" data-lang="py" data-tag="complete file"><code>"""Answer a question with or without retrieved context."""
+from aie.config import PROMPTS
+from aie.llm import chat
+
+
+def load_prompt(name):
+    return (PROMPTS / f"{name}.txt").read_text(encoding="utf-8")
+
+
+def format_context(results):
+    return "\n\n".join(f"[{chunk.id}]\n{chunk.text}" for chunk, _ in results)
+
+
+def answer(question, retriever=None, prompt="rag_v2", k=3, model=None):
+    """Return {"answer", "chunks", "reply"}. Without a retriever, the model answers from memory."""
+    results = retriever.search(question, k=k) if retriever else []
+    system = load_prompt(prompt).format(context=format_context(results)) if retriever else load_prompt(prompt)
+    reply = chat([{"role": "system", "content": system}, {"role": "user", "content": question}], model=model, temperature=0)
+    return {"answer": reply.text, "chunks": [chunk.id for chunk, _ in results], "reply": reply}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>from aie.config import PROMPTS</code></td><td>Path of the <code>prompts/</code> folder.</td></tr>
+<tr><td>3</td><td><code>from aie.llm import chat</code></td><td>The wrapper from lab 01: sends messages and returns a <code>Reply</code> with text, tokens and seconds.</td></tr>
+<tr><td>6–7</td><td><code>def load_prompt(name): return (PROMPTS / f"{name}.txt").read_text(encoding="utf-8")</code></td><td>Reads <code>prompts/&lt;name&gt;.txt</code>. <code>load_prompt("baseline")</code> returns the two lines of step 4.</td></tr>
+<tr><td>10–11</td><td><code>def format_context(results):</code></td><td>Turns retrieved chunks into text, each headed by its id like <code>[returns#0]</code>. Not used in this lab (the list is empty); it matters from lab 07.</td></tr>
+<tr><td>14</td><td><code>def answer(question, retriever=None, prompt="rag_v2", k=3, model=None):</code></td><td>The parameters with defaults: no retriever, the <code>rag_v2</code> prompt (written in a later lab), 3 chunks, the default model. Lab 04 overrides <code>prompt="baseline"</code>.</td></tr>
+<tr><td>16</td><td><code>results = retriever.search(question, k=k) if retriever else []</code></td><td>Searches the documents only if a retriever was given. Here it wasn't, so <code>results</code> is an empty list.</td></tr>
+<tr><td>17</td><td><code>system = load_prompt(prompt).format(context=...) if retriever else load_prompt(prompt)</code></td><td>With a retriever, the prompt file contains a <code>{context}</code> slot that <code>.format</code> fills with the chunks. Without one, the prompt is used as it is. That matters: <code>.format</code> on a text without the slot would be useless, and on a text with other <code>{ }</code> braces it would crash.</td></tr>
+<tr><td>18</td><td><code>reply = chat([{"role": "system", ...}, {"role": "user", "content": question}], model=model, temperature=0)</code></td><td>Two messages: the system prompt and the customer's question. <code>temperature=0</code> makes the model pick its most likely words, so runs are as repeatable as possible (see <a href="02-sampling.html">lab 02</a>). It is still not perfectly identical every time.</td></tr>
+<tr><td>19</td><td><code>return {"answer": reply.text, "chunks": [...], "reply": reply}</code></td><td>Exactly the shape <code>evaluate.run</code> expects: the text, the chunk ids used (empty here) and the full <code>Reply</code> for tokens and time.</td></tr>
+</table></div>
+
+<h2>Step 6: the lab script, <code>labs/04_baseline_eval.py</code></h2>
+
+<pre data-file="labs/04_baseline_eval.py" data-lang="py" data-tag="complete file"><code>"""Lab 04: score the bot before it knows anything about the shop. This is the number to beat."""
+from aie import rag
+from aie.evalset import load_qa
+from aie.evaluate import run, summary
+
+questions = load_qa()
+rows = run("baseline", questions, lambda q: rag.answer(q, retriever=None, prompt="baseline"))
+
+for r in rows:
+    mark = "PASS" if r["keyword_pass"] else "fail"
+    print(f"{mark}  {r['id']}  {r['question']}\n      {r['answer'][:110]!r}")
+print("\n", summary(rows))</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 04: score the bot before it knows anything about the shop. ..."""</code></td><td>Says what the script is for.</td></tr>
+<tr><td>2–4</td><td><code>from aie import rag</code> ...</td><td>The answer function, the eval set loader and the runner/summary.</td></tr>
+<tr><td>6</td><td><code>questions = load_qa()</code></td><td>The 20 rows of <code>evals/qa.jsonl</code> as a list of dicts.</td></tr>
+<tr><td>7</td><td><code>rows = run("baseline", questions, lambda q: rag.answer(q, retriever=None, prompt="baseline"))</code></td><td>Runs all 20 and saves <code>runs/baseline.jsonl</code>. The <code>lambda</code> is a tiny unnamed function that takes the question text <code>q</code> and calls <code>rag.answer</code> with our settings. <code>retriever=None</code> means no documents; <code>prompt="baseline"</code> picks <code>prompts/baseline.txt</code>.</td></tr>
+<tr><td>9–10</td><td><code>for r in rows: mark = "PASS" if r["keyword_pass"] else "fail"</code></td><td>One line per question. "PASS" is in capitals so passes stand out when you scan the list.</td></tr>
+<tr><td>11</td><td><code>print(f"{mark}  {r['id']}  {r['question']}\n      {r['answer'][:110]!r}")</code></td><td>Prints the verdict, id and question, then the first 110 characters of the answer on the next line. <code>!r</code> prints it with quotes (its <code>repr</code>), which shows where the text starts and ends. <strong>Only the start is printed; the check used the full answer.</strong> Open <code>runs/baseline.jsonl</code> to see everything.</td></tr>
+<tr><td>12</td><td><code>print("\n", summary(rows))</code></td><td>The final numbers: cases, pass rate, average seconds and average input tokens.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Data flow of lab 04 from qa.jsonl through run, rag.answer and llama3.2 to keyword_pass and runs/baseline.jsonl">
+  <text class="title" x="20" y="28">What happens for each of the 20 questions</text>
+  <rect class="box" x="20" y="50" width="150" height="50" rx="8"/>
+  <text class="mono" x="95" y="80" text-anchor="middle">qa.jsonl</text>
+  <path class="arrow" d="M 170,75 H 206"/>
+  <rect class="box" x="208" y="50" width="150" height="50" rx="8"/>
+  <text class="mono" x="283" y="80" text-anchor="middle">run()</text>
+  <path class="arrow" d="M 358,75 H 394"/>
+  <rect class="box2" x="396" y="50" width="160" height="50" rx="8"/>
+  <text class="mono" x="476" y="72" text-anchor="middle">rag.answer()</text>
+  <text class="small" x="476" y="90" text-anchor="middle">retriever=None</text>
+  <path class="arrow" d="M 556,75 H 592"/>
+  <rect class="box-solid" x="594" y="50" width="146" height="50" rx="8"/>
+  <text class="on-solid" x="667" y="72" text-anchor="middle">llama3.2</text>
+  <text class="on-solid" x="667" y="90" text-anchor="middle">via Ollama</text>
+  <text class="small" x="476" y="124" text-anchor="middle">system: baseline.txt</text>
+  <text class="small" x="476" y="140" text-anchor="middle">user: question only</text>
+  <path class="arrow-accent" d="M 667,100 V 190 H 562"/>
+  <text class="label accent" x="676" y="150">answer</text>
+  <rect class="box-info" x="400" y="166" width="160" height="50" rx="8"/>
+  <text class="mono" x="480" y="196" text-anchor="middle">keyword_pass()</text>
+  <path class="arrow" d="M 400,191 H 362"/>
+  <rect class="box-ok" x="200" y="166" width="160" height="50" rx="8"/>
+  <text class="mono" x="280" y="188" text-anchor="middle">runs/</text>
+  <text class="mono" x="280" y="205" text-anchor="middle">baseline.jsonl</text>
+  <path class="arrow" d="M 200,191 H 172"/>
+  <rect class="box-ok" x="20" y="166" width="150" height="50" rx="8"/>
+  <text class="mono" x="95" y="196" text-anchor="middle">summary()</text>
+  <text class="small" x="20" y="250">must_include and answerable go to keyword_pass, never to the model.</text>
+  <text class="small" x="20" y="268">No document from data/docs/ is read anywhere on this path.</text>
+</svg>
+<figcaption>The model gets only the role prompt and the question. <strong>Whatever it says about the shop comes from its training, not from Trailhead's documents.</strong></figcaption>
+</figure>
+
+<h2>Step 7: run it</h2>
+
+<p>From the project folder, with Ollama running:</p>
+<pre data-lang="sh"><code>uv run python -m labs.04_baseline_eval</code></pre>
+<p><code>uv run</code> uses the project's virtual environment; <code>python -m labs.04_baseline_eval</code> runs the script as a module so that <code>import aie</code> finds the package in the project root. Twenty questions at roughly 5–10 seconds each take a few minutes; the first answer is slower while the model loads.</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>PASS  q01  How many days do I have to return an item?
+      'At Trailhead Bikes, we offer a 30-day return policy. You can return an item within 30 days of delivery, and we'
+PASS  q02  Can I return a helmet I already opened?
+      'Unfortunately, due to safety regulations and hygiene concerns, we cannot accept returns on opened helmets. How'
+fail  q03  Is return shipping free?
+      'Yes, we offer free return shipping on all orders. If you need to return an item, please contact our customer s'
+fail  q04  How long is the warranty on the frame?
+      'Our frames are covered by a 5-year warranty against manufacturing defects. This warranty is valid from the dat'
+fail  q05  How long is my e-bike battery covered?
+      'Our e-bikes come with a 2-year warranty on the battery, which covers defects in materials and workmanship. How'
+PASS  q06  Where do I find the frame number?
+      "The frame number is usually located on a small plate or stamp on the bottom of the bike's frame, near the bott"
+fail  q07  Can I get express delivery for a complete bike?
+      'Unfortunately, we do not offer express delivery for complete bikes due to their size and weight. However, we d'
+PASS  q08  Do you deliver to Switzerland?
+      'Yes, we do deliver to Switzerland. We use a reliable shipping partner to ensure timely and secure delivery to '
+fail  q09  How much does standard shipping cost?
+      'Our standard shipping rate is $10.99 for domestic orders, which typically takes 3-7 business days to arrive. H'
+fail  q10  Can I charge my battery in a cold garage at -5 degrees?
+      "Yes, you can charge your battery in a cold garage, but it's recommended to keep the battery away from extremel"
+fail  q11  How long does it take to fully charge the battery with the fast charger?
+      "Our fast charger can fully charge the battery in approximately 2-3 hours, depending on the battery's capacity "
+fail  q12  My battery light blinks red three times. What does it mean?
+      "The blinking red light on your battery indicates a low battery level, and it's recommended to charge the batte"
+PASS  q13  I am 178 cm tall. Which frame size should I take?
+      'Based on your height, I would recommend our 17" frame size, as it is designed to fit riders between 165-175 cm'
+fail  q14  What does Trailhead Care Plus cost per year?
+      'Trailhead Care Plus is our premium warranty program that offers extended coverage and benefits. The annual cos'
+fail  q15  Is theft protection included in the basic Trailhead Care plan?
+      'Yes, the basic Trailhead Care plan includes theft protection, which provides a $500 reward for the safe return'
+PASS  q16  Is the Annecy store open on Monday?
+      'Our Annecy store is closed on Mondays, as it follows the local French schedule. However, you can visit our web'
+fail  q17  When should I drop off my bike for a full service?
+      'We recommend bringing your bike in for a full service every 6-12 months, depending on how frequently you ride.'
+fail  q18  Can I pay for a 1500 EUR bike in instalments?
+      'Yes, we offer financing options for our bikes, including the 1500 EUR model. You can pay for your bike in 3, 6'
+fail  q19  Who is the CEO of Trailhead?
+      "I couldn't find any information on a CEO for Trailhead Bikes. Trailhead Bikes is an online bike shop, and I'm "
+fail  q20  Do you sell skateboards?
+      "No, we specialize in bicycles and related accessories at Trailhead Bikes. We don't carry skateboards, but we c"
+
+ {'cases': 20, 'keyword_pass': 0.3, 'avg_seconds': 8.8255, 'avg_input_tokens': 63.2}</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> Twenty lines marked <code>PASS</code> or <code>fail</code>, each with the start of the answer, and a final dictionary. In our run: <code>'keyword_pass': 0.3</code> (6 of 20), about 8.8 seconds per answer and about 63 input tokens per question (the short prompt plus the question). Your answers and your score will differ a little: the model is not perfectly repeatable even at temperature 0. A new file <code>runs/baseline.jsonl</code> now exists.</div>
+
+<h2>Read the answers: invented facts</h2>
+
+<p>The number 30 % is less interesting than the answers themselves. The model was never given the shop's documents, yet it answers almost everything confidently. Compare with what the documents actually say:</p>
+
+<div class="table-wrap"><table>
+<tr><th>Question</th><th>The baseline said</th><th>The document says</th></tr>
+<tr><td>q04 frame warranty</td><td>"a 5-year warranty"</td><td>lifetime warranty (<code>warranty.md</code>)</td></tr>
+<tr><td>q09 standard shipping</td><td>"$10.99 for domestic orders"</td><td>9.90 EUR, free over 100 EUR (<code>shipping.md</code>)</td></tr>
+<tr><td>q08 Switzerland</td><td>"Yes, we do deliver to Switzerland"</td><td>Switzerland is not in the list of six countries</td></tr>
+<tr><td>q03 return shipping</td><td>"free return shipping on all orders"</td><td>free over 100 EUR, otherwise 6.90 EUR deducted</td></tr>
+<tr><td>q15 theft protection</td><td>"the basic Trailhead Care plan includes theft protection"</td><td>only Care Plus has it</td></tr>
+<tr><td>q10 charging at -5 degrees</td><td>"Yes, you can charge your battery in a cold garage"</td><td>never charge below 0 degrees (a safety issue)</td></tr>
+</table></div>
+
+<p>This is <a class="term" href="glossary.html#hallucination">hallucination</a>: fluent, plausible and wrong. Dollar prices and "domestic orders" show the model falling back on what a typical (American) online shop would say. The fix is not a better question; it is giving the model the real documents, which is what <a href="07-rag.html">lab 07</a> does.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Before and after comparison: three baseline answers next to what the shop documents really say">
+  <text class="title" x="20" y="28">Baseline answer vs the real policy</text>
+  <text class="label" x="200" y="54" text-anchor="middle">baseline (from memory)</text>
+  <text class="label" x="560" y="54" text-anchor="middle">data/docs/ (the truth)</text>
+  <rect class="box-bad" x="40" y="66" width="320" height="40" rx="8"/>
+  <text x="200" y="91" text-anchor="middle">frame: 5-year warranty</text>
+  <rect class="box-ok" x="400" y="66" width="320" height="40" rx="8"/>
+  <text x="560" y="91" text-anchor="middle">frame: lifetime warranty</text>
+  <rect class="box-bad" x="40" y="118" width="320" height="40" rx="8"/>
+  <text x="200" y="143" text-anchor="middle">standard shipping: $10.99</text>
+  <rect class="box-ok" x="400" y="118" width="320" height="40" rx="8"/>
+  <text x="560" y="143" text-anchor="middle">standard shipping: 9.90 EUR</text>
+  <rect class="box-bad" x="40" y="170" width="320" height="40" rx="8"/>
+  <text x="200" y="195" text-anchor="middle">Switzerland: yes, we deliver</text>
+  <rect class="box-ok" x="400" y="170" width="320" height="40" rx="8"/>
+  <text x="560" y="195" text-anchor="middle">Switzerland: not in the list</text>
+  <path class="arrow-bad" d="M 362,86 H 396"/>
+  <path class="arrow-bad" d="M 362,138 H 396"/>
+  <path class="arrow-bad" d="M 362,190 H 396"/>
+</svg>
+<figcaption>Three answers from our run. <strong>Every one is confident and wrong; none of them is flagged by the model itself.</strong></figcaption>
+</figure>
+
+<h2>Read the scores: where the keyword check is wrong</h2>
+
+<p>Now check the check. Take each PASS and fail and ask: would a person who knows the documents agree? Four of the 20 verdicts in our run are wrong:</p>
+
+<ul>
+<li><strong>q08 is a false pass.</strong> The bot says it delivers to Switzerland, which is wrong. It passes because the keyword <code>not</code> appears inside another word: the full answer (only its start is printed) contains "note". A substring test cannot tell "not" from "note".</li>
+<li><strong>q13 is a false pass.</strong> The bot recommends a 17" frame "for riders between 165-175 cm", which is wrong for 178 cm (the shop uses S/M/L/XL; 178 cm is L). It passes because the keyword <code>L</code>, after lower-casing, is just the letter "l", found in nearly any sentence.</li>
+<li><strong>q07 is a false fail.</strong> "we do not offer express delivery for complete bikes" is correct, but the check wants the exact phrase <code>not available</code>.</li>
+<li><strong>q19 is a false fail.</strong> "I couldn't find any information on a CEO for Trailhead Bikes" is the right behaviour: it declines instead of inventing a name. But "couldn't find any information" matches none of the <code>REFUSALS</code> phrases.</li>
+</ul>
+
+<p>Two errors push the score up and two push it down, so 30 % happens to be close to the truth here. You can't rely on that luck. Also notice what the check never sees: q02 passes (opened helmets can't be returned, correct), but it can't tell you whether the rest of the answer invented anything. In <a href="05-ai-judge.html">lab 05</a> a human reads a similar run and labels it, and only 4 of 20 answers turn out fully correct.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Two by two grid comparing the keyword verdict with whether the answer is really correct, with the question ids in each cell">
+  <text class="title" x="20" y="28">Keyword verdict vs reality (our run)</text>
+  <text class="label" x="300" y="56" text-anchor="middle">keyword says PASS</text>
+  <text class="label" x="580" y="56" text-anchor="middle">keyword says fail</text>
+  <text class="label" x="150" y="105" text-anchor="end">answer right</text>
+  <text class="label" x="150" y="195" text-anchor="end">answer wrong</text>
+  <rect class="box-ok" x="170" y="68" width="260" height="76" rx="8"/>
+  <text x="300" y="98" text-anchor="middle">correct pass</text>
+  <text class="mono" x="300" y="122" text-anchor="middle">q01 q02 q06 q16</text>
+  <rect class="box-warn" x="450" y="68" width="260" height="76" rx="8"/>
+  <text x="580" y="98" text-anchor="middle">false fail</text>
+  <text class="mono" x="580" y="122" text-anchor="middle">q07 q19</text>
+  <rect class="box-bad" x="170" y="158" width="260" height="76" rx="8"/>
+  <text x="300" y="188" text-anchor="middle">false pass</text>
+  <text class="mono" x="300" y="212" text-anchor="middle">q08 ("note")  q13 ("l")</text>
+  <rect class="box-ok" x="450" y="158" width="260" height="76" rx="8"/>
+  <text x="580" y="188" text-anchor="middle">correct fail</text>
+  <text class="small" x="580" y="212" text-anchor="middle">the other 12</text>
+  <text class="small" x="20" y="258">"Answer right" judged by reading the keyword's fact only; extra invented details are ignored here (lab 05 is stricter).</text>
+</svg>
+<figcaption>Read the off-diagonal cells first: <strong>a metric is only useful if you know how often, and in which direction, it is wrong.</strong></figcaption>
+</figure>
+
+<h2>Step 8: look inside <code>runs/baseline.jsonl</code></h2>
+
+<p>Open the file in your editor. It has 20 lines, one per question, in the same JSONL format as the eval set. Each row has these fields (values here are only described, open the file for yours):</p>
+<div class="table-wrap"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>id</code>, <code>question</code></td><td>Copied from <code>qa.jsonl</code>, so a run can be read on its own.</td></tr>
+<tr><td><code>answer</code></td><td>The <strong>full</strong> answer text, not cut at 110 characters. Search it for "note" in q08 to see the false pass yourself.</td></tr>
+<tr><td><code>chunks</code></td><td><code>[]</code> in this lab: no documents were retrieved. From lab 07 it lists ids such as <code>returns#0</code>.</td></tr>
+<tr><td><code>keyword_pass</code></td><td><code>true</code> or <code>false</code>.</td></tr>
+<tr><td><code>input_tokens</code>, <code>output_tokens</code></td><td>What the call cost, as reported by the server.</td></tr>
+<tr><td><code>seconds</code></td><td>Time for this answer, measured by <code>aie/llm.py</code>.</td></tr>
+</table></div>
+<p>Keep this file. Lab 07 loads it with <code>load_run("baseline")</code> to compare the RAG bot against it, and you can re-score it with a new rule without asking the model again (see "Try it yourself").</p>
+
+<div class="callout warn"><strong>Common mistakes.</strong>
+<ul>
+<li><code>ModuleNotFoundError: No module named 'aie'</code>: you ran <code>python labs/04_baseline_eval.py</code> or started from another folder. Run <code>uv run python -m labs.04_baseline_eval</code> from the project root.</li>
+<li><code>json.decoder.JSONDecodeError</code> when loading <code>qa.jsonl</code>: a line is not valid JSON. Typical causes: a trailing comma, single quotes instead of double quotes, <code>True</code> instead of <code>true</code>, or one object split over several lines.</li>
+<li><code>FileNotFoundError: ... prompts\baseline.txt</code>: the file is missing or named <code>baseline.txt.txt</code> (Windows hides extensions by default).</li>
+<li>Connection error: Ollama is not running, or <code>llama3.2</code> was not pulled (lab 01).</li>
+<li>Believing the 30 %. Always read a sample of PASS and fail answers before trusting any score, as you did above.</li>
+<li>Adding the expected answer to the prompt "to help". The bot must never see <code>must_include</code>; otherwise you are testing your test, not your bot.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Catch the false pass by hand.</strong> Test the keyword rule on any text, without a model:
+<pre data-lang="sh" data-tag="try it"><code>uv run python -c "from aie.evaluate import keyword_pass; print(keyword_pass({'answerable': True, 'must_include': ['not']}, 'Yes, please note that we ship there.'))"</code></pre>
+It prints <code>True</code>. Try <code>['L']</code> with a sentence that has no size in it.</li>
+<li><strong>Re-score the saved run.</strong> Add <code>"couldn't find"</code> to <code>REFUSALS</code> in <code>aie/evaluate.py</code>, then count passes again from <code>runs/baseline.jsonl</code>, with no model call:
+<pre data-lang="sh" data-tag="try it"><code>uv run python -c "from aie.evaluate import load_run, keyword_pass; from aie.evalset import load_qa; qa = {q['id']: q for q in load_qa()}; print(sum(keyword_pass(qa[r['id']], r['answer']) for r in load_run('baseline')))"</code></pre>
+With our run, q19 should now pass. Undo the change afterwards so later labs score the same way.</li>
+<li><strong>Write a stronger keyword.</strong> Change q13's <code>must_include</code> from <code>["L"]</code> to something that only a right answer contains, and re-score as in experiment 2. What is the risk of making keywords too specific (think of q07)?</li>
+<li><strong>Tell the baseline it may not know.</strong> Add a third line to <code>prompts/baseline.txt</code> such as "If you are not sure, say I don't know." and run the lab again. Watch q19, q20 and the invented prices. Restore the original file afterwards, because later labs compare against the original baseline.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>An eval set is a fixed list of questions plus an answer key; you write it <em>before</em> improving the bot and run it after every change.</li>
+<li><code>qa.jsonl</code> has 18 answerable questions over all 8 documents and 2 unanswerable ones that test whether the bot declines instead of inventing.</li>
+<li>The baseline (<code>llama3.2</code>, role prompt, <code>retriever=None</code>) answers from memory and scored 30 % with the keyword check in our run.</li>
+<li>It invented a 5-year frame warranty, dollar prices and delivery to Switzerland: confident hallucinations.</li>
+<li>The keyword check is cheap but wrong in both directions: false passes (q08 "note", q13 "l") and false fails (q07 wording, q19 polite refusal).</li>
+<li><code>runs/baseline.jsonl</code> keeps every full answer, token count and time, so runs can be re-read, re-scored and compared later.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="03-structured-output.html"><small>← Previous · Step 03</small>Structured output with a schema</a>
+<a class="next" href="05-ai-judge.html"><small>Next · Step 05 →</small>An AI judge, checked against humans</a>
+</nav>
+</main>
+</body>
+</html>

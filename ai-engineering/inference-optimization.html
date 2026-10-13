@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 9 · Inference optimization</title>
+<meta name="description" content="Latency and cost metrics, what slows inference down, and techniques at the model and service level. Read with book chapter 9.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 9/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 9 of 10</div>
+  <h1>Inference optimization</h1>
+  <p class="lead">Latency and cost metrics, what slows inference down, and techniques at the model and service level. Read with book chapter 9.</p>
+</section>
+<div class="callout">Read with <strong>chapter 9 · Inference Optimization</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>Every time the Trailhead Bikes bot answers a customer, a model runs on a computer somewhere and produces text one piece at a time. That run is called <a class="term" href="glossary.html#inference">inference</a>. This chapter explains what happens during inference, how to measure whether it is fast and cheap enough, why it is slow, and which tricks make it faster at three levels: the model itself, the server that runs it, and your application.</p>
+
+<p><strong>Why this matters for your project.</strong> On our lab machine (an NVIDIA T500 with 4 GB of GPU memory) a warm <code>llama3.2</code> answer takes roughly 5 to 10 seconds, the first call after loading a model takes 35 to 56 seconds, and one <code>gemma4</code> answer with hidden thinking took 95 to 110 seconds. Those numbers decide whether a customer waits or leaves. In <a href="14-latency.html">lab 14</a> you measure speed yourself, and in <a href="11-cache-router.html">lab 11</a> you skip the model entirely for some requests. This page gives you the vocabulary and mental model behind both labs.</p>
+
+<h2>What inference is: two phases</h2>
+
+<p>Training a model means changing its <a class="term" href="glossary.html#parameters">parameters</a>. Inference means using a model whose parameters are fixed: you give it a <a class="term" href="glossary.html#prompt">prompt</a> and it predicts the next <a class="term" href="glossary.html#token">token</a>, then the next, until it stops. A language model only ever predicts one token at a time; a long answer is just many predictions in a row, each one fed back as input for the next.</p>
+
+<p>Inference has two phases that behave very differently:</p>
+<ul>
+  <li><strong>Prefill.</strong> The model reads the whole prompt (system prompt, retrieved documents, the question). All prompt tokens are already known, so the model can process them together, in parallel, in one big pass. At the end of this pass it can predict the first output token.</li>
+  <li><strong>Decode.</strong> The model generates the answer. Each new token depends on the one before it, so this part is sequential: one forward pass per output token. A 100-token answer needs about 100 passes.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Timeline: a long prefill block produces token 1, then six short decode steps produce tokens 2 to 7; TTFT spans the prefill, TPOT spans one decode step, total latency spans everything">
+  <text x="20" y="28" class="title">One request, from left to right in time</text>
+  <rect x="20" y="50" width="220" height="60" rx="8" class="box-info"/>
+  <text x="130" y="76" text-anchor="middle">Prefill</text>
+  <text x="130" y="96" text-anchor="middle" class="label">whole prompt, one pass</text>
+  <rect x="250" y="50" width="70" height="60" rx="8" class="box-ok"/>
+  <text x="285" y="85" text-anchor="middle" class="label">token 2</text>
+  <rect x="330" y="50" width="70" height="60" rx="8" class="box-ok"/>
+  <text x="365" y="85" text-anchor="middle" class="label">token 3</text>
+  <rect x="410" y="50" width="70" height="60" rx="8" class="box-ok"/>
+  <text x="445" y="85" text-anchor="middle" class="label">token 4</text>
+  <rect x="490" y="50" width="70" height="60" rx="8" class="box-ok"/>
+  <text x="525" y="85" text-anchor="middle" class="label">token 5</text>
+  <rect x="570" y="50" width="70" height="60" rx="8" class="box-ok"/>
+  <text x="605" y="85" text-anchor="middle" class="label">token 6</text>
+  <rect x="650" y="50" width="90" height="60" rx="8" class="box-ok"/>
+  <text x="695" y="85" text-anchor="middle" class="label">token 7</text>
+  <path class="line" d="M20,135 H240"/>
+  <path class="line" d="M20,128 V142 M240,128 V142"/>
+  <text x="130" y="158" text-anchor="middle" class="accent">TTFT (token 1 appears)</text>
+  <path class="line" d="M250,135 H320"/>
+  <path class="line" d="M250,128 V142 M320,128 V142"/>
+  <text x="285" y="158" text-anchor="middle" class="accent">TPOT</text>
+  <path class="line" d="M20,185 H740"/>
+  <path class="line" d="M20,178 V192 M740,178 V192"/>
+  <text x="380" y="210" text-anchor="middle">total latency ≈ TTFT + TPOT × (output tokens − 1)</text>
+</svg>
+<figcaption>Prefill reads the prompt in one parallel pass and yields the first token; decode then adds one token per step. <strong>Long prompts make TTFT grow; long answers make total latency grow.</strong> Box widths are illustrative.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to tokens and forward passes? What they are and why they matter</summary>
+<p>A <a class="term" href="glossary.html#tokenizer">tokenizer</a> cuts text into tokens: whole short words, pieces of longer words, punctuation. "Trailhead" might become two or three tokens. A <em>forward pass</em> is one run of the input through all the layers of the <a class="term" href="glossary.html#transformer">transformer</a>, ending with a probability for every possible next token. Prefill is one forward pass over many tokens at once; decode is one forward pass per new token. Costs and limits (price per token, <a class="term" href="glossary.html#context-window">context window</a>) are counted in tokens, which is why our wrapper <code>aie/llm.py</code> records <code>input_tokens</code> and <code>output_tokens</code> for every call.</p>
+</details>
+
+<h2>The numbers that describe speed and cost</h2>
+
+<p><a class="term" href="glossary.html#latency">Latency</a> is how long one user waits. For a chat product it splits into parts that users feel differently:</p>
+
+<div class="table-wrap"><table>
+<tr><th>Metric</th><th>What it measures</th><th>What makes it worse</th></tr>
+<tr><td><a class="term" href="glossary.html#ttft">Time to first token</a> (TTFT)</td><td>Seconds from sending the request until the first piece of the answer arrives. With <a class="term" href="glossary.html#streaming">streaming</a>, this is when the user sees the bot "start typing".</td><td>Long prompts (big RAG context), a queue of other requests, loading the model, hidden thinking tokens.</td></tr>
+<tr><td><a class="term" href="glossary.html#tpot">Time per output token</a> (TPOT)</td><td>Average gap between two output tokens during decode. Its inverse is "tokens per second" for one user.</td><td>Bigger models, slower GPU memory, many requests sharing the GPU.</td></tr>
+<tr><td>Total latency</td><td>From request to the last token. Roughly TTFT plus TPOT times the number of output tokens.</td><td>Everything above, plus long answers.</td></tr>
+<tr><td><a class="term" href="glossary.html#throughput">Throughput</a></td><td>Work done per second by the whole server, usually output tokens per second across all users, or requests per minute.</td><td>Serving requests one at a time instead of in batches.</td></tr>
+<tr><td>Goodput</td><td>Throughput that counts only requests that met your targets, for example "TTFT under 1 s and TPOT under 50 ms" (illustrative targets).</td><td>Pushing throughput so high that individual requests become too slow.</td></tr>
+<tr><td>Utilization</td><td>How busy the hardware is. Tools like <code>nvidia-smi</code> report the share of time the GPU was running <em>something</em>.</td><td>Idle gaps between requests; tiny batches.</td></tr>
+</table></div>
+
+<p>Two of these deserve a warning. First, <strong>latency and throughput pull against each other</strong>. Packing more requests together raises throughput, but each request now shares the GPU and may get slower. Goodput exists precisely to stop you from celebrating a throughput number that came from making users wait. Second, <strong>"100 % GPU utilization" does not mean the GPU is used well</strong>. The common utilization number says the GPU was doing some work during each sampling period, not how much of its arithmetic power was used. Engineers also look at how much of the theoretical compute (or memory bandwidth) a job actually achieves, which is usually far below the peak.</p>
+
+<p>Also report latency as a distribution, not one average. Look at the median (p50) and at slow cases such as p90 or p99: the one customer in a hundred who waits 40 seconds is real, and an average hides them.</p>
+
+<h2>Why inference is slow: compute-bound vs memory-bound</h2>
+
+<p>A GPU has two resources that matter here: <strong>compute</strong> (how many multiplications per second its cores can do) and <strong>memory bandwidth</strong> (how many bytes per second it can move from its memory into those cores). A job is <em>compute-bound</em> when the cores are the bottleneck and <em>memory-bandwidth-bound</em> when the cores sit waiting for data.</p>
+
+<p>Prefill is usually compute-bound: the model loads each weight once and uses it for every prompt token in the pass, so there is a lot of math per byte loaded. Decode is usually memory-bound: to produce one token for one request, the GPU must read essentially all of the model's weights from memory, do a small amount of math with them, and then read them all again for the next token. The cores finish their math quickly and wait for the next load.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="GPU memory holding model weights and the KV cache sends all weights to the compute cores at every decode step; the arrow, not the cores, limits speed">
+  <rect x="20" y="30" width="260" height="150" rx="8" class="zone"/>
+  <text x="150" y="52" text-anchor="middle" class="title">GPU memory (VRAM)</text>
+  <rect x="40" y="68" width="220" height="44" rx="8" class="box2"/>
+  <text x="150" y="95" text-anchor="middle">model weights</text>
+  <rect x="40" y="122" width="220" height="44" rx="8" class="box2"/>
+  <text x="150" y="149" text-anchor="middle">KV cache</text>
+  <path class="arrow-accent" d="M282,105 H476"/>
+  <text x="380" y="80" text-anchor="middle" class="label">every decode step reads</text>
+  <text x="380" y="96" text-anchor="middle" class="label">all the weights again</text>
+  <text x="380" y="128" text-anchor="middle" class="small">limited by memory bandwidth</text>
+  <rect x="480" y="68" width="260" height="98" rx="8" class="box-info"/>
+  <text x="610" y="105" text-anchor="middle">compute cores</text>
+  <text x="610" y="127" text-anchor="middle" class="small">the math itself is quick</text>
+  <text x="380" y="206" text-anchor="middle" class="small">Decode: little math per byte moved, so the speed of the arrow sets the speed of the answer.</text>
+</svg>
+<figcaption>During decode the GPU streams the whole model from memory for every token. <strong>For one request, a smaller model (fewer bytes) usually means faster tokens.</strong></figcaption>
+</figure>
+
+<p>This gives you a useful back-of-the-envelope rule. If a model's weights take <em>S</em> gigabytes and the GPU can move <em>B</em> gigabytes per second, one request can decode at most about <em>B / S</em> tokens per second. As an illustrative example (not our hardware): a 2 GB model on a GPU that moves 100 GB/s tops out near 50 tokens per second for a single user. Real numbers are lower because of overheads. The rule explains three things you will see in practice:</p>
+<ul>
+  <li>Shrinking the weights (<a class="term" href="glossary.html#quantization">quantization</a>, smaller models) speeds up decode almost directly.</li>
+  <li>Serving several requests together is nearly free during decode: the weights are read once and used for all of them, which is why <a class="term" href="glossary.html#batching">batching</a> raises throughput so much.</li>
+  <li>Buying a GPU with more compute but the same memory bandwidth may not make single-user chat any faster.</li>
+</ul>
+
+<h2>Hardware basics, with our 4 GB GPU</h2>
+
+<p>For inference, the first questions about any accelerator are: <strong>how much memory does it have</strong> (does the model fit at all?) and <strong>how fast is that memory</strong> (how quickly can it decode?). Compute speed matters most for long prompts and big batches.</p>
+
+<p>Our lab GPU, an NVIDIA T500, has 4 GB of memory. <code>llama3.2</code> has about 3 billion parameters. Stored at 16 bits (2 bytes) each, that would be about 6 GB, which would not fit. The model Ollama downloads is 2.0 GB, which tells you the weights are stored with far fewer bits per parameter: it is a quantized version. Weights are not the only thing in memory, though. The runtime also needs room for working buffers and for the KV cache (explained below), which grows with the length of the conversation.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="A 4 GB memory bar: llama3.2 weights take 2.0 GB, KV cache and runtime overhead take more, a little is free; switching to gemma4 forces a reload">
+  <text x="20" y="26" class="title">NVIDIA T500 · 4 GB of GPU memory</text>
+  <rect x="20" y="40" width="360" height="50" rx="8" class="box-ok"/>
+  <text x="200" y="70" text-anchor="middle">llama3.2 weights · 2.0 GB</text>
+  <rect x="384" y="40" width="160" height="50" rx="8" class="box-info"/>
+  <text x="464" y="62" text-anchor="middle" class="label">KV cache</text>
+  <text x="464" y="78" text-anchor="middle" class="small">grows with context</text>
+  <rect x="548" y="40" width="110" height="50" rx="8" class="box2"/>
+  <text x="603" y="70" text-anchor="middle" class="label">overhead</text>
+  <rect x="662" y="40" width="78" height="50" rx="8" class="zone"/>
+  <text x="701" y="70" text-anchor="middle" class="label">free</text>
+  <rect x="20" y="114" width="720" height="44" rx="8" class="box-warn"/>
+  <text x="380" y="141" text-anchor="middle">Switch to gemma4: it needs more room, so llama3.2 is unloaded and gemma4 loaded</text>
+  <text x="380" y="180" text-anchor="middle" class="small">Only the 4 GB and 2.0 GB sizes are measured facts; the other widths are illustrative.</text>
+</svg>
+<figcaption>On a small GPU the model barely fits with room for its working memory. <strong>Two models cannot stay loaded side by side, so every switch pays a slow reload.</strong></figcaption>
+</figure>
+
+<p>That is why the labs warn that switching between <code>llama3.2</code> (the app model) and <code>gemma4</code> (the judge) is slow on this machine, and why the first call after loading a model takes 35 to 56 seconds while warm calls take 5 to 10. Model loading is part of real-world latency too: servers keep popular models loaded ("warm") for exactly this reason.</p>
+
+<p>In data centres the same questions apply at a larger scale: accelerators with tens of gigabytes of very fast memory, several of them per machine, linked by fast connections. Product names and specs change quickly, so check vendors' current documentation rather than any list you read in a book or guide.</p>
+
+<h2>Where to optimize: three levels</h2>
+
+<p>Speed-ups come from three places. You rarely control all three. When you call a hosted API, the provider owns the model and the service levels, and your levers are mostly in the application. When you run models yourself, as in our labs with <a class="term" href="glossary.html#ollama">Ollama</a>, all three are yours.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Three columns: model-level techniques, service-level techniques and application-level techniques">
+  <rect x="20" y="20" width="230" height="170" rx="8" class="box"/>
+  <text x="135" y="46" text-anchor="middle" class="title">Model level</text>
+  <text x="135" y="72" text-anchor="middle" class="label">quantization</text>
+  <text x="135" y="94" text-anchor="middle" class="label">distillation</text>
+  <text x="135" y="116" text-anchor="middle" class="label">pruning</text>
+  <text x="135" y="138" text-anchor="middle" class="label">speculative decoding</text>
+  <text x="135" y="160" text-anchor="middle" class="label">KV cache, attention tricks</text>
+  <rect x="265" y="20" width="230" height="170" rx="8" class="box"/>
+  <text x="380" y="46" text-anchor="middle" class="title">Service level</text>
+  <text x="380" y="72" text-anchor="middle" class="label">batching</text>
+  <text x="380" y="94" text-anchor="middle" class="label">prompt (prefix) caching</text>
+  <text x="380" y="116" text-anchor="middle" class="label">replicas</text>
+  <text x="380" y="138" text-anchor="middle" class="label">tensor / pipeline parallelism</text>
+  <rect x="510" y="20" width="230" height="170" rx="8" class="box-info"/>
+  <text x="625" y="46" text-anchor="middle" class="title">Application level</text>
+  <text x="625" y="72" text-anchor="middle" class="label">streaming (lab 14)</text>
+  <text x="625" y="94" text-anchor="middle" class="label">answer caches (lab 11)</text>
+  <text x="625" y="116" text-anchor="middle" class="label">routing to small models</text>
+  <text x="625" y="138" text-anchor="middle" class="label">shorter prompts and answers</text>
+  <text x="625" y="160" text-anchor="middle" class="label">reasoning effort</text>
+</svg>
+<figcaption>Model-level changes make each forward pass cheaper; service-level changes keep the hardware busy; application-level changes avoid work or hide it. <strong>Our labs work mostly in the right-hand column.</strong></figcaption>
+</figure>
+
+<h2>Model-level techniques</h2>
+
+<h3>Quantization</h3>
+<p><a class="term" href="glossary.html#quantization">Quantization</a> stores each weight with fewer bits, for example 8 or 4 bits instead of 16. The model file shrinks, it fits on smaller GPUs, and because decode is memory-bound, fewer bytes to read means faster tokens. The cost is some loss of precision, which may or may not hurt quality on your task. The only way to know is to run your own eval set (<a href="04-eval-set.html">lab 04</a>) on both versions. Quantization can also be applied to the KV cache and to the activations, not only to the weights.</p>
+
+<h3>Distillation</h3>
+<p>Distillation trains a smaller "student" model to imitate a larger "teacher" model, often using the teacher's outputs as training data. You end up with a model that is cheaper to serve and keeps much of the teacher's skill on the tasks you trained it for. It connects directly to <a href="dataset-engineering.html">dataset engineering</a> and to the synthetic data you generate in <a href="13-synthetic-data.html">lab 13</a>. Check the teacher model's licence before using its outputs to train another model.</p>
+
+<h3>Pruning</h3>
+<p>Pruning removes parts of a model that contribute little: individual weights, attention heads or whole layers. It can make the model smaller, but removing individual weights only speeds things up if the hardware and software can skip the zeros efficiently, which is often not the case. In practice you will meet quantization and distillation far more often than pruning.</p>
+
+<h3>Speculative decoding</h3>
+<p>Since decode is memory-bound, checking several tokens in one pass costs about the same as generating one. Speculative decoding uses that fact. A small, fast <em>draft</em> model guesses the next few tokens. The big <em>target</em> model then checks all of those guesses in a single forward pass. It keeps the guesses up to the first one it disagrees with, and replaces that one with its own token. When the draft model guesses well, you get several tokens for the price of about one big-model pass. When it is set up correctly, the output follows the same distribution as the big model alone, so quality does not change; only speed does.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="A draft model proposes four tokens; the target model checks them in one pass, accepts three and corrects the fourth">
+  <rect x="20" y="36" width="220" height="56" rx="8" class="box2"/>
+  <text x="130" y="60" text-anchor="middle">draft model</text>
+  <text x="130" y="78" text-anchor="middle" class="small">small and fast, guesses 4</text>
+  <path class="arrow" d="M240,64 H276"/>
+  <rect x="280" y="44" width="90" height="40" rx="8" class="box"/>
+  <text x="325" y="69" text-anchor="middle" class="mono">your</text>
+  <rect x="380" y="44" width="90" height="40" rx="8" class="box"/>
+  <text x="425" y="69" text-anchor="middle" class="mono">order</text>
+  <rect x="480" y="44" width="90" height="40" rx="8" class="box"/>
+  <text x="525" y="69" text-anchor="middle" class="mono">has</text>
+  <rect x="580" y="44" width="90" height="40" rx="8" class="box"/>
+  <text x="625" y="69" text-anchor="middle" class="mono">left</text>
+  <rect x="20" y="124" width="220" height="56" rx="8" class="box-info"/>
+  <text x="130" y="148" text-anchor="middle">target model</text>
+  <text x="130" y="166" text-anchor="middle" class="small">checks all 4 in one pass</text>
+  <path class="arrow" d="M240,152 H276"/>
+  <rect x="280" y="132" width="90" height="40" rx="8" class="box-ok"/>
+  <text x="325" y="157" text-anchor="middle" class="mono">your</text>
+  <rect x="380" y="132" width="90" height="40" rx="8" class="box-ok"/>
+  <text x="425" y="157" text-anchor="middle" class="mono">order</text>
+  <rect x="480" y="132" width="90" height="40" rx="8" class="box-ok"/>
+  <text x="525" y="157" text-anchor="middle" class="mono">has</text>
+  <rect x="580" y="132" width="90" height="40" rx="8" class="box-bad"/>
+  <text x="625" y="157" text-anchor="middle" class="mono">shipped</text>
+  <text x="680" y="157" class="small">fixed</text>
+  <text x="380" y="206" text-anchor="middle" class="small">Result: 4 tokens from one target-model pass (3 accepted guesses + 1 correction). Illustrative.</text>
+</svg>
+<figcaption>The draft guesses, the target verifies in parallel. <strong>Speed-up depends on how often the guesses are right; the final text is what the target model would accept.</strong></figcaption>
+</figure>
+
+<h3>The KV cache and attention optimizations</h3>
+<p>Inside a transformer, <a class="term" href="glossary.html#attention">attention</a> lets each new token look back at every earlier token. To do that it computes two vectors per earlier token per layer, called a key (K) and a value (V). These do not change once computed, so servers store them in a <a class="term" href="glossary.html#kv-cache">KV cache</a> instead of recomputing them at every step. Prefill fills the cache with the prompt's keys and values; each decode step adds one more entry.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Without a KV cache, step 6 recomputes keys and values for all six tokens; with a KV cache, five are reused and only the new token is computed">
+  <rect x="20" y="20" width="350" height="200" rx="8" class="zone"/>
+  <text x="195" y="44" text-anchor="middle" class="title">Without a KV cache</text>
+  <rect x="40" y="66" width="40" height="40" rx="8" class="box-warn"/>
+  <text x="60" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="90" y="66" width="40" height="40" rx="8" class="box-warn"/>
+  <text x="110" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="140" y="66" width="40" height="40" rx="8" class="box-warn"/>
+  <text x="160" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="190" y="66" width="40" height="40" rx="8" class="box-warn"/>
+  <text x="210" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="240" y="66" width="40" height="40" rx="8" class="box-warn"/>
+  <text x="260" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="290" y="66" width="40" height="40" rx="8" class="box-warn"/>
+  <text x="310" y="91" text-anchor="middle" class="mono">KV</text>
+  <text x="195" y="134" text-anchor="middle" class="label">step 6 recomputes all 6</text>
+  <text x="195" y="172" text-anchor="middle" class="bad">work per step grows</text>
+  <text x="195" y="192" text-anchor="middle" class="small">with every new token</text>
+  <rect x="390" y="20" width="350" height="200" rx="8" class="zone"/>
+  <text x="565" y="44" text-anchor="middle" class="title">With a KV cache</text>
+  <rect x="410" y="66" width="40" height="40" rx="8" class="box-ok"/>
+  <text x="430" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="460" y="66" width="40" height="40" rx="8" class="box-ok"/>
+  <text x="480" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="510" y="66" width="40" height="40" rx="8" class="box-ok"/>
+  <text x="530" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="560" y="66" width="40" height="40" rx="8" class="box-ok"/>
+  <text x="580" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="610" y="66" width="40" height="40" rx="8" class="box-ok"/>
+  <text x="630" y="91" text-anchor="middle" class="mono">KV</text>
+  <rect x="660" y="66" width="40" height="40" rx="8" class="box-info"/>
+  <text x="680" y="91" text-anchor="middle" class="mono">KV</text>
+  <text x="565" y="134" text-anchor="middle" class="label">5 reused from memory, 1 new</text>
+  <text x="565" y="172" text-anchor="middle" class="ok">compute per step stays small</text>
+  <text x="565" y="192" text-anchor="middle" class="small">but memory grows with every token</text>
+</svg>
+<figcaption>The KV cache trades memory for compute. <strong>It is why long conversations and many parallel users eat GPU memory even when the model itself fits.</strong></figcaption>
+</figure>
+
+<p>The KV cache is so central that many optimizations target it: storing it in fewer bits, sharing keys and values between attention heads so there are fewer of them to store, limiting attention to a window of recent tokens, and managing the cache in small pages (like an operating system manages RAM) so that memory is not wasted on reserved but unused space. There are also faster ways to compute attention itself that reorganize the work to reduce memory traffic without changing the result. You do not need to implement any of this; you need to know it exists, so that "this server supports long contexts and many users cheaply" makes sense to you.</p>
+
+<h2>Service-level techniques</h2>
+
+<h3>Batching: static, dynamic and continuous</h3>
+<p>Because decode reads all the weights anyway, processing many requests in the same step is far cheaper than processing them one after another. That is <a class="term" href="glossary.html#batching">batching</a>, and there are three common styles:</p>
+<ul>
+  <li><strong>Static batching</strong> waits until it has a fixed number of requests, runs them together, and returns all results when the slowest one finishes. Simple, but short answers wait for long ones, and the first request waits for the batch to fill.</li>
+  <li><strong>Dynamic batching</strong> starts a batch when it is full <em>or</em> when a time limit passes, whichever comes first, so a lone request is not stuck forever.</li>
+  <li><strong>Continuous batching</strong> (also called in-flight batching) works at the level of decode steps: when one request finishes, a waiting request takes its slot at the next step. The GPU stays full and short answers leave early. Modern LLM servers use this.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Static batching leaves slots idle until the longest request finishes; continuous batching fills each freed slot with a waiting request">
+  <text x="20" y="34" class="title">Static batching</text>
+  <text x="20" y="62" class="label">slot 1</text>
+  <rect x="80" y="48" width="470" height="22" rx="4" class="box-ok"/>
+  <text x="315" y="64" text-anchor="middle" class="small">request A (long answer)</text>
+  <text x="20" y="88" class="label">slot 2</text>
+  <rect x="80" y="74" width="170" height="22" rx="4" class="box-ok"/>
+  <text x="165" y="90" text-anchor="middle" class="small">B</text>
+  <rect x="254" y="74" width="296" height="22" rx="4" class="zone"/>
+  <text x="402" y="90" text-anchor="middle" class="small">idle</text>
+  <text x="20" y="114" class="label">slot 3</text>
+  <rect x="80" y="100" width="300" height="22" rx="4" class="box-ok"/>
+  <text x="230" y="116" text-anchor="middle" class="small">C</text>
+  <rect x="384" y="100" width="166" height="22" rx="4" class="zone"/>
+  <text x="467" y="116" text-anchor="middle" class="small">idle</text>
+  <rect x="556" y="74" width="184" height="22" rx="4" class="box-warn"/>
+  <text x="648" y="90" text-anchor="middle" class="small">D waited for the batch</text>
+  <text x="20" y="160" class="title">Continuous batching</text>
+  <text x="20" y="188" class="label">slot 1</text>
+  <rect x="80" y="174" width="470" height="22" rx="4" class="box-ok"/>
+  <text x="315" y="190" text-anchor="middle" class="small">request A (long answer)</text>
+  <text x="20" y="214" class="label">slot 2</text>
+  <rect x="80" y="200" width="170" height="22" rx="4" class="box-ok"/>
+  <text x="165" y="216" text-anchor="middle" class="small">B</text>
+  <rect x="254" y="200" width="200" height="22" rx="4" class="box-info"/>
+  <text x="354" y="216" text-anchor="middle" class="small">D joins at once</text>
+  <text x="20" y="240" class="label">slot 3</text>
+  <rect x="80" y="226" width="300" height="22" rx="4" class="box-ok"/>
+  <text x="230" y="242" text-anchor="middle" class="small">C</text>
+  <rect x="384" y="226" width="200" height="22" rx="4" class="box-info"/>
+  <text x="484" y="242" text-anchor="middle" class="small">E joins at once</text>
+  <path class="arrow" d="M600,150 H736"/>
+  <text x="668" y="142" text-anchor="middle" class="small">time</text>
+</svg>
+<figcaption>Each bar is one request decoding; dashed areas are wasted GPU slots (lengths illustrative). <strong>Continuous batching refills a slot as soon as a request finishes.</strong></figcaption>
+</figure>
+
+<p>Whether your server batches at all is a setting. At the time of writing, the <a href="https://docs.ollama.com/faq">Ollama FAQ</a> documents <code>OLLAMA_NUM_PARALLEL</code>, the number of requests each loaded model works on at the same time, and notes that memory use grows with it. In <a href="14-latency.html">lab 14</a> you send the same request 1, 4 and 8 times at once; compare the wall time and total tokens per second to see whether your setup ran them together or queued them. Check the current FAQ for the default on your version. In our run the answer was clear: 1, 4 and 8 requests took 15.7, 67.6 and 135.7 s, and throughput stayed flat at 5.8, 5.4 and 5.4 output tokens per second, so this server answered them one after another. <code>ollama ps</code> showed why there was no room for more: <code>llama3.2</code> was loaded at 10 GB with a 65536-token context and ran 79 % on the CPU, 21 % on the GPU, because the KV cache for that context does not fit our 4 GB GPU. We did not change <code>OLLAMA_NUM_PARALLEL</code> or <code>OLLAMA_CONTEXT_LENGTH</code>, so we cannot say what they would gain here.</p>
+
+<h3>Prompt caching (prefix reuse)</h3>
+<p>Many requests start with the same text: the same system prompt, the same tool descriptions, the same long document. Prefill for that shared beginning produces the same KV cache entries every time. Prompt caching keeps those entries and reuses them when a new request starts with exactly the same prefix, so only the new part needs prefill. This lowers TTFT and, with hosted APIs that support it, often lowers the price of the cached input tokens (see the provider docs linked below for current rules).</p>
+<p>The design rule that follows is simple: <strong>put what never changes first and what changes last.</strong> Our prompt <code>prompts/rag_v2.txt</code> already has that shape: fixed rules at the top, then the retrieved context, and the customer's question arrives as a separate message at the end. Any byte that differs, even a timestamp at the top of the system prompt, breaks the match from that point on.</p>
+
+<h3>Parallelism: replicas, tensor and pipeline</h3>
+<p>When one GPU is not enough, there are two different problems. If the model fits but there are too many users, run <strong>replicas</strong>: several copies of the model behind a load balancer. If the model does not fit on one GPU, split it. <strong>Tensor parallelism</strong> splits each layer's big matrix operations across several GPUs that work on the same token at the same time; it can cut latency but needs very fast links between GPUs. <strong>Pipeline parallelism</strong> gives each GPU a different group of layers and passes the work along like an assembly line; it lets huge models run but adds hand-off delays. You will mostly meet these as settings in serving software, not as code you write.</p>
+
+<h2>Application-level techniques: what you control in our project</h2>
+
+<h3>Streaming</h3>
+<p><a class="term" href="glossary.html#streaming">Streaming</a> sends each piece of the answer as soon as it is generated instead of waiting for the end. It does not make the total faster, but the user starts reading after TTFT instead of after the total latency, which feels much faster. Lab 14 uses <code>stream=True</code> and timestamps the first piece to measure TTFT. One catch: if a guardrail must check the full answer before the user sees it (as our output guardrail in <a href="10-guardrails.html">lab 10</a> does with citations), streaming and checking pull against each other. Common compromises are checking in chunks, or streaming and retracting, each with trade-offs.</p>
+
+<h3>Caching whole answers</h3>
+<p>The fastest model call is the one you never make. In <a href="11-cache-router.html">lab 11</a> an exact <a class="term" href="glossary.html#cache">cache</a> answers a question it has seen before (after lower-casing and squeezing spaces), and a <a class="term" href="glossary.html#semantic-cache">semantic cache</a> answers a question whose <a class="term" href="glossary.html#embedding">embedding</a> is close enough to a cached one (<a class="term" href="glossary.html#cosine-similarity">cosine similarity</a> at least 0.9). A cache hit skips retrieval and generation completely. The risk is a wrong hit: "How long does express shipping take?" is very similar to "How long does standard shipping take?" but needs a different answer, which is exactly the case lab 11 prints a warning about. In our real run, a fresh answer took 4.00 s while the exact cache answered the repeat in under 0.01 s and the semantic cache answered a lower-case copy in 0.06 s (the time to embed the question). Personal answers (anything about one customer's order) must never be served from a shared cache.</p>
+
+<h3>Routing to smaller models</h3>
+<p>Not every message needs your biggest model, or any model. A <a class="term" href="glossary.html#router">router</a> classifies each message and sends it to the cheapest path that can handle it. In lab 11, <code>aie/router.py</code> sorts messages into <code>smalltalk</code>, <code>policy_question</code>, <code>order_question</code> and <code>out_of_scope</code>; smalltalk and out-of-scope messages get a fixed reply without any generation. The router itself costs a model call, so it only pays off if it is cheaper than the work it saves. In our real run each routing decision with <code>llama3.2</code> took 2.3 to 4.4 seconds, close to the cost of a full answer, and one of the four messages ("Thanks a lot!") was misrouted as <code>out_of_scope</code>. In production the router is often a much smaller model or a simple classifier.</p>
+
+<h3>Reasoning effort and output length</h3>
+<p>Decode time grows with every output token, including tokens the user never sees. <a class="term" href="glossary.html#reasoning-model">Reasoning models</a> produce hidden "thinking" tokens before the answer. Our wrapper passes <code>AIE_REASONING_EFFORT</code> (default <code>none</code>) as <code>reasoning_effort</code>. With <code>gemma4</code> on our T500, turning thinking off cut one answer from about 95 to 110 seconds (roughly 350 to 400 hidden thinking tokens) to about 13 seconds (32 tokens). That is the decode rule in action: fewer output tokens, proportionally less time. Thinking can improve hard answers, so treat effort as a setting to evaluate, not a switch to always turn off. The same logic applies to visible output: "answer in one to three sentences" in <code>rag_v2</code> is also a latency and cost decision.</p>
+
+<h2>How to measure it (lab 14)</h2>
+
+<p>Optimizing without measuring is guessing. <a href="14-latency.html">Lab 14</a> measures the numbers from this page with nothing but the OpenAI Python SDK against Ollama:</p>
+<ul>
+  <li><strong>TTFT</strong>: time from sending a streaming request until the first chunk with content arrives.</li>
+  <li><strong>TPOT</strong>: time from the first to the last chunk, divided by the number of gaps between chunks. With Ollama a chunk is usually about one token, so this is close to TPOT, but it is a chunk count, not an exact token count.</li>
+  <li><strong>Throughput</strong>: send N identical requests at once with <code>asyncio.gather</code> and divide the total output tokens (from the <code>usage</code> field) by the wall time.</li>
+</ul>
+
+<pre data-lang="py" data-tag="excerpt from labs/14_latency.py"><code>    for event in stream:
+        if event.choices and event.choices[0].delta.content:
+            first = first or time.perf_counter()
+            pieces += 1</code></pre>
+
+<p>Our real run on the T500: TTFT 1.18 s on the first of three streamed answers and 0.42 and 0.35 s on the next two (repeat runs are often faster, which is why you report the first one separately), TPOT 163, 179 and 160 ms, and about 15 to 16 s in total for about 90 chunks. With a short prompt, decode is nearly all of the time.</p>
+
+<p>Good measurement habits: run each measurement several times and ignore or report separately the first one (it may include loading the model); keep the prompt, model and temperature fixed; measure on hardware like your production hardware; and record both latency and quality, because a faster setup that answers worse is not an improvement. Our <code>aie/llm.py</code> wrapper records seconds and token counts on every call, and <a href="12-feedback.html">lab 12</a> stores them in a trace table, so you can watch these numbers on real traffic rather than only in a benchmark script.</p>
+
+<details class="primer"><summary>New to async code? Why lab 14 uses asyncio for throughput</summary>
+<p>A normal Python call waits for the answer before the next line runs, so a loop of 8 calls sends them one after another. <code>AsyncOpenAI</code> plus <code>asyncio.gather</code> sends all 8 requests without waiting, and then waits for all of them together. That is how you simulate several customers arriving at the same moment. Whether the server then works on them in parallel is up to the server, which is exactly what the experiment reveals.</p>
+</details>
+
+<div class="callout warn"><strong>Common misconceptions and pitfalls</strong>
+<ul>
+  <li><strong>"Average latency looks fine, so we are fine."</strong> Look at p90 and p99 and at TTFT separately; users notice the slow tail and the wait before the first word.</li>
+  <li><strong>Measuring the cold start as if it were normal.</strong> Our first call after loading takes 35 to 56 s; warm calls take 5 to 10 s. Mixing them gives meaningless averages.</li>
+  <li><strong>Optimizing speed without re-running evals.</strong> Quantization, smaller models, lower reasoning effort and semantic caches can all quietly lower quality. Re-run the eval set after each change.</li>
+  <li><strong>Assuming 100 % GPU utilization means efficient.</strong> It only means the GPU was busy, not that it used its compute or bandwidth well.</li>
+  <li><strong>Putting variable text at the top of the prompt.</strong> A date or user name first defeats prefix caching for everything after it.</li>
+  <li><strong>Sharing cached answers across customers.</strong> Only cache answers that are the same for everyone, like policy questions.</li>
+  <li><strong>Trusting benchmark numbers from elsewhere.</strong> Speed depends on hardware, model version, prompt length and server settings. Measure your own setup.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>Inference has a parallel, compute-heavy <strong>prefill</strong> (reads the prompt, sets TTFT) and a sequential, memory-bound <strong>decode</strong> (one pass per token, sets TPOT).</li>
+  <li>Track TTFT, TPOT, total latency (as percentiles), throughput, goodput and utilization; latency and throughput trade against each other.</li>
+  <li>Decode speed is mostly limited by how fast the GPU can read the weights, so smaller weights and batching help most.</li>
+  <li>Model level: quantization, distillation, pruning, speculative decoding, KV cache and attention optimizations.</li>
+  <li>Service level: continuous batching, prompt (prefix) caching, replicas and model parallelism.</li>
+  <li>Application level, where our labs work: streaming, exact and semantic answer caches, routing, shorter outputs and lower reasoning effort.</li>
+  <li>Measure with real requests (lab 14), several runs, warm models, and re-check quality after every speed-up.</li>
+</ul>
+</div>
+
+<h2>Learn more</h2>
+<ul>
+  <li><a href="https://www.oreilly.com/library/view/ai-engineering/9781098166298/">AI Engineering (O'Reilly)</a>, chapter 9, and the author's <a href="https://github.com/chiphuyen/aie-book">resources repository</a>.</li>
+  <li><a href="https://huggingface.co/docs/transformers/main/en/llm_optims">Hugging Face Transformers: LLM inference optimization</a> (KV cache, static cache, speculative decoding, attention).</li>
+  <li><a href="https://huggingface.co/docs/transformers/main/en/quantization/overview">Hugging Face Transformers: quantization overview</a>.</li>
+  <li><a href="https://docs.nvidia.com/deeplearning/performance/dl-performance-gpu-background/index.html">NVIDIA: GPU performance background</a> (compute-bound vs memory-bound, arithmetic intensity).</li>
+  <li><a href="https://huggingface.co/docs/text-generation-inference/conceptual/streaming">Hugging Face Text Generation Inference: streaming</a>.</li>
+  <li><a href="https://docs.ollama.com/faq">Ollama FAQ</a> (parallel requests, keeping models loaded).</li>
+  <li><a href="https://platform.openai.com/docs/guides/latency-optimization">OpenAI: latency optimization</a> and <a href="https://platform.openai.com/docs/guides/prompt-caching">OpenAI: prompt caching</a>.</li>
+  <li><a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching">Anthropic: prompt caching</a>.</li>
+  <li><a href="https://docs.python.org/3/library/asyncio.html">Python docs: asyncio</a>.</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="dataset-engineering.html"><small>← Chapter 8</small>Dataset engineering</a>
+<a class="next" href="architecture-and-feedback.html"><small>Chapter 10 →</small>Architecture and user feedback</a>
+</nav>
+</main>
+</body>
+</html>

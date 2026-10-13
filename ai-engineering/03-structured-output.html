@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 · Structured output with a schema</title>
+<meta name="description" content="Turn customer messages into validated JSON with Pydantic, and learn why valid JSON can still be wrong.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 03/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 03 of 14 · Hands-on lab</div>
+  <h1>Structured output with a schema</h1>
+  <p class="lead">Turn customer messages into validated JSON with Pydantic, and learn why valid JSON can still be wrong.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<div class="callout"><strong>Goal of this lab.</strong> Turn free-text customer messages into a small, typed "ticket"
+(intent, order number, urgency, summary) that code can use. You make the model answer in JSON that follows a schema,
+validate it with Pydantic, and retry automatically when it doesn't. Then you see the most important lesson of the lab:
+<strong>valid JSON is not the same as a correct answer</strong>.</div>
+
+<h2>The idea in brief</h2>
+
+<p>A model normally answers with free text. That's fine for a person, but a program needs fields it can trust: "is
+this about a return?", "which order?". <a class="term" href="glossary.html#structured-output">Structured output</a>
+means asking the model for data in a fixed format, usually JSON, described by a
+<a class="term" href="glossary.html#json-schema">JSON Schema</a>. Many servers, including Ollama and OpenAI, accept the
+schema in the request (<code>response_format</code>) and steer the model's sampling so the output has the right shape.
+On our side, <a class="term" href="glossary.html#pydantic">Pydantic</a> checks the result again and turns it into a
+Python object.</p>
+
+<p>The schema controls the <em>shape</em> of the answer, not its <em>truth</em>. A model can fill a perfectly valid
+<code>order_id</code> field with a number it made up: a <a class="term" href="glossary.html#hallucination">hallucination</a>
+in a neat JSON box. The concept chapter <a href="foundation-models.html">Foundation models</a> explains why this
+happens; it pairs with chapter 2 of the book, <em>Understanding Foundation Models</em>.</p>
+
+<details class="primer"><summary>New to JSON and JSON Schema? What they are and why they matter</summary>
+<p>JSON is a text format for data: objects in <code>{ }</code> with <code>"name": value</code> pairs, lists in
+<code>[ ]</code>, strings in double quotes, numbers, <code>true</code>/<code>false</code> and <code>null</code>.
+Almost every language can read it.</p>
+<p>A JSON Schema is itself a JSON document that describes what valid data looks like: which fields are required, which
+type each one has, which values are allowed, which text pattern a string must match. A program can check any JSON
+against it automatically.</p>
+</details>
+
+<details class="primer"><summary>New to Pydantic? What it is and why it matters</summary>
+<p>Pydantic lets you describe data as a Python class with type hints. From that one class it can (1) produce the JSON
+Schema, (2) parse JSON text and check every field (<code>model_validate_json</code>), raising a
+<code>ValidationError</code> that lists what is wrong, and (3) give you a normal Python object with attributes
+(<code>ticket.order_id</code>). One class, used both to tell the model what to produce and to check what it produced.
+That is the "Pydantic pattern" used here and in the judge (lab 05) and router (lab 11).</p>
+</details>
+
+<h2>How <code>chat_json</code> works</h2>
+
+<p>You wrote <code>chat_json</code> in <a href="01-setup.html">lab 01</a>; now it gets used. It is lines 44–63 of
+<code>aie/llm.py</code> (the file is unchanged, shown again here so you don't have to switch pages):</p>
+
+<pre data-file="aie/llm.py" data-lang="py" data-tag="complete file · chat_json is lines 44–63"><code>"""One small wrapper around an OpenAI-compatible API (Ollama locally, or OpenAI).
+
+Every call returns the text plus what it cost: tokens and seconds. Later labs log these numbers.
+"""
+import json
+import time
+from dataclasses import dataclass
+
+from openai import OpenAI
+from pydantic import BaseModel, ValidationError
+
+from aie import config
+
+client = OpenAI(base_url=config.BASE_URL, api_key=config.API_KEY)
+
+
+@dataclass
+class Reply:
+    text: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    seconds: float
+
+
+def chat(messages, model=None, **params):
+    """Send a list of {"role", "content"} messages and return a Reply."""
+    if isinstance(messages, str):
+        messages = [{"role": "user", "content": messages}]
+    if config.REASONING_EFFORT and "reasoning_effort" not in params:
+        params["reasoning_effort"] = config.REASONING_EFFORT
+    start = time.perf_counter()
+    response = client.chat.completions.create(model=model or config.MODEL, messages=messages, **params)
+    usage = response.usage
+    return Reply(
+        text=response.choices[0].message.content or "",
+        model=response.model,
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+        seconds=time.perf_counter() - start,
+    )
+
+
+def chat_json(messages, schema: type[BaseModel], model=None, retries=2, **params):
+    """Ask for JSON that matches a Pydantic model; validate it and retry with the error if it doesn't."""
+    if isinstance(messages, str):
+        messages = [{"role": "user", "content": messages}]
+    messages = list(messages)
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()},
+    }
+    for attempt in range(retries + 1):
+        reply = chat(messages, model=model, response_format=response_format, **params)
+        try:
+            return schema.model_validate_json(reply.text)
+        except ValidationError as error:
+            if attempt == retries:
+                raise
+            messages += [
+                {"role": "assistant", "content": reply.text},
+                {"role": "user", "content": f"That JSON was invalid: {error.errors()[:3]}. Reply with corrected JSON only."},
+            ]
+
+
+def embed(texts, model=None):
+    """Return one embedding vector (a list of floats) per input text."""
+    response = client.embeddings.create(model=model or config.EMBED_MODEL, input=list(texts))
+    return [item.embedding for item in response.data]
+
+
+def to_json(obj):
+    return json.dumps(obj, ensure_ascii=False, indent=2)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>44</td><td><code>def chat_json(messages, schema: type[BaseModel], model=None, retries=2, **params):</code></td>
+<td><code>schema</code> is a Pydantic <strong>class</strong> (not an object), e.g. <code>Ticket</code>.
+<code>retries=2</code> means up to 2 extra tries after the first.</td></tr>
+<tr><td>46–48</td><td><code>messages = list(messages)</code></td><td>Copies the list so the retry messages don't leak
+into the caller's list.</td></tr>
+<tr><td>49–52</td><td><code>response_format = {"type": "json_schema", "json_schema": {"name": ..., "schema": ...}}</code></td>
+<td>The OpenAI-style way to ask for structured output. <code>schema.__name__</code> is the class name
+(<code>"Ticket"</code>); <code>model_json_schema()</code> produces the JSON Schema shown below. The server uses it to
+constrain the output.</td></tr>
+<tr><td>53–54</td><td><code>for attempt in range(retries + 1):</code> / <code>reply = chat(..., response_format=...)</code></td>
+<td>Attempts 0, 1, 2. Each attempt is a normal <code>chat()</code> call, so it is timed and counted like any other.</td></tr>
+<tr><td>55–56</td><td><code>return schema.model_validate_json(reply.text)</code></td><td>Parses the text as JSON
+and checks every field against the class. Success: return a <code>Ticket</code> object and stop.</td></tr>
+<tr><td>57–59</td><td><code>except ValidationError as error: if attempt == retries: raise</code></td><td>Wrong JSON
+or a wrong field. On the last attempt, give up and let the error reach the caller, so a broken answer never passes
+silently.</td></tr>
+<tr><td>60–63</td><td><code>messages += [{"role": "assistant", ...}, {"role": "user", "content": f"That JSON was invalid: ..."}]</code></td>
+<td>Otherwise, show the model its own answer and the first 3 errors, and ask for a corrected version. Models are often
+good at fixing a mistake once it is pointed out.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Flow of chat_json: build response_format from the Pydantic class, call chat, validate the JSON; valid returns a Ticket; invalid adds the error to the messages and retries, up to three attempts, then raises">
+  <rect x="10" y="20" width="170" height="60" rx="8" class="box"/>
+  <text x="95" y="46" text-anchor="middle" class="label">Pydantic class</text>
+  <text x="95" y="64" text-anchor="middle" class="small mono">Ticket</text>
+  <path class="arrow" d="M 182,50 H 208"/>
+  <rect x="210" y="20" width="170" height="60" rx="8" class="box-info"/>
+  <text x="295" y="46" text-anchor="middle" class="label">response_format</text>
+  <text x="295" y="64" text-anchor="middle" class="small">JSON Schema (49–52)</text>
+  <path class="arrow" d="M 382,50 H 408"/>
+  <rect x="410" y="20" width="150" height="60" rx="8" class="box-solid"/>
+  <text x="485" y="46" text-anchor="middle" class="on-solid">chat()</text>
+  <text x="485" y="64" text-anchor="middle" class="small on-solid">model answers (54)</text>
+  <path class="arrow" d="M 562,50 H 588"/>
+  <rect x="590" y="20" width="160" height="60" rx="8" class="box-info"/>
+  <text x="670" y="46" text-anchor="middle" class="label">model_validate_json</text>
+  <text x="670" y="64" text-anchor="middle" class="small">line 56</text>
+  <path class="arrow-ok" d="M 670,82 V 128"/>
+  <text x="680" y="110" class="small ok">valid</text>
+  <rect x="590" y="130" width="160" height="50" rx="8" class="box-ok"/>
+  <text x="670" y="160" text-anchor="middle" class="label">return Ticket</text>
+  <path class="arrow-bad" d="M 590,70 L 382,150"/>
+  <text x="500" y="128" text-anchor="middle" class="small bad">ValidationError</text>
+  <rect x="160" y="130" width="220" height="60" rx="8" class="box-warn"/>
+  <text x="270" y="156" text-anchor="middle" class="label">add answer + errors</text>
+  <text x="270" y="174" text-anchor="middle" class="small">to messages (60–63)</text>
+  <path class="arrow dashed" d="M 380,160 H 440 V 82"/>
+  <text x="432" y="110" text-anchor="end" class="small">retry (attempt 1, 2)</text>
+  <path class="arrow-bad" d="M 270,192 V 228"/>
+  <text x="280" y="214" class="small">after the 3rd attempt</text>
+  <rect x="160" y="230" width="220" height="44" rx="8" class="box-bad"/>
+  <text x="270" y="257" text-anchor="middle" class="label">raise the error (59)</text>
+</svg>
+<figcaption>One Pydantic class drives both the request and the check. <strong>Up to three attempts</strong>; a bad
+answer either gets fixed or stops the program, it never slips through.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="The conversation grows on a retry: system and user messages, then the model's invalid JSON as an assistant message, then a user message with the errors, then a new answer">
+  <text x="20" y="26" class="title">The messages list during a retry</text>
+  <rect x="20" y="40" width="460" height="36" rx="8" class="box"/>
+  <text x="34" y="63" class="small mono">system: Extract a support ticket ... JSON only.</text>
+  <rect x="20" y="84" width="460" height="36" rx="8" class="box"/>
+  <text x="34" y="107" class="small mono">user: The battery of my Volt won't charge ...</text>
+  <rect x="80" y="128" width="400" height="36" rx="8" class="box-bad"/>
+  <text x="94" y="151" class="small mono">assistant: {"intent": "refund", ...}</text>
+  <rect x="20" y="172" width="460" height="36" rx="8" class="box-warn"/>
+  <text x="34" y="195" class="small mono">user: That JSON was invalid: [...]. Reply with ...</text>
+  <rect x="80" y="216" width="400" height="36" rx="8" class="box-ok"/>
+  <text x="94" y="239" class="small mono">assistant: {"intent": "warranty", ...}</text>
+  <rect x="510" y="40" width="240" height="80" rx="8" class="box-info"/>
+  <text x="630" y="66" text-anchor="middle" class="label">attempt 0</text>
+  <text x="630" y="86" text-anchor="middle" class="small">sends the first 2</text>
+  <text x="630" y="104" text-anchor="middle" class="small">messages</text>
+  <rect x="510" y="140" width="240" height="80" rx="8" class="box-info"/>
+  <text x="630" y="166" text-anchor="middle" class="label">attempt 1</text>
+  <text x="630" y="186" text-anchor="middle" class="small">sends all 4, gets</text>
+  <text x="630" y="204" text-anchor="middle" class="small">the corrected answer</text>
+  <text x="20" y="276" class="small">Illustrative contents: "refund" is not an allowed intent, so validation fails.</text>
+</svg>
+<figcaption>A retry is just a longer conversation: <strong>the model sees its own mistake and the exact error
+messages</strong>. Each retry costs another model call (more tokens, more seconds).</figcaption>
+</figure>
+
+<h2>Actions</h2>
+
+<ol class="steps">
+<li>Create <code>labs/03_structured.py</code>. Start with the first attempt below to see the problem for yourself (you
+can save it under the same name and replace it afterwards).</li>
+<li>Run it: <code>uv run python -m labs.03_structured</code>.</li>
+<li>Replace the file with the final version and run again.</li>
+<li>Run the final version once more with the bigger model <code>gemma4</code> (commands below) and compare.</li>
+</ol>
+
+<h2>First attempt</h2>
+
+<p>The first version describes the ticket with a Pydantic class and a one-line system prompt. Nothing more.</p>
+
+<pre data-file="labs/03_structured.py (first attempt)" data-lang="py" data-tag="first attempt · complete file"><code>"""Lab 03: turn a free-text customer message into validated JSON."""
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from aie.llm import chat_json
+
+
+class Ticket(BaseModel):
+    intent: Literal["return", "warranty", "shipping", "order_status", "other"]
+    order_id: str | None = Field(description="Order number like TH-10234, or null if none is given")
+    urgent: bool
+    summary: str = Field(description="One short sentence")
+
+
+SYSTEM = "Extract a support ticket from the customer's message. Reply with JSON only."
+messages = [
+    "Hi, my order TH-10251 still hasn't arrived and I need the helmet for a race on Saturday!",
+    "The battery of my Volt won't charge since yesterday, the light blinks red.",
+    "Do you have stores in Paris?",
+]
+
+for text in messages:
+    ticket = chat_json([{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}], Ticket, temperature=0)
+    print(text)
+    print("  -&gt;", ticket.model_dump())</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>from typing import Literal</code></td><td><code>Literal[...]</code> means "exactly one of these
+values". It becomes an <code>enum</code> in the JSON Schema.</td></tr>
+<tr><td>4</td><td><code>from pydantic import BaseModel, Field</code></td><td><code>BaseModel</code> is the parent of every
+Pydantic class; <code>Field</code> adds extra information to a field (description, pattern…).</td></tr>
+<tr><td>6</td><td><code>from aie.llm import chat_json</code></td><td>The structured-output helper explained above.</td></tr>
+<tr><td>9–13</td><td><code>class Ticket(BaseModel):</code> …</td><td>The ticket. <code>intent</code>: one of five
+labels. <code>order_id</code>: a string <strong>or</strong> <code>None</code> (<code>str | None</code>), described for
+the model. <code>urgent</code>: <code>True</code>/<code>False</code>. <code>summary</code>: free text, "one short
+sentence". Descriptions are copied into the schema, so the model reads them.</td></tr>
+<tr><td>16</td><td><code>SYSTEM = "Extract a support ticket ... Reply with JSON only."</code></td><td>A minimal
+instruction.</td></tr>
+<tr><td>17–21</td><td><code>messages = [ ... ]</code></td><td>Three test messages: a late order with an order number,
+a broken battery without one, and a general question.</td></tr>
+<tr><td>23–24</td><td><code>ticket = chat_json([...system..., ...user...], Ticket, temperature=0)</code></td><td>One
+structured call per message. <code>temperature=0</code> because extraction should be repeatable, not creative
+(<a href="02-sampling.html">lab 02</a>).</td></tr>
+<tr><td>25–26</td><td><code>print(text)</code> / <code>print("  -&gt;", ticket.model_dump())</code></td><td>Shows the
+message and the ticket. <code>model_dump()</code> turns the object into a plain dictionary for printing.</td></tr>
+</table></div>
+
+<pre data-file="Output of the first attempt" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>Hi, my order TH-10251 still hasn't arrived and I need the helmet for a race on Saturday!
+  -&gt; {'intent': 'order_status', 'order_id': 'TH-10251', 'urgent': True, 'summary': 'Missing Order'}
+The battery of my Volt won't charge since yesterday, the light blinks red.
+  -&gt; {'intent': 'shipping', 'order_id': '123456789', 'urgent': True, 'summary': 'Battery charging issue with Volt car'}
+Do you have stores in Paris?
+  -&gt; {'intent': 'order_status', 'order_id': 'ST-001234', 'urgent': False, 'summary': 'Support Ticket Extracted from Customer Message'}</code></pre>
+
+<p>Every answer is valid JSON and passed validation. And yet two of the three are wrong in a dangerous way: the model
+<strong>invented order numbers</strong> (<code>123456789</code> and <code>ST-001234</code>) for messages that contain
+none. A program that looks up these orders would fail, or worse, find someone else's order. The intents are also
+shaky (a battery problem labelled <code>shipping</code>), and one summary calls the Volt e-bike battery a "car".</p>
+
+<div class="callout warn"><strong>Why did validation not catch it?</strong> The class said <code>order_id</code> is
+"a string or null". <code>"123456789"</code> <em>is</em> a string. The schema was too loose to tell a real order
+number from an invented one, and the prompt never said "don't invent one".</div>
+
+<h2>The final version</h2>
+
+<p>Three changes: a <code>pattern</code> on <code>order_id</code> (line 11), a more precise system prompt with label
+definitions and "never invent" (lines 16–20), and a check in plain Python that the order number really appears in the
+message (lines 29–32).</p>
+
+<pre data-file="labs/03_structured.py" data-lang="py" data-tag="complete file"><code>"""Lab 03: turn a free-text customer message into validated JSON."""
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from aie.llm import chat_json
+
+
+class Ticket(BaseModel):
+    intent: Literal["return", "warranty", "shipping", "order_status", "other"]
+    order_id: str | None = Field(pattern=r"^TH-\d{5}$", description="Order number like TH-10234, or null if the message has none")
+    urgent: bool
+    summary: str = Field(description="One short sentence")
+
+
+SYSTEM = (
+    "Extract a support ticket from the customer's message. Reply with JSON only.\n"
+    "intent: return, warranty (something broken or not working), shipping, order_status or other.\n"
+    "order_id: copy it only if it appears in the message, otherwise null. Never invent one."
+)
+messages = [
+    "Hi, my order TH-10251 still hasn't arrived and I need the helmet for a race on Saturday!",
+    "The battery of my Volt won't charge since yesterday, the light blinks red.",
+    "Do you have stores in Paris?",
+]
+
+for text in messages:
+    ticket = chat_json([{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}], Ticket, temperature=0)
+    # Valid JSON is not the same as a correct answer: check facts you can check in code.
+    if ticket.order_id and ticket.order_id not in text:
+        print(f"  (model invented order_id {ticket.order_id}; replaced with None)")
+        ticket.order_id = None
+    print(text)
+    print("  -&gt;", ticket.model_dump())</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 03: turn a free-text customer message into validated JSON."""</code></td><td>Docstring.</td></tr>
+<tr><td>2–6</td><td><code>from typing import Literal</code> … <code>from aie.llm import chat_json</code></td><td>Same
+imports as the first attempt.</td></tr>
+<tr><td>9</td><td><code>class Ticket(BaseModel):</code></td><td>The ticket class; the name becomes the schema's
+name.</td></tr>
+<tr><td>10</td><td><code>intent: Literal["return", "warranty", "shipping", "order_status", "other"]</code></td><td>The
+model must pick one of five labels. Any other word fails validation.</td></tr>
+<tr><td>11</td><td><code>order_id: str | None = Field(pattern=r"^TH-\d{5}$", description=...)</code></td><td>New:
+<code>pattern</code> is a regular expression. <code>^</code> start, <code>TH-</code> literally, <code>\d{5}</code>
+exactly five digits, <code>$</code> end. <code>123456789</code> and <code>ST-001234</code> now fail. The
+<code>r"..."</code> (raw string) keeps the backslash as typed. <code>None</code> is still allowed. There is no default
+value, so the field must be present (possibly as <code>null</code>).</td></tr>
+<tr><td>12–13</td><td><code>urgent: bool</code> / <code>summary: str = Field(description="One short sentence")</code></td>
+<td>Unchanged.</td></tr>
+<tr><td>16–20</td><td><code>SYSTEM = ( "...JSON only.\n" "intent: return, warranty (...)..." "order_id: ... Never invent one." )</code></td>
+<td>Python joins adjacent strings inside the parentheses into one. The prompt now defines <code>warranty</code>
+("something broken or not working") and forbids invented order numbers. <code>\n</code> puts each rule on its own
+line.</td></tr>
+<tr><td>21–25</td><td><code>messages = [ ... ]</code></td><td>The same three messages, so the results are comparable
+with the first attempt.</td></tr>
+<tr><td>27–28</td><td><code>for text in messages: ticket = chat_json(..., Ticket, temperature=0)</code></td><td>Same
+call as before.</td></tr>
+<tr><td>29</td><td><code># Valid JSON is not the same as a correct answer...</code></td><td>The lesson, as a
+comment.</td></tr>
+<tr><td>30–32</td><td><code>if ticket.order_id and ticket.order_id not in text:</code> … <code>ticket.order_id = None</code></td>
+<td>A fact you can check in code, so check it: an order number that is not in the customer's text was invented. The
+pattern can't catch an invented <code>TH-99999</code>; this check can. It prints a note and removes the bad
+value.</td></tr>
+<tr><td>33–34</td><td><code>print(text)</code> / <code>print("  -&gt;", ticket.model_dump())</code></td><td>Same output
+format as before.</td></tr>
+</table></div>
+
+<p>This is the JSON Schema Pydantic builds from the final <code>Ticket</code> class, i.e. what
+<code>chat_json</code> sends in <code>response_format</code> (printed with <code>Ticket.model_json_schema()</code> in
+the lab environment):</p>
+
+<pre data-lang="json" data-tag="real output · Ticket.model_json_schema()"><code>{
+  "properties": {
+    "intent": {
+      "enum": [
+        "return",
+        "warranty",
+        "shipping",
+        "order_status",
+        "other"
+      ],
+      "title": "Intent",
+      "type": "string"
+    },
+    "order_id": {
+      "anyOf": [
+        {
+          "pattern": "^TH-\\d{5}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Order number like TH-10234, or null if the message has none",
+      "title": "Order Id"
+    },
+    "urgent": {
+      "title": "Urgent",
+      "type": "boolean"
+    },
+    "summary": {
+      "description": "One short sentence",
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "intent",
+    "order_id",
+    "urgent",
+    "summary"
+  ],
+  "title": "Ticket",
+  "type": "object"
+}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Mapping from the Python class fields to JSON Schema parts: Literal becomes enum, str or None with pattern becomes anyOf string with pattern or null, bool becomes boolean, Field description becomes description, no default becomes required">
+  <text x="20" y="26" class="title">Python (Pydantic)</text>
+  <text x="430" y="26" class="title">JSON Schema</text>
+  <rect x="20" y="40" width="330" height="36" rx="8" class="box"/>
+  <text x="32" y="63" class="small mono">intent: Literal["return", ...]</text>
+  <path class="arrow" d="M 352,58 H 428"/>
+  <rect x="430" y="40" width="310" height="36" rx="8" class="box-info"/>
+  <text x="442" y="63" class="small mono">"enum": ["return", ...]</text>
+  <rect x="20" y="88" width="330" height="36" rx="8" class="box"/>
+  <text x="32" y="111" class="small mono">order_id: str | None = Field(pattern=...)</text>
+  <path class="arrow" d="M 352,106 H 428"/>
+  <rect x="430" y="88" width="310" height="36" rx="8" class="box-info"/>
+  <text x="442" y="111" class="small mono">"anyOf": [string + pattern, null]</text>
+  <rect x="20" y="136" width="330" height="36" rx="8" class="box"/>
+  <text x="32" y="159" class="small mono">urgent: bool</text>
+  <path class="arrow" d="M 352,154 H 428"/>
+  <rect x="430" y="136" width="310" height="36" rx="8" class="box-info"/>
+  <text x="442" y="159" class="small mono">"type": "boolean"</text>
+  <rect x="20" y="184" width="330" height="36" rx="8" class="box"/>
+  <text x="32" y="207" class="small mono">Field(description="One short sentence")</text>
+  <path class="arrow" d="M 352,202 H 428"/>
+  <rect x="430" y="184" width="310" height="36" rx="8" class="box-info"/>
+  <text x="442" y="207" class="small mono">"description": "One short sentence"</text>
+  <text x="380" y="242" text-anchor="middle" class="small">No default value on any field → all four are listed in "required".</text>
+</svg>
+<figcaption>Each Python type hint becomes a piece of the schema. <strong>Write the class once; the schema for the
+model and the check for your code both come from it.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>What does a ValidationError look like?</summary>
+<p>To see it, we validated a hand-made bad JSON string (not a model answer) against the final class:
+<code>{"intent":"refund","order_id":"123456789","urgent":true,"summary":"x"}</code>. Pydantic reported:</p>
+<pre data-lang="text" data-tag="real output · hand-made test input"><code>2 validation errors for Ticket
+intent
+  Input should be 'return', 'warranty', 'shipping', 'order_status' or 'other' [type=literal_error, input_value='refund', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.14/v/literal_error
+order_id
+  String should match pattern '^TH-\d{5}$' [type=string_pattern_mismatch, input_value='123456789', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.14/v/string_pattern_mismatch</code></pre>
+<p><code>chat_json</code> sends the same information (as <code>error.errors()[:3]</code>, a list of dictionaries) back to
+the model in its retry message.</p>
+</details>
+
+<h2>Run it</h2>
+
+<pre data-lang="sh" data-tag="command"><code>uv run python -m labs.03_structured</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your output will differ"><code>Hi, my order TH-10251 still hasn't arrived and I need the helmet for a race on Saturday!
+  -&gt; {'intent': 'return', 'order_id': 'TH-10251', 'urgent': True, 'summary': 'Missing order shipment'}
+The battery of my Volt won't charge since yesterday, the light blinks red.
+  -&gt; {'intent': 'return', 'order_id': None, 'urgent': False, 'summary': 'Faulty battery charging issue with Volt, blinking red light'}
+Do you have stores in Paris?
+  -&gt; {'intent': 'return', 'order_id': None, 'urgent': False, 'summary': 'No stores in Paris'}</code></pre>
+
+<p>The invented order numbers are gone: the first message keeps its real <code>TH-10251</code>, the other two have
+<code>None</code>. (The "model invented order_id" note never printed in our run; the pattern and the prompt were
+enough this time. The check stays as a safety net.) But now <strong>every intent is <code>return</code></strong>: a late
+order, a broken battery and a question about stores. The answers are valid, typed, and still wrong. A small 3B model
+simply isn't reliable at this labelling task, even with the label definitions in the prompt.</p>
+
+<h2>Same script, bigger model</h2>
+
+<p>Because the model name is a setting (lab 01), you can try <code>gemma4</code> for one run without editing any file.
+A variable set in the terminal wins over <code>.env</code> and the default.</p>
+
+<pre data-lang="ps" data-tag="PowerShell (Windows)"><code>$env:AIE_MODEL = "gemma4"
+uv run python -m labs.03_structured
+Remove-Item Env:AIE_MODEL</code></pre>
+
+<pre data-lang="sh" data-tag="bash / zsh (macOS, Linux, Git Bash)"><code>AIE_MODEL=gemma4 uv run python -m labs.03_structured</code></pre>
+
+<p>In PowerShell the variable stays set for the rest of the terminal session, so the last line removes it. In bash,
+writing <code>NAME=value</code> before the command sets it for that one command only. Expect this run to be slow:
+gemma4 is larger, and Ollama has to unload llama3.2 and load gemma4 first.</p>
+
+<pre data-file="Output with AIE_MODEL=gemma4" data-lang="text" data-tag="real run · gemma4 · your output will differ"><code>Hi, my order TH-10251 still hasn't arrived and I need the helmet for a race on Saturday!
+  -&gt; {'intent': 'shipping', 'order_id': 'TH-10251', 'urgent': True, 'summary': 'Order delayed, needed for race on Saturday'}
+The battery of my Volt won't charge since yesterday, the light blinks red.
+  -&gt; {'intent': 'warranty', 'order_id': None, 'urgent': True, 'summary': 'Battery not charging, blinking red light.'}
+Do you have stores in Paris?
+  -&gt; {'intent': 'other', 'order_id': None, 'urgent': False, 'summary': 'Inquiry about physical store locations in Paris'}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Results grid: three messages by three runs. First attempt with llama3.2 invented order ids; final llama3.2 fixed ids but labelled all intents return; gemma4 got all three intents sensible">
+  <text x="100" y="28" text-anchor="middle" class="label">message</text>
+  <text x="285" y="22" text-anchor="middle" class="label">first attempt</text>
+  <text x="285" y="38" text-anchor="middle" class="small">llama3.2</text>
+  <text x="475" y="22" text-anchor="middle" class="label">final</text>
+  <text x="475" y="38" text-anchor="middle" class="small">llama3.2</text>
+  <text x="665" y="22" text-anchor="middle" class="label">final</text>
+  <text x="665" y="38" text-anchor="middle" class="small">gemma4</text>
+  <rect x="10" y="50" width="180" height="60" rx="8" class="box"/>
+  <text x="100" y="76" text-anchor="middle" class="small">TH-10251 not arrived,</text>
+  <text x="100" y="94" text-anchor="middle" class="small">race on Saturday</text>
+  <rect x="200" y="50" width="170" height="60" rx="8" class="box-ok"/>
+  <text x="285" y="76" text-anchor="middle" class="small mono">order_status</text>
+  <text x="285" y="94" text-anchor="middle" class="small mono">TH-10251</text>
+  <rect x="390" y="50" width="170" height="60" rx="8" class="box-warn"/>
+  <text x="475" y="76" text-anchor="middle" class="small mono">return ✗</text>
+  <text x="475" y="94" text-anchor="middle" class="small mono">TH-10251</text>
+  <rect x="580" y="50" width="170" height="60" rx="8" class="box-ok"/>
+  <text x="665" y="76" text-anchor="middle" class="small mono">shipping</text>
+  <text x="665" y="94" text-anchor="middle" class="small mono">TH-10251</text>
+  <rect x="10" y="120" width="180" height="60" rx="8" class="box"/>
+  <text x="100" y="146" text-anchor="middle" class="small">Volt battery</text>
+  <text x="100" y="164" text-anchor="middle" class="small">won't charge</text>
+  <rect x="200" y="120" width="170" height="60" rx="8" class="box-bad"/>
+  <text x="285" y="146" text-anchor="middle" class="small mono">shipping ✗</text>
+  <text x="285" y="164" text-anchor="middle" class="small mono">123456789 ✗</text>
+  <rect x="390" y="120" width="170" height="60" rx="8" class="box-warn"/>
+  <text x="475" y="146" text-anchor="middle" class="small mono">return ✗</text>
+  <text x="475" y="164" text-anchor="middle" class="small mono">None</text>
+  <rect x="580" y="120" width="170" height="60" rx="8" class="box-ok"/>
+  <text x="665" y="146" text-anchor="middle" class="small mono">warranty</text>
+  <text x="665" y="164" text-anchor="middle" class="small mono">None</text>
+  <rect x="10" y="190" width="180" height="60" rx="8" class="box"/>
+  <text x="100" y="216" text-anchor="middle" class="small">Stores in Paris?</text>
+  <rect x="200" y="190" width="170" height="60" rx="8" class="box-bad"/>
+  <text x="285" y="216" text-anchor="middle" class="small mono">order_status ✗</text>
+  <text x="285" y="234" text-anchor="middle" class="small mono">ST-001234 ✗</text>
+  <rect x="390" y="190" width="170" height="60" rx="8" class="box-warn"/>
+  <text x="475" y="216" text-anchor="middle" class="small mono">return ✗</text>
+  <text x="475" y="234" text-anchor="middle" class="small mono">None</text>
+  <rect x="580" y="190" width="170" height="60" rx="8" class="box-ok"/>
+  <text x="665" y="216" text-anchor="middle" class="small mono">other</text>
+  <text x="665" y="234" text-anchor="middle" class="small mono">None</text>
+</svg>
+<figcaption>Intent (top) and order_id (bottom) from our three real runs; ✗ marks a wrong value. <strong>All nine
+answers were valid JSON</strong>; only the last column is also right.</figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> Three messages, each followed by a dictionary with
+exactly the four fields. With the final version, <code>order_id</code> is <code>'TH-10251'</code> for the first message
+and <code>None</code> for the others. With llama3.2 the intents may well be wrong (ours were all
+<code>return</code>); with gemma4 we got <code>shipping</code>, <code>warranty</code> and <code>other</code>, which
+make sense. Wording of the summaries, and even the <code>urgent</code> flag, will vary (llama3.2 said the dead battery
+was not urgent, gemma4 said it was).</div>
+
+<h2>Valid JSON is not correct JSON</h2>
+
+<p>This lab shows four different levels of "right". Each needs a different tool, and only the first is free.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Four levels of checking: shape checked by schema and Pydantic, format checked by the pattern, facts checked by code, meaning checked by evaluation">
+  <rect x="10" y="14" width="740" height="52" rx="8" class="box-ok"/>
+  <text x="24" y="37" class="label">1. Shape: is it JSON with the right fields and types?</text>
+  <text x="24" y="55" class="small">response_format + Pydantic · catches an unknown intent or a missing field</text>
+  <rect x="40" y="76" width="710" height="52" rx="8" class="box-info"/>
+  <text x="54" y="99" class="label">2. Format: does each value look right?</text>
+  <text x="54" y="117" class="small">pattern ^TH-\d{5}$ · catches 123456789 and ST-001234</text>
+  <rect x="70" y="138" width="680" height="52" rx="8" class="box-warn"/>
+  <text x="84" y="161" class="label">3. Facts: is it true, where code can check?</text>
+  <text x="84" y="179" class="small">order_id must appear in the message (lines 30–32) · catches TH-99999</text>
+  <rect x="100" y="200" width="650" height="52" rx="8" class="box-bad"/>
+  <text x="114" y="223" class="label">4. Meaning: is the judgement right?</text>
+  <text x="114" y="241" class="small">all "return" passed levels 1–3 · needs an eval set (lab 04) or a judge (lab 05)</text>
+</svg>
+<figcaption>Each level catches mistakes the one above lets through. <strong>A schema guarantees the shape, never the
+meaning</strong>; for meaning you need evaluation, which is where the next labs go.</figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes.</strong>
+<ul>
+<li><strong>Trusting a field because it validated.</strong> Our first attempt validated perfectly and invented two
+order numbers. Check what you can check in code.</li>
+<li><strong>A loose schema.</strong> <code>str | None</code> accepts any text. Add <code>Literal</code>,
+<code>pattern</code>, number ranges and descriptions where you know the format.</li>
+<li><strong>Forgetting <code>temperature=0</code></strong> for extraction: the same message could give a different
+ticket each run.</li>
+<li><strong>Leaving <code>AIE_MODEL</code> set in PowerShell.</strong> Every later lab would then run on gemma4 (slow).
+Run <code>Remove-Item Env:AIE_MODEL</code> or open a new terminal.</li>
+<li><strong>Assuming retries are free.</strong> Each retry is another full model call; if the model keeps failing, the
+third failure raises a <code>ValidationError</code> and stops the script.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ul>
+<li>Add a fourth message to the list on lines 21–25, for example
+<code>"I want to send back the helmet from order TH-10233, it's too small."</code>, and check the intent and order
+number.</li>
+<li>Add a message with a wrong-format number, like <code>"Where is my order 4567?"</code>. The pattern doesn't
+allow <code>4567</code>, so the model has to answer <code>None</code>; if it insists on <code>4567</code>, you see
+<code>chat_json</code> retry and, after three failures, raise a <code>ValidationError</code>: the schema doing its
+job.</li>
+<li>Remove <code>"Never invent one."</code> from line 19 and run again with llama3.2: do invented order numbers come
+back, and does the safety net on lines 30–32 print its note?</li>
+<li>Add a field <code>language: str = Field(description="Language of the message, e.g. English")</code> to the class
+and see it appear in every ticket.</li>
+</ul>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Structured output: send a JSON Schema in <code>response_format</code> so the model answers in a fixed shape.</li>
+<li>The Pydantic pattern: one class produces the schema and validates the answer into a typed object.</li>
+<li><code>chat_json</code> retries up to twice, showing the model its invalid JSON and the errors, then raises.</li>
+<li>Tight types (<code>Literal</code>, <code>pattern</code>) and a clear prompt removed the invented order numbers.</li>
+<li>Valid JSON ≠ correct: llama3.2 labelled everything <code>return</code>; gemma4 got all three right. Meaning needs
+evaluation (next lab).</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="02-sampling.html"><small>← Previous · Step 02</small>Sampling: temperature and seeds</a>
+<a class="next" href="04-eval-set.html"><small>Next · Step 04 →</small>Build an eval set and a baseline</a>
+</nav>
+</main>
+</body>
+</html>

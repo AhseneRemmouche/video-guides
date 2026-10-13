@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>13 · Synthetic data for fine-tuning</title>
+<meta name="description" content="Generate question-answer pairs from the documents, filter and deduplicate them, and export a fine-tuning file.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 13/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 13 of 14 · Hands-on lab</div>
+  <h1>Synthetic data for fine-tuning</h1>
+  <p class="lead">Generate question-answer pairs from the documents, filter and deduplicate them, and export a fine-tuning file.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<p><a class="term" href="glossary.html#finetuning">Finetuning</a> needs examples: hundreds or thousands of questions with the answers you want the model to give. Writing them all by hand is slow. A common shortcut is <a class="term" href="glossary.html#synthetic-data">synthetic data</a>: ask a model to write the examples from your own documents, then filter out the bad ones. In this lab you generate question-answer pairs from the eight Trailhead documents, check them with two cheap filters, and export them in the chat format that most finetuning services accept.</p>
+
+<div class="callout"><strong>Goal.</strong> Generate pairs with <code>llama3.2</code> and a schema, drop pairs whose numbers are not in the source document, remove duplicates, write <code>runs/finetune.jsonl</code> in the chat <a class="term" href="glossary.html#jsonl">JSONL</a> format, and see what the filters cannot catch.</div>
+
+<div class="callout warn"><strong>This lab does not train a model.</strong> It stops at the training file. Training even a small model needs more memory, time and care than our 4 GB laptop GPU allows. What you would do with the file, when finetuning is worth it, and how LoRA reduces the cost are explained in the concept chapter <a href="finetuning.html">Finetuning</a>. How to judge and clean data in general is in <a href="dataset-engineering.html">Dataset engineering</a>.</div>
+
+<h2>The idea in brief</h2>
+
+<p>Synthetic data is cheap to produce and easy to scale: one prompt per document, a few seconds per call. Its weakness is quality. A model can misread the document, invent a number, ask a question the document doesn't answer, or write the same question five times. So synthetic data is always <strong>generate, then filter</strong>. Our filters are deliberately simple and fast:</p>
+<ul>
+  <li><strong>Grounding check</strong>: every number in the answer must appear in the source document. Invented prices or day counts are the most damaging errors for a shop, and numbers are easy to check with code.</li>
+  <li><strong><a class="term" href="glossary.html#deduplication">Deduplication</a></strong>: questions that are identical after lower-casing and removing punctuation are kept once.</li>
+</ul>
+<p>The result is formatted as conversations (system, user, assistant), one per line, because that is what <a class="term" href="glossary.html#sft">supervised finetuning</a> on a chat model trains on.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Pipeline: 8 documents, generate 4 pairs each giving 32, grounding filter drops 0, deduplication drops 0, 32 examples written to runs/finetune.jsonl">
+  <rect class="box2" x="10" y="40" width="120" height="60" rx="8"/>
+  <text x="70" y="66" text-anchor="middle">8 documents</text>
+  <text x="70" y="84" text-anchor="middle" class="small mono">data/docs/</text>
+  <path class="arrow" d="M130,70 H153"/>
+  <rect class="box-info" x="155" y="40" width="140" height="60" rx="8"/>
+  <text x="225" y="66" text-anchor="middle" class="mono">generate()</text>
+  <text x="225" y="84" text-anchor="middle" class="small">4 per doc · temp 0.8</text>
+  <path class="arrow" d="M295,70 H318"/>
+  <rect class="box" x="320" y="40" width="140" height="60" rx="8"/>
+  <text x="390" y="66" text-anchor="middle" class="mono">is_grounded()</text>
+  <text x="390" y="84" text-anchor="middle" class="small">numbers in doc?</text>
+  <path class="arrow" d="M460,70 H483"/>
+  <rect class="box" x="485" y="40" width="120" height="60" rx="8"/>
+  <text x="545" y="66" text-anchor="middle" class="mono">normalize()</text>
+  <text x="545" y="84" text-anchor="middle" class="small">seen before?</text>
+  <path class="arrow" d="M605,70 H628"/>
+  <rect class="box-ok" x="630" y="40" width="120" height="60" rx="8"/>
+  <text x="690" y="66" text-anchor="middle" class="small mono">runs/</text>
+  <text x="690" y="84" text-anchor="middle" class="small mono">finetune.jsonl</text>
+  <text x="225" y="128" text-anchor="middle" class="label">32 generated</text>
+  <text x="390" y="128" text-anchor="middle" class="label">0 not grounded</text>
+  <text x="545" y="128" text-anchor="middle" class="label">0 duplicates</text>
+  <text x="690" y="128" text-anchor="middle" class="label ok">32 kept</text>
+  <path class="arrow-bad" d="M442,100 V150"/>
+  <text x="448" y="168" class="small">dropped, printed</text>
+  <path class="arrow-bad" d="M592,100 V150"/>
+  <text x="598" y="168" class="small">counted, skipped</text>
+</svg>
+<figcaption>The pipeline of <code>labs/13_synthetic_data.py</code> with the counts from our run. <strong>Nothing was dropped, which says as much about the filters as about the data.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to finetuning data? What a training example looks like</summary>
+<p>A chat model is finetuned on whole conversations. Each example says: "given this system message and this user message, the assistant should reply with <em>this</em>." During training the model's numbers are nudged so that the assistant reply becomes more likely. Whatever is in your examples is what the model learns: the facts, but also the length, tone and format of the answers. If every answer in the file is a short fragment without citations, the finetuned model learns to answer in short fragments without citations. That is why the content of the file matters more than its size.</p>
+</details>
+
+<details class="primer"><summary>New to JSONL? One JSON object per line</summary>
+<p><a class="term" href="glossary.html#jsonl">JSONL</a> ("JSON Lines") is a text file where each line is one complete JSON object. You already use it for the eval set (<code>evals/qa.jsonl</code>). It suits datasets because you can add, count, shuffle or split examples line by line, and a tool can read a huge file without loading it all at once. The catch: an object must stay on one line, so newlines inside a text are written as <code>\n</code>.</p>
+</details>
+
+<h2>Steps</h2>
+<ol class="steps">
+  <li>Create <code>aie/synth.py</code> with the schema, the generation prompt and the two filter helpers.</li>
+  <li>Create <code>labs/13_synthetic_data.py</code>, which loops over the documents, filters, and writes the file.</li>
+  <li>Run <code>uv run python -m labs.13_synthetic_data</code> from the project folder. On our machine this took several minutes (eight generation calls asking for structured JSON with <code>llama3.2</code>); yours may be faster or slower.</li>
+  <li>Open <code>runs/finetune.jsonl</code> in your editor and read every example. This is the most important step.</li>
+</ol>
+
+<h2>The code</h2>
+
+<h3>Generation and filters</h3>
+<pre data-file="aie/synth.py" data-lang="py" data-tag="complete file"><code>"""Generate question-answer pairs from the documents, then filter them."""
+import re
+
+from pydantic import BaseModel
+
+from aie.llm import chat_json
+
+
+class QA(BaseModel):
+    question: str
+    answer: str
+
+
+class QAList(BaseModel):
+    pairs: list[QA]
+
+
+GEN_PROMPT = """Write {n} different questions a customer might ask that this document answers,
+each with a short correct answer taken from the document. Vary the wording; some questions should be casual.
+Reply with JSON: {{"pairs": [{{"question": "...", "answer": "..."}}]}}"""
+
+
+def generate(doc_text, n=4):
+    messages = [{"role": "system", "content": GEN_PROMPT.format(n=n)}, {"role": "user", "content": doc_text}]
+    return chat_json(messages, QAList, temperature=0.8).pairs
+
+
+def normalize(text):
+    return " ".join("".join(ch for ch in text.lower() if ch.isalnum() or ch == " ").split())
+
+
+def is_grounded(pair, doc_text):
+    """Cheap filter: every number in the answer must appear in the document."""
+    return all(num in doc_text for num in re.findall(r"\d+(?:[.,]\d+)?", pair.answer))</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>import re</code></td><td>Regular expressions, used to find numbers in an answer.</td></tr>
+<tr><td>4</td><td><code>from pydantic import BaseModel</code></td><td>For the schema of the model's reply, as in <a href="03-structured-output.html">lab 03</a>.</td></tr>
+<tr><td>6</td><td><code>from aie.llm import chat_json</code></td><td>Asks for JSON matching a schema, validates it and retries on errors.</td></tr>
+<tr><td>9–11</td><td><code>class QA(BaseModel): question: str  answer: str</code></td><td>One example: a question and its answer, both text.</td></tr>
+<tr><td>14–15</td><td><code>class QAList(BaseModel): pairs: list[QA]</code></td><td>The whole reply: an object with a list of pairs. The top level is an object rather than a bare list because JSON-schema output works most reliably with an object at the top.</td></tr>
+<tr><td>18–20</td><td><code>GEN_PROMPT = """Write {n} different questions ... Reply with JSON: {{"pairs": [...]}}"""</code></td><td>The instruction. "Vary the wording; some questions should be casual" asks for variety, because real customers don't write like documents. <code>{n}</code> is filled in later; the doubled braces <code>{{</code> <code>}}</code> are literal braces that survive <code>.format()</code>.</td></tr>
+<tr><td>23–25</td><td><code>def generate(doc_text, n=4):</code> … <code>return chat_json(messages, QAList, temperature=0.8).pairs</code></td><td>The instruction is the system message and the document is the user message. <a class="term" href="glossary.html#temperature">Temperature</a> 0.8 makes the wording more varied than the 0 we use for answers; that is good for a dataset and a risk for accuracy, which is why filters follow. Returns the list of <code>QA</code> objects.</td></tr>
+<tr><td>28–29</td><td><code>def normalize(text): return " ".join("".join(ch for ch in text.lower() if ch.isalnum() or ch == " ").split())</code></td><td>Builds a comparison key: lower case, keep only letters, digits and spaces, then collapse spaces. "How long does it take?!" and "how long  does it take" both become <code>how long does it take</code>.</td></tr>
+<tr><td>32–34</td><td><code>def is_grounded(pair, doc_text):</code> … <code>return all(num in doc_text for num in re.findall(r"\d+(?:[.,]\d+)?", pair.answer))</code></td><td>Finds every number in the answer (<code>\d+</code> digits, optionally followed by <code>.</code> or <code>,</code> and more digits, so <code>9.90</code> counts as one number) and checks that each one appears somewhere in the document text. <code>all()</code> of an empty list is <code>True</code>, so answers without numbers always pass. Note that <code>num in doc_text</code> is a plain text search, which is the weakness explained below.</td></tr>
+</table></div>
+
+<h3>The lab script</h3>
+<pre data-file="labs/13_synthetic_data.py" data-lang="py" data-tag="complete file"><code>"""Lab 13: build a fine-tuning dataset from your documents: generate, filter, deduplicate, export."""
+import json
+
+from aie.config import RUNS
+from aie.docs import load_docs
+from aie.rag import load_prompt
+from aie.synth import generate, is_grounded, normalize
+
+kept, seen = [], set()
+stats = {"generated": 0, "not grounded": 0, "duplicate": 0}
+for doc_id, text in load_docs().items():
+    for pair in generate(text):
+        stats["generated"] += 1
+        if not is_grounded(pair, text):
+            stats["not grounded"] += 1
+            print(f"  dropped (a number is not in {doc_id}): {pair.answer[:90]!r}")
+            continue
+        key = normalize(pair.question)
+        if key in seen:
+            stats["duplicate"] += 1
+            continue
+        seen.add(key)
+        kept.append((doc_id, pair))
+
+# Chat format used by most fine-tuning APIs: one JSON object with a "messages" list per line.
+system = load_prompt("baseline").strip()
+out = RUNS / "finetune.jsonl"
+out.parent.mkdir(exist_ok=True)
+with open(out, "w", encoding="utf-8", newline="\n") as f:
+    for _, pair in kept:
+        f.write(json.dumps({"messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": pair.question},
+            {"role": "assistant", "content": pair.answer}]}, ensure_ascii=False) + "\n")
+
+print(f"\n{stats} -&gt; kept {len(kept)} examples in runs/{out.name}")
+for doc_id, pair in kept[:4]:
+    print(f"  [{doc_id}] Q: {pair.question}\n  {' ' * len(doc_id)}   A: {pair.answer}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>import json</code></td><td>To write each example as a JSON line.</td></tr>
+<tr><td>4–7</td><td><code>from aie.config import RUNS</code> … <code>from aie.synth import generate, is_grounded, normalize</code></td><td>The output folder, the document loader (whole documents, not chunks), the prompt loader, and the new helpers.</td></tr>
+<tr><td>9–10</td><td><code>kept, seen = [], set()</code> <code>stats = {...}</code></td><td><code>kept</code> collects accepted pairs, <code>seen</code> remembers normalized questions (a set makes "have I seen this?" instant), <code>stats</code> counts what happened to each pair.</td></tr>
+<tr><td>11–13</td><td><code>for doc_id, text in load_docs().items():</code> <code>for pair in generate(text):</code> <code>stats["generated"] += 1</code></td><td>One generation call per document (eight calls), four pairs each.</td></tr>
+<tr><td>14–17</td><td><code>if not is_grounded(pair, text):</code> … <code>continue</code></td><td>Drops pairs with a number that is not in that document, prints the start of the rejected answer so you can see what was dropped, and skips to the next pair.</td></tr>
+<tr><td>18–21</td><td><code>key = normalize(pair.question)</code> <code>if key in seen:</code> … <code>continue</code></td><td>Exact-duplicate check on the question.</td></tr>
+<tr><td>22–23</td><td><code>seen.add(key)</code> <code>kept.append((doc_id, pair))</code></td><td>Remembers the question and keeps the pair with its source document id.</td></tr>
+<tr><td>25–26</td><td><code># Chat format ...</code> <code>system = load_prompt("baseline").strip()</code></td><td>The system message for every example is the short <code>prompts/baseline.txt</code> ("You are the customer support assistant of Trailhead Bikes ..."). There is no retrieved context in it: a model trained on these examples would be learning the facts themselves, not how to use documents.</td></tr>
+<tr><td>27–28</td><td><code>out = RUNS / "finetune.jsonl"</code> <code>out.parent.mkdir(exist_ok=True)</code></td><td>The output path, and the <code>runs/</code> folder if it is missing.</td></tr>
+<tr><td>29</td><td><code>with open(out, "w", encoding="utf-8", newline="\n") as f:</code></td><td>Opens the file for writing. <code>utf-8</code> keeps accented characters intact; <code>newline="\n"</code> stops Windows from writing <code>\r\n</code> line endings, which some tools reject.</td></tr>
+<tr><td>30–34</td><td><code>f.write(json.dumps({"messages": [system, user, assistant]}, ensure_ascii=False) + "\n")</code></td><td>One line per example with a <code>messages</code> list of three roles. <code>ensure_ascii=False</code> writes characters like "é" as they are instead of <code>é</code>.</td></tr>
+<tr><td>36</td><td><code>print(f"\n{stats} -&gt; kept {len(kept)} examples in runs/{out.name}")</code></td><td>The summary line. It starts with <code>\n</code>, which is why the output begins with an empty line when nothing was dropped.</td></tr>
+<tr><td>37–38</td><td><code>for doc_id, pair in kept[:4]:</code> …</td><td>Shows the first four kept examples. <code>' ' * len(doc_id)</code> indents the answer under the question.</td></tr>
+</table></div>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="from the project folder"><code>uv run python -m labs.13_synthetic_data</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>
+{'generated': 32, 'not grounded': 0, 'duplicate': 0} -&gt; kept 32 examples in runs/finetune.jsonl
+  [battery-care] Q: What's the ideal temperature range for charging my e-bike battery?
+                 A: Between 10 and 30 degrees Celsius
+  [battery-care] Q: How long should I let my e-bike battery warm up if it's below 0 degrees?
+                 A: Let it warm up indoors first before charging.
+  [battery-care] Q: How often should I check on my e-bike battery if I'm storing it for more than a month?
+                 A: Every 8 weeks.
+  [battery-care] Q: What happens if I try to charge my e-bike battery with the case open?
+                 A: It voids the warranty, so don't open the battery case while trying to charge it.</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> Possibly a few "dropped (a number is not in ...)" lines (we had none), then the counts, then four examples from <code>battery-care</code>, the first document. Our run: 32 generated, 0 not grounded, 0 duplicates, 32 kept. Because generation uses temperature 0.8, your questions, answers and counts will differ, and a different run may drop some pairs. The file <code>runs/finetune.jsonl</code> now has one line per kept example.</div>
+
+<h2>The chat JSONL format</h2>
+<p>Here is the first line of our <code>runs/finetune.jsonl</code>, exactly as written:</p>
+<pre data-lang="json" data-tag="real line from runs/finetune.jsonl"><code>{"messages": [{"role": "system", "content": "You are the customer support assistant of Trailhead Bikes, an online bike shop.\nAnswer the customer's question in one to three sentences."}, {"role": "user", "content": "What's the ideal temperature range for charging my e-bike battery?"}, {"role": "assistant", "content": "Between 10 and 30 degrees Celsius"}]}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="One JSONL line holds a messages list with a system message, a user message and an assistant message; training makes the assistant message more likely given the first two">
+  <rect class="zone" x="10" y="14" width="740" height="132" rx="8"/>
+  <text x="24" y="36" class="mono small">one line = {"messages": [ ... ]}</text>
+  <rect class="box2" x="24" y="48" width="230" height="84" rx="8"/>
+  <text x="139" y="72" text-anchor="middle" class="mono">system</text>
+  <text x="139" y="94" text-anchor="middle" class="small">prompts/baseline.txt</text>
+  <text x="139" y="110" text-anchor="middle" class="small">same on every line</text>
+  <path class="arrow" d="M254,90 H268"/>
+  <rect class="box-info" x="270" y="48" width="230" height="84" rx="8"/>
+  <text x="385" y="72" text-anchor="middle" class="mono">user</text>
+  <text x="385" y="94" text-anchor="middle" class="small">the generated question</text>
+  <text x="385" y="110" text-anchor="middle" class="small">(pair.question)</text>
+  <path class="arrow" d="M500,90 H514"/>
+  <rect class="box-ok" x="516" y="48" width="220" height="84" rx="8"/>
+  <text x="626" y="72" text-anchor="middle" class="mono">assistant</text>
+  <text x="626" y="94" text-anchor="middle" class="small">the generated answer</text>
+  <text x="626" y="110" text-anchor="middle" class="small">(pair.answer)</text>
+  <text x="139" y="172" text-anchor="middle" class="small">given as input</text>
+  <text x="385" y="172" text-anchor="middle" class="small">given as input</text>
+  <text x="626" y="172" text-anchor="middle" class="small accent">what training makes more likely</text>
+  <path class="line dashed" d="M24,156 H500"/>
+  <path class="line dashed" d="M516,156 H736"/>
+</svg>
+<figcaption>The structure of each line in <code>runs/finetune.jsonl</code>. <strong>The model learns to produce the assistant text, so its style, length and accuracy are what you are teaching.</strong></figcaption>
+</figure>
+
+<p>Most hosted finetuning services and open-source training libraries accept this "messages" layout, sometimes with small differences (field names, a separate validation file, limits on file size). Check the documentation of the service or library you use before uploading. Notice two things the example teaches besides the fact: the answer is a fragment ("Between 10 and 30 degrees Celsius", no full sentence) and it has no citation. A model trained on 32 lines like this would learn to answer in short fragments without citations, unlike our RAG bot.</p>
+
+<h2>What the filters cannot see</h2>
+
+<h3>The grounding check is a text search</h3>
+<p><code>is_grounded</code> asks "does this number appear in the document?" with <code>num in doc_text</code>. That is a search for characters, not for numbers. The battery document contains "10 and 30 degrees", so an answer that says "3 hours" passes: the character "3" is inside "30". We checked this directly, without any model call:</p>
+<pre data-lang="sh" data-tag="from the project folder · our check"><code>uv run python -c "from aie.docs import load_docs; from aie.synth import QA, is_grounded; t = load_docs()['battery-care']; print(is_grounded(QA(question='q', answer='About 3 hours.'), t), is_grounded(QA(question='q', answer='About 7 hours.'), t))"</code></pre>
+<pre data-lang="text" data-tag="real output"><code>True False</code></pre>
+<p>"3 hours" is accepted although no "3" appears on its own anywhere in the battery document; "7 hours" is correctly rejected. The same happens with "1" inside "10" or "5" inside "50". A stricter version would match whole numbers only (for example with a regular expression and word boundaries), and an even better one would also check the unit. Even then, a number can be in the document and still be the <em>wrong</em> number for that question: "4.5" is in the document as a charging time, so an answer giving 4.5 as the range would pass.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Mistake, symptom, fix: num in doc_text is a substring search, so 3 is found inside 30 and a wrong answer passes; fix by matching whole numbers">
+  <rect class="box-bad" x="10" y="30" width="230" height="110" rx="8"/>
+  <text x="125" y="54" text-anchor="middle" class="title">Mistake</text>
+  <text x="125" y="80" text-anchor="middle" class="mono small">"3" in doc_text</text>
+  <text x="125" y="100" text-anchor="middle" class="small">searches characters,</text>
+  <text x="125" y="116" text-anchor="middle" class="small">not whole numbers</text>
+  <path class="arrow" d="M240,85 H263"/>
+  <rect class="box-warn" x="265" y="30" width="230" height="110" rx="8"/>
+  <text x="380" y="54" text-anchor="middle" class="title">Symptom</text>
+  <text x="380" y="80" text-anchor="middle" class="small">"About 3 hours." passes</text>
+  <text x="380" y="100" text-anchor="middle" class="small">because the document says</text>
+  <text x="380" y="116" text-anchor="middle" class="small mono">"10 and 30 degrees"</text>
+  <path class="arrow" d="M495,85 H518"/>
+  <rect class="box-ok" x="520" y="30" width="230" height="110" rx="8"/>
+  <text x="635" y="54" text-anchor="middle" class="title">Fix (try it)</text>
+  <text x="635" y="80" text-anchor="middle" class="small">match whole numbers only,</text>
+  <text x="635" y="100" text-anchor="middle" class="small">ideally with their unit;</text>
+  <text x="635" y="116" text-anchor="middle" class="small">still review by hand</text>
+</svg>
+<figcaption>The weakness we confirmed with the one-line check above. <strong>A filter that passes everything may be a weak filter, not proof of clean data.</strong></figcaption>
+</figure>
+
+<h3>Good-looking questions can still be weak</h3>
+<p>Look at the fourth example in the output: "What happens if I try to charge my e-bike battery with the case open?" with the answer "It voids the warranty, so don't open the battery case while trying to charge it." The document says that <em>opening</em> the battery case voids the warranty; it says nothing about charging with an open case. The question invents a situation, and the answer stitches two sentences together. It has no numbers, so the grounding check can't object, and it is not a duplicate. It was kept. Neither filter can judge whether a question makes sense or whether a customer would ever ask it.</p>
+<p>The deduplication has a similar limit. It only removes questions that are identical after normalization. Our file contains, from the sizing document, both "Can I exchange my bike for another size within a certain timeframe?" and "How long do I have to exchange my bike for another size?". They ask the same thing in different words, and both were kept. Near-duplicates like these are usually caught by comparing embeddings, the same trick as the semantic cache in <a href="11-cache-router.html">lab 11</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Two columns: what our filters catch (numbers missing from the document, identical questions) and what they miss (numbers hidden inside other numbers, right number wrong meaning, invented situations, paraphrased duplicates, style)">
+  <rect class="box-ok" x="10" y="14" width="365" height="182" rx="8"/>
+  <text x="192" y="40" text-anchor="middle" class="title">Our filters catch</text>
+  <text x="30" y="72" class="small">• a number that appears nowhere in the document</text>
+  <text x="30" y="96" class="small">  (an invented price or day count)</text>
+  <text x="30" y="124" class="small">• the same question twice, ignoring case,</text>
+  <text x="30" y="148" class="small">  spaces and punctuation</text>
+  <rect class="box-warn" x="385" y="14" width="365" height="182" rx="8"/>
+  <text x="567" y="40" text-anchor="middle" class="title">They miss</text>
+  <text x="405" y="72" class="small">• "3" hidden inside "30" (text search)</text>
+  <text x="405" y="96" class="small">• a real number used for the wrong fact</text>
+  <text x="405" y="120" class="small">• invented situations ("charge with the case open")</text>
+  <text x="405" y="144" class="small">• the same question in other words</text>
+  <text x="405" y="168" class="small">• style: fragments, no citations</text>
+</svg>
+<figcaption>Cheap filters remove the obvious problems. <strong>Everything in the right column needs either stronger checks (an AI judge, embeddings) or a person reading the file.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="Where lab 13 stops: the dataset is done here; finetuning and evaluating the finetuned model against the baseline are explained in the Finetuning chapter but not run">
+  <rect class="box-ok" x="10" y="40" width="220" height="60" rx="8"/>
+  <text x="120" y="66" text-anchor="middle">clean dataset</text>
+  <text x="120" y="84" text-anchor="middle" class="small">this lab (and your review)</text>
+  <path class="arrow" d="M230,70 H268"/>
+  <rect class="box2" x="270" y="40" width="220" height="60" rx="8"/>
+  <text x="380" y="66" text-anchor="middle">finetuning job</text>
+  <text x="380" y="84" text-anchor="middle" class="small">e.g. LoRA · not run here</text>
+  <path class="arrow" d="M490,70 H528"/>
+  <rect class="box2" x="530" y="40" width="220" height="60" rx="8"/>
+  <text x="640" y="66" text-anchor="middle">eval vs baseline</text>
+  <text x="640" y="84" text-anchor="middle" class="small">same eval set as lab 04</text>
+  <path class="line dashed" d="M250,22 V128"/>
+  <text x="140" y="130" text-anchor="middle" class="small">done in this guide</text>
+  <text x="510" y="130" text-anchor="middle" class="small">explained in the Finetuning chapter</text>
+</svg>
+<figcaption>Lab 13 produces the input of a finetuning job. <strong>A finetuned model is only better if it beats the current bot on the same eval set.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+  <li><strong>Trusting "0 dropped".</strong> Zero rejections can mean clean data or a filter that can't see the problems. Our filter passes "3 hours" for a document that only says "30 degrees". Read a sample of the file yourself, every time.</li>
+  <li><strong>Generating from the documents and testing on questions from the same documents.</strong> If you later finetune on this file, keep the eval set (<code>evals/qa.jsonl</code>) separate and written independently, or the scores will look better than the model is.</li>
+  <li><strong>Using the eval questions as training data.</strong> Never copy eval cases into a training file; the eval would then measure memory, not skill.</li>
+  <li><strong>Finetuning to teach facts that change.</strong> Prices and delivery times change; a finetuned model keeps the old ones until you train again. Facts usually belong in documents and RAG; finetuning suits style, format and behaviour. See <a href="finetuning.html">Finetuning</a>.</li>
+  <li><strong>Broken JSONL.</strong> Writing <code>json.dumps(..., indent=2)</code> spreads one example over many lines and the file is no longer JSONL. Keep one object per line, as line 34 does.</li>
+  <li><strong>Expecting the same counts as ours.</strong> Temperature 0.8 means a different set of pairs every run, and occasionally <code>chat_json</code> may fail validation more than its retries allow and stop the script with a <code>ValidationError</code>. Run it again.</li>
+</ul>
+</div>
+
+<h2>Try it yourself</h2>
+<ol>
+  <li><strong>Reproduce the filter's blind spot.</strong> Run the one-line check above with other answers, such as <code>'Within 1 day.'</code> against <code>load_docs()['returns']</code> or <code>'About 5 hours.'</code> against <code>load_docs()['battery-care']</code>. Read the document first and predict the result. We got <code>True</code> for both, and both are wrong passes: the returns document writes "one business day" in words and has "1" only inside "100", and the battery document has "5" only inside "4.5", "2.5" and "500".</li>
+  <li><strong>Make the grounding check stricter.</strong> In <code>is_grounded</code>, replace <code>num in doc_text</code> with a whole-number match, for example <code>re.search(rf"(?&lt;![\d.,]){re.escape(num)}(?![\d]|[.,]\d)", doc_text)</code>, and rerun the one-line check: "About 3 hours." now gives <code>False</code> for the battery document, while real numbers such as "10" or "4.5" still pass (we checked these three cases).</li>
+  <li><strong>Read the whole file.</strong> Open <code>runs/finetune.jsonl</code> and mark each line keep or drop. Count how many you would drop and why (wrong fact, weak question, near-duplicate). Compare that number with the "0 not grounded, 0 duplicates" the script reported.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>Synthetic data means generate, then filter: <code>generate()</code> asks <code>llama3.2</code> for 4 pairs per document as validated JSON, at temperature 0.8 for variety.</li>
+  <li>Our run: 32 generated, 0 not grounded, 0 duplicates, 32 kept, written to <code>runs/finetune.jsonl</code>.</li>
+  <li>Each line is <code>{"messages": [system, user, assistant]}</code>; the assistant text is what a finetuned model learns to produce, including its style.</li>
+  <li>The filters are cheap and limited: the grounding check is a text search ("3" passes because of "30"), and they kept a weak, invented question and paraphrased duplicates. A person must read the data.</li>
+  <li>This lab does not train a model. The <a href="finetuning.html">Finetuning</a> chapter explains the next steps and when they are worth it.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="12-feedback.html"><small>← Previous · Step 12</small>Tracing and user feedback</a>
+<a class="next" href="14-latency.html"><small>Next · Step 14 →</small>Latency and throughput</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 3 · Evaluation methods</title>
+<meta name="description" content="Why evaluating open-ended output is hard, exact and similarity metrics, AI judges and comparing models. Read with book chapter 3.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 3/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 3 of 10</div>
+  <h1>Evaluation methods</h1>
+  <p class="lead">Why evaluating open-ended output is hard, exact and similarity metrics, AI judges and comparing models. Read with book chapter 3.</p>
+</section>
+<div class="callout">Read with <strong>chapter 3 · Evaluation Methodology</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>A support bot that answers "30 days" when the policy says 30 days is right. One that answers "5 years" for a lifetime warranty is wrong. That sounds easy to check, until you try to do it for thousands of free-text answers, written in different words every time. This chapter is about the <strong>tools you can use to decide whether a model's output is good</strong>: cheap exact checks, similarity scores, language-model metrics, another model acting as a judge, and comparing models head to head.</p>
+
+<p>You will learn what each method measures, what it misses, and how much it costs. Every method is illustrated with something that really happened in the labs, where a small local model (<code>llama3.2</code>) answers questions about a fictional bike shop and a larger model (<code>gemma4</code>) grades it.</p>
+
+<div class="callout ok"><strong>Why this matters for your project.</strong> Every later lab asks "did this change make the bot better?" A new prompt, a retriever, a guardrail, a cache: none of these can be judged by reading three answers and saying "looks fine". You need a measurement you trust. In <a href="04-eval-set.html">lab 04</a> you build the first one and discover it lies a little; in <a href="05-ai-judge.html">lab 05</a> you build a better one and measure how much you can trust <em>it</em>.</div>
+
+<h2>Why evaluating open-ended output is hard</h2>
+
+<p>Classic software is tested with exact expectations: <code>add(2, 3)</code> must return <code>5</code>. Classic machine learning models usually have a small, fixed set of outputs (spam or not spam, one of ten digits), so you can count how often the prediction matches the label. A <a class="term" href="glossary.html#foundation-model">foundation model</a> that writes free text breaks both habits.</p>
+
+<ul>
+<li><strong>Many right answers.</strong> "You have 30 days to return an item", "Returns are accepted within thirty days of delivery" and "30 days, full refund" are all correct. A test that expects one exact string rejects two of them.</li>
+<li><strong>Partly right answers.</strong> In the lab baseline, the bot said opened helmets cannot be returned (right) and then offered a store credit that does not exist (invented). Is that answer correct? It depends on your rules, and you have to write those rules down.</li>
+<li><strong>Answers that sound right.</strong> A fluent, confident answer is easy to accept when skimming. The baseline said the frame warranty lasts 5 years in perfectly good English. Only someone who knows the policy (lifetime) can see the error. This is <a class="term" href="glossary.html#hallucination">hallucination</a>, and it is exactly what evaluation must catch.</li>
+<li><strong>Randomness.</strong> With <a class="term" href="glossary.html#sampling">sampling</a>, the same question can produce a different answer each time. One run is a sample, not the truth. (See <a href="02-sampling.html">lab 02</a>.)</li>
+<li><strong>The task is open.</strong> General models can be asked anything, so there is no natural "complete" test set. You must decide which questions matter for <em>your</em> application.</li>
+<li><strong>Models get better than the testers.</strong> For hard tasks (a long legal summary, a tricky proof), checking an answer can take an expert as long as writing it.</li>
+</ul>
+
+<p>Because of all this, there is no single perfect method. Instead you combine several, from cheap and strict to expensive and flexible. Keep this picture in mind for the rest of the page.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="A spectrum of evaluation methods from exact checks to human review, with cost and flexibility increasing to the right">
+  <text class="title" x="20" y="28">From strict and cheap to flexible and expensive</text>
+  <rect class="box-ok" x="20" y="50" width="160" height="70" rx="8"/>
+  <text x="100" y="80" text-anchor="middle">Exact checks</text>
+  <text class="small" x="100" y="100" text-anchor="middle">match, keywords, tests</text>
+  <rect class="box-info" x="205" y="50" width="160" height="70" rx="8"/>
+  <text x="285" y="80" text-anchor="middle">Similarity</text>
+  <text class="small" x="285" y="100" text-anchor="middle">vs a reference answer</text>
+  <rect class="box2" x="390" y="50" width="160" height="70" rx="8"/>
+  <text x="470" y="80" text-anchor="middle">AI judge</text>
+  <text class="small" x="470" y="100" text-anchor="middle">a model + a rubric</text>
+  <rect class="box-warn" x="575" y="50" width="165" height="70" rx="8"/>
+  <text x="657" y="80" text-anchor="middle">Human review</text>
+  <text class="small" x="657" y="100" text-anchor="middle">experts or users</text>
+  <path class="arrow-accent" d="M 20,160 H 736"/>
+  <text class="label" x="20" y="185">cost per answer, time, flexibility, ability to judge meaning</text>
+  <path class="arrow" d="M 736,215 H 22"/>
+  <text class="label" x="740" y="240" text-anchor="end">repeatability, speed, objectivity</text>
+</svg>
+<figcaption>Read left to right: each step understands meaning better but costs more and gives less repeatable scores. <strong>Real projects mix methods: cheap checks on everything, judges and humans on samples.</strong></figcaption>
+</figure>
+
+<h2>Language-model metrics: entropy, cross-entropy and perplexity</h2>
+
+<p>Before looking at answers, it helps to know the metrics people use for the <em>model itself</em>. A language model is trained to predict the next <a class="term" href="glossary.html#token">token</a>. For every position in a text it gives a probability to each possible next token. These metrics all measure one thing: <strong>how surprised the model is by real text</strong>.</p>
+
+<details class="primer"><summary>New to probabilities over tokens? What the model actually outputs</summary>
+<p>When the model reads "Returns are accepted within 30", it does not just pick the next word. Internally it produces a list like: "days" 0.92, "calendar" 0.03, "business" 0.02, and thousands of tiny probabilities for everything else. The numbers add up to 1. <a class="term" href="glossary.html#sampling">Sampling</a> then picks one token from this list. The metrics below look at the probability the model gave to the token that <em>actually</em> came next in some real text.</p>
+</details>
+
+<h3>Entropy: how unpredictable the data is</h3>
+<p>Entropy is a property of the text source, not of a model. It measures how much information each token carries, on average, in bits. If the next token is always obvious (a list of dates in a fixed format), entropy is low. If anything could come next (creative writing, random passwords), entropy is high. A useful way to feel it: entropy of 2 bits per token is as unpredictable as choosing uniformly between 4 options at every step.</p>
+
+<h3>Cross-entropy: how well a model predicts that data</h3>
+<p>Cross-entropy measures how surprised a <em>particular model</em> is by real text. For each real next token, take the probability the model gave it, compute <code>-log2(p)</code> (a probability of 1 gives 0 bits of surprise; 0.5 gives 1 bit; 0.25 gives 2 bits), and average over the text. Lower is better. It can never go below the true entropy of the data: no model can predict text better than the text is actually predictable. Training a language model is, in fact, minimising cross-entropy on its training data.</p>
+
+<h3>Perplexity: the same number, easier to read</h3>
+<p>Perplexity is cross-entropy turned back into "number of choices": <code>perplexity = 2 ** cross_entropy</code> (or <code>e ** cross_entropy</code> if natural logs were used; the result is the same). A perplexity of 4 means the model is, on average, as unsure as if it were picking between 4 equally likely tokens. Lower is better. Some papers report <em>bits per character</em> or <em>bits per byte</em> instead, which removes the dependence on how the text was split into tokens.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Two models predicting the next token after the words within 30; a confident model gives the real token high probability and low surprise, an unsure model spreads probability and has higher perplexity">
+  <text class="title" x="20" y="26">Next token after "Returns are accepted within 30 ..." (real next token: "days")</text>
+  <rect class="zone" x="20" y="42" width="350" height="215" rx="8"/>
+  <text class="label" x="36" y="64">Model A (confident)</text>
+  <rect class="box-ok" x="40" y="80" width="250" height="22" rx="4"/>
+  <text class="mono" x="300" y="96">days 0.90</text>
+  <rect class="box" x="40" y="110" width="15" height="22" rx="4"/>
+  <text class="mono" x="65" y="126">business 0.05</text>
+  <rect class="box" x="40" y="140" width="10" height="22" rx="4"/>
+  <text class="mono" x="60" y="156">calendar 0.03</text>
+  <text class="small" x="40" y="195">surprise = -log2(0.90) = 0.15 bits</text>
+  <text class="small" x="40" y="215">if every token looked like this:</text>
+  <text class="ok" x="40" y="238">perplexity close to 1</text>
+  <rect class="zone" x="390" y="42" width="350" height="215" rx="8"/>
+  <text class="label" x="406" y="64">Model B (unsure)</text>
+  <rect class="box-warn" x="410" y="80" width="70" height="22" rx="4"/>
+  <text class="mono" x="490" y="96">days 0.25</text>
+  <rect class="box" x="410" y="110" width="70" height="22" rx="4"/>
+  <text class="mono" x="490" y="126">euros 0.25</text>
+  <rect class="box" x="410" y="140" width="70" height="22" rx="4"/>
+  <text class="mono" x="490" y="156">km 0.25  (+ others)</text>
+  <text class="small" x="410" y="195">surprise = -log2(0.25) = 2 bits</text>
+  <text class="small" x="410" y="215">if every token looked like this:</text>
+  <text class="warn" x="410" y="238">perplexity = 2 ** 2 = 4</text>
+</svg>
+<figcaption>Illustrative probabilities. Perplexity averages this surprise over many tokens of real text. <strong>A lower perplexity means the model predicts that kind of text better; it does not mean its answers are correct or helpful.</strong></figcaption>
+</figure>
+
+<h3>When these metrics are useful, and when they are not</h3>
+<ul>
+<li><strong>Useful while training or adapting a model.</strong> If you <a class="term" href="glossary.html#finetuning">finetune</a> a model on your shop's documents, perplexity on held-out shop text should drop. It is cheap and needs no labels.</li>
+<li><strong>Useful for data work.</strong> Text with unusually low perplexity may have been in the training data already (a sign of contamination, see the <a href="evaluating-systems.html">next chapter</a>). Text with very high perplexity is often garbage or another language, which helps data cleaning (<a href="dataset-engineering.html">dataset engineering</a>).</li>
+<li><strong>Not comparable across tokenizers.</strong> Two models that split text into different tokens produce perplexities over different units. Compare bits per byte, or compare only models that share a <a class="term" href="glossary.html#tokenizer">tokenizer</a>.</li>
+<li><strong>Weak for chat assistants.</strong> Post-training teaches a model to give helpful, safe answers rather than to imitate internet text, which can make its perplexity on raw text <em>worse</em> while the product gets better. Perplexity tells you nothing about whether "5 years" is the right warranty.</li>
+<li><strong>You need token probabilities.</strong> Some APIs return them (often called <em>logprobs</em>); others hide them. Check your provider's documentation. The labs do not use them.</li>
+</ul>
+
+<p>For an application like the support bot, you care about the <em>answers</em>, so the rest of this page is about evaluating outputs.</p>
+
+<h2>Exact evaluation: checks with no judgement involved</h2>
+
+<p>An exact method gives the same verdict every time, with no human or model opinion involved. It is the first thing to try because it is fast, free and repeatable. Its weakness is that it only sees the surface of the text.</p>
+
+<h3>Exact match</h3>
+<p><a class="term" href="glossary.html#exact-match">Exact match</a> compares the output with an expected answer, character for character (often after lowercasing and trimming spaces). It works well when the answer space is small: a classification label ("return", "warranty", "shipping"), a yes/no, a number, an order id. It fails for free text, where right answers vary in wording.</p>
+<p>The trick that makes exact match useful for <a class="term" href="glossary.html#llm">LLMs</a> is to <strong>ask for a constrained output</strong>. In <a href="03-structured-output.html">lab 03</a> the model returns JSON validated by a <a class="term" href="glossary.html#pydantic">Pydantic</a> model, so the <code>intent</code> field can be compared exactly with the expected intent. The lab also showed the limit: llama3.2 produced perfectly valid JSON with the wrong intent. Validity is an exact check of <em>format</em>; correctness is a separate check.</p>
+
+<h3>Functional correctness: run it and see</h3>
+<p>For some outputs, you can check the effect instead of the text. Generated code can be executed against unit tests; a generated SQL query can be run and its rows compared with the expected rows; an agent that books an appointment can be checked by looking at the calendar afterwards. The output is correct if it <em>works</em>, however it is written. Code benchmarks often report <em>pass@k</em>: the chance that at least one of k generated attempts passes all the tests.</p>
+<p>The lab project uses functional checks for its own deterministic code: <code>uv run pytest</code> runs 8 offline tests. In <a href="09-agent.html">lab 09</a> the trajectory check is also functional: it looks at which tools the agent actually called and flagged that <code>search_docs</code> was missing.</p>
+
+<h3>Keyword checks, and how they lie</h3>
+<p>The first metric of the lab is a keyword check. Each question in <code>evals/qa.jsonl</code> lists strings the answer must contain, and questions with no answer in the documents must get a refusal. Here is the whole check, from <code>aie/evaluate.py</code>:</p>
+
+<pre data-lang="py" data-tag="excerpt · aie/evaluate.py"><code>REFUSALS = ("i don't know", "i do not know", "don't have information", "not able to find", "no information")
+
+
+def is_refusal(text):
+    return any(r in text.lower().replace("’", "'") for r in REFUSALS)
+
+
+def keyword_pass(question, answer):
+    """Answerable: every must_include string appears. Unanswerable: the answer says it doesn't know."""
+    if not question["answerable"]:
+        return is_refusal(answer)
+    return all(word.lower() in answer.lower() for word in question["must_include"])</code></pre>
+
+<p>It is a substring test after lowercasing. On the baseline run (the bot with no documents) it gave 30 % (6 of 20). Reading the answers shows that this number is wrong in both directions:</p>
+
+<div class="table-wrap"><table>
+<tr><th>Question</th><th>Required</th><th>What the bot said (excerpt)</th><th>Keyword verdict</th><th>Truth</th></tr>
+<tr><td>q08 Do you deliver to Switzerland?</td><td><code>not</code></td><td>"Yes, we do deliver to Switzerland ..."</td><td>pass</td><td>wrong: Switzerland is not served. The check found "not" inside the word "note" later in the answer.</td></tr>
+<tr><td>q13 I am 178 cm tall. Which frame size?</td><td><code>L</code></td><td>"I would recommend our 17" frame size ..."</td><td>pass</td><td>wrong: the answer is size L. After lowercasing, "l" appears in almost any sentence.</td></tr>
+<tr><td>q07 Express delivery for a complete bike?</td><td><code>not available</code></td><td>"we do not offer express delivery for complete bikes ..."</td><td>fail</td><td>essentially right, in other words.</td></tr>
+<tr><td>q19 Who is the CEO of Trailhead?</td><td>a refusal</td><td>"I couldn't find any information on a CEO ..."</td><td>fail</td><td>right: it declined, but "couldn't find" is not in the refusal list.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Mistake, symptom and fix for keyword checks: substring matching finds not inside note and l inside any word, so wrong answers pass">
+  <text class="title" x="20" y="26">Why a substring check gives false passes</text>
+  <rect class="box-bad" x="20" y="45" width="220" height="100" rx="8"/>
+  <text class="label" x="130" y="68" text-anchor="middle">Mistake</text>
+  <text x="130" y="92" text-anchor="middle">"not" in answer.lower()</text>
+  <text x="130" y="114" text-anchor="middle">"l" in answer.lower()</text>
+  <text class="small" x="130" y="134" text-anchor="middle">substring, not whole word</text>
+  <path class="arrow-bad" d="M 240,95 H 268"/>
+  <rect class="box-warn" x="270" y="45" width="220" height="100" rx="8"/>
+  <text class="label" x="380" y="68" text-anchor="middle">Symptom</text>
+  <text class="mono" x="380" y="92" text-anchor="middle">"please [not]e that"</text>
+  <text class="mono" x="380" y="114" text-anchor="middle">"I wou[l]d recommend"</text>
+  <text class="small" x="380" y="134" text-anchor="middle">wrong answers PASS</text>
+  <path class="arrow-ok" d="M 490,95 H 518"/>
+  <rect class="box-ok" x="520" y="45" width="220" height="100" rx="8"/>
+  <text class="label" x="630" y="68" text-anchor="middle">Fixes (pick per case)</text>
+  <text x="630" y="92" text-anchor="middle">whole-word regex: \bnot\b</text>
+  <text x="630" y="114" text-anchor="middle">ask for a label field</text>
+  <text class="small" x="630" y="134" text-anchor="middle">or grade meaning (judge)</text>
+  <rect class="zone" x="20" y="170" width="720" height="115" rx="8"/>
+  <text class="label" x="36" y="194">The opposite error: false fails</text>
+  <text x="36" y="222">"we do not offer express" fails because the list wants "not available"</text>
+  <text x="36" y="248">"I couldn't find any information" fails because the refusal list lacks it</text>
+  <text class="small" x="36" y="272">Right meaning, different words: any fixed list of strings misses some phrasings.</text>
+</svg>
+<figcaption>Real cases from <a href="04-eval-set.html">lab 04</a>. <strong>A keyword score is a rough signal; always read a sample of the answers behind it.</strong></figcaption>
+</figure>
+
+<p>Two of the six passes are false and at least two fails are false, so the real baseline accuracy is not 30 %. Nothing here is a bug in Python; it is a <em>measurement</em> problem. Keyword checks are still worth keeping: they cost nothing, run in milliseconds, and catch gross regressions (if the RAG bot stops saying "30" for the return window, something broke). Just never treat them as the final word.</p>
+
+<h2>Similarity against a reference answer</h2>
+
+<p>If you have a reference answer written by a person, you can score how close the model's answer is to it. This handles some of the "many right wordings" problem, at the cost of needing references for every question.</p>
+
+<h3>Lexical similarity: shared words</h3>
+<p>Lexical metrics count overlapping words or word sequences (n-grams). Edit distance counts how many character edits turn one string into another. Older metrics from machine translation and summarisation, such as BLEU and ROUGE, are of this kind. They are cheap and need no model. Their problem is that overlap is not meaning: "returns are accepted within 30 days" and "returns are not accepted after 30 days" share most of their words. And a correct answer in different words ("you have a month") scores poorly.</p>
+
+<h3>Semantic similarity: shared meaning, via embeddings</h3>
+<p>An <a class="term" href="glossary.html#embedding">embedding</a> model turns a text into a <a class="term" href="glossary.html#vector">vector</a>, a list of numbers, so that texts with similar meaning get nearby vectors. To compare an answer with a reference, embed both and compute their <a class="term" href="glossary.html#cosine-similarity">cosine similarity</a> (close to 1 means similar direction, close to 0 means unrelated). The lab uses the same idea for retrieval in <a href="06-retrieval.html">lab 06</a>, with <code>nomic-embed-text</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Answers drawn as points near a reference answer in embedding space; a paraphrase is close, a wrong number on the same topic is also fairly close, an off-topic answer is far">
+  <text class="title" x="20" y="26">Embedding space (illustrative, 2-D)</text>
+  <rect class="zone" x="20" y="40" width="430" height="245" rx="8"/>
+  <circle class="dot-info" cx="120" cy="110" r="9"/>
+  <text class="label" x="135" y="105">reference: "frame warranty is lifetime"</text>
+  <circle class="dot-ok" cx="95" cy="145" r="7"/>
+  <text class="small" x="30" y="174">"frames are covered for life"</text>
+  <circle class="dot-warn" cx="190" cy="150" r="7"/>
+  <text class="small" x="205" y="166">"5-year frame warranty"</text>
+  <circle class="dot-bad" cx="390" cy="255" r="7"/>
+  <text class="small" x="270" y="275">"we ship to Germany"</text>
+  <path class="line dashed" d="M 120,110 L 95,145"/>
+  <path class="line dashed" d="M 120,110 L 190,150"/>
+  <rect class="box-ok" x="470" y="50" width="270" height="60" rx="8"/>
+  <text x="605" y="75" text-anchor="middle">Paraphrase: high similarity</text>
+  <text class="small" x="605" y="95" text-anchor="middle">the useful case</text>
+  <rect class="box-warn" x="470" y="125" width="270" height="70" rx="8"/>
+  <text x="605" y="150" text-anchor="middle">Same topic, wrong fact:</text>
+  <text x="605" y="170" text-anchor="middle">can still score high</text>
+  <text class="small" x="605" y="188" text-anchor="middle">embeddings capture topic first</text>
+  <rect class="box-bad" x="470" y="210" width="270" height="60" rx="8"/>
+  <text x="605" y="235" text-anchor="middle">Off topic: low similarity</text>
+  <text class="small" x="605" y="255" text-anchor="middle">easy to catch</text>
+</svg>
+<figcaption>Positions are illustrative, not measured. <strong>Semantic similarity is good at "is this about the right thing?" and weak at "is this specific fact right?"</strong>, which is the question a support bot cares about most.</figcaption>
+</figure>
+
+<p>Practical points if you use semantic similarity:</p>
+<ul>
+<li>You must pick a <strong>threshold</strong> ("above 0.8 counts as correct"). The right value depends on the embedding model and the task; set it by looking at labelled examples, not by guessing.</li>
+<li>Scores from different embedding models are not comparable with each other.</li>
+<li>Some embedding models need special prefixes. <code>nomic-embed-text</code> expects <code>search_query: </code> and <code>search_document: </code> in front of the text; forgetting them quietly lowers quality.</li>
+<li>Your score now depends on another model. Changing it changes all your historical numbers.</li>
+</ul>
+
+<h2>AI as a judge</h2>
+
+<p>The most flexible automatic method is to ask a model to grade the answer, the way a teacher grades an essay. This is an <a class="term" href="glossary.html#ai-judge">AI judge</a> (often called "LLM-as-a-judge"). It can read meaning, follow detailed instructions, and explain its verdict. It is also a model, with all the weaknesses of models.</p>
+
+<h3>How it works in the lab</h3>
+<p>The judge in <code>aie/judge.py</code> gets three things: the customer's question, the shop's reference document for that question, and the bot's answer. A system prompt (the <a class="term" href="glossary.html#rubric">rubric</a>) says what "correct" means. The judge must reply with JSON matching a small Pydantic model, so the verdict can be read by code:</p>
+
+<pre data-lang="py" data-tag="excerpt · aie/judge.py"><code>class Verdict(BaseModel):
+    reasoning: str
+    verdict: Literal["correct", "incorrect"]</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="The AI judge flow in the lab: question, reference document and answer go into the judge model gemma4 together with the rubric; it returns JSON with reasoning and a verdict that is compared with the human label">
+  <text class="title" x="20" y="26">How lab 05 grades one answer</text>
+  <rect class="box" x="20" y="45" width="180" height="40" rx="8"/>
+  <text x="110" y="70" text-anchor="middle">QUESTION</text>
+  <rect class="box" x="20" y="95" width="180" height="40" rx="8"/>
+  <text x="110" y="120" text-anchor="middle">REFERENCE DOCUMENT</text>
+  <rect class="box" x="20" y="145" width="180" height="40" rx="8"/>
+  <text x="110" y="170" text-anchor="middle">ASSISTANT'S ANSWER</text>
+  <rect class="box2" x="20" y="205" width="180" height="40" rx="8"/>
+  <text x="110" y="230" text-anchor="middle">RUBRIC (system)</text>
+  <path class="arrow" d="M 200,115 H 268"/>
+  <path class="arrow" d="M 200,165 L 268,140"/>
+  <path class="arrow" d="M 200,65 L 268,100"/>
+  <path class="arrow" d="M 200,225 L 268,160"/>
+  <rect class="box-solid" x="270" y="85" width="170" height="90" rx="8"/>
+  <text class="on-solid" x="355" y="120" text-anchor="middle">judge model</text>
+  <text class="on-solid" x="355" y="142" text-anchor="middle">gemma4, temp 0</text>
+  <path class="arrow-accent" d="M 440,130 H 478"/>
+  <rect class="box-info" x="480" y="85" width="120" height="90" rx="8"/>
+  <text class="mono" x="540" y="115" text-anchor="middle">reasoning</text>
+  <text class="mono" x="540" y="140" text-anchor="middle">verdict</text>
+  <text class="small" x="540" y="162" text-anchor="middle">JSON (Verdict)</text>
+  <path class="arrow" d="M 600,130 H 628"/>
+  <rect class="box-ok" x="630" y="85" width="110" height="90" rx="8"/>
+  <text x="685" y="115" text-anchor="middle">compare</text>
+  <text x="685" y="137" text-anchor="middle">with human</text>
+  <text class="small" x="685" y="160" text-anchor="middle">agree or not</text>
+</svg>
+<figcaption>The judge sees the same reference a careful human grader would use. <strong>The reasoning field comes first, so the model explains before it decides, and you can read why it disagreed.</strong></figcaption>
+</figure>
+
+<h3>Designing the rubric</h3>
+<p>The rubric is the most important part of a judge. Vague instructions ("is this a good answer?") give vague, unstable verdicts. Good rubrics share some habits:</p>
+<ul>
+<li><strong>Define the classes precisely.</strong> The lab rubric says an answer is correct when it matches the reference <em>and</em> "states no number, policy or fact that contradicts or is missing from the reference". That second clause is what catches invented store credits.</li>
+<li><strong>Cover the edge cases you know.</strong> It says what to do when no document covers the question (correct only if the bot declines or points to support), and that extra politeness is fine.</li>
+<li><strong>Prefer few classes.</strong> A binary verdict (correct / incorrect) or a short scale with a written description of each level is far more stable than "score 1 to 10". Two graders rarely agree on the difference between a 6 and a 7.</li>
+<li><strong>Ask for reasoning before the verdict.</strong> It tends to make verdicts more careful and gives you something to read when a verdict looks wrong.</li>
+<li><strong>Force a parseable output.</strong> <a class="term" href="glossary.html#structured-output">Structured output</a> with a fixed set of values means no regex parsing of free text.</li>
+<li><strong>Version it.</strong> A change to the rubric changes every score. Treat it like code, and never compare scores produced by different rubric versions.</li>
+</ul>
+
+<h3>Kinds of judges</h3>
+<div class="table-wrap"><table>
+<tr><th>Choice</th><th>Option A</th><th>Option B</th></tr>
+<tr><td>What the judge compares against</td><td><strong>Reference-based</strong>: it gets a reference answer or source document. More reliable for facts. The lab judge is this kind.</td><td><strong>Reference-free</strong>: it judges the answer on its own (is it polite? on topic? safe?). Works without labelled data, but cannot know your shop's policies.</td></tr>
+<tr><td>How many answers it sees</td><td><strong>Pointwise</strong>: one answer, one score. Gives absolute numbers you can track over time.</td><td><strong>Pairwise</strong>: two answers, "which is better?". Easier and often more consistent for subjective quality, but gives only relative results.</td></tr>
+<tr><td>Which model</td><td>A <strong>stronger general model</strong>, as in the lab (<code>gemma4</code> grades <code>llama3.2</code>).</td><td>A <strong>small specialised model</strong> trained to grade one thing (for example, a safety classifier). Cheaper, but narrower.</td></tr>
+</table></div>
+
+<h3>Known biases of AI judges</h3>
+<p>Researchers have measured several systematic tendencies in model graders. You cannot remove them completely, but you can design around them.</p>
+<ul>
+<li><strong><a class="term" href="glossary.html#position-bias">Position bias</a>.</strong> In pairwise comparisons, judges often prefer the answer shown first (or second). Mitigation: ask twice with the order swapped, and count a win only if it holds both ways.</li>
+<li><strong>Verbosity bias.</strong> Longer, more detailed-looking answers tend to get better grades, even when the extra length adds nothing or adds errors. Mitigation: tell the rubric that length is not a quality, and check scores against answer length.</li>
+<li><strong>Self-preference.</strong> A model may rate answers written by itself, or by models of its own family, more favourably. Mitigation: use a judge from a different family than the model being graded, or check this on labelled data.</li>
+<li><strong>Inconsistency.</strong> The same input can get different verdicts on different runs. The lab uses <a class="term" href="glossary.html#temperature">temperature</a> 0 to reduce this; it does not guarantee identical output on every server.</li>
+<li><strong>Sensitivity to wording.</strong> Small rubric changes can shift many verdicts. This is why the rubric is versioned and calibrated.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Checking position bias by asking the judge twice with the order of the two answers swapped; only a consistent preference counts as a win">
+  <text class="title" x="20" y="26">Pairwise judging with the order swapped</text>
+  <rect class="box" x="20" y="45" width="210" height="60" rx="8"/>
+  <text x="125" y="70" text-anchor="middle">Round 1: first = A</text>
+  <text x="125" y="90" text-anchor="middle">second = B</text>
+  <rect class="box" x="20" y="135" width="210" height="60" rx="8"/>
+  <text x="125" y="160" text-anchor="middle">Round 2: first = B</text>
+  <text x="125" y="180" text-anchor="middle">second = A</text>
+  <path class="arrow" d="M 230,75 H 288"/>
+  <path class="arrow" d="M 230,165 H 288"/>
+  <rect class="box-solid" x="290" y="45" width="150" height="150" rx="8"/>
+  <text class="on-solid" x="365" y="115" text-anchor="middle">judge</text>
+  <text class="on-solid" x="365" y="135" text-anchor="middle">"which is better?"</text>
+  <path class="arrow-ok" d="M 440,85 H 468"/>
+  <path class="arrow-bad" d="M 440,160 H 468"/>
+  <rect class="box-ok" x="470" y="50" width="270" height="65" rx="8"/>
+  <text x="605" y="75" text-anchor="middle">A wins both rounds</text>
+  <text class="small" x="605" y="97" text-anchor="middle">a real preference: count it</text>
+  <rect class="box-warn" x="470" y="130" width="270" height="65" rx="8"/>
+  <text x="605" y="155" text-anchor="middle">"first" wins both rounds</text>
+  <text class="small" x="605" y="177" text-anchor="middle">position bias: count a tie</text>
+</svg>
+<figcaption>A simple, widely used guard. <strong>Doubling the judge calls doubles the cost, so it is a trade-off, not a free fix.</strong></figcaption>
+</figure>
+
+<h3>Cost, speed and the need to calibrate</h3>
+<p>A judge is a model call per answer, often with a larger and slower model than the one being graded. On the lab machine (a 4 GB laptop GPU), <code>gemma4</code> took about 13 s per verdict with reasoning disabled (<code>AIE_REASONING_EFFORT=none</code>), and roughly 95–110 s when it was allowed to think first. Twenty answers is minutes; thousands of answers on every prompt change adds up fast, whether you pay in time or in API fees. A common pattern: run cheap exact checks on everything, and the judge on a sample or only on cases the cheap checks cannot decide.</p>
+
+<p>The bigger issue is trust. A judge produces a number, and the number looks precise. Before relying on it, you must check it against <a class="term" href="glossary.html#human-labels">human labels</a>. That is what <a href="05-ai-judge.html">lab 05</a> does: the guide author labelled 20 saved baseline answers by hand (4 of 20 correct), then both the judge and the keyword check graded the same answers.</p>
+
+<pre data-lang="text" data-tag="real output, excerpt · lab 05"><code>q01  human=ok   judge=bad  keyword=ok    &lt;-- judge disagrees with human
+q16  human=ok   judge=bad  keyword=ok    &lt;-- judge disagrees with human
+q20  human=bad  judge=ok   keyword=bad   &lt;-- judge disagrees with human
+
+Agreement with human labels: judge 17/20 = 85%, keyword check 16/20 = 80%</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Twenty cells, one per question; the judge agrees with the human on seventeen and disagrees on q01, q16 and q20">
+  <text class="title" x="20" y="26">Judge vs human on 20 labelled answers (real run, lab 05)</text>
+  <rect class="box-bad" x="20" y="45" width="66" height="40" rx="6"/><text class="mono" x="53" y="70" text-anchor="middle">q01</text>
+  <rect class="box-ok" x="92" y="45" width="66" height="40" rx="6"/><text class="mono" x="125" y="70" text-anchor="middle">q02</text>
+  <rect class="box-ok" x="164" y="45" width="66" height="40" rx="6"/><text class="mono" x="197" y="70" text-anchor="middle">q03</text>
+  <rect class="box-ok" x="236" y="45" width="66" height="40" rx="6"/><text class="mono" x="269" y="70" text-anchor="middle">q04</text>
+  <rect class="box-ok" x="308" y="45" width="66" height="40" rx="6"/><text class="mono" x="341" y="70" text-anchor="middle">q05</text>
+  <rect class="box-ok" x="380" y="45" width="66" height="40" rx="6"/><text class="mono" x="413" y="70" text-anchor="middle">q06</text>
+  <rect class="box-ok" x="452" y="45" width="66" height="40" rx="6"/><text class="mono" x="485" y="70" text-anchor="middle">q07</text>
+  <rect class="box-ok" x="524" y="45" width="66" height="40" rx="6"/><text class="mono" x="557" y="70" text-anchor="middle">q08</text>
+  <rect class="box-ok" x="596" y="45" width="66" height="40" rx="6"/><text class="mono" x="629" y="70" text-anchor="middle">q09</text>
+  <rect class="box-ok" x="668" y="45" width="66" height="40" rx="6"/><text class="mono" x="701" y="70" text-anchor="middle">q10</text>
+  <rect class="box-ok" x="20" y="95" width="66" height="40" rx="6"/><text class="mono" x="53" y="120" text-anchor="middle">q11</text>
+  <rect class="box-ok" x="92" y="95" width="66" height="40" rx="6"/><text class="mono" x="125" y="120" text-anchor="middle">q12</text>
+  <rect class="box-ok" x="164" y="95" width="66" height="40" rx="6"/><text class="mono" x="197" y="120" text-anchor="middle">q13</text>
+  <rect class="box-ok" x="236" y="95" width="66" height="40" rx="6"/><text class="mono" x="269" y="120" text-anchor="middle">q14</text>
+  <rect class="box-ok" x="308" y="95" width="66" height="40" rx="6"/><text class="mono" x="341" y="120" text-anchor="middle">q15</text>
+  <rect class="box-bad" x="380" y="95" width="66" height="40" rx="6"/><text class="mono" x="413" y="120" text-anchor="middle">q16</text>
+  <rect class="box-ok" x="452" y="95" width="66" height="40" rx="6"/><text class="mono" x="485" y="120" text-anchor="middle">q17</text>
+  <rect class="box-ok" x="524" y="95" width="66" height="40" rx="6"/><text class="mono" x="557" y="120" text-anchor="middle">q18</text>
+  <rect class="box-ok" x="596" y="95" width="66" height="40" rx="6"/><text class="mono" x="629" y="120" text-anchor="middle">q19</text>
+  <rect class="box-bad" x="668" y="95" width="66" height="40" rx="6"/><text class="mono" x="701" y="120" text-anchor="middle">q20</text>
+  <text class="label" x="20" y="165">q01, q16: judge stricter than the human. It penalised small invented extras</text>
+  <text class="label" x="20" y="185">(an exchange option, a made-up reason for closing), following the rubric literally.</text>
+  <text class="label" x="20" y="212">q20: judge more lenient. It accepted "No, we don't sell skateboards"</text>
+  <text class="label" x="20" y="232">although no document says so; the rubric expected a refusal.</text>
+</svg>
+<figcaption>Green = judge and human agree, red = they disagree. <strong>85 % agreement sounds good, but each red cell is a rule the rubric and the human interpret differently.</strong></figcaption>
+</figure>
+
+<p>Three lessons come out of these 20 rows:</p>
+<ol>
+<li><strong>The judge is only slightly better than the keyword check here</strong> (17 vs 16), but it is right for better reasons: it did not fall for "note" or for the stray "l". The keyword check's agreement was partly luck.</li>
+<li><strong>Disagreements are usually about the rule, not the model.</strong> For q01 and q16 the judge applied "no fact missing from the reference" strictly; the human decided a harmless invented detail was acceptable. Either the rubric or the human label should change, so that both express the same policy.</li>
+<li><strong>A human label is also a judgement.</strong> Calibration is not "make the judge copy the human"; it is making the rule clear enough that careful humans and the judge agree.</li>
+</ol>
+
+<p>Twenty labels are enough to find these issues, not enough to state "this judge is 85 % accurate" with confidence (the <a href="evaluating-systems.html">next chapter</a> explains why). For a judge you rely on, label more examples, track agreement each time you change the rubric or the judge model, and re-check periodically.</p>
+
+<details class="primer"><summary>Agreement beyond chance: why raw percent agreement can flatter a judge</summary>
+<p>In lab 05, 16 of the 20 human labels are "bad". A "judge" that always answered "bad" would agree with the human 80 % of the time without reading anything. So compare agreement with this trivial baseline. Statistics such as Cohen's kappa correct for chance agreement: 0 means "no better than chance", 1 means perfect agreement. You do not need to compute kappa to get the idea: always ask "how well would a dumb rule do on this data?"</p>
+</details>
+
+<h2>Comparative evaluation: ranking models by preferences</h2>
+
+<p>Sometimes you do not need an absolute score; you need to know which of several models or prompts is better. Comparative evaluation shows two outputs for the same input to a judge (a person or a model) and asks which is better. Many such comparisons are then combined into a ranking.</p>
+
+<p>Why compare instead of score? People are much better at saying "this one is better" than at assigning consistent numbers. Comparisons also keep working when all candidates are good: two strong answers may both get 9 out of 10, but a reader can still prefer one.</p>
+
+<h3>From match results to a ranking</h3>
+<p>The simplest summary is the <strong>win rate</strong>: how often model A beats model B. With several models, you want one score per model that explains all the match results. Two classic approaches, borrowed from sports and statistics:</p>
+<ul>
+<li><strong>Elo ratings</strong> (from chess). Each model has a rating. Before a match, the ratings predict the chance of winning: with ratings R<sub>A</sub> and R<sub>B</sub>, A is expected to win with probability <code>1 / (1 + 10 ** ((R_B - R_A) / 400))</code>. After the match, the winner gains points and the loser loses the same amount, more when the result was a surprise. Ratings update one match at a time, so the order of matches matters a little.</li>
+<li><strong>Bradley–Terry model</strong>. Same idea of hidden strengths, but fitted to <em>all</em> comparisons at once, so the result does not depend on match order. It is what many public leaderboards based on human votes use today, often with confidence intervals around each score.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Pairwise votes between three prompts are collected, combined by a rating model such as Elo or Bradley-Terry, and turned into a ranking with uncertainty">
+  <text class="title" x="20" y="26">From many pairwise votes to one ranking (illustrative)</text>
+  <rect class="box" x="20" y="45" width="210" height="34" rx="8"/>
+  <text class="mono" x="125" y="67" text-anchor="middle">rag_v1 vs rag_v2: v2</text>
+  <rect class="box" x="20" y="87" width="210" height="34" rx="8"/>
+  <text class="mono" x="125" y="109" text-anchor="middle">baseline vs rag_v2: v2</text>
+  <rect class="box" x="20" y="129" width="210" height="34" rx="8"/>
+  <text class="mono" x="125" y="151" text-anchor="middle">baseline vs rag_v1: v1</text>
+  <rect class="box" x="20" y="171" width="210" height="34" rx="8"/>
+  <text class="mono" x="125" y="193" text-anchor="middle">rag_v1 vs rag_v2: v1</text>
+  <text class="small" x="125" y="228" text-anchor="middle">... hundreds of votes</text>
+  <path class="arrow" d="M 230,125 H 288"/>
+  <rect class="box-solid" x="290" y="85" width="190" height="80" rx="8"/>
+  <text class="on-solid" x="385" y="118" text-anchor="middle">rating model</text>
+  <text class="on-solid" x="385" y="140" text-anchor="middle">Elo / Bradley-Terry</text>
+  <path class="arrow-accent" d="M 480,125 H 518"/>
+  <rect class="box-ok" x="520" y="45" width="220" height="40" rx="8"/>
+  <text x="630" y="70" text-anchor="middle">1. rag_v2  (strongest)</text>
+  <rect class="box-info" x="520" y="95" width="220" height="40" rx="8"/>
+  <text x="630" y="120" text-anchor="middle">2. rag_v1</text>
+  <rect class="box-warn" x="520" y="145" width="220" height="40" rx="8"/>
+  <text x="630" y="170" text-anchor="middle">3. baseline</text>
+  <text class="small" x="630" y="210" text-anchor="middle">each score has an uncertainty;</text>
+  <text class="small" x="630" y="226" text-anchor="middle">close scores may not differ</text>
+  <text class="label" x="20" y="268">Elo example: both at 1000, K = 32, A wins: A expected 0.5, gains 32 x 0.5 = 16 points, B loses 16.</text>
+</svg>
+<figcaption>The prompt names are the lab's prompt files; the votes and ranking are invented to show the mechanism. <strong>Rankings say which is better, not whether any of them is good enough.</strong></figcaption>
+</figure>
+
+<h3>Limits of comparative evaluation</h3>
+<ul>
+<li><strong>Relative, not absolute.</strong> The best of three bad bots is still bad. For a support bot you also need "is the answer correct?", which only absolute evaluation answers.</li>
+<li><strong>Many comparisons needed.</strong> The number of pairs grows quickly with the number of candidates, and each pair needs many votes before the difference is clear.</li>
+<li><strong>Preferences are not always consistent.</strong> A can beat B, B beat C and C beat A. Rating models assume a single strength per model, which smooths this over.</li>
+<li><strong>Who votes, on what, matters.</strong> Public leaderboards reflect the prompts and taste of their voters, which may be nothing like your customers' questions. Voters also tend to reward style (length, formatting, confidence), the same verbosity bias judges have.</li>
+<li><strong>Judging correctness needs knowledge.</strong> A voter who does not know the shop's return policy cannot tell which answer is correct, only which sounds better.</li>
+</ul>
+<p>Comparative evaluation is great for choosing between prompt versions or models when both are plausible (you could run pairwise judging on the outputs of <a href="08-prompts.html">lab 08</a>'s two prompt versions), and as a complement to an absolute correctness check, not a replacement.</p>
+
+<div class="callout warn"><strong>Pitfalls and common misconceptions</strong>
+<ul>
+<li><strong>"The metric went up, so the bot got better."</strong> Only if the metric measures what you care about. The lab's keyword score rewarded "note" for containing "not".</li>
+<li><strong>"Low perplexity means good answers."</strong> Perplexity measures prediction of text, not correctness or helpfulness, and chat models are not optimised for it.</li>
+<li><strong>"Semantic similarity understands correctness."</strong> It mostly captures topic. "5-year warranty" and "lifetime warranty" are close in meaning-space and opposite in fact.</li>
+<li><strong>"A judge model is objective."</strong> It has biases (position, verbosity, self-preference) and follows its rubric literally. Measure its agreement with humans before trusting it.</li>
+<li><strong>"Raw percent agreement is enough."</strong> If most labels are "bad", a judge that always says "bad" also scores high. Compare with a trivial baseline.</li>
+<li><strong>Changing two things at once.</strong> New rubric and new judge model on the same day: you cannot tell which caused the score change. Version both.</li>
+<li><strong>Trusting one run.</strong> Model outputs vary. Small score differences between two runs on 20 questions are often noise.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Open-ended output has many right answers, partly right answers and convincing wrong ones, so no single method is enough.</li>
+<li>Entropy, cross-entropy and perplexity measure how well a model predicts text. Useful for training and data work, not for judging a chat answer.</li>
+<li>Exact methods (exact match, functional tests, keyword checks) are cheap and repeatable but surface-level. Lab 04's keyword check produced false passes ("not" in "note", "l" anywhere) and false fails.</li>
+<li>Similarity to a reference: lexical overlap is cheap but blind to meaning; embedding similarity sees topic better but can miss a wrong number.</li>
+<li>An AI judge reads meaning using a rubric. Design the rubric carefully, watch for position, verbosity and self-preference bias, and budget for the cost.</li>
+<li>Always calibrate a judge against human labels: in lab 05 it agreed 17/20 times, and the three disagreements revealed rubric ambiguities, not just model errors.</li>
+<li>Pairwise comparisons combined with Elo or Bradley–Terry give rankings: good for choosing between candidates, silent about whether any is good enough.</li>
+</ul>
+</div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://www.oreilly.com/library/view/ai-engineering/9781098166298/">AI Engineering (O'Reilly)</a>, chapter 3, and the author's <a href="https://github.com/chiphuyen/aie-book">resources repository</a> with chapter summaries and a reading list.</li>
+<li><a href="https://huggingface.co/docs/transformers/perplexity">Hugging Face Transformers: Perplexity of fixed-length models</a>, how perplexity is computed in practice.</li>
+<li><a href="https://huggingface.co/docs/evaluate/index">Hugging Face Evaluate documentation</a>, a library of standard metrics such as exact match, BLEU and ROUGE.</li>
+<li><a href="https://arxiv.org/abs/2306.05685">Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena</a> (Zheng et al., 2023), the paper that measured position, verbosity and self-enhancement biases.</li>
+<li><a href="https://arxiv.org/abs/2403.04132">Chatbot Arena: An Open Platform for Evaluating LLMs by Human Preference</a> (Chiang et al., 2024), pairwise votes and Bradley–Terry ratings at scale.</li>
+<li><a href="https://arxiv.org/abs/2107.03374">Evaluating Large Language Models Trained on Code</a> (Chen et al., 2021), functional correctness and pass@k.</li>
+<li><a href="https://scikit-learn.org/stable/modules/generated/sklearn.metrics.cohen_kappa_score.html">scikit-learn: cohen_kappa_score</a>, agreement beyond chance between two graders.</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="foundation-models.html"><small>← Chapter 2</small>How foundation models work</a>
+<a class="next" href="evaluating-systems.html"><small>Chapter 4 →</small>Evaluating an AI system</a>
+</nav>
+</main>
+</body>
+</html>

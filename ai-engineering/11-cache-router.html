@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 · Caching and routing</title>
+<meta name="description" content="Answer repeated questions from exact and semantic caches, and send each message to the cheapest path.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 11/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 11 of 14 · Hands-on lab</div>
+  <h1>Caching and routing</h1>
+  <p class="lead">Answer repeated questions from exact and semantic caches, and send each message to the cheapest path.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<p>Every answer from the Trailhead bot costs about 4 seconds on our laptop GPU, and on a paid API it would also cost money for every token. Many customers ask the same few questions. In this lab you add two shortcuts in front of the model: a <a class="term" href="glossary.html#cache">cache</a> that remembers answers it already gave, and a <a class="term" href="glossary.html#router">router</a> that sends each message to the cheapest path that can handle it. You will also see where both shortcuts go wrong.</p>
+
+<div class="callout"><strong>Goal.</strong> Answer repeated questions from an exact cache and a <a class="term" href="glossary.html#semantic-cache">semantic cache</a>, measure the time saved, understand the similarity threshold trade-off, and classify messages with a small router built on <a class="term" href="glossary.html#structured-output">structured output</a>.</div>
+
+<h2>The idea in brief</h2>
+
+<p>A cache is a lookup table: question in, stored answer out. If the question was seen before, you skip the model entirely. There are two kinds in this lab:</p>
+<ul>
+  <li><strong>Exact cache</strong>: the new question must be the same text as an old one (after small clean-ups like lower case). It is never wrong, but it misses every rewording.</li>
+  <li><strong>Semantic cache</strong>: the new question is turned into an <a class="term" href="glossary.html#embedding">embedding</a> and compared with the embeddings of old questions. If the closest one is similar enough (above a <em>threshold</em>), its answer is reused. It catches rewordings, but it can also reuse an answer for a question that only <em>looks</em> similar.</li>
+</ul>
+<p>A router is a cheap classification step before the expensive work: "is this small talk, a policy question, an order question or something we don't handle?" Each class gets its own path. The concept chapters explain where these pieces sit in a real system: <a href="architecture-and-feedback.html">Architecture and user feedback</a> (step by step, caches and routers are layers of the architecture) and <a href="inference-optimization.html">Inference optimization</a> (the fastest model call is the one you never make).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="A question first checks the exact cache, then the semantic cache; a hit returns the stored answer; a miss goes to the RAG bot and the new answer is stored in both caches">
+  <rect class="box2" x="10" y="40" width="100" height="44" rx="8"/>
+  <text x="60" y="67" text-anchor="middle">question</text>
+  <path class="arrow" d="M110,62 H138"/>
+  <rect class="box" x="140" y="40" width="150" height="44" rx="8"/>
+  <text x="215" y="67" text-anchor="middle" class="mono">ExactCache.get</text>
+  <path class="arrow" d="M290,62 H318"/>
+  <text x="304" y="52" text-anchor="middle" class="small">miss</text>
+  <rect class="box" x="320" y="40" width="170" height="44" rx="8"/>
+  <text x="405" y="67" text-anchor="middle" class="mono">SemanticCache.get</text>
+  <path class="arrow" d="M490,62 H518"/>
+  <text x="504" y="52" text-anchor="middle" class="small">miss</text>
+  <rect class="box-info" x="520" y="40" width="150" height="44" rx="8"/>
+  <text x="595" y="67" text-anchor="middle" class="mono">rag.answer()</text>
+  <path class="arrow-ok" d="M215,84 V128"/>
+  <text x="222" y="110" class="small">hit</text>
+  <path class="arrow-ok" d="M405,84 V128"/>
+  <text x="412" y="110" class="small">similarity ≥ 0.9</text>
+  <rect class="box-ok" x="140" y="130" width="350" height="44" rx="8"/>
+  <text x="315" y="157" text-anchor="middle">hit: return the stored answer (0.00–0.06 s)</text>
+  <path class="arrow" d="M595,84 V128"/>
+  <rect class="box-info" x="520" y="130" width="230" height="44" rx="8"/>
+  <text x="635" y="157" text-anchor="middle">store in both caches (≈4 s)</text>
+</svg>
+<figcaption>The path of one question through <code>answer()</code> in <code>labs/11_cache_router.py</code>. <strong>Cheap checks run first; the model only runs when both caches miss.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to embeddings and cosine similarity? What the similarity number means</summary>
+<p>An <a class="term" href="glossary.html#embedding">embedding</a> model (here <code>nomic-embed-text</code>) turns a text into a list of a few hundred numbers, a <a class="term" href="glossary.html#vector">vector</a>. Texts with similar meaning get vectors that point in similar directions. <a class="term" href="glossary.html#cosine-similarity">Cosine similarity</a> measures the angle between two vectors: 1.00 means the same direction (same meaning, or the same words), values near 0 mean unrelated. You met this in <a href="06-retrieval.html">lab 06</a>, where it ranked document chunks. Here it ranks old questions instead.</p>
+<p>If both vectors are first scaled to length 1 ("normalized"), cosine similarity is just the dot product of the two lists: multiply the numbers pairwise and add them up. That is why <code>cache.py</code> divides each vector by its length once, then uses the fast <code>@</code> (matrix product) operator.</p>
+</details>
+
+<details class="primer"><summary>New to caching? Why "remember the answer" is harder than it sounds</summary>
+<p>Caching is old and simple in normal software: if a web page didn't change, serve the copy you already made. For a chatbot, three questions make it harder. <strong>Is it the same question?</strong> (exact text, or the same meaning?) <strong>Is the old answer still true?</strong> (if <code>shipping.md</code> changes, cached shipping answers must be thrown away). <strong>Is it safe to share?</strong> A policy answer is the same for everybody; an answer about one customer's order must never be served to another customer. Our lab cache keeps everything in memory, so it is emptied every time the program ends, which sidesteps the second question. A real one needs an expiry rule.</p>
+</details>
+
+<h2>Steps</h2>
+<ol class="steps">
+  <li>Make sure Ollama is running and that <code>llama3.2</code> and <code>nomic-embed-text</code> are pulled (<a href="01-setup.html">lab 01</a>). This lab reuses the hybrid retriever of <a href="06-retrieval.html">lab 06</a> and the RAG answer of <a href="07-rag.html">lab 07</a>.</li>
+  <li>Create <code>aie/cache.py</code> with the two cache classes (complete file below).</li>
+  <li>Create <code>aie/router.py</code> with the <code>Route</code> schema and the <code>route()</code> function.</li>
+  <li>Create <code>labs/11_cache_router.py</code>, which asks five shipping questions through the caches and then routes four messages.</li>
+  <li>From the project folder, run <code>uv run python -m labs.11_cache_router</code> and compare your timings and similarities with ours.</li>
+</ol>
+
+<h2>The code</h2>
+
+<h3>The two caches</h3>
+<pre data-file="aie/cache.py" data-lang="py" data-tag="complete file"><code>"""Two caches: exact (same text) and semantic (similar meaning)."""
+import numpy as np
+
+from aie.llm import embed
+
+
+class ExactCache:
+    def __init__(self):
+        self.store = {}
+
+    @staticmethod
+    def key(text):
+        return " ".join(text.lower().split())
+
+    def get(self, text):
+        return self.store.get(self.key(text))
+
+    def put(self, text, answer):
+        self.store[self.key(text)] = answer
+
+
+class SemanticCache:
+    """Returns a stored answer when a new question is close enough to a previous one."""
+
+    def __init__(self, threshold=0.9):
+        self.threshold, self.vectors, self.answers = threshold, [], []
+
+    def _vector(self, text):
+        v = np.array(embed([f"search_query: {text}"])[0], dtype=np.float32)
+        return v / np.linalg.norm(v)
+
+    def get(self, text):
+        if not self.vectors:
+            return None, 0.0
+        v = self._vector(text)
+        sims = np.array(self.vectors) @ v
+        best = int(np.argmax(sims))
+        return (self.answers[best] if sims[best] &gt;= self.threshold else None), float(sims[best])
+
+    def put(self, text, answer):
+        self.vectors.append(self._vector(text))
+        self.answers.append(answer)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Two caches: ..."""</code></td><td>Module docstring: one sentence that says what the file is for.</td></tr>
+<tr><td>2</td><td><code>import numpy as np</code></td><td>NumPy does the vector maths (normalizing, dot products) quickly. It was installed in lab 01 with <code>uv add openai pydantic numpy</code>.</td></tr>
+<tr><td>4</td><td><code>from aie.llm import embed</code></td><td>The embedding helper from our wrapper. It sends texts to <code>nomic-embed-text</code> and returns one vector per text.</td></tr>
+<tr><td>7–9</td><td><code>class ExactCache:</code> … <code>self.store = {}</code></td><td>The exact cache is a plain Python dictionary: key = cleaned-up question, value = answer. Looking up a key in a dictionary takes microseconds, which is why the exact hit shows 0.00 s.</td></tr>
+<tr><td>11–13</td><td><code>@staticmethod def key(text): return " ".join(text.lower().split())</code></td><td>Builds the dictionary key. <code>lower()</code> ignores capital letters; <code>split()</code> then <code>" ".join(...)</code> collapses extra spaces. Punctuation is kept, so <code>take?</code> and <code>take</code> give different keys. <code>@staticmethod</code> means the method doesn't need <code>self</code>.</td></tr>
+<tr><td>15–16</td><td><code>def get(self, text): return self.store.get(self.key(text))</code></td><td>Returns the stored answer, or <code>None</code> when the key is missing (<code>dict.get</code> never raises an error).</td></tr>
+<tr><td>18–19</td><td><code>def put(self, text, answer): ...</code></td><td>Saves an answer under the cleaned-up key. Called after the model has answered.</td></tr>
+<tr><td>22–23</td><td><code>class SemanticCache:</code> + docstring</td><td>The cache that compares meaning instead of text.</td></tr>
+<tr><td>25–26</td><td><code>def __init__(self, threshold=0.9): self.threshold, self.vectors, self.answers = threshold, [], []</code></td><td>Stores the threshold (the minimum similarity for a hit) and two parallel lists: the i-th vector belongs to the i-th answer. 0.9 is our starting point, not a universal value: the right threshold depends on the embedding model and your questions, and you tune it on examples.</td></tr>
+<tr><td>28–30</td><td><code>def _vector(self, text):</code> … <code>return v / np.linalg.norm(v)</code></td><td>Embeds one question. The <code>search_query: </code> prefix is required by <code>nomic-embed-text</code> (it was trained with these task prefixes). <code>np.linalg.norm(v)</code> is the vector's length; dividing by it scales the vector to length 1, so a dot product later equals cosine similarity. The leading underscore says "internal helper".</td></tr>
+<tr><td>32–34</td><td><code>def get(self, text): if not self.vectors: return None, 0.0</code></td><td>With an empty cache there is nothing to compare, so it returns "no hit, similarity 0.0" without calling the embedding model. That is why the first line of the output says <code>closest cached question: 0.00</code>.</td></tr>
+<tr><td>35</td><td><code>v = self._vector(text)</code></td><td>Embeds the new question. This call to the embedding model is the main cost of a semantic lookup (about 0.06 s in our run).</td></tr>
+<tr><td>36</td><td><code>sims = np.array(self.vectors) @ v</code></td><td>Stacks all stored vectors into a matrix and multiplies by the new vector: one similarity per stored question, in one step.</td></tr>
+<tr><td>37</td><td><code>best = int(np.argmax(sims))</code></td><td>Position of the most similar stored question.</td></tr>
+<tr><td>38</td><td><code>return (self.answers[best] if sims[best] &gt;= self.threshold else None), float(sims[best])</code></td><td>Returns two things: the answer if the best similarity reaches the threshold (else <code>None</code>), and the similarity itself, so the lab can print how close the miss was.</td></tr>
+<tr><td>40–42</td><td><code>def put(self, text, answer): ...</code></td><td>Embeds the question and appends vector and answer to the two lists. A real system would use a vector database instead of a Python list once there are many entries.</td></tr>
+</table></div>
+
+<h3>The router</h3>
+<pre data-file="aie/router.py" data-lang="py" data-tag="complete file"><code>"""Route each message to the cheapest path that can handle it."""
+from typing import Literal
+
+from pydantic import BaseModel
+
+from aie.llm import chat_json
+
+
+class Route(BaseModel):
+    route: Literal["smalltalk", "policy_question", "order_question", "out_of_scope"]
+
+
+ROUTER_PROMPT = """Classify the customer's message for a bike shop's support system.
+smalltalk: greetings or thanks. policy_question: returns, warranty, shipping, batteries, sizes, service plans, stores, payment.
+order_question: about a specific order. out_of_scope: anything else. Reply with JSON."""
+
+
+def route(message):
+    return chat_json([{"role": "system", "content": ROUTER_PROMPT}, {"role": "user", "content": message}], Route, temperature=0).route</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>from typing import Literal</code></td><td><code>Literal[...]</code> means "only one of these exact strings". Pydantic turns it into an <code>enum</code> in the <a class="term" href="glossary.html#json-schema">JSON Schema</a>, so the model is told which values are allowed.</td></tr>
+<tr><td>4</td><td><code>from pydantic import BaseModel</code></td><td>Base class for schemas that validate data, as in <a href="03-structured-output.html">lab 03</a>.</td></tr>
+<tr><td>6</td><td><code>from aie.llm import chat_json</code></td><td>Our helper that asks for JSON matching a schema, validates it, and retries with the error if the JSON is invalid.</td></tr>
+<tr><td>9–10</td><td><code>class Route(BaseModel): route: Literal["smalltalk", ...]</code></td><td>The answer we want: one field with one of four labels. If the model replies with any other label, validation fails and <code>chat_json</code> retries.</td></tr>
+<tr><td>13–15</td><td><code>ROUTER_PROMPT = """..."""</code></td><td>The <a class="term" href="glossary.html#system-prompt">system prompt</a>: a one-line definition per label. The definitions are what the model goes by, so vague definitions give vague routing. Note that "thanks" is listed under <code>smalltalk</code>; in our run the model still misrouted "Thanks a lot!".</td></tr>
+<tr><td>18–19</td><td><code>def route(message): return chat_json([...], Route, temperature=0).route</code></td><td>Sends the system prompt and the customer's message, gets back a validated <code>Route</code> object and returns just the label. <code>temperature=0</code> makes the choice as repeatable as possible, which you want for a classifier.</td></tr>
+</table></div>
+
+<h3>The lab script</h3>
+<pre data-file="labs/11_cache_router.py" data-lang="py" data-tag="complete file"><code>"""Lab 11: save time and money with caches and a router."""
+import time
+
+from aie import rag
+from aie.cache import ExactCache, SemanticCache
+from aie.docs import load_chunks
+from aie.retrieve import Hybrid
+from aie.router import route
+
+retriever = Hybrid(load_chunks())
+exact, semantic = ExactCache(), SemanticCache(threshold=0.9)
+
+
+def answer(question):
+    start = time.perf_counter()
+    if (hit := exact.get(question)) is not None:
+        return hit, "exact cache", time.perf_counter() - start
+    hit, similarity = semantic.get(question)
+    if hit is not None:
+        return hit, f"semantic cache (similarity {similarity:.2f})", time.perf_counter() - start
+    text = rag.answer(question, retriever)["answer"]
+    exact.put(question, text)
+    semantic.put(question, text)
+    return text, f"model (closest cached question: {similarity:.2f})", time.perf_counter() - start
+
+
+print("1) Caching")
+for q in ["How long does standard shipping take?",
+          "How long does standard shipping take?",
+          "how long does standard shipping take",
+          "How many days does standard delivery take?",
+          "How long does express shipping take?"]:
+    text, source, seconds = answer(q)
+    print(f"   {seconds:6.2f} s  {source:&lt;40} {q}")
+print("   Careful: a semantic cache must not answer the express question with the standard answer.")
+
+print("\n2) Routing")
+REPLIES = {"smalltalk": "You're welcome! Anything else I can help with?",
+           "out_of_scope": "I can only help with Trailhead Bikes questions."}
+for m in ["Thanks a lot!", "Do you ship to Belgium?", "Where is my order TH-10260?", "Write me a poem about cats"]:
+    start = time.perf_counter()
+    r = route(m)
+    note = REPLIES.get(r, "-&gt; RAG bot" if r == "policy_question" else "-&gt; agent with order tools")
+    print(f"   {r:&lt;16} {time.perf_counter() - start:5.1f} s  {m!r}: {note}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>import time</code></td><td>For <code>time.perf_counter()</code>, a precise stopwatch.</td></tr>
+<tr><td>4–8</td><td><code>from aie import rag</code> … <code>from aie.router import route</code></td><td>Reuses the RAG answer (lab 07), the chunk loader and hybrid retriever (lab 06), and the two new modules.</td></tr>
+<tr><td>10</td><td><code>retriever = Hybrid(load_chunks())</code></td><td>Builds the BM25 + embedding retriever once at start-up, so its set-up time is not counted in the per-question timings.</td></tr>
+<tr><td>11</td><td><code>exact, semantic = ExactCache(), SemanticCache(threshold=0.9)</code></td><td>Two empty caches. The threshold is set here so you can change it in one place (see "Try it yourself").</td></tr>
+<tr><td>14–15</td><td><code>def answer(question):</code> <code>start = time.perf_counter()</code></td><td>The cached answer function. The stopwatch starts before any lookup, so cache time is measured too.</td></tr>
+<tr><td>16–17</td><td><code>if (hit := exact.get(question)) is not None: return hit, "exact cache", ...</code></td><td>Exact cache first, because it is the cheapest. <code>:=</code> (the "walrus" operator) assigns and tests in one line. <code>is not None</code> matters: an empty string answer would still count as a hit.</td></tr>
+<tr><td>18–20</td><td><code>hit, similarity = semantic.get(question)</code> …</td><td>Semantic cache second. On a hit it returns the stored answer and the similarity, formatted with two decimals (<code>:.2f</code>).</td></tr>
+<tr><td>21</td><td><code>text = rag.answer(question, retriever)["answer"]</code></td><td>Both caches missed: run the real RAG pipeline (retrieve three chunks, prompt <code>rag_v2</code>, call <code>llama3.2</code>).</td></tr>
+<tr><td>22–23</td><td><code>exact.put(...)</code> <code>semantic.put(...)</code></td><td>Store the fresh answer in both caches, so the next identical or similar question is fast.</td></tr>
+<tr><td>24</td><td><code>return text, f"model (closest cached question: {similarity:.2f})", ...</code></td><td>Also reports how close the nearest cached question was. That number is how you tune the threshold.</td></tr>
+<tr><td>27–34</td><td><code>for q in [...]:</code> … <code>print(f"   {seconds:6.2f} s  {source:&lt;40} {q}")</code></td><td>Five test questions, chosen on purpose: a new question, an identical repeat, a lower-case copy without "?", a paraphrase with the same meaning, and a question with similar words but a <em>different</em> meaning (express vs standard). <code>:&lt;40</code> pads the text to 40 characters so the columns line up.</td></tr>
+<tr><td>35</td><td><code>print("   Careful: ...")</code></td><td>A reminder printed with the results: the express question is the one a semantic cache must not answer from the standard-shipping entry.</td></tr>
+<tr><td>37–39</td><td><code>REPLIES = {...}</code></td><td>Fixed replies for two routes. They cost no model call at all, which is the point of routing.</td></tr>
+<tr><td>40</td><td><code>for m in ["Thanks a lot!", ...]:</code></td><td>Four messages, one per route we expect: small talk, policy, order, out of scope.</td></tr>
+<tr><td>41–42</td><td><code>start = ...</code> <code>r = route(m)</code></td><td>Times the routing call alone.</td></tr>
+<tr><td>43</td><td><code>note = REPLIES.get(r, "-&gt; RAG bot" if r == "policy_question" else "-&gt; agent with order tools")</code></td><td>Picks the fixed reply if the route has one, otherwise names where the message would go. This lab only prints the destination; it does not call the RAG bot or the agent after routing.</td></tr>
+<tr><td>44</td><td><code>print(f"   {r:&lt;16} {...:5.1f} s  {m!r}: {note}")</code></td><td>Prints route, routing time and the message. <code>!r</code> prints the message with quotes so you can see exactly what was sent.</td></tr>
+</table></div>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="from the project folder"><code>uv run python -m labs.11_cache_router</code></pre>
+<p><code>uv run</code> runs the command inside the project's virtual environment; <code>-m labs.11_cache_router</code> runs the file as a module, so the <code>aie</code> package is found from the project root.</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>1) Caching
+     4.00 s  model (closest cached question: 0.00)    How long does standard shipping take?
+     0.00 s  exact cache                              How long does standard shipping take?
+     0.06 s  semantic cache (similarity 1.00)         how long does standard shipping take
+     3.82 s  model (closest cached question: 0.88)    How many days does standard delivery take?
+     4.27 s  model (closest cached question: 0.82)    How long does express shipping take?
+   Careful: a semantic cache must not answer the express question with the standard answer.
+
+2) Routing
+   out_of_scope       3.3 s  'Thanks a lot!': I can only help with Trailhead Bikes questions.
+   policy_question    4.4 s  'Do you ship to Belgium?': -&gt; RAG bot
+   order_question     2.3 s  'Where is my order TH-10260?': -&gt; agent with order tools
+   out_of_scope       2.8 s  'Write me a poem about cats': I can only help with Trailhead Bikes questions.</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> Two sections. In "1) Caching" the first question goes to the model (a few seconds), the identical repeat is an exact hit (0.00 s), and the lower-case copy is a semantic hit with similarity 1.00. The paraphrase and the express question both go to the model, with similarities just below 0.9. In "2) Routing" each message gets one of the four labels and a time of a few seconds. Your times and similarities will differ a little; your routes may differ too.</div>
+
+<h2>Reading the output</h2>
+
+<h3>Caching: the time saved is real</h3>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Horizontal bars of the five timings: 4.00 s, 0.00 s, 0.06 s, 3.82 s and 4.27 s">
+  <text x="20" y="35" class="label">1 · model · new question</text>
+  <rect class="box" x="310" y="20" width="337" height="22" rx="4"/>
+  <text x="655" y="36" class="label">4.00 s</text>
+  <text x="20" y="67" class="label">2 · exact cache · same text</text>
+  <rect class="box-ok" x="310" y="52" width="3" height="22" rx="1"/>
+  <text x="321" y="68" class="label">0.00 s</text>
+  <text x="20" y="99" class="label">3 · semantic cache · 1.00</text>
+  <rect class="box-ok" x="310" y="84" width="6" height="22" rx="1"/>
+  <text x="324" y="100" class="label">0.06 s</text>
+  <text x="20" y="131" class="label">4 · model · paraphrase 0.88</text>
+  <rect class="box" x="310" y="116" width="322" height="22" rx="4"/>
+  <text x="640" y="132" class="label">3.82 s</text>
+  <text x="20" y="163" class="label">5 · model · express 0.82</text>
+  <rect class="box" x="310" y="148" width="360" height="22" rx="4"/>
+  <text x="678" y="164" class="label">4.27 s</text>
+  <text x="380" y="197" text-anchor="middle" class="small">bar length = seconds for that question (same scale for all rows)</text>
+</svg>
+<figcaption>The five timings of our run. Cache hits are too short to see. <strong>A hit is about 60 times faster than a model answer here, and on a paid API it also costs no tokens.</strong></figcaption>
+</figure>
+
+<p>Line 3 is worth a second look. "how long does standard shipping take" differs from the first question only by capitals and the missing "?". The exact cache lower-cases the text but keeps punctuation, so its key is different and it misses. The semantic cache sees the same meaning (similarity 1.00) and answers in 0.06 s, the time of one embedding call.</p>
+
+<h3>The threshold trade-off</h3>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="A similarity scale from 0.75 to 1.00 with the threshold at 0.90; the lower-case copy at 1.00 is a hit, the paraphrase at 0.88 and the express question at 0.82 are misses">
+  <rect class="box2" x="60" y="90" width="384" height="20"/>
+  <rect class="box-ok" x="444" y="90" width="256" height="20"/>
+  <path class="line" d="M60,100 H700"/>
+  <path class="line dashed" d="M444,44 V140"/>
+  <text x="444" y="36" text-anchor="middle" class="label accent">threshold 0.90</text>
+  <text x="60" y="128" text-anchor="middle" class="small">0.75</text>
+  <text x="188" y="128" text-anchor="middle" class="small">0.80</text>
+  <text x="316" y="128" text-anchor="middle" class="small">0.85</text>
+  <text x="572" y="128" text-anchor="middle" class="small">0.95</text>
+  <text x="700" y="128" text-anchor="middle" class="small">1.00</text>
+  <circle class="dot-info" cx="239" cy="100" r="7"/>
+  <text x="239" y="76" text-anchor="middle" class="label">express 0.82</text>
+  <circle class="dot-warn" cx="393" cy="100" r="7"/>
+  <text x="380" y="76" text-anchor="middle" class="label">paraphrase 0.88</text>
+  <circle class="dot-ok" cx="700" cy="100" r="7"/>
+  <text x="700" y="76" text-anchor="end" class="label">lower-case copy 1.00</text>
+  <text x="250" y="156" text-anchor="middle" class="small">below: ask the model (safe, slower)</text>
+  <text x="572" y="156" text-anchor="middle" class="small">at or above: reuse the cached answer</text>
+  <text x="380" y="184" text-anchor="middle" class="small bad">At 0.80 the express question (0.82) would get the standard-shipping answer.</text>
+</svg>
+<figcaption>Where our three semantic lookups landed (real similarities from the run). <strong>The threshold decides which mistake you prefer: missed savings above, wrong answers below.</strong></figcaption>
+</figure>
+
+<p>The paraphrase "How many days does standard delivery take?" means the same as the cached question, and the cached answer would have been right. It scored 0.88, just below 0.9, so the bot paid for a fresh answer: a <em>missed saving</em>. The express question scored 0.82 and also went to the model, which was <em>correct</em>: express shipping takes 1 to 2 days, standard shipping 3 to 5, so reusing the cached answer would have told the customer something false.</p>
+<p>So why not lower the threshold to 0.85 to catch the paraphrase? Because the two numbers are close. The gap between "same meaning, different words" (0.88) and "similar words, different meaning" (0.82) is only 0.06 here. A threshold low enough to catch more paraphrases will sooner or later catch a question like the express one, and then the cache confidently serves a wrong answer in 0.06 s, with no model ever looking at the new question. A missed saving costs you 4 seconds; a wrong cached answer costs you a customer's trust. That is why semantic caches start strict, are tuned on a labelled set of question pairs, and are often limited to questions where a wrong reuse is harmless.</p>
+
+<h3>Routing: useful, but not free</h3>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 262" role="img" aria-label="A message goes to route(), which picks one of four routes: smalltalk with a fixed reply, policy_question to the RAG bot, order_question to the agent, out_of_scope with a fixed refusal; in our run Thanks a lot was sent to out_of_scope">
+  <rect class="box2" x="10" y="108" width="120" height="44" rx="8"/>
+  <text x="70" y="135" text-anchor="middle">message</text>
+  <path class="arrow" d="M130,130 H168"/>
+  <rect class="box-info" x="170" y="98" width="170" height="64" rx="8"/>
+  <text x="255" y="124" text-anchor="middle" class="mono">route()</text>
+  <text x="255" y="144" text-anchor="middle" class="small">llama3.2 · 2.3–4.4 s</text>
+  <path class="arrow" d="M340,130 C380,130 380,42 418,42"/>
+  <path class="arrow" d="M340,130 C380,130 380,102 418,102"/>
+  <path class="arrow" d="M340,130 C380,130 380,162 418,162"/>
+  <path class="arrow" d="M340,130 C380,130 380,224 418,224"/>
+  <rect class="box" x="420" y="20" width="320" height="44" rx="8"/>
+  <text x="432" y="39" class="mono">smalltalk</text>
+  <text x="432" y="55" class="small">fixed reply, no further model call</text>
+  <rect class="box" x="420" y="80" width="320" height="44" rx="8"/>
+  <text x="432" y="99" class="mono">policy_question</text>
+  <text x="432" y="115" class="small">→ RAG bot (lab 07)</text>
+  <rect class="box" x="420" y="140" width="320" height="44" rx="8"/>
+  <text x="432" y="159" class="mono">order_question</text>
+  <text x="432" y="175" class="small">→ agent with order tools (lab 09)</text>
+  <rect class="box-warn" x="420" y="196" width="320" height="56" rx="8"/>
+  <text x="432" y="215" class="mono">out_of_scope</text>
+  <text x="432" y="231" class="small">fixed refusal, no further model call</text>
+  <text x="432" y="246" class="small bad">our run: "Thanks a lot!" landed here</text>
+</svg>
+<figcaption>The four routes of <code>aie/router.py</code>. In this lab the script only prints the destination. <strong>Every route starts with one model call to choose it.</strong></figcaption>
+</figure>
+
+<p>Three of the four messages were routed correctly. "Thanks a lot!" was labelled <code>out_of_scope</code>, although the prompt lists thanks under <code>smalltalk</code>, so a polite customer got "I can only help with Trailhead Bikes questions." A small model makes this kind of mistake; you only notice it if you test the router on labelled messages, exactly like the eval set of <a href="04-eval-set.html">lab 04</a>.</p>
+<p>The second lesson is in the times. Each routing call took 2.3 to 4.4 seconds, almost as long as a full RAG answer (about 4 s in part 1), because the router is the same <code>llama3.2</code> model. A router only saves time and money when it is much cheaper than the work it avoids.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Stacked bars: small talk without router 4.0 s, with router 3.3 s; policy question without router 4.0 s, with router 4.4 plus 4.0 equals 8.4 s">
+  <text x="20" y="40" class="label">small talk, no router</text>
+  <rect class="box" x="250" y="24" width="200" height="24" rx="4"/>
+  <text x="458" y="41" class="label">≈4.0 s (RAG)</text>
+  <text x="20" y="80" class="label">small talk, with router</text>
+  <rect class="box-warn" x="250" y="64" width="165" height="24" rx="4"/>
+  <text x="423" y="81" class="label">3.3 s (route, then fixed reply)</text>
+  <text x="20" y="130" class="label">policy question, no router</text>
+  <rect class="box" x="250" y="114" width="200" height="24" rx="4"/>
+  <text x="458" y="131" class="label">≈4.0 s (RAG)</text>
+  <text x="20" y="170" class="label">policy question, with router</text>
+  <rect class="box-warn" x="250" y="154" width="220" height="24" rx="4"/>
+  <rect class="box" x="470" y="154" width="200" height="24" rx="4"/>
+  <text x="678" y="171" class="label">≈8.4 s</text>
+  <rect class="box-warn" x="250" y="198" width="14" height="14" rx="2"/>
+  <text x="270" y="210" class="small">routing call</text>
+  <rect class="box" x="370" y="198" width="14" height="14" rx="2"/>
+  <text x="390" y="210" class="small">RAG answer</text>
+</svg>
+<figcaption>Route times are from our run (3.3 s and 4.4 s); the ≈4.0 s RAG time is the typical fresh answer from part 1, and the sums are simple arithmetic, not a measurement. <strong>With a router as slow as the model, small talk saves little and every real question gets twice as slow.</strong></figcaption>
+</figure>
+
+<p>Real systems therefore route with something much cheaper than the main model: keyword rules, a small classifier trained on labelled messages, an embedding compared with example messages per route, or a tiny model on fast hardware. The cache-then-route order also matters: the caches run first because a hit makes routing unnecessary.</p>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+  <li><strong>Lowering the threshold to "get more hits".</strong> The hit rate goes up and so does the number of confidently wrong answers. Our express question at 0.82 shows how close a wrong match can be. Tune on labelled pairs and look at the misses <em>and</em> the false hits.</li>
+  <li><strong>Forgetting the embedding prefix.</strong> <code>nomic-embed-text</code> expects <code>search_query: </code> (or <code>search_document: </code>). Without it the similarities shift and a threshold tuned with the prefix no longer fits.</li>
+  <li><strong>Caching personal answers.</strong> "Where is my order TH-10260?" must never be answered from a cache shared between customers. Only cache answers that are the same for everybody, or include the customer in the key.</li>
+  <li><strong>Never clearing the cache.</strong> If a policy document changes, old cached answers are now wrong. Our in-memory cache disappears when the script ends; a persistent cache needs an expiry time or a reset when documents change.</li>
+  <li><strong>Assuming the router is right.</strong> It is a model making a guess. "Thanks a lot!" went to <code>out_of_scope</code> in our run. Give routes a safe default and measure routing accuracy.</li>
+  <li><strong>Running from the wrong folder.</strong> <code>ModuleNotFoundError: No module named 'aie'</code> means you are not in the project folder, or you ran <code>python labs/11_cache_router.py</code> instead of <code>python -m labs.11_cache_router</code>.</li>
+</ul>
+</div>
+
+<h2>Try it yourself</h2>
+<ol>
+  <li><strong>Move the threshold.</strong> In line 11 of <code>labs/11_cache_router.py</code> change <code>threshold=0.9</code> to <code>0.85</code> and run again. If your similarities are close to ours, the paraphrase (≈0.88) now becomes a semantic hit with the standard-shipping answer, which is correct. Then try <code>0.8</code>: the express question (≈0.82) now also gets the standard-shipping answer, which is wrong. Use the similarities printed in <em>your</em> run to predict the result before you run it.</li>
+  <li><strong>Find your own near-misses.</strong> Add questions to the list in lines 28–32, such as "Do you ship to Italy?" followed by "Do you ship to Japan?". Look at the printed "closest cached question" values. Pairs with different answers but high similarity are exactly the cases a threshold must keep out.</li>
+  <li><strong>Fix the small-talk route.</strong> Add a few examples to <code>ROUTER_PROMPT</code> in <code>aie/router.py</code>, for example <code>smalltalk: greetings or thanks, e.g. "Hi", "Thanks a lot!", "Have a nice day".</code>, and run again. Check whether "Thanks a lot!" now lands in <code>smalltalk</code>, and whether the other three routes stayed the same.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>An exact cache is fast and never wrong but misses every rewording; ours even missed a lower-case copy because "?" is part of the key.</li>
+  <li>A semantic cache compares embeddings: it answered a reworded copy in 0.06 s instead of about 4 s.</li>
+  <li>The threshold is a trade-off: at 0.9 we missed a good paraphrase (0.88) but correctly refused the express question (0.82). A lower threshold risks fast, confident, wrong answers.</li>
+  <li>A router picks a path per message, but it is a model guess ("Thanks a lot!" was misrouted) and here it cost 2.3–4.4 s per call. A router must be much cheaper than what it saves.</li>
+  <li>Only cache answers that are the same for everyone, and clear the cache when the documents change.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="10-guardrails.html"><small>← Previous · Step 10</small>Guardrails on input and output</a>
+<a class="next" href="12-feedback.html"><small>Next · Step 12 →</small>Tracing and user feedback</a>
+</nav>
+</main>
+</body>
+</html>

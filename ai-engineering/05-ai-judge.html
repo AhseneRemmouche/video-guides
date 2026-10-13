@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 · An AI judge, checked against humans</title>
+<meta name="description" content="Grade answers with a stronger model and a written rubric, then measure how often it agrees with human labels.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 05/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 05 of 14 · Hands-on lab</div>
+  <h1>An AI judge, checked against humans</h1>
+  <p class="lead">Grade answers with a stronger model and a written rubric, then measure how often it agrees with human labels.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<p>In <a href="04-eval-set.html">lab 04</a> the keyword check gave a score of 30 %, and you found four verdicts that were plainly wrong. Reading every answer yourself would fix that, but you can't do it after every change. This lab hands the grading to a second, larger model with a written rubric: an <a class="term" href="glossary.html#ai-judge">AI judge</a>. Then it asks the question that matters most: <strong>how often does the judge agree with a careful human?</strong></p>
+
+<div class="callout"><strong>Goal of this lab.</strong> Build a judge (<code>gemma4</code>, a rubric, the reference document, a structured verdict), run it on 20 answers that a human has already labelled, and measure agreement: judge vs human, and keyword check vs human. Then study the cases where the judge and the human disagree.</div>
+
+<h2>The idea in brief</h2>
+
+<p>An AI judge is a model prompted to grade another model's output. You give it the question, the answer and something to compare against (here the shop document the answer should come from), plus a <a class="term" href="glossary.html#rubric">rubric</a>: written rules for what counts as correct. It returns a verdict. Unlike a keyword check, it can understand "we do not offer express delivery" as meaning "not available", and it can spot invented extras around a correct keyword.</p>
+
+<p>But a judge is itself a model, so it can be wrong, inconsistent, or biased in ways you can't see by reading its code. That is why you <strong>calibrate</strong> it: run it on examples where you already know the right verdict (<a class="term" href="glossary.html#human-labels">human labels</a>) and count how often it agrees. Only then do you let it grade new runs. The concept chapters <a href="evaluation-methods.html">Evaluation methods</a> (AI as a judge) and <a href="evaluating-systems.html">Evaluating AI systems</a> (building an evaluation pipeline) cover the theory.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Inputs of the judge: rubric as system prompt, question, reference document and answer as user prompt, sent to gemma4, returning a Verdict with reasoning and verdict">
+  <text class="title" x="20" y="28">One judge call</text>
+  <rect class="box-warn" x="20" y="48" width="230" height="40" rx="8"/>
+  <text x="135" y="73" text-anchor="middle">RUBRIC (system prompt)</text>
+  <rect class="box" x="20" y="100" width="230" height="40" rx="8"/>
+  <text x="135" y="125" text-anchor="middle">QUESTION</text>
+  <rect class="box-info" x="20" y="152" width="230" height="40" rx="8"/>
+  <text x="135" y="177" text-anchor="middle">REFERENCE DOCUMENT</text>
+  <rect class="box" x="20" y="204" width="230" height="40" rx="8"/>
+  <text x="135" y="229" text-anchor="middle">ASSISTANT'S ANSWER</text>
+  <path class="arrow" d="M 250,68 L 318,130"/>
+  <path class="arrow" d="M 250,120 L 318,138"/>
+  <path class="arrow" d="M 250,172 L 318,148"/>
+  <path class="arrow" d="M 250,224 L 318,156"/>
+  <rect class="box-solid" x="320" y="104" width="160" height="70" rx="8"/>
+  <text class="on-solid" x="400" y="130" text-anchor="middle">gemma4</text>
+  <text class="on-solid" x="400" y="150" text-anchor="middle">temperature 0</text>
+  <path class="arrow-accent" d="M 480,139 H 524"/>
+  <rect class="box-ok" x="526" y="94" width="214" height="90" rx="8"/>
+  <text class="mono" x="540" y="118">Verdict(</text>
+  <text class="mono" x="556" y="140">reasoning="...",</text>
+  <text class="mono" x="556" y="160">verdict="correct")</text>
+  <text class="small" x="633" y="206" text-anchor="middle">validated by Pydantic</text>
+</svg>
+<figcaption>The judge sees the reference document, which the bot in lab 04 never saw. <strong>Giving the judge the truth turns "does this sound right?" into "does this match the source?"</strong></figcaption>
+</figure>
+
+<h2>What you will do</h2>
+
+<ol class="steps">
+<li>Create <code>aie/judge.py</code> with the rubric, the <code>Verdict</code> schema and the <code>judge()</code> function.</li>
+<li>Create <code>evals/judge_calibration.jsonl</code>: 20 saved baseline answers, each labelled correct or not by a human.</li>
+<li>Create <code>labs/05_judge.py</code>.</li>
+<li>Check that the judge model is available: <code>ollama pull gemma4</code> (done in lab 01) and that <code>AIE_JUDGE_MODEL</code> is unset or <code>gemma4</code>.</li>
+<li>Run <code>uv run python -m labs.05_judge</code> and wait. In our run on a 4 GB laptop GPU it took about 10 minutes for the 20 answers (including loading <code>gemma4</code>); yours may be faster or slower.</li>
+<li>Read every line marked <code>&lt;-- judge disagrees with human</code> and decide who is right.</li>
+</ol>
+
+<h2>Step 1: the judge, <code>aie/judge.py</code></h2>
+
+<pre data-file="aie/judge.py" data-lang="py" data-tag="complete file"><code>"""An AI judge: a (usually stronger) model grades an answer against the reference document."""
+from typing import Literal
+
+from pydantic import BaseModel
+
+from aie import config
+from aie.docs import load_docs
+from aie.llm import chat_json
+
+RUBRIC = """You grade answers from a bike shop's support assistant.
+
+You get the customer's question, the shop's reference document and the assistant's answer.
+The answer is CORRECT when:
+- it answers the question the way the reference document does, and
+- it states no number, policy or fact that contradicts or is missing from the reference.
+If the reference says no document covers the question, the answer is CORRECT only if it says it doesn't know
+or points to support, without inventing facts.
+Extra politeness or advice that adds no new facts is fine.
+
+First explain your reasoning in two or three sentences, then give the verdict."""
+
+
+class Verdict(BaseModel):
+    reasoning: str
+    verdict: Literal["correct", "incorrect"]
+
+
+def judge(question, answer, source):
+    reference = load_docs()[source] if source else "No document covers this question."
+    prompt = f"QUESTION:\n{question}\n\nREFERENCE DOCUMENT:\n{reference}\n\nASSISTANT'S ANSWER:\n{answer}"
+    return chat_json(
+        [{"role": "system", "content": RUBRIC}, {"role": "user", "content": prompt}],
+        Verdict, model=config.JUDGE_MODEL, temperature=0,
+    )</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""An AI judge: a (usually stronger) model grades an answer ..."""</code></td><td>The idea in one sentence. A judge is usually a larger or better model than the one being graded, because grading needs careful reading.</td></tr>
+<tr><td>2</td><td><code>from typing import Literal</code></td><td><code>Literal["correct", "incorrect"]</code> means "exactly one of these two strings". It forces a clean yes/no instead of "mostly correct".</td></tr>
+<tr><td>4</td><td><code>from pydantic import BaseModel</code></td><td><a class="term" href="glossary.html#pydantic">Pydantic</a> describes the shape of the judge's JSON reply and checks it, as in <a href="03-structured-output.html">lab 03</a>.</td></tr>
+<tr><td>6</td><td><code>from aie import config</code></td><td>For <code>config.JUDGE_MODEL</code>: <code>gemma4</code> by default, or the <code>AIE_JUDGE_MODEL</code> environment variable.</td></tr>
+<tr><td>7</td><td><code>from aie.docs import load_docs</code></td><td>Returns <code>{"returns": "...", "shipping": "...", ...}</code>: every document in <code>data/docs/</code> keyed by file name.</td></tr>
+<tr><td>8</td><td><code>from aie.llm import chat_json</code></td><td>The helper in <code>aie/llm.py</code> (used in lab 03) that asks for JSON matching a schema, validates it and retries with the error message if it is invalid.</td></tr>
+<tr><td>10</td><td><code>RUBRIC = """You grade answers from a bike shop's support assistant.</code></td><td>The rubric is the judge's system prompt. It starts by stating the judge's job.</td></tr>
+<tr><td>12</td><td><code>You get the customer's question, the shop's reference document and the assistant's answer.</code></td><td>Names the three inputs so the model knows which text is which (they arrive under matching headings, line 30).</td></tr>
+<tr><td>13–15</td><td><code>The answer is CORRECT when: - it answers the question the way the reference document does, and - it states no number, policy or fact that contradicts or is missing from the reference.</code></td><td>The core rule, in two parts. The second part is strict on purpose: an answer is wrong if it adds <em>any</em> fact the document doesn't contain, even when the main answer is right. This is the rule that catches invented store credits and dollar prices. Remember it; it explains two disagreements below.</td></tr>
+<tr><td>16–17</td><td><code>If the reference says no document covers the question, the answer is CORRECT only if it says it doesn't know or points to support, without inventing facts.</code></td><td>The rule for the two unanswerable questions (q19, q20). Without it, the judge would have nothing to compare against and would have to guess.</td></tr>
+<tr><td>18</td><td><code>Extra politeness or advice that adds no new facts is fine.</code></td><td>Prevents the opposite problem: punishing "Please contact our support team" as an "extra". Rubrics need both "what is wrong" and "what is allowed".</td></tr>
+<tr><td>20</td><td><code>First explain your reasoning in two or three sentences, then give the verdict."""</code></td><td>Asks for a short explanation before the verdict. It gives you something to read when you disagree, and it lets the model "think on paper" before committing.</td></tr>
+<tr><td>23–25</td><td><code>class Verdict(BaseModel): reasoning: str; verdict: Literal["correct", "incorrect"]</code></td><td>The reply schema. <strong><code>reasoning</code> comes before <code>verdict</code> on purpose</strong>: models write JSON from left to right, one token at a time, so the reasoning is generated first and the verdict can follow from it. With the verdict first, the model would decide and then write a justification for whatever it already said.</td></tr>
+<tr><td>28</td><td><code>def judge(question, answer, source):</code></td><td><code>source</code> is the document name from <code>qa.jsonl</code> (for example <code>"returns"</code>), or <code>None</code> for unanswerable questions.</td></tr>
+<tr><td>29</td><td><code>reference = load_docs()[source] if source else "No document covers this question."</code></td><td>The full reference document, or a fixed sentence that triggers rule 16–17. Giving the judge the source makes it a "reference-based" judge: it compares with the truth instead of relying on its own knowledge, which knows nothing about Trailhead either.</td></tr>
+<tr><td>30</td><td><code>prompt = f"QUESTION:\n{question}\n\nREFERENCE DOCUMENT:\n{reference}\n\nASSISTANT'S ANSWER:\n{answer}"</code></td><td>The user message: three clearly labelled sections, separated by blank lines.</td></tr>
+<tr><td>31–34</td><td><code>return chat_json([...], Verdict, model=config.JUDGE_MODEL, temperature=0)</code></td><td>Sends rubric + prompt to the judge model and returns a validated <code>Verdict</code> object. <code>temperature=0</code> asks for the most likely tokens, so grading the same answer twice gives (nearly) the same verdict; a judge whose mood changes between runs is useless. <code>chat()</code> also passes <code>reasoning_effort="none"</code> from <code>AIE_REASONING_EFFORT</code> (see below).</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to "thinking" models? Why <code>reasoning_effort</code> is set to <code>none</code></summary>
+<p><code>gemma4</code> is a <a class="term" href="glossary.html#reasoning-model">reasoning model</a>: by default it writes a long hidden chain of thought before the visible answer. That costs tokens and time. On our machine, one judge answer took about 95–110 seconds with thinking on (around 350–400 hidden thinking tokens) and about 13 seconds with <code>reasoning_effort</code> set to <code>none</code> (32 tokens).</p>
+<p>The wrapper in <code>aie/llm.py</code> sends <code>reasoning_effort</code> on every call, taken from <code>AIE_REASONING_EFFORT</code> (default <code>none</code>). The judge still reasons, but briefly and visibly, in the <code>reasoning</code> field the rubric asks for. That is a trade-off: less thinking may mean less careful verdicts. Calibration is how you find out whether the cheaper setting is good enough.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Field order in the Verdict JSON: tokens are generated left to right, so reasoning is written before the verdict">
+  <text class="title" x="20" y="28">Why reasoning comes first in Verdict</text>
+  <text class="label" x="20" y="58">Generation order (left to right, one token at a time):</text>
+  <rect class="box" x="20" y="70" width="70" height="40" rx="8"/>
+  <text class="mono" x="55" y="95" text-anchor="middle">{</text>
+  <rect class="box-info" x="100" y="70" width="430" height="40" rx="8"/>
+  <text class="mono" x="315" y="95" text-anchor="middle">"reasoning": "The reference says ..."</text>
+  <rect class="box-ok" x="540" y="70" width="200" height="40" rx="8"/>
+  <text class="mono" x="640" y="95" text-anchor="middle">"verdict": "..."}</text>
+  <path class="arrow-accent" d="M 20,130 H 736"/>
+  <text class="small" x="20" y="152">time</text>
+  <text class="small" x="315" y="176" text-anchor="middle">written first: the comparison with the document</text>
+  <text class="small" x="640" y="176" text-anchor="middle">written last: can follow from it</text>
+</svg>
+<figcaption>Pydantic keeps field order in the JSON schema. <strong>Put the explanation before the decision, so the decision is based on it rather than justified after the fact.</strong></figcaption>
+</figure>
+
+<h2>Step 2: human labels, <code>evals/judge_calibration.jsonl</code></h2>
+
+<p>To calibrate a judge you need answers whose correct verdict you already know. This file holds 20 answers from one saved baseline run (the same bot and questions as lab 04, but an earlier run, so a few answers differ from your <code>runs/baseline.jsonl</code>). The guide author read each answer against the shop documents and labelled it. Only <strong>4 of the 20</strong> are labelled correct: q01, q06, q16 and q19.</p>
+
+<pre data-file="evals/judge_calibration.jsonl" data-lang="json" data-tag="complete file"><code>{"id": "q01", "question": "How many days do I have to return an item?", "answer": "At Trailhead Bikes, we offer a 30-day return policy. You can return any item within 30 days of delivery, and we'll provide a full refund or exchange it for a different size/color if needed. Please contact our customer support team to initiate the return process.", "human_correct": true, "human_note": "30 days and full refund are right"}
+{"id": "q02", "question": "Can I return a helmet I already opened?", "answer": "Unfortunately, due to safety regulations and hygiene concerns, we cannot accept returns on opened helmets. However, we can offer a store credit for the full amount of the helmet if you'd like to exchange it for a different size or style. Please contact us to discuss further.", "human_correct": false, "human_note": "right that opened helmets can't be returned, but invents a store credit"}
+{"id": "q03", "question": "Is return shipping free?", "answer": "Yes, we offer free return shipping on all orders within the continental United States. Please contact our customer support team to initiate the return process and we'll provide a return shipping label.", "human_correct": false, "human_note": "wrong: free only over 100 EUR, otherwise 6.90 EUR"}
+{"id": "q04", "question": "How long is the warranty on the frame?", "answer": "Our frames are covered by a 5-year warranty against manufacturing defects. This warranty is valid from the date of purchase and covers repairs or replacements of defective frames, parts, and labor.", "human_correct": false, "human_note": "wrong: lifetime, not 5 years"}
+{"id": "q05", "question": "How long is my e-bike battery covered?", "answer": "Our e-bikes come with a 2-year warranty on the battery, which covers defects in materials and workmanship. However, the battery's overall lifespan is typically around 5-7 years, depending on usage and maintenance.", "human_correct": false, "human_note": "incomplete: misses the 500 charge cycles limit"}
+{"id": "q06", "question": "Where do I find the frame number?", "answer": "You can typically find the frame number on the bottom bracket shell of your bike, usually stamped or engraved in a circular or oval pattern. It's usually a series of numbers and letters that identify your specific bike model and production year.", "human_correct": true, "human_note": "bottom bracket is right"}
+{"id": "q07", "question": "Can I get express delivery for a complete bike?", "answer": "We offer express delivery options for complete bikes, which typically take 2-3 business days to arrive. However, please note that this service is only available for orders placed before 12pm EST, and an additional shipping fee of $50 will be applied. Would you like me to add this option to your order?", "human_correct": false, "human_note": "wrong: express is not available for complete bikes"}
+{"id": "q08", "question": "Do you deliver to Switzerland?", "answer": "Yes, we do deliver to Switzerland. However, please note that international shipping rates and delivery times may vary. You can check the estimated delivery time and cost on our website by entering your shipping address as Switzerland.", "human_correct": false, "human_note": "wrong: Switzerland is not in the shipping list"}
+{"id": "q09", "question": "How much does standard shipping cost?", "answer": "Our standard shipping rate is $10.99 for domestic orders, which typically takes 3-7 business days to arrive. Please note that this rate applies to orders weighing 50 pounds or less.", "human_correct": false, "human_note": "wrong: 9.90 EUR"}
+{"id": "q10", "question": "Can I charge my battery in a cold garage at -5 degrees?", "answer": "Yes, you can charge your battery in a cold garage, but it's recommended to keep the battery away from extremely cold temperatures for an extended period. Most lithium-ion batteries, like those used in our Trailhead Bikes, can still be charged in cold temperatures, but the charging time may be slightly longer.", "human_correct": false, "human_note": "wrong and unsafe: never charge below 0 degrees"}
+{"id": "q11", "question": "How long does it take to fully charge the battery with the fast charger?", "answer": "Our fast charger can fully charge the battery in approximately 2-3 hours, depending on the battery's capacity and the charger's output. However, with the fast charger, you can expect to see a 50% charge in about 1 hour.", "human_correct": false, "human_note": "wrong: 2.5 hours"}
+{"id": "q12", "question": "My battery light blinks red three times. What does it mean?", "answer": "The blinking red light on your battery indicates a low battery level. It's recommended to charge your battery as soon as possible to avoid any damage to your bike's electrical system.", "human_correct": false, "human_note": "wrong: too cold or too hot to charge"}
+{"id": "q13", "question": "I am 178 cm tall. Which frame size should I take?", "answer": "Based on your height, I would recommend our 18\" frame size, as it provides a comfortable riding position and adequate clearance for your legs. However, please note that frame size is just one factor to consider, and we also recommend trying on a bike to ensure a proper fit. Would you like me to guide you through our sizing chart or recommend a specific bike model that might suit you?", "human_correct": false, "human_note": "wrong: size L for 175-185 cm"}
+{"id": "q14", "question": "What does Trailhead Care Plus cost per year?", "answer": "Trailhead Care Plus is our premium warranty program that offers extended coverage and benefits. The annual cost of Trailhead Care Plus is $199, which provides coverage for parts and labor for up to 2 years or 24,000 miles, whichever comes first.", "human_correct": false, "human_note": "wrong: 149 EUR"}
+{"id": "q15", "question": "Is theft protection included in the basic Trailhead Care plan?", "answer": "Yes, theft protection is included in the basic Trailhead Care plan. This plan provides coverage for theft, loss, or damage to your bike, and we'll work with you to replace or repair your bike as needed. Please note that there may be some exclusions and limitations to the coverage, so I can provide more details if you'd like.", "human_correct": false, "human_note": "wrong: theft protection is only in Care Plus"}
+{"id": "q16", "question": "Is the Annecy store open on Monday?", "answer": "Our Annecy store is closed on Mondays, as it follows the French public holiday schedule. However, you can visit our website or contact our customer service team to inquire about any special events or sales that may be happening on Mondays.", "human_correct": true, "human_note": "closed on Monday is right (the reason given is invented but harmless)"}
+{"id": "q17", "question": "When should I drop off my bike for a full service?", "answer": "We recommend bringing your bike in for a full service every 6-12 months, depending on how frequently you ride. If you've been riding extensively or in harsh conditions, you may need to come in more often. Please contact us to schedule an appointment and we'll be happy to assess your bike's needs.", "human_correct": false, "human_note": "does not answer: before 10 am"}
+{"id": "q18", "question": "Can I pay for a 1500 EUR bike in instalments?", "answer": "Yes, we offer financing options for our bikes, including the 1500 EUR model. You can pay for your bike in 3, 6, or 12 monthly instalments, with a 10% deposit required upfront. Please contact our customer support team to discuss the details and apply for financing.", "human_correct": false, "human_note": "wrong: 3 or 4 interest-free instalments, no deposit"}
+{"id": "q19", "question": "Who is the CEO of Trailhead?", "answer": "I couldn't find any information on a CEO for Trailhead Bikes. Trailhead Bikes is an online bike shop, and I'm not aware of any publicly available information on its leadership structure.", "human_correct": true, "human_note": "declines instead of inventing a name"}
+{"id": "q20", "question": "Do you sell skateboards?", "answer": "No, we don't sell skateboards. Trailhead Bikes specializes in bicycles, including road bikes, mountain bikes, and hybrid bikes. If you're looking for a skateboard, I recommend checking out a specialty skate shop or online retailer that focuses on action sports equipment.", "human_correct": false, "human_note": "the documents never say this; it states an unsupported fact instead of declining"}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–20</td><td><code>"id"</code>, <code>"question"</code></td><td>The same ids and questions as <code>qa.jsonl</code>. The lab script uses the id to look up <code>source</code> and <code>must_include</code> there.</td></tr>
+<tr><td>1–20</td><td><code>"answer"</code></td><td>The full answer text from the saved run: what the judge grades. Fixed text, so every judge and every check grades exactly the same answers.</td></tr>
+<tr><td>1–20</td><td><code>"human_correct": true / false</code></td><td>The human verdict: the "right answer" for the judge.</td></tr>
+<tr><td>1–20</td><td><code>"human_note"</code></td><td>Why the human decided that way. Notes make labels reviewable: someone else can disagree with a specific reason instead of a bare "false".</td></tr>
+<tr><td>2</td><td><code>"human_correct": false, "human_note": "... but invents a store credit"</code></td><td>The main fact (no returns of opened helmets) is right, but an invented store credit makes it wrong. The keyword check passes it (it contains "hygiene").</td></tr>
+<tr><td>5</td><td><code>"incomplete: misses the 500 charge cycles limit"</code></td><td>Labelled wrong because half the policy is missing. A different labeller might accept it.</td></tr>
+<tr><td>16</td><td><code>"human_correct": true, "... (the reason given is invented but harmless)"</code></td><td>A judgement call: "closed on Mondays" is right, but the reason ("French public holiday schedule") is invented. The human chose to accept it. Watch this one.</td></tr>
+<tr><td>19</td><td><code>"declines instead of inventing a name"</code></td><td>A polite refusal counts as correct, the case the keyword check got wrong in lab 04.</td></tr>
+<tr><td>20</td><td><code>"the documents never say this; it states an unsupported fact instead of declining"</code></td><td>"No, we don't sell skateboards" is probably true in reality, but nothing in the documents supports it. The human applied the rule "don't state facts you can't back up" and labelled it wrong.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to human labels? They are judgements too</summary>
+<p>It is tempting to call human labels "the ground truth". They are better described as <strong>one careful person's judgement</strong>. Look at q05 (incomplete), q16 (right answer, invented reason) and q20 (true in the world, unsupported by the documents). Two reasonable people could label each of them differently.</p>
+<p>In practice teams write labelling guidelines, have two people label the same items, and measure how often they agree with each other. If two humans agree only 85 % of the time, a judge that agrees 85 % with one of them is about as good as a second human. Here there is only one labeller, so treat the agreement numbers as rough.</p>
+</details>
+
+<h2>Step 3: the calibration script, <code>labs/05_judge.py</code></h2>
+
+<pre data-file="labs/05_judge.py" data-lang="py" data-tag="complete file"><code>"""Lab 05: grade answers with an AI judge, then check the judge against human labels."""
+from aie import config
+from aie.config import EVALS
+from aie.evalset import load_jsonl, load_qa
+from aie.evaluate import keyword_pass
+from aie.judge import judge
+
+qa = {q["id"]: q for q in load_qa()}
+labelled = load_jsonl(EVALS / "judge_calibration.jsonl")
+print(f"Judge model: {config.JUDGE_MODEL}\n")
+
+agree_judge = agree_keyword = 0
+for row in labelled:
+    q = qa[row["id"]]
+    v = judge(row["question"], row["answer"], q["source"])
+    judge_ok = v.verdict == "correct"
+    keyword_ok = keyword_pass(q, row["answer"])
+    agree_judge += judge_ok == row["human_correct"]
+    agree_keyword += keyword_ok == row["human_correct"]
+    flag = "" if judge_ok == row["human_correct"] else "   &lt;-- judge disagrees with human"
+    print(f"{row['id']}  human={'ok ' if row['human_correct'] else 'bad'}  judge={'ok ' if judge_ok else 'bad'}  keyword={'ok ' if keyword_ok else 'bad'}{flag}")
+    if flag:
+        print(f"      judge said: {v.reasoning[:160]}")
+
+n = len(labelled)
+print(f"\nAgreement with human labels: judge {agree_judge}/{n} = {agree_judge / n:.0%}, keyword check {agree_keyword}/{n} = {agree_keyword / n:.0%}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2–6</td><td><code>from aie import config</code> ... <code>from aie.judge import judge</code></td><td>Config (judge model name and the <code>evals/</code> path), the JSONL helpers, the lab 04 keyword check, and the new judge.</td></tr>
+<tr><td>8</td><td><code>qa = {q["id"]: q for q in load_qa()}</code></td><td>A dict from id to eval row, so <code>qa["q04"]</code> gives that question's <code>source</code> and keywords.</td></tr>
+<tr><td>9</td><td><code>labelled = load_jsonl(EVALS / "judge_calibration.jsonl")</code></td><td>The 20 labelled answers.</td></tr>
+<tr><td>10</td><td><code>print(f"Judge model: {config.JUDGE_MODEL}\n")</code></td><td>Prints which judge was used. Always record this: results from different judges are not comparable.</td></tr>
+<tr><td>12</td><td><code>agree_judge = agree_keyword = 0</code></td><td>Two counters, both starting at 0.</td></tr>
+<tr><td>14</td><td><code>q = qa[row["id"]]</code></td><td>The eval row for this answer.</td></tr>
+<tr><td>15</td><td><code>v = judge(row["question"], row["answer"], q["source"])</code></td><td>One judge call: the slow part (one <code>gemma4</code> answer per row).</td></tr>
+<tr><td>16</td><td><code>judge_ok = v.verdict == "correct"</code></td><td>Turns the judge's string into <code>True</code>/<code>False</code> so it can be compared with the human's boolean.</td></tr>
+<tr><td>17</td><td><code>keyword_ok = keyword_pass(q, row["answer"])</code></td><td>The lab 04 check on the same answer, for comparison. It costs nothing.</td></tr>
+<tr><td>18–19</td><td><code>agree_judge += judge_ok == row["human_correct"]</code></td><td>Adds 1 when the verdict matches the human label (<code>True</code> counts as 1). Agreement counts both "both say correct" and "both say incorrect".</td></tr>
+<tr><td>20</td><td><code>flag = "" if judge_ok == row["human_correct"] else "   &lt;-- judge disagrees with human"</code></td><td>A marker that makes disagreements easy to find in the output.</td></tr>
+<tr><td>21</td><td><code>print(f"{row['id']}  human={'ok ' if ... else 'bad'}  judge=...  keyword=...{flag}")</code></td><td>One aligned line per answer with all three verdicts side by side. <code>'ok '</code> has a trailing space so it is as wide as <code>'bad'</code> and the columns line up.</td></tr>
+<tr><td>22–23</td><td><code>if flag: print(f"      judge said: {v.reasoning[:160]}")</code></td><td>For disagreements only, prints the first 160 characters of the judge's reasoning. This is where the <code>reasoning</code> field pays off: you can see <em>why</em> it disagreed.</td></tr>
+<tr><td>25–26</td><td><code>n = len(labelled)</code> ... <code>{agree_judge / n:.0%}</code></td><td>Agreement as a fraction and a percentage. <code>:.0%</code> formats 0.85 as <code>85%</code>.</td></tr>
+</table></div>
+
+<h2>Step 4: run it</h2>
+
+<pre data-lang="sh"><code>uv run python -m labs.05_judge</code></pre>
+
+<p>Be patient. <code>gemma4</code> is much larger than <code>llama3.2</code>, and on a small GPU it does not fit fully, so each verdict is slow. In our run on a laptop with a 4 GB GPU, the whole script took <strong>about 10 minutes</strong>, including loading the model. That is our experience on one machine, not a benchmark.</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · gemma4 judge · your output will differ"><code>Judge model: gemma4
+
+q01  human=ok   judge=bad  keyword=ok    &lt;-- judge disagrees with human
+      judge said: The assistant correctly states the 30-day return window for a full refund, which aligns with the reference document. However, the assistant mentions the option 
+q02  human=bad  judge=bad  keyword=ok 
+q03  human=bad  judge=bad  keyword=bad
+q04  human=bad  judge=bad  keyword=bad
+q05  human=bad  judge=bad  keyword=bad
+q06  human=ok   judge=ok   keyword=ok 
+q07  human=bad  judge=bad  keyword=bad
+q08  human=bad  judge=bad  keyword=ok 
+q09  human=bad  judge=bad  keyword=bad
+q10  human=bad  judge=bad  keyword=bad
+q11  human=bad  judge=bad  keyword=bad
+q12  human=bad  judge=bad  keyword=bad
+q13  human=bad  judge=bad  keyword=ok 
+q14  human=bad  judge=bad  keyword=bad
+q15  human=bad  judge=bad  keyword=bad
+q16  human=ok   judge=bad  keyword=ok    &lt;-- judge disagrees with human
+      judge said: The reference document explicitly states that all stores, including Annecy, are closed on Monday. The assistant's answer correctly states the store is closed on
+q17  human=bad  judge=bad  keyword=bad
+q18  human=bad  judge=bad  keyword=bad
+q19  human=ok   judge=ok   keyword=bad
+q20  human=bad  judge=ok   keyword=bad   &lt;-- judge disagrees with human
+      judge said: The reference document explicitly states that no document covers the question. The assistant's answer provides a definitive 'no' and then offers helpful advice,
+
+Agreement with human labels: judge 17/20 = 85%, keyword check 16/20 = 80%</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> The judge model name, then 20 lines with <code>human=</code>, <code>judge=</code> and <code>keyword=</code> verdicts, a few lines flagged <code>&lt;-- judge disagrees with human</code> with the start of the judge's reasoning, and a final agreement line. In our run: <strong>judge 17/20 = 85 %, keyword check 16/20 = 80 %</strong>, with disagreements on q01, q16 and q20. Your judge may disagree on different rows: even at temperature 0, model outputs can vary between runs and versions.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Bar chart of agreement with human labels: judge 17 of 20, keyword check 16 of 20, with the rows each got wrong">
+  <text class="title" x="20" y="28">Agreement with the human labels (our run)</text>
+  <text class="label" x="150" y="76" text-anchor="end">gemma4 judge</text>
+  <rect class="box-ok" x="160" y="58" width="374" height="28" rx="4"/>
+  <text x="612" y="77">17/20 (85 %)</text>
+  <text class="small" x="160" y="104">wrong on q01, q16, q20</text>
+  <text class="label" x="150" y="146" text-anchor="end">keyword check</text>
+  <rect class="box-info" x="160" y="128" width="352" height="28" rx="4"/>
+  <text x="612" y="147">16/20 (80 %)</text>
+  <text class="small" x="160" y="174">wrong on q02, q08, q13, q19</text>
+  <path class="line dashed" d="M 600,48 V 186"/>
+  <text class="small" x="600" y="204" text-anchor="middle">20/20</text>
+  <text class="small" x="160" y="204">bar length = agreeing rows out of 20</text>
+</svg>
+<figcaption>Close totals, but <strong>the two methods fail on completely different questions</strong>: the keyword check on wording, the judge on borderline judgement calls.</figcaption>
+</figure>
+
+<h2>Read the disagreements</h2>
+
+<p>The totals are close, so it is the individual rows that tell you something. The keyword check's four misses are the ones you found in lab 04: substring accidents (q08, q13), a missed invented extra (q02) and a missed polite refusal (q19). The judge got all four right. Its three misses are of a different kind:</p>
+
+<ul>
+<li><strong>q01, judge stricter than the human.</strong> The answer says 30 days and a full refund (right) and adds that you can "exchange it for a different size/color", which the returns document doesn't mention. The human accepted it; the judge said incorrect. Its printed reasoning stops at "the assistant mentions the option", and the only option in the answer is that exchange, so it most likely applied rubric line 15 literally ("no ... fact that ... is missing from the reference").</li>
+<li><strong>q16, judge stricter than the human.</strong> "Closed on Mondays" is right, but the reason ("French public holiday schedule") is invented. The human called it harmless; the judge, whose reasoning agrees the store is closed on Monday, still said incorrect, which points to line 15 again. (Its reasoning is cut at 160 characters; print all of <code>v.reasoning</code> to see the full text.)</li>
+<li><strong>q20, judge more lenient than the human.</strong> "No, we don't sell skateboards" is stated as a fact, but no document says it. Rubric lines 16–17 say an answer to an uncovered question is correct <em>only</em> if it says it doesn't know or points to support. The judge accepted the confident "no" anyway; its reasoning calls it "a definitive 'no'" plus "helpful advice".</li>
+</ul>
+
+<p>So who is right? For q01 and q16 you could argue the judge is: the rubric says no missing facts, and the human made an exception. That means the rubric doesn't say what the human actually believes ("small harmless extras are fine"). For q20 the judge did not follow its own rubric. These are the two lessons of calibration: <strong>disagreements show you either a weakness of the judge or a gap between your rubric and your real standard</strong>, and you only find them by comparing with labels.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="The three disagreements: q01 and q16 where the judge was stricter than the human, q20 where it was more lenient, each linked to the rubric line involved">
+  <text class="title" x="20" y="28">Three disagreements, two directions</text>
+  <rect class="box-warn" x="20" y="48" width="350" height="150" rx="8"/>
+  <text class="title" x="195" y="74" text-anchor="middle">judge stricter (q01, q16)</text>
+  <text x="40" y="102">human: ok, judge: bad</text>
+  <text class="small" x="40" y="126">q01 adds a size/colour exchange</text>
+  <text class="small" x="40" y="144">q16 adds an invented reason</text>
+  <text class="small" x="40" y="168">applies rubric line 15 to the letter:</text>
+  <text class="small" x="40" y="184">"no fact missing from the reference"</text>
+  <rect class="box-bad" x="390" y="48" width="350" height="150" rx="8"/>
+  <text class="title" x="565" y="74" text-anchor="middle">judge more lenient (q20)</text>
+  <text x="410" y="102">human: bad, judge: ok</text>
+  <text class="small" x="410" y="126">"No, we don't sell skateboards"</text>
+  <text class="small" x="410" y="144">no document says so</text>
+  <text class="small" x="410" y="168">ignores rubric lines 16-17:</text>
+  <text class="small" x="410" y="184">"correct only if it says it doesn't know"</text>
+  <text class="small" x="195" y="226" text-anchor="middle">fix: say in the rubric what is allowed</text>
+  <text class="small" x="565" y="226" text-anchor="middle">fix: stronger judge, or test this rule more</text>
+</svg>
+<figcaption>Disagreements are information. <strong>The left box is mostly a rubric problem; the right box is a judge problem.</strong></figcaption>
+</figure>
+
+<h2>Rubric wording matters</h2>
+
+<p>The judge did exactly what line 15 said, and that is the point: a judge follows the words you wrote, not the standard in your head. Small wording choices change verdicts:</p>
+<ul>
+<li>"No fact missing from the reference" makes every harmless invented detail a failure. If you want q16 to pass, write it down: for example "A small detail that does not change the policy is acceptable" (and accept that the judge must now decide what "small" means).</li>
+<li>Binary verdicts (<code>correct</code>/<code>incorrect</code>) are easy to count but hide partial answers like q05. Some teams use a 1–5 scale or separate criteria (correct facts, complete, no inventions), each with its own verdict.</li>
+<li>A few worked examples in the rubric (a <a class="term" href="glossary.html#few-shot">few-shot</a> prompt), especially of borderline cases, often help more than longer rules.</li>
+</ul>
+<p>Whenever you change the rubric, run the calibration again. A rubric edit that fixes q16 might break something else.</p>
+
+<details class="primer"><summary>New to judge biases? Known ways AI judges go wrong</summary>
+<p>AI judges have well-known tendencies you should test for, not assume away:</p>
+<ul>
+<li><strong><a class="term" href="glossary.html#position-bias">Position bias</a></strong>: when comparing two answers, judges often prefer the one shown first (or second). The usual fix is to judge both orders.</li>
+<li><strong>Length bias</strong>: longer, more detailed answers tend to look better, even when the extra text is invented.</li>
+<li><strong>Self-preference</strong>: a model may rate text written by itself or its own model family more favourably.</li>
+<li><strong>Leniency toward confident, fluent text</strong>: q20 is a small example: a confident "no" was accepted.</li>
+<li><strong>Drift</strong>: if the judge model or its version changes, its verdicts change. Record the judge model with every score.</li>
+</ul>
+</details>
+
+<h2>What a judge costs</h2>
+
+<p>The keyword check grades 20 answers in a fraction of a second, for free, and gives the same result every time. The judge needed one call to a larger model per answer: about 10 minutes for 20 answers on our machine. With a paid API, that is also money for every eval run, and the judge's prompt is long because it contains the whole reference document. A human is the most expensive of all, which is why you use humans to <em>check the judge</em> on a small sample and let the judge grade the rest.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Comparison of keyword check, AI judge and human review by speed, cost and what they catch">
+  <text class="title" x="20" y="28">Three graders compared</text>
+  <rect class="box-ok" x="20" y="44" width="230" height="160" rx="8"/>
+  <text class="title" x="135" y="70" text-anchor="middle">Keyword check</text>
+  <text class="small" x="40" y="98">time: under a second for 20</text>
+  <text class="small" x="40" y="118">cost: free, no model</text>
+  <text class="small" x="40" y="138">repeatable: always</text>
+  <text class="small" x="40" y="164">misses: meaning, inventions</text>
+  <text class="small" x="40" y="182">agreement here: 16/20</text>
+  <rect class="box-info" x="265" y="44" width="230" height="160" rx="8"/>
+  <text class="title" x="380" y="70" text-anchor="middle">AI judge (gemma4)</text>
+  <text class="small" x="285" y="98">time: about 10 min for 20 (ours)</text>
+  <text class="small" x="285" y="118">cost: one big-model call each</text>
+  <text class="small" x="285" y="138">repeatable: mostly (temp 0)</text>
+  <text class="small" x="285" y="164">misses: borderline calls</text>
+  <text class="small" x="285" y="182">agreement here: 17/20</text>
+  <rect class="box-warn" x="510" y="44" width="230" height="160" rx="8"/>
+  <text class="title" x="625" y="70" text-anchor="middle">Human review</text>
+  <text class="small" x="530" y="98">time: minutes per answer</text>
+  <text class="small" x="530" y="118">cost: the highest</text>
+  <text class="small" x="530" y="138">repeatable: not fully</text>
+  <text class="small" x="530" y="164">role: the reference that</text>
+  <text class="small" x="530" y="182">calibrates the other two</text>
+</svg>
+<figcaption>Use them together. <strong>Humans label a small sample, the judge is calibrated on it, and cheap checks run everywhere else.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes.</strong>
+<ul>
+<li>The run seems frozen after the first lines: it is just slow. <code>gemma4</code> loads first, and switching between <code>llama3.2</code> and <code>gemma4</code> reloads models on a small GPU. Wait, or check activity with <code>ollama ps</code> in a second terminal.</li>
+<li><code>model "gemma4" not found</code>: run <code>ollama pull gemma4</code>, or set <code>AIE_JUDGE_MODEL</code> in <code>.env</code> to a judge model you have.</li>
+<li>Very slow answers (minutes each): <code>AIE_REASONING_EFFORT</code> was set to something other than <code>none</code>, so the model thinks at length before every verdict.</li>
+<li><code>pydantic.ValidationError</code> after retries: the judge returned a verdict other than <code>correct</code>/<code>incorrect</code> or broken JSON three times. Check that the model supports structured output, or try again.</li>
+<li><code>KeyError: 'q21'</code>: a row in <code>judge_calibration.jsonl</code> has an id that is not in <code>qa.jsonl</code>.</li>
+<li>Trusting the judge because it "explains itself". A fluent reasoning is not proof; q20's reasoning sounds sensible and still contradicts the rubric.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Judge one answer directly</strong> (one call, much faster than the full lab):
+<pre data-lang="sh" data-tag="try it"><code>uv run python -c "from aie.judge import judge; print(judge('Do you sell skateboards?', 'No, we do not sell skateboards.', None))"</code></pre>
+It prints a <code>Verdict</code> with its reasoning. Then try <code>'I do not know, please contact support.'</code> as the answer and compare.</li>
+<li><strong>Change the rubric for q16.</strong> Add a line to <code>RUBRIC</code> such as "A harmless reason or detail that does not change the policy is acceptable." and judge the q16 answer alone:
+<pre data-lang="sh" data-tag="try it"><code>uv run python -c "from aie.judge import judge; print(judge('Is the Annecy store open on Monday?', 'Our Annecy store is closed on Mondays, as it follows the French public holiday schedule.', 'stores'))"</code></pre>
+Does the verdict change? If yes, rerun the whole lab to see what else changed.</li>
+<li><strong>Try a weaker judge.</strong> Grade with the small app model instead (PowerShell first, then bash), and compare the agreement line with ours:
+<pre data-lang="ps" data-tag="try it"><code>$env:AIE_JUDGE_MODEL = "llama3.2"; uv run python -m labs.05_judge; Remove-Item Env:AIE_JUDGE_MODEL</code></pre>
+<pre data-lang="sh" data-tag="try it"><code>AIE_JUDGE_MODEL=llama3.2 uv run python -m labs.05_judge</code></pre></li>
+<li><strong>Be the labeller.</strong> Read q05, q16 and q20 in <code>judge_calibration.jsonl</code>. If you disagree with a label, change <code>human_correct</code> and rerun. The judge didn't change, but its agreement score did: a reminder that the score depends on the labels as much as on the judge.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>An AI judge is a model plus a rubric plus a reference; here <code>gemma4</code> at temperature 0 with <code>reasoning_effort</code> none, returning a validated <code>Verdict</code>.</li>
+<li><code>reasoning</code> comes before <code>verdict</code> so the decision follows from the comparison.</li>
+<li>Calibrate before trusting: on 20 human-labelled answers the judge agreed 17/20 (85 %), the keyword check 16/20 (80 %), failing on different questions.</li>
+<li>Disagreements (q01, q16 stricter; q20 lenient) revealed a rubric that says more than the human meant, and a judge that ignored a rule.</li>
+<li>Human labels are judgements too; write notes, and ideally measure agreement between two humans.</li>
+<li>Judges cost time and money (about 10 minutes for 20 answers on our machine) and have biases; use humans to check the judge and cheap checks everywhere else.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="04-eval-set.html"><small>← Previous · Step 04</small>Build an eval set and a baseline</a>
+<a class="next" href="06-retrieval.html"><small>Next · Step 06 →</small>Retrieval: BM25, embeddings and hybrid</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 7 · Finetuning</title>
+<meta name="description" content="When to finetune instead of prompting or RAG, memory math, parameter-efficient methods like LoRA, and model merging. Read with book chapter 7.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 7/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 7 of 10</div>
+  <h1>Finetuning</h1>
+  <p class="lead">When to finetune instead of prompting or RAG, memory math, parameter-efficient methods like LoRA, and model merging. Read with book chapter 7.</p>
+</section>
+<div class="callout">Read with <strong>chapter 7 · Finetuning</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>Every lab so far changed what we <em>send</em> to the model: a better prompt, retrieved documents, tools, a cache. The model itself, <code>llama3.2</code>, never changed. Its billions of numbers stayed exactly as Meta released them. <strong>Finetuning</strong> is the other option: you change those numbers by training the model a little more on your own examples, so that the new behaviour is built into the model instead of written into every prompt.</p>
+
+<p>This chapter explains what finetuning really does, when it is worth the trouble and when it is not, why training needs so much more memory than running a model, what tricks like LoRA and quantization do about that, and how to tell whether a finetuned model is actually better. It ends where <a href="13-synthetic-data.html">lab 13</a> begins: a training file in the right format.</p>
+
+<div class="callout ok"><strong>Why this matters for your project.</strong> The Trailhead bot is small and local, and some of its failures (long rambling answers, a wrong tone, forgetting to cite) are exactly the kind of thing finetuning can fix. Others (not knowing the return policy) are not. Knowing which is which saves you weeks of work and a GPU bill. In <a href="13-synthetic-data.html">lab 13</a> you prepare a finetuning dataset; this page explains what you would do with it.</div>
+
+<div class="callout warn"><strong>This guide does not run a finetuning job.</strong> The labs run on a laptop GPU with 4 GB of memory, and training even a small model needs far more care, memory and time than the rest of the project. Lab 13 stops at producing <code>runs/finetune.jsonl</code>. Everything below about training is explained, not executed; the numbers in the memory examples are illustrative round numbers, not measurements.</div>
+
+<h2>What finetuning is</h2>
+
+<p>A model's knowledge and habits live in its <a class="term" href="glossary.html#parameters">parameters</a> (also called weights): very large tables of numbers that turn input <a class="term" href="glossary.html#token">tokens</a> into a prediction of the next token. Training means showing the model an example, measuring how wrong its prediction was (the <em>loss</em>), and nudging every parameter slightly in the direction that would have made it less wrong. Repeat that millions of times and the model gets good at whatever the examples show.</p>
+
+<p><a class="term" href="glossary.html#finetuning">Finetuning</a> is simply <strong>continuing that training</strong>, starting from a model that is already trained, on a much smaller set of examples you chose. Nothing about the mechanics is new. What is different is the starting point (a capable model, not random numbers) and the goal (adapt it to one job, not teach it language from scratch).</p>
+
+<details class="primer"><summary>New to training? Loss, gradients and the optimizer in plain words</summary>
+<p>Imagine the model as a machine with billions of small dials. You give it the start of a sentence from your data and ask for the next token. It assigns a probability to every possible token. The <strong>loss</strong> is a single number that is high when the model gave little probability to the token that actually came next, and low when it gave a lot.</p>
+<p>A <strong>gradient</strong> tells you, for every dial, which direction to turn it to lower the loss, and how strongly that dial matters. Computing the gradients is called the <em>backward pass</em>. The <strong>optimizer</strong> (most often a variant called Adam or AdamW) then turns the dials. It keeps a small memory per dial (a running average of recent gradients and of their size) so the steps are smoother. The <strong>learning rate</strong> is how big each step is.</p>
+<p>Running the model to get a prediction is the <em>forward pass</em>. <a class="term" href="glossary.html#inference">Inference</a> is only forward passes. Training is forward pass, backward pass, optimizer step, over and over. That difference is why training needs much more memory, as you will see below.</p>
+</details>
+
+<h3>Pre-training, post-training, and your finetuning</h3>
+
+<p>A modern chat model goes through several training stages before you download it, and your finetuning is one more stage on top:</p>
+
+<ul>
+<li><strong>Pre-training.</strong> The model learns to predict the next token on an enormous, mixed collection of text. This is where general knowledge and language skill come from, and it costs far more than anything an application team will do.</li>
+<li><strong>Post-training.</strong> The model maker then teaches the raw model to behave like an assistant. First with <a class="term" href="glossary.html#sft">supervised finetuning (SFT)</a> on example conversations (an instruction and a good answer), then usually with <a class="term" href="glossary.html#preference-finetuning">preference finetuning</a>, where the model learns from comparisons of a better and a worse answer. Post-training <em>is</em> finetuning, done by the model maker.</li>
+<li><strong>Your finetuning.</strong> You start from the post-trained model and run SFT (sometimes preference finetuning) on your own examples: your tone, your output format, your domain's way of answering.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Four stages in a row: pre-training and post-training by the model maker, then your finetuning and the deployed model">
+  <text class="small" x="195" y="22" text-anchor="middle">done by the model maker</text>
+  <rect class="zone" x="5" y="30" width="370" height="125" rx="8"/>
+  <text class="small" x="575" y="22" text-anchor="middle">done by you (optional)</text>
+  <rect class="zone" x="385" y="30" width="370" height="125" rx="8"/>
+  <rect class="box2" x="15" y="45" width="165" height="95" rx="8"/>
+  <text class="title" x="97" y="78" text-anchor="middle">Pre-training</text>
+  <text class="small" x="97" y="100" text-anchor="middle">next-token prediction</text>
+  <text class="small" x="97" y="116" text-anchor="middle">on huge mixed text</text>
+  <path class="arrow" d="M 180,92 H 198"/>
+  <rect class="box2" x="200" y="45" width="165" height="95" rx="8"/>
+  <text class="title" x="282" y="78" text-anchor="middle">Post-training</text>
+  <text class="small" x="282" y="100" text-anchor="middle">SFT + preference</text>
+  <text class="small" x="282" y="116" text-anchor="middle">makes an assistant</text>
+  <path class="arrow-accent" d="M 365,92 H 393"/>
+  <rect class="box-info" x="395" y="45" width="165" height="95" rx="8"/>
+  <text class="title" x="477" y="78" text-anchor="middle">Your finetuning</text>
+  <text class="small" x="477" y="100" text-anchor="middle">same mechanics,</text>
+  <text class="small" x="477" y="116" text-anchor="middle">your examples</text>
+  <path class="arrow" d="M 560,92 H 578"/>
+  <rect class="box-ok" x="580" y="45" width="165" height="95" rx="8"/>
+  <text class="title" x="662" y="78" text-anchor="middle">Your model</text>
+  <text class="small" x="662" y="100" text-anchor="middle">served and evaluated</text>
+  <text class="small" x="662" y="116" text-anchor="middle">like any other model</text>
+</svg>
+<figcaption>Read left to right. The labs use the model at the end of the grey zone (<code>llama3.2</code> as released). <strong>Finetuning is not a different technique from what the model maker did; it is the same training, continued on your data.</strong></figcaption>
+</figure>
+
+<p>Because the starting model already knows language and has assistant manners, your examples only need to show the <em>difference</em> you want. That is why finetuning can work with hundreds or thousands of examples rather than the trillions of tokens used in pre-training.</p>
+
+<h2>Prompt, RAG or finetune?</h2>
+
+<p>There are three main levers for making a model do your job well: the <a class="term" href="glossary.html#prompt">prompt</a> (instructions and <a class="term" href="glossary.html#few-shot">few-shot</a> examples), <a class="term" href="glossary.html#rag">RAG</a> (giving the model the right information at question time) and finetuning (changing the model). They are not rivals; mature systems often use all three. But they solve different problems, and they cost very different amounts.</p>
+
+<p>Two widely used <strong>rules of thumb</strong> (not laws) help you choose:</p>
+<ul>
+<li><strong>RAG is for facts and knowledge.</strong> If the model fails because it does not know something, or the information changes (prices, stock, policies), put the information in the context. Updating a document is instant; updating a finetuned model means another training run. Our own numbers show this: with no documents, the bot passed 30 % of the keyword checks in <a href="04-eval-set.html">lab 04</a>; with retrieved documents, the <code>rag_v2</code> prompt in <a href="07-rag.html">lab 07</a> passed 80 % on the same 20 questions. No training was needed for that jump.</li>
+<li><strong>Finetuning is for form and behaviour.</strong> If the model knows enough but answers in the wrong shape (too long, wrong tone, a JSON format it keeps breaking, a habit of not citing sources, a specialised writing style), finetuning can make the right behaviour automatic. It is also how you get a <em>smaller</em> model to do a narrow task as well as a bigger one, which can cut cost and <a class="term" href="glossary.html#latency">latency</a>.</li>
+</ul>
+
+<p>A sensible order is: get the most out of the prompt first, measured on an <a class="term" href="glossary.html#eval-set">eval set</a>; add RAG if the failures are about missing information; consider finetuning only when the remaining failures are about behaviour and you have run out of prompt-level fixes.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Decision tree: start with a prompt and an eval set, then choose RAG for missing facts, few-shot then finetuning for wrong format, or finetuning a smaller model for cost">
+  <rect class="box" x="210" y="15" width="340" height="40" rx="8"/>
+  <text x="380" y="40" text-anchor="middle">Start: a prompt + an eval set (labs 04, 08)</text>
+  <path class="arrow" d="M 380,55 V 83"/>
+  <rect class="box2" x="270" y="85" width="220" height="40" rx="8"/>
+  <text class="title" x="380" y="110" text-anchor="middle">Why does it still fail?</text>
+  <path class="arrow" d="M 380,125 V 145 H 125 V 168"/>
+  <path class="arrow" d="M 380,125 V 168"/>
+  <path class="arrow" d="M 380,125 V 145 H 635 V 168"/>
+  <rect class="box2" x="10" y="170" width="230" height="40" rx="8"/>
+  <text x="125" y="195" text-anchor="middle">Missing or changing facts</text>
+  <rect class="box2" x="265" y="170" width="230" height="40" rx="8"/>
+  <text x="380" y="195" text-anchor="middle">Wrong format, tone or style</text>
+  <rect class="box2" x="520" y="170" width="230" height="40" rx="8"/>
+  <text x="635" y="195" text-anchor="middle">Too slow or too expensive</text>
+  <path class="arrow" d="M 125,210 V 233"/>
+  <path class="arrow" d="M 380,210 V 233"/>
+  <path class="arrow" d="M 635,210 V 233"/>
+  <rect class="box-ok" x="10" y="235" width="230" height="44" rx="8"/>
+  <text x="125" y="255" text-anchor="middle">RAG (lab 07)</text>
+  <text class="small" x="125" y="271" text-anchor="middle">update documents, not weights</text>
+  <rect class="box-info" x="265" y="235" width="230" height="44" rx="8"/>
+  <text x="380" y="255" text-anchor="middle">Few-shot, then finetune</text>
+  <text class="small" x="380" y="271" text-anchor="middle">behaviour into the weights</text>
+  <rect class="box-info" x="520" y="235" width="230" height="44" rx="8"/>
+  <text x="635" y="255" text-anchor="middle">Finetune a smaller model</text>
+  <text class="small" x="635" y="271" text-anchor="middle">or distil a bigger one</text>
+</svg>
+<figcaption>A rule-of-thumb decision tree. <strong>Diagnose the failure before choosing the fix:</strong> missing knowledge points to RAG, wrong behaviour points to finetuning. Real systems often combine both.</figcaption>
+</figure>
+
+<details class="primer"><summary>Wait, lab 13 makes question-answer pairs from the policy documents. Isn't that teaching facts?</summary>
+<p>Good catch. The dataset from <a href="13-synthetic-data.html">lab 13</a> does contain facts ("30 days", "6.90 EUR"). A model finetuned on it would partly memorise them. But that is a fragile way to store facts: the model may mix them up, it cannot cite a source, and when the shop changes its return policy you would have to regenerate the data and retrain. For the facts, RAG is the better tool, and the lab results above show it already works well.</p>
+<p>What finetuning on this kind of data <em>can</em> teach reliably is the style: short answers of one to three sentences, a friendly support tone, the shop's vocabulary. The lab uses it as a realistic example of the data pipeline (generate, filter, deduplicate, format), which is the same whatever you finetune for. Combining the two is also common: finetune for behaviour, and still retrieve the facts.</p>
+</details>
+
+<h3>Reasons not to finetune (yet)</h3>
+<ul>
+<li><strong>Cost and skills.</strong> You need GPUs (or a paid hosted service), training code or a platform, and someone who can read a loss curve and debug a training run.</li>
+<li><strong>Data.</strong> You need good examples, often hundreds or thousands, that show exactly the behaviour you want. Getting them is usually the hardest part (see <a href="dataset-engineering.html">Dataset engineering</a>).</li>
+<li><strong>Maintenance.</strong> A finetuned model is a new artifact you own. When a better base model comes out (which in this field happens often) you have to decide whether to finetune again. You also have to host and serve it, unless your provider does that.</li>
+<li><strong>Losing general abilities.</strong> Training hard on a narrow task can make a model worse at things it used to do well. This is called <em>catastrophic forgetting</em>. A support bot finetuned only on short answers might become unable to write a longer explanation when one is genuinely needed.</li>
+<li><strong>You may not need it.</strong> Prompt improvements are cheap to try and easy to undo. Many teams finetune too early, then discover that a clearer prompt plus a few examples would have done the job.</li>
+</ul>
+
+<p>Good reasons <em>to</em> finetune include: a strict output format that prompting cannot make reliable, a consistent voice across millions of messages, a domain whose language the base model handles badly, privacy or cost requirements that push you toward a small model you host yourself, and very long prompts (dozens of examples on every call) that you could replace by baking the examples into the weights.</p>
+
+<h2>Why training needs so much memory</h2>
+
+<p>Running a model and training it are very different workloads. To run a model, the GPU must hold the weights plus some working memory for the current request (mostly the <a class="term" href="glossary.html#kv-cache">KV cache</a>). To train it, the GPU must hold much more:</p>
+
+<ol>
+<li><strong>Weights</strong>: the model itself.</li>
+<li><strong>Gradients</strong>: one number per trainable parameter, saying which way to move it.</li>
+<li><strong>Optimizer states</strong>: Adam-style optimizers keep two extra numbers per trainable parameter (running averages), usually in 32-bit precision.</li>
+<li><strong>Activations</strong>: the intermediate results of the forward pass, kept so the backward pass can compute gradients. Their size grows with the batch size and the sequence length, not only with the model size.</li>
+</ol>
+
+<p>The first three scale with the number of parameters, so you can estimate them with simple arithmetic: <em>parameters × bytes per parameter</em>.</p>
+
+<h3>Bytes per parameter</h3>
+
+<p>Each parameter is a number stored in a certain format. The format decides how many bytes it takes:</p>
+
+<div class="table-wrap"><table>
+<tr><th>Format</th><th>Bits</th><th>Bytes per parameter</th><th>Weights of an illustrative 7-billion-parameter model</th></tr>
+<tr><td>fp32 (32-bit float)</td><td>32</td><td>4</td><td>7 × 10<sup>9</sup> × 4 = 28 × 10<sup>9</sup> bytes ≈ 28 GB</td></tr>
+<tr><td>bf16 or fp16 (16-bit float)</td><td>16</td><td>2</td><td>7 × 10<sup>9</sup> × 2 ≈ 14 GB</td></tr>
+<tr><td>int8 (8-bit integer)</td><td>8</td><td>1</td><td>7 × 10<sup>9</sup> × 1 ≈ 7 GB</td></tr>
+<tr><td>int4 (4-bit integer)</td><td>4</td><td>0.5</td><td>7 × 10<sup>9</sup> × 0.5 ≈ 3.5 GB</td></tr>
+</table></div>
+
+<p>Here 1 GB means 10<sup>9</sup> bytes, to keep the arithmetic readable; tools that report GiB (2<sup>30</sup> bytes) will show slightly smaller numbers. The 7-billion size is a round number chosen for the example, not a specific model. Real quantized files are also a little larger than the pure arithmetic, because they store extra scale values and keep a few layers in higher precision.</p>
+
+<p>You can check this against our own lab. <code>llama3.2</code> has about 3 billion parameters. At 2 bytes each it would need about 6 GB, which would not fit on the 4 GB GPU used for the labs. Yet the Ollama download is 2.0 GB. That is because the default Ollama version of the model is <a class="term" href="glossary.html#quantization">quantized</a> to roughly 4 bits per weight: 3 × 10<sup>9</sup> × 0.5 bytes is about 1.5 GB, plus the extras just mentioned.</p>
+
+<h3>A worked example (illustrative numbers)</h3>
+
+<p>Take the same illustrative 7-billion-parameter model and compare running it with fully finetuning it. A common recipe for full finetuning is <em>mixed precision</em> with an Adam-style optimizer: the forward and backward passes run in bf16, but a 32-bit "master" copy of the weights and the optimizer states are kept in fp32 so tiny updates are not rounded away. Per trainable parameter that gives:</p>
+
+<pre data-lang="text" data-tag="illustrative arithmetic"><code>Inference (bf16 weights only)
+  weights            2 bytes x 7e9  =  14 GB    (+ KV cache, grows with context and users)
+
+Full finetuning, mixed precision + Adam (per parameter)
+  bf16 weights       2 bytes
+  bf16 gradients     2 bytes
+  fp32 master copy   4 bytes
+  Adam 1st moment    4 bytes   (running average of gradients)
+  Adam 2nd moment    4 bytes   (running average of squared gradients)
+  ---------------------------
+  total             16 bytes x 7e9  = 112 GB    (+ activations)</code></pre>
+
+<p>So the same model that needs about 14 GB to answer questions needs <strong>about eight times as much</strong> to train all of its weights, before counting activations. That is more than any single consumer GPU holds, which is why full finetuning of even mid-sized models is usually done on several data-centre GPUs, with techniques that split these pieces across them.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 310" role="img" aria-label="Stacked bars comparing memory for inference, full finetuning, LoRA and QLoRA on an illustrative 7-billion-parameter model">
+  <text class="label" x="10" y="57">Inference (bf16)</text>
+  <text class="small" x="10" y="73">≈ 14 GB + KV cache</text>
+  <rect class="box-info" x="180" y="40" width="70" height="40" rx="4"/>
+  <text class="small" x="215" y="64" text-anchor="middle">weights</text>
+  <text class="label" x="10" y="117">Full finetuning</text>
+  <text class="small" x="10" y="133">≈ 112 GB + activations</text>
+  <rect class="box-info" x="180" y="100" width="70" height="40" rx="4"/>
+  <text class="small" x="215" y="124" text-anchor="middle">weights</text>
+  <rect class="box2" x="250" y="100" width="70" height="40" rx="4"/>
+  <text class="small" x="285" y="124" text-anchor="middle">grads</text>
+  <rect class="box-warn" x="320" y="100" width="140" height="40" rx="4"/>
+  <text class="small" x="390" y="124" text-anchor="middle">fp32 master copy</text>
+  <rect class="box-warn" x="460" y="100" width="140" height="40" rx="4"/>
+  <text class="small" x="530" y="124" text-anchor="middle">Adam 1st moment</text>
+  <rect class="box-warn" x="600" y="100" width="140" height="40" rx="4"/>
+  <text class="small" x="670" y="124" text-anchor="middle">Adam 2nd moment</text>
+  <text class="label" x="10" y="177">LoRA (bf16 base)</text>
+  <text class="small" x="10" y="193">≈ 14 GB + a little</text>
+  <rect class="box-info" x="180" y="160" width="70" height="40" rx="4"/>
+  <text class="small" x="215" y="184" text-anchor="middle">frozen</text>
+  <rect class="box-ok" x="250" y="160" width="8" height="40" rx="2"/>
+  <text class="small" x="268" y="184">+ adapters, their gradients and optimizer states (small)</text>
+  <text class="label" x="10" y="237">QLoRA (4-bit base)</text>
+  <text class="small" x="10" y="253">≈ 3.5 GB + a little</text>
+  <rect class="box-info" x="180" y="220" width="18" height="40" rx="2"/>
+  <rect class="box-ok" x="198" y="220" width="8" height="40" rx="2"/>
+  <text class="small" x="216" y="244">+ the same small adapter parts (activations still needed)</text>
+  <path class="line" d="M 180,280 H 740"/>
+  <text class="small" x="180" y="298" text-anchor="middle">0</text>
+  <text class="small" x="320" y="298" text-anchor="middle">28 GB</text>
+  <text class="small" x="460" y="298" text-anchor="middle">56 GB</text>
+  <text class="small" x="600" y="298" text-anchor="middle">84 GB</text>
+  <text class="small" x="740" y="298" text-anchor="end">112 GB</text>
+</svg>
+<figcaption>Bars drawn to scale for an <strong>illustrative</strong> 7-billion-parameter model (5 px per GB). Activations and the KV cache are not drawn because they depend on batch size and sequence length. <strong>Most of the cost of full finetuning is not the weights but the gradients and optimizer states for every parameter.</strong></figcaption>
+</figure>
+
+<p>Two ideas fall straight out of this picture. First, if you only <em>train</em> a tiny fraction of the parameters, the gradients and optimizer states shrink to almost nothing: that is parameter-efficient finetuning. Second, if you store the frozen weights in fewer bits, the remaining big block shrinks too: that is quantization. QLoRA combines both.</p>
+
+<p>Activations deserve one more word. They are the reason a training run that fits with short examples can crash with an "out of memory" error on long ones. Common remedies are a smaller batch per step (with <em>gradient accumulation</em> to keep the effective batch size), shorter sequences, and <em>gradient checkpointing</em>, which throws away most activations and recomputes them during the backward pass: less memory, more compute.</p>
+
+<h2>Numerical precision and quantization</h2>
+
+<p>Floating-point numbers store a value as a sign, an <strong>exponent</strong> (how big or small the number is, its range) and a <strong>mantissa</strong> (the significant digits, its precision). Fewer bits means less memory and faster arithmetic, but you lose range, precision, or both.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Bit layouts of fp32, fp16, bf16, int8 and int4, drawn with one square per bit">
+  <text class="mono" x="20" y="47">fp32</text>
+  <rect class="box-bad" x="120" y="30" width="14" height="26"/>
+  <rect class="box-info" x="134" y="30" width="112" height="26"/>
+  <text class="small" x="190" y="47" text-anchor="middle">exponent 8</text>
+  <rect class="box2" x="246" y="30" width="322" height="26"/>
+  <text class="small" x="407" y="47" text-anchor="middle">mantissa 23</text>
+  <text class="small" x="585" y="47">4 bytes · reference</text>
+  <text class="mono" x="20" y="87">fp16</text>
+  <rect class="box-bad" x="120" y="70" width="14" height="26"/>
+  <rect class="box-info" x="134" y="70" width="70" height="26"/>
+  <text class="small" x="169" y="87" text-anchor="middle">exp 5</text>
+  <rect class="box2" x="204" y="70" width="140" height="26"/>
+  <text class="small" x="274" y="87" text-anchor="middle">mantissa 10</text>
+  <text class="small" x="585" y="87">2 bytes · small range</text>
+  <text class="mono" x="20" y="127">bf16</text>
+  <rect class="box-bad" x="120" y="110" width="14" height="26"/>
+  <rect class="box-info" x="134" y="110" width="112" height="26"/>
+  <text class="small" x="190" y="127" text-anchor="middle">exponent 8</text>
+  <rect class="box2" x="246" y="110" width="98" height="26"/>
+  <text class="small" x="295" y="127" text-anchor="middle">mant. 7</text>
+  <text class="small" x="585" y="127">2 bytes · fp32's range</text>
+  <text class="mono" x="20" y="167">int8</text>
+  <rect class="box-ok" x="120" y="150" width="112" height="26"/>
+  <text class="small" x="176" y="167" text-anchor="middle">integer, 8 bits</text>
+  <text class="small" x="585" y="167">1 byte · needs a scale</text>
+  <text class="mono" x="20" y="207">int4</text>
+  <rect class="box-ok" x="120" y="190" width="56" height="26"/>
+  <text class="small" x="148" y="207" text-anchor="middle">4 bits</text>
+  <text class="small" x="585" y="207">0.5 byte · needs a scale</text>
+</svg>
+<figcaption>One square per bit (the small red square is the sign bit). <strong>bf16 keeps fp32's 8-bit exponent and gives up precision</strong>, which is why it is popular for training: values rarely overflow. fp16 keeps more precision but a much smaller range.</figcaption>
+</figure>
+
+<p><strong>Quantization</strong> means storing (and often computing with) numbers in fewer bits than they were trained in. For integers, a block of weights is stored as small whole numbers plus a <em>scale</em>: to read a weight back, multiply the integer by the scale. With 4 bits there are only 16 possible values per block, so each weight is rounded to the nearest one. The surprise of recent years is how little quality is lost at 8 bits and often even at 4 bits, especially for larger models, though the loss is never exactly zero and should be measured on your own eval set.</p>
+
+<ul>
+<li><strong>Post-training quantization</strong> converts a finished model. That is what produced the 2.0 GB <code>llama3.2</code> the labs use. It is cheap and is mostly about inference.</li>
+<li><strong>Quantization-aware training</strong> simulates the rounding during training so the model learns to cope with it. It usually loses less quality but needs a training run.</li>
+<li><strong>Mixed precision</strong>, seen above, is a training technique: compute in 16 bits, keep a 32-bit copy where small differences matter.</li>
+</ul>
+
+<p>Quantization appears again, from the inference side, in <a href="inference-optimization.html">Inference optimization</a>.</p>
+
+<h2>Full finetuning vs parameter-efficient finetuning</h2>
+
+<p><strong>Full finetuning</strong> updates every parameter. It is the most flexible option and can give the best results when you have lots of data, but it needs the big memory budget above and produces a complete new copy of the model (gigabytes) for every finetuned version.</p>
+
+<p><a class="term" href="glossary.html#peft">Parameter-efficient finetuning (PEFT)</a> freezes the original weights and trains only a small number of new or selected parameters. Because gradients and optimizer states are needed only for those, memory drops dramatically, training is faster, and the result is a small file you can store and swap easily. With enough care, results on narrow tasks are often close to full finetuning. Common families:</p>
+
+<ul>
+<li><strong>Adapters</strong>: small extra layers inserted inside each block of the model; only they are trained. Simple, but they add a little computation at inference time.</li>
+<li><strong>Prompt-based methods</strong> (soft prompts, prefix tuning): train a few "virtual token" vectors that are prepended to the input. Very small, but usually weaker.</li>
+<li><strong>LoRA and its variants</strong>: the most widely used PEFT method today, explained next.</li>
+</ul>
+
+<h3>LoRA: low-rank adaptation</h3>
+
+<p>Inside a transformer, most parameters sit in large weight matrices. Call one of them <code>W</code>, with shape <code>d × k</code>. Full finetuning learns a change <code>ΔW</code> of the same big shape. <a class="term" href="glossary.html#lora">LoRA</a> bets that the useful change is much simpler than that, and writes it as the product of two thin matrices: <code>ΔW = B · A</code>, where <code>B</code> is <code>d × r</code> and <code>A</code> is <code>r × k</code>. The number <code>r</code>, the <strong>rank</strong>, is small (values like 4, 8, 16 or 64 are common choices). <code>W</code> stays frozen; only <code>A</code> and <code>B</code> are trained.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="LoRA: a large frozen matrix W plus the product of a tall thin matrix B and a wide thin matrix A, merged into W prime">
+  <rect class="box2" x="30" y="40" width="160" height="160" rx="4"/>
+  <text class="title" x="110" y="112" text-anchor="middle">W</text>
+  <text class="small" x="110" y="132" text-anchor="middle">frozen, d × k</text>
+  <text class="title" x="215" y="126" text-anchor="middle">+</text>
+  <rect class="box-ok" x="240" y="40" width="30" height="160" rx="4"/>
+  <text class="title" x="255" y="125" text-anchor="middle">B</text>
+  <text class="small" x="255" y="220" text-anchor="middle">d × r</text>
+  <text class="title" x="285" y="61" text-anchor="middle">·</text>
+  <rect class="box-ok" x="300" y="40" width="160" height="30" rx="4"/>
+  <text class="title" x="380" y="60" text-anchor="middle">A</text>
+  <text class="small" x="380" y="88" text-anchor="middle">r × k</text>
+  <text class="small" x="350" y="130" text-anchor="middle">only A and B</text>
+  <text class="small" x="350" y="146" text-anchor="middle">are trained</text>
+  <path class="arrow-accent" d="M 470,120 H 528"/>
+  <text class="small" x="499" y="110" text-anchor="middle">merge</text>
+  <rect class="box-info" x="530" y="80" width="210" height="80" rx="8"/>
+  <text class="mono" x="635" y="115" text-anchor="middle">W' = W + B·A</text>
+  <text class="small" x="635" y="138" text-anchor="middle">same shape as W, no extra cost</text>
+  <text class="small" x="30" y="252">Illustrative: d = k = 4096, r = 8 → W has 16,777,216 numbers; A and B together have 65,536 (about 0.4 %).</text>
+</svg>
+<figcaption>LoRA trains two thin matrices instead of the big one. <strong>The rank r controls how much the adapter can express and how big it is.</strong> Sizes are illustrative, not those of a specific model.</figcaption>
+</figure>
+
+<p>The arithmetic in the figure is the whole reason LoRA is cheap. For one illustrative 4096 × 4096 matrix:</p>
+
+<pre data-lang="text" data-tag="illustrative arithmetic"><code>full matrix:  d x k        = 4096 x 4096       = 16,777,216 trainable numbers
+LoRA, r = 8:  r x (d + k)  = 8 x (4096 + 4096) =     65,536 trainable numbers
+ratio:        65,536 / 16,777,216 = 0.0039   (about 0.4 %)</code></pre>
+
+<p>Applied to the attention (and often the feed-forward) matrices of every layer, a LoRA adapter typically trains well under a few percent of the model's parameters. Gradients and Adam states exist only for those, which is the thin green sliver in the memory diagram. Other practical points:</p>
+
+<ul>
+<li><strong>Initialisation.</strong> <code>B</code> starts at zero, so <code>B · A</code> is zero and the model starts out behaving exactly like the base model. Training only moves it away as much as the data asks.</li>
+<li><strong>Scaling.</strong> Libraries add a factor (often called <code>alpha</code>, used as <code>alpha / r</code>) that controls how strongly the adapter's output is mixed in. Treat it like another learning-rate knob; library defaults are a fine start.</li>
+<li><strong>Which matrices.</strong> You choose which weight matrices get adapters. More targets mean more capacity and more memory.</li>
+<li><strong>Merging.</strong> After training you can compute <code>W' = W + B·A</code> once and save a normal model. It then runs at exactly the same speed as the original, with no extra layers.</li>
+<li><strong>Not merging.</strong> Or you keep the adapter separate: a file of a few megabytes to a few hundred megabytes, instead of gigabytes for a full copy.</li>
+</ul>
+
+<h3>Serving many LoRA adapters</h3>
+
+<p>Keeping adapters separate has a big operational advantage. Suppose you want one variant of the bot per brand, per language, or per customer. With full finetuning that is one full model copy each, every one occupying GPU memory. With LoRA, the server can load the base model <strong>once</strong> and apply a different small adapter per request. Several serving engines support this directly (check their current documentation for how). Swapping an adapter is cheap, and many adapters fit in the memory one extra model copy would need.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Three requests go to one shared base model; each request uses a different small LoRA adapter">
+  <rect class="box2" x="10" y="20" width="160" height="44" rx="8"/>
+  <text x="90" y="47" text-anchor="middle">Request: brand A</text>
+  <rect class="box2" x="10" y="88" width="160" height="44" rx="8"/>
+  <text x="90" y="115" text-anchor="middle">Request: French</text>
+  <rect class="box2" x="10" y="156" width="160" height="44" rx="8"/>
+  <text x="90" y="183" text-anchor="middle">Request: brand B</text>
+  <path class="arrow" d="M 170,42 H 220 V 100 H 268"/>
+  <path class="arrow" d="M 170,110 H 268"/>
+  <path class="arrow" d="M 170,178 H 220 V 120 H 268"/>
+  <rect class="box-info" x="270" y="60" width="220" height="100" rx="8"/>
+  <text class="title" x="380" y="100" text-anchor="middle">Base model</text>
+  <text class="small" x="380" y="120" text-anchor="middle">loaded once in GPU memory</text>
+  <text class="small" x="380" y="136" text-anchor="middle">gigabytes</text>
+  <rect class="box-ok" x="580" y="20" width="170" height="44" rx="8"/>
+  <text x="665" y="47" text-anchor="middle">adapter: brand A</text>
+  <rect class="box-ok" x="580" y="88" width="170" height="44" rx="8"/>
+  <text x="665" y="115" text-anchor="middle">adapter: French</text>
+  <rect class="box-ok" x="580" y="156" width="170" height="44" rx="8"/>
+  <text x="665" y="183" text-anchor="middle">adapter: brand B</text>
+  <path class="line dashed" d="M 580,42 H 535 V 90 H 490"/>
+  <path class="line dashed" d="M 580,110 H 490"/>
+  <path class="line dashed" d="M 580,178 H 535 V 130 H 490"/>
+  <text class="small" x="535" y="210" text-anchor="middle">megabytes each</text>
+</svg>
+<figcaption>Illustrative multi-adapter serving (the adapter names are made up). <strong>One base model, many cheap adapters:</strong> each request picks the adapter it needs.</figcaption>
+</figure>
+
+<h3>QLoRA, conceptually</h3>
+
+<p>After LoRA, the biggest block left in memory is the frozen base model. QLoRA stores that frozen model in 4 bits (with a 4-bit format designed for the typical distribution of neural-network weights), and trains ordinary LoRA adapters on top. During the forward and backward passes the needed weights are temporarily converted back to 16 bits for the arithmetic, so the adapters still get good gradients. It also uses tricks to avoid memory spikes from the optimizer. The result is that models which would need a data-centre GPU for full finetuning can be adapted on a single, much smaller GPU. The cost is extra compute (converting weights on the fly) and some sensitivity to the quantization; as always, compare against a baseline.</p>
+
+<p>Could you QLoRA-finetune <code>llama3.2</code> on the 4 GB laptop GPU used for the labs? The weights would fit, but activations and adapters need room too, so it would be very tight and slow, and we did not try it. Hosted finetuning services, or a rented GPU with more memory, are the realistic options for most readers.</p>
+
+<h2>Model merging and multi-task finetuning</h2>
+
+<p>Suppose you have finetuned the same base model twice: once to answer in a short support style, once to write good order-status summaries. Can you have both skills in one model? There are three ways:</p>
+
+<ul>
+<li><strong>Multi-task finetuning</strong>: build one dataset that mixes both tasks and train once. Simple and robust, but you must retrain everything whenever one task changes, and the mix proportions matter.</li>
+<li><strong>Sequential finetuning</strong>: train on task one, then task two. Risky, because training on the second task can make the model forget the first (catastrophic forgetting again).</li>
+<li><strong>Model merging</strong>: train separately, then combine the weights without further training. Because both models started from the same base, their weights are still "compatible". The simplest merge averages them. A more targeted idea computes each model's <em>task vector</em> (finetuned weights minus base weights) and adds the task vectors back to the base, sometimes after pruning small or conflicting changes. Merging is cheap to try, and open-source tools exist for it, but results vary and must be evaluated on both tasks.</li>
+</ul>
+
+<p>Merging also works for LoRA adapters (you can combine or switch them), and it is one reason teams keep a clean record of which base model every adapter was trained from: merging only makes sense within one family of weights.</p>
+
+<h2>Hyperparameters and overfitting</h2>
+
+<p>Training settings that you choose (rather than the model learning them) are called <strong>hyperparameters</strong>. The main ones for finetuning:</p>
+
+<ul>
+<li><strong>Learning rate</strong>: how big each update step is. Too high and training is unstable or wipes out what the model knew; too low and nothing changes. PEFT methods such as LoRA usually tolerate, and often need, a higher learning rate than full finetuning. Start from the defaults of the library or service you use, and use a <em>schedule</em> (a short warm-up, then a slow decrease) as most tools do by default.</li>
+<li><strong>Batch size</strong>: how many examples are averaged per update. Bigger batches give smoother updates but need more memory (activations). Gradient accumulation simulates a big batch with several small ones.</li>
+<li><strong>Epochs</strong>: how many times the model sees the whole dataset. For SFT on a small dataset, a few epochs is a common starting point. More epochs on few examples is the classic road to overfitting.</li>
+<li><strong>LoRA rank and targets</strong>, if you use LoRA (see above).</li>
+</ul>
+
+<p><strong>Overfitting</strong> means the model learns the training examples themselves (including their quirks and exact wording) instead of the general behaviour you wanted. The tell-tale sign: the loss keeps going down on the training data while it starts going up on held-out validation data the model never trains on. Keep a validation split (for example a slice of <code>finetune.jsonl</code>), watch both curves, and keep the checkpoint from where validation was best.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Training loss keeps falling while validation loss falls then rises; the best checkpoint is at the validation minimum">
+  <path class="line" d="M 70,30 V 210 H 730"/>
+  <text class="small" x="60" y="40" text-anchor="end">loss</text>
+  <text class="small" x="730" y="252" text-anchor="end">training steps / epochs</text>
+  <path class="arrow-ok" d="M 80,45 C 200,120 320,165 450,182 S 650,196 715,198"/>
+  <path class="arrow-bad" d="M 80,55 C 200,125 300,150 380,152 S 600,120 715,80"/>
+  <path class="line dashed" d="M 380,30 V 210"/>
+  <text class="label" x="388" y="45">best checkpoint</text>
+  <text class="ok" x="610" y="178">training loss</text>
+  <text class="bad" x="700" y="62" text-anchor="end">validation loss</text>
+  <text class="small" x="225" y="232" text-anchor="middle">still learning</text>
+  <text class="small" x="555" y="232" text-anchor="middle">memorising: overfitting</text>
+</svg>
+<figcaption>Illustrative curves, not from a real run. <strong>Judge training by the held-out curve, not the training curve.</strong> When validation loss turns upward, more training is making the model worse for new inputs.</figcaption>
+</figure>
+
+<p>Loss is only a proxy. A lower validation loss usually means better answers, but the real test is your task metric, which brings us back to the labs.</p>
+
+<h2>Evaluating a finetuned model against the baseline</h2>
+
+<p>A finetuned model is just another model to evaluate, and everything from the evaluation labs applies. The key rule: <strong>compare on the same <a class="term" href="glossary.html#eval-set">eval set</a>, with the same scoring, against a clear <a class="term" href="glossary.html#baseline">baseline</a></strong>. For this project that means:</p>
+
+<ol>
+<li>Run the 20 questions of <code>evals/qa.jsonl</code> through the finetuned model with the same prompt and the same keyword check as in <a href="04-eval-set.html">lab 04</a>.</li>
+<li>Grade the same answers with the <a class="term" href="glossary.html#ai-judge">AI judge</a> from <a href="05-ai-judge.html">lab 05</a>, whose agreement with human labels you already measured, because keyword checks have known false passes.</li>
+<li>Compare with the right baselines: the base model with the same prompt (30 % keyword pass in lab 04), and the base model with RAG (80 % with <code>rag_v2</code> in <a href="07-rag.html">lab 07</a>). Also try finetuned model plus RAG; the combination is often what you would deploy.</li>
+<li>Check what else changed: answer length, tone, refusals on unanswerable questions (q19, q20), latency, and general abilities you did not train for (a few unrelated prompts are enough to spot forgetting).</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="One eval set feeds three systems; the same scorers grade all three and the scores are compared">
+  <rect class="box" x="10" y="78" width="150" height="50" rx="8"/>
+  <text class="mono" x="85" y="100" text-anchor="middle">evals/qa.jsonl</text>
+  <text class="small" x="85" y="117" text-anchor="middle">same 20 questions</text>
+  <path class="arrow" d="M 160,103 H 180 V 42 H 198"/>
+  <path class="arrow" d="M 160,103 H 198"/>
+  <path class="arrow" d="M 160,103 H 180 V 164 H 198"/>
+  <rect class="box2" x="200" y="20" width="230" height="44" rx="8"/>
+  <text x="315" y="47" text-anchor="middle">Base model + prompt (lab 04)</text>
+  <rect class="box2" x="200" y="81" width="230" height="44" rx="8"/>
+  <text x="315" y="108" text-anchor="middle">Base model + RAG (lab 07)</text>
+  <rect class="box-info" x="200" y="142" width="230" height="44" rx="8"/>
+  <text x="315" y="169" text-anchor="middle">Finetuned model (+ RAG?)</text>
+  <path class="arrow" d="M 430,42 H 450 V 98 H 468"/>
+  <path class="arrow" d="M 430,103 H 468"/>
+  <path class="arrow" d="M 430,164 H 450 V 108 H 468"/>
+  <rect class="box-warn" x="470" y="68" width="150" height="70" rx="8"/>
+  <text x="545" y="96" text-anchor="middle">Same scorers</text>
+  <text class="small" x="545" y="114" text-anchor="middle">keyword + AI judge</text>
+  <text class="small" x="545" y="128" text-anchor="middle">(labs 04, 05)</text>
+  <path class="arrow-accent" d="M 620,103 H 648"/>
+  <rect class="box-ok" x="650" y="78" width="100" height="50" rx="8"/>
+  <text x="700" y="100" text-anchor="middle">Compare</text>
+  <text class="small" x="700" y="117" text-anchor="middle">scores</text>
+</svg>
+<figcaption>The evaluation set and the scorers stay fixed; only the system changes. <strong>If anything else changes between runs, you can no longer tell what caused the difference.</strong></figcaption>
+</figure>
+
+<p>One more trap: <strong>test questions must not leak into the training data</strong>. Lab 13 generates questions from the same documents that the eval questions are about, so a generated question can be almost identical to one in <code>qa.jsonl</code>. If it ends up in training, the finetuned model has seen the test, and its score is inflated. The lab script does not check for this; <a href="dataset-engineering.html">Dataset engineering</a> shows a small check you can add. Also remember that 20 questions is a small set and model outputs vary from run to run, so treat a difference of one or two questions as noise, not a win.</p>
+
+<h2>From lab 13 to a finetuning job</h2>
+
+<p><a href="13-synthetic-data.html">Lab 13</a> produces <code>runs/finetune.jsonl</code>: one JSON object per line, each with a <code>messages</code> list of a system message (the baseline support prompt), a user question and the assistant's answer. In our run it kept 32 examples, at the very small end of what finetuning needs, which is one more reason this guide stops at the data. This "chat messages" layout is accepted, with small variations, by hosted finetuning APIs and by open-source trainers. The lab code writes each line like this:</p>
+
+<pre data-lang="py" data-tag="excerpt from labs/13_synthetic_data.py"><code>f.write(json.dumps({"messages": [
+    {"role": "system", "content": system},
+    {"role": "user", "content": pair.question},
+    {"role": "assistant", "content": pair.answer}]}, ensure_ascii=False) + "\n")</code></pre>
+
+<p>If you wanted to go further, the next steps would be: split the file into training and validation parts; pick a base model and a method (a hosted service, or an open-source stack such as Hugging Face TRL with PEFT for LoRA or QLoRA); train with default hyperparameters first; then run the evaluation above. The base model you finetune should be the one you will serve, with the same chat template (see <a href="dataset-engineering.html">Dataset engineering</a>). Check the current documentation of whichever service or library you choose; APIs and supported models change often.</p>
+
+<div class="callout warn"><strong>Common misconceptions and pitfalls</strong>
+<ul>
+<li><strong>"Finetuning will teach the bot our policies."</strong> It can memorise some, unreliably and without citations, and it goes stale when the policy changes. Use RAG for facts.</li>
+<li><strong>"If it fits for inference, it fits for training."</strong> Full finetuning needs several times the memory of inference (about 16 bytes per parameter with Adam and mixed precision, plus activations).</li>
+<li><strong>Judging by training loss.</strong> A falling training loss can hide overfitting. Watch validation loss and, above all, your task metric.</li>
+<li><strong>Changing two things at once.</strong> A new model and a new prompt and a new scorer in the same comparison tells you nothing. Change one thing; keep the eval set and scorers fixed.</li>
+<li><strong>Test leakage.</strong> Generated training questions that duplicate eval questions inflate scores.</li>
+<li><strong>Ignoring the cost of ownership.</strong> A finetuned model must be stored, served, monitored and eventually retrained on a newer base.</li>
+<li><strong>Assuming quantization is free.</strong> 4-bit models are usually close to the original, but measure on your own eval set.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Finetuning continues training a pre-trained, post-trained model on your own examples; post-training by model makers is the same idea.</li>
+<li>Rule of thumb: RAG for facts and changing knowledge; finetuning for form, behaviour, style and format, or to make a smaller model good enough.</li>
+<li>Training needs memory for weights, gradients, optimizer states and activations. Weights: 4 / 2 / 1 / 0.5 bytes per parameter in fp32 / bf16 / int8 / int4; full finetuning with Adam is about 16 bytes per parameter.</li>
+<li>PEFT trains a small part of the model. LoRA learns <code>B · A</code> of rank <code>r</code>, can be merged into the weights, and lets one server host many adapters. QLoRA adds a 4-bit frozen base.</li>
+<li>Multi-task data, sequential training and model merging are ways to combine skills; all need evaluation on every task.</li>
+<li>Learning rate, batch size and epochs control training; watch a validation split to catch overfitting.</li>
+<li>Evaluate a finetuned model on the same eval set and scorers as the baseline (labs 04, 05, 07), and keep test questions out of the training data. Lab 13 prepares the data; this guide does not run training.</li>
+</ul>
+</div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://www.oreilly.com/library/view/ai-engineering/9781098166298/">AI Engineering</a> (O'Reilly) — chapter 7, Finetuning.</li>
+<li><a href="https://github.com/chiphuyen/aie-book">chiphuyen/aie-book</a> — the author's study notes, chapter summaries and reading list.</li>
+<li><a href="https://arxiv.org/abs/2106.09685">LoRA: Low-Rank Adaptation of Large Language Models</a> — the original LoRA paper.</li>
+<li><a href="https://arxiv.org/abs/2305.14314">QLoRA: Efficient Finetuning of Quantized LLMs</a> — the original QLoRA paper.</li>
+<li><a href="https://huggingface.co/docs/peft/index">Hugging Face PEFT documentation</a> and its <a href="https://huggingface.co/docs/peft/conceptual_guides/lora">LoRA conceptual guide</a>.</li>
+<li><a href="https://huggingface.co/docs/trl/sft_trainer">Hugging Face TRL: SFT Trainer</a> — supervised finetuning on chat-format datasets.</li>
+<li><a href="https://huggingface.co/docs/transformers/perf_train_gpu_one">Transformers: efficient training on one GPU</a> — mixed precision, gradient accumulation and checkpointing.</li>
+<li><a href="https://huggingface.co/docs/transformers/quantization/overview">Transformers: quantization overview</a>.</li>
+<li><a href="https://pytorch.org/docs/stable/amp.html">PyTorch automatic mixed precision</a>.</li>
+<li><a href="https://platform.openai.com/docs/guides/fine-tuning">OpenAI fine-tuning guide</a> — an example of a hosted service using the chat JSONL format.</li>
+<li><a href="https://arxiv.org/abs/2212.04089">Editing Models with Task Arithmetic</a> and <a href="https://arxiv.org/abs/2306.01708">TIES-Merging</a> — papers behind common model-merging methods; <a href="https://github.com/arcee-ai/mergekit">mergekit</a> is an open-source merging tool.</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="rag-and-agents.html"><small>← Chapter 6</small>RAG and agents</a>
+<a class="next" href="dataset-engineering.html"><small>Chapter 8 →</small>Dataset engineering</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 10 · Architecture and user feedback</title>
+<meta name="description" content="Building up a production architecture step by step, monitoring, and designing feedback loops. Read with book chapter 10.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 10/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 10 of 10</div>
+  <h1>Architecture and user feedback</h1>
+  <p class="lead">Building up a production architecture step by step, monitoring, and designing feedback loops. Read with book chapter 10.</p>
+</section>
+<div class="callout">Read with <strong>chapter 10 · AI Engineering Architecture and User Feedback</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>By the last labs, the Trailhead Bikes bot is no longer "a prompt sent to a model". It retrieves documents, calls tools, checks what comes in and what goes out, skips the model when it can, and writes down everything it does. This chapter builds that architecture one layer at a time, the same way you should build a real system: start with the simplest thing that works and add a component only when you can name the problem it solves. Then it covers how to watch the system in production and how to learn from the people who use it.</p>
+
+<p><strong>Why this matters for your project.</strong> Each layer below matches code you run: <a href="10-guardrails.html">lab 10</a> (guardrails), <a href="11-cache-router.html">lab 11</a> (caches and a router) and <a href="12-feedback.html">lab 12</a> (tracing and feedback). Seeing them as one picture tells you where a new feature belongs, and where to look when something goes wrong.</p>
+
+<h2>Step 1: just call the model</h2>
+
+<p>The simplest AI application sends the user's message to a model and shows the reply. That is <a href="01-setup.html">lab 01</a>: one function, <code>chat()</code> in <code>aie/llm.py</code>, talks to an <a class="term" href="glossary.html#openai-compatible-api">OpenAI-compatible API</a> (Ollama locally) and returns the text along with token counts and seconds.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="Customer sends a message to the app, which calls the model API and returns the reply">
+  <rect x="20" y="36" width="130" height="60" rx="8" class="box"/>
+  <text x="85" y="71" text-anchor="middle">customer</text>
+  <path class="arrow" d="M150,56 H226"/>
+  <path class="arrow" d="M230,78 H154"/>
+  <rect x="230" y="36" width="200" height="60" rx="8" class="box-info"/>
+  <text x="330" y="62" text-anchor="middle">your app</text>
+  <text x="330" y="82" text-anchor="middle" class="small mono">aie/llm.py · chat()</text>
+  <path class="arrow" d="M430,56 H486"/>
+  <path class="arrow" d="M490,78 H434"/>
+  <rect x="490" y="36" width="250" height="60" rx="8" class="box2"/>
+  <text x="615" y="62" text-anchor="middle">llama3.2 via Ollama</text>
+  <text x="615" y="82" text-anchor="middle" class="small">OpenAI-compatible API</text>
+  <text x="380" y="132" text-anchor="middle" class="small">Every call returns text + input tokens + output tokens + seconds.</text>
+</svg>
+<figcaption>Step 1 is a request and a reply. <strong>Even here, recording tokens and time from the first day pays off later.</strong></figcaption>
+</figure>
+
+<p>This version is fine for a demo, and it is the right starting point for a <a class="term" href="glossary.html#baseline">baseline</a>: <a href="04-eval-set.html">lab 04</a> measures it and finds that, without the shop's documents, it invents policies. That measured failure is the reason for step 2. Notice that the wrapper already reads the base URL, model name and key from settings: switching from Ollama to a hosted provider is a configuration change, not a code change.</p>
+
+<h2>Step 2: add context (RAG and tools)</h2>
+
+<p>A model only knows what it was trained on and what is in its prompt. To answer about Trailhead Bikes, it needs the shop's documents (<a class="term" href="glossary.html#rag">RAG</a>, <a href="06-retrieval.html">lab 06</a> and <a href="07-rag.html">lab 07</a>) and, for order questions, live data from tools (<a class="term" href="glossary.html#tool-calling">tool calling</a>, <a href="09-agent.html">lab 09</a>). This is usually the single biggest quality jump, and it adds new parts that can fail: retrieval can miss, a tool can return an error.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="The app fetches chunks from the hybrid retriever and order data from tools, builds the prompt and calls the model">
+  <rect x="20" y="40" width="130" height="60" rx="8" class="box"/>
+  <text x="85" y="75" text-anchor="middle">customer</text>
+  <path class="arrow" d="M150,70 H226"/>
+  <rect x="230" y="40" width="200" height="60" rx="8" class="box-info"/>
+  <text x="330" y="66" text-anchor="middle">your app</text>
+  <text x="330" y="86" text-anchor="middle" class="small mono">aie/rag.py · answer()</text>
+  <path class="arrow" d="M430,70 H486"/>
+  <rect x="490" y="40" width="250" height="60" rx="8" class="box2"/>
+  <text x="615" y="66" text-anchor="middle">model</text>
+  <text x="615" y="86" text-anchor="middle" class="small">rules + chunks + question</text>
+  <path class="arrow" d="M280,102 V146"/>
+  <path class="arrow" d="M390,102 V146"/>
+  <rect x="120" y="150" width="210" height="60" rx="8" class="box-ok"/>
+  <text x="225" y="176" text-anchor="middle">retriever (Hybrid)</text>
+  <text x="225" y="196" text-anchor="middle" class="small">data/docs · 8 policy docs</text>
+  <rect x="350" y="150" width="240" height="60" rx="8" class="box-ok"/>
+  <text x="470" y="176" text-anchor="middle">tools (agent, lab 09)</text>
+  <text x="470" y="196" text-anchor="middle" class="small mono">search_docs · get_order</text>
+</svg>
+<figcaption>Context comes from two places: retrieved chunks and tool results. <strong>Each new source is also a new way to be wrong, and a new way in for prompt injection.</strong></figcaption>
+</figure>
+
+<p>Two design choices from the labs belong to this step. Authorization lives in the tool (<code>make_get_order</code> only returns orders of the current customer), not in the prompt, because a prompt can be talked around and code cannot. And retrieved text is treated as reference material, not instructions (rule 4 of <code>prompts/rag_v2.txt</code>), because documents can carry <a class="term" href="glossary.html#indirect-prompt-injection">indirect prompt injection</a>, which <a href="08-prompts.html">lab 08</a> demonstrates.</p>
+
+<h2>Step 3: add guardrails on input and output</h2>
+
+<p>Once real people can type anything, you need checks that do not depend on the model behaving. <a class="term" href="glossary.html#guardrail">Guardrails</a> sit on both sides of the model:</p>
+<ul>
+  <li><strong>Input guardrails</strong> run before the model sees the message. In <code>aie/guardrails.py</code>, <code>check_input</code> rejects very long messages and messages that match simple <a class="term" href="glossary.html#prompt-injection">prompt injection</a> patterns, and <code>redact_pii</code> replaces e-mail addresses, French phone numbers and card numbers with placeholders. That protects the customer's <a class="term" href="glossary.html#pii">personal data</a> from the model provider and from your logs.</li>
+  <li><strong>Output guardrails</strong> run before the customer sees the reply. <code>check_output</code> allows "I don't know", otherwise requires at least one citation, rejects citations of chunks the model was not given, and blocks a promise the shop never makes (free bikes).</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Message passes the input guardrail, the RAG bot and the output guardrail to reach the customer; either guardrail can send the fallback reply instead">
+  <rect x="20" y="40" width="170" height="60" rx="8" class="box-warn"/>
+  <text x="105" y="66" text-anchor="middle">input guardrail</text>
+  <text x="105" y="86" text-anchor="middle" class="small">length · injection · PII</text>
+  <path class="arrow-ok" d="M190,70 H246"/>
+  <rect x="250" y="40" width="150" height="60" rx="8" class="box-info"/>
+  <text x="325" y="66" text-anchor="middle">RAG bot</text>
+  <text x="325" y="86" text-anchor="middle" class="small">prompt rag_v2</text>
+  <path class="arrow-ok" d="M400,70 H446"/>
+  <rect x="450" y="40" width="170" height="60" rx="8" class="box-warn"/>
+  <text x="535" y="66" text-anchor="middle">output guardrail</text>
+  <text x="535" y="86" text-anchor="middle" class="small">citations · promises</text>
+  <path class="arrow-ok" d="M620,70 H656"/>
+  <rect x="660" y="40" width="80" height="60" rx="8" class="box-ok"/>
+  <text x="700" y="75" text-anchor="middle">reply</text>
+  <path class="arrow-bad" d="M105,102 V160 H226"/>
+  <path class="arrow-bad" d="M535,102 V160 H454"/>
+  <text x="112" y="136" class="small bad">blocked</text>
+  <text x="542" y="136" class="small bad">blocked</text>
+  <rect x="230" y="135" width="220" height="56" rx="8" class="box-bad"/>
+  <text x="340" y="159" text-anchor="middle">FALLBACK reply</text>
+  <text x="340" y="178" text-anchor="middle" class="small">"please contact support"</text>
+</svg>
+<figcaption>Lab 10's <code>guarded_answer()</code>: two checks around the model, one safe fallback. <strong>Guardrails are plain code you can test, which is what makes them dependable.</strong></figcaption>
+</figure>
+
+<p>Guardrails have costs. They add latency (a model-based checker is another model call), they block some legitimate messages (false positives) and miss some attacks (false negatives). Pattern lists like ours are easy to get around; production systems add classifier models or provider moderation endpoints on top. And an output check that needs the whole answer conflicts with <a class="term" href="glossary.html#streaming">streaming</a> (see <a href="inference-optimization.html">Inference optimization</a>). Measure all three: how often each guardrail fires, how often it fires wrongly, and how much time it adds.</p>
+
+<p>Our real run of lab 10 (one run with <code>llama3.2</code>; yours may differ) shows both kinds of surprise. The injection attempt was blocked at input, as designed. The message with an e-mail address and a card number had its personal data redacted, but was then blocked at <em>output</em>: the model answered without a citation ("We are investigating this issue..."), so the customer got the fallback. That is arguably the right outcome for a billing problem, but for the wrong reason. And "What is the capital of Australia?" passed with "I don't know", yet the model still appended two unrelated citations, <code>[stores#0] [sizing#1]</code>; <code>check_output</code> returns early on "I don't know", so it never looked at them. Guardrails need their own test cases, like everything else.</p>
+
+<h2>Step 4: add a router and a gateway</h2>
+
+<p>As soon as you have more than one way to answer, something must choose. A <a class="term" href="glossary.html#router">router</a> classifies the incoming message and sends it down the right path. In lab 11, <code>aie/router.py</code> asks the model for one of four labels with <a class="term" href="glossary.html#structured-output">structured output</a>; thanks and greetings get a canned reply, off-topic requests get a polite refusal, policy questions go to the RAG bot and order questions go to the agent with order tools.</p>
+
+<p>A <strong>model gateway</strong> is the single door through which all your code reaches models. It hides the differences between providers, keeps API keys in one place, retries and falls back to another model when one fails, enforces rate limits and budgets, and logs every call. Our project has a tiny version of this idea: every lab calls models through <code>aie/llm.py</code>, which reads <code>AIE_BASE_URL</code>, <code>AIE_MODEL</code> and the other settings, so the rest of the code never knows which provider is behind it.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Router sends smalltalk to a canned reply, policy questions to the RAG bot and order questions to the agent; RAG bot and agent reach models only through a gateway">
+  <rect x="20" y="100" width="150" height="60" rx="8" class="box-info"/>
+  <text x="95" y="126" text-anchor="middle">router</text>
+  <text x="95" y="146" text-anchor="middle" class="small mono">aie/router.py</text>
+  <path class="arrow" d="M170,115 L246,58"/>
+  <path class="arrow" d="M170,130 H246"/>
+  <path class="arrow" d="M170,145 L246,202"/>
+  <rect x="250" y="30" width="200" height="50" rx="8" class="box2"/>
+  <text x="350" y="52" text-anchor="middle" class="label">canned reply, no model</text>
+  <text x="350" y="69" text-anchor="middle" class="small">smalltalk · out_of_scope</text>
+  <rect x="250" y="105" width="200" height="50" rx="8" class="box"/>
+  <text x="350" y="127" text-anchor="middle" class="label">RAG bot</text>
+  <text x="350" y="144" text-anchor="middle" class="small">policy_question</text>
+  <rect x="250" y="180" width="200" height="50" rx="8" class="box"/>
+  <text x="350" y="202" text-anchor="middle" class="label">agent + order tools</text>
+  <text x="350" y="219" text-anchor="middle" class="small">order_question</text>
+  <path class="arrow" d="M450,130 H496"/>
+  <path class="arrow" d="M450,205 H496"/>
+  <rect x="500" y="90" width="110" height="140" rx="8" class="box-solid"/>
+  <text x="555" y="150" text-anchor="middle" class="on-solid">model</text>
+  <text x="555" y="168" text-anchor="middle" class="on-solid">gateway</text>
+  <path class="arrow" d="M610,120 H636"/>
+  <path class="arrow" d="M610,160 H636"/>
+  <path class="arrow" d="M610,200 H636"/>
+  <rect x="640" y="100" width="100" height="36" rx="8" class="box2"/>
+  <text x="690" y="123" text-anchor="middle" class="label">llama3.2</text>
+  <rect x="640" y="142" width="100" height="36" rx="8" class="box2"/>
+  <text x="690" y="165" text-anchor="middle" class="label">gemma4</text>
+  <rect x="640" y="184" width="100" height="36" rx="8" class="box2"/>
+  <text x="690" y="207" text-anchor="middle" class="label">hosted API</text>
+  <text x="555" y="252" text-anchor="middle" class="small">keys · retries · fallback · logs</text>
+</svg>
+<figcaption>The router decides <em>what kind of work</em> a message needs; the gateway decides <em>which model serves it and how</em>. <strong>In our labs the gateway is just <code>aie/llm.py</code>; in larger teams it is often a separate service.</strong></figcaption>
+</figure>
+
+<p>A router is a model too, so it can be wrong, and it is not free. In our real run of lab 11, "Thanks a lot!" was labelled <code>out_of_scope</code> instead of <code>smalltalk</code>, so a polite thank-you got "I can only help with Trailhead Bikes questions". Each routing decision took 2.3 to 4.4 seconds with <code>llama3.2</code>, about as long as a whole RAG answer on that machine, which is why production routers are usually much smaller models or simple classifiers. A policy question misrouted as smalltalk would be worse: a cheerful non-answer. Give the router its own small eval set, log its decisions, and make the fallback for an unsure route the more capable path, not the canned reply.</p>
+
+<h2>Step 5: add caches</h2>
+
+<p>Many customers ask the same things. Caches return a stored answer without running retrieval or generation. Lab 11 puts two in front of the bot: an exact <a class="term" href="glossary.html#cache">cache</a> keyed on the lower-cased, space-normalised question, and a <a class="term" href="glossary.html#semantic-cache">semantic cache</a> that compares <a class="term" href="glossary.html#embedding">embeddings</a> and accepts a match at similarity 0.9 or higher. Further down, the model server can keep a prompt (prefix) cache, which speeds up prefill but still runs the model.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Question checks the exact cache, then the semantic cache; a hit returns the stored answer; a miss goes to the router and the bot, and the fresh answer is stored in both caches">
+  <rect x="20" y="20" width="380" height="44" rx="8" class="box-ok"/>
+  <text x="210" y="47" text-anchor="middle">return the stored answer (no model call)</text>
+  <rect x="20" y="110" width="150" height="56" rx="8" class="box"/>
+  <text x="95" y="135" text-anchor="middle">exact cache</text>
+  <text x="95" y="153" text-anchor="middle" class="small">same text</text>
+  <rect x="220" y="110" width="170" height="56" rx="8" class="box"/>
+  <text x="305" y="135" text-anchor="middle">semantic cache</text>
+  <text x="305" y="153" text-anchor="middle" class="small">similarity ≥ 0.9</text>
+  <rect x="440" y="110" width="120" height="56" rx="8" class="box-info"/>
+  <text x="500" y="143" text-anchor="middle">router</text>
+  <rect x="600" y="110" width="140" height="56" rx="8" class="box2"/>
+  <text x="670" y="135" text-anchor="middle">RAG / agent</text>
+  <text x="670" y="153" text-anchor="middle" class="small">via the gateway</text>
+  <path class="arrow-ok" d="M95,108 V68"/>
+  <path class="arrow-ok" d="M305,108 V68"/>
+  <text x="102" y="92" class="small ok">hit</text>
+  <text x="312" y="92" class="small ok">hit</text>
+  <path class="arrow" d="M170,138 H216"/>
+  <path class="arrow" d="M390,138 H436"/>
+  <path class="arrow" d="M560,138 H596"/>
+  <text x="193" y="130" text-anchor="middle" class="small">miss</text>
+  <text x="413" y="130" text-anchor="middle" class="small">miss</text>
+  <path class="arrow dashed" d="M670,168 V196 H95 V170"/>
+  <text x="380" y="190" text-anchor="middle" class="small">fresh answer stored with put()</text>
+</svg>
+<figcaption>Cheap checks first, expensive work last. <strong>A semantic cache hit is a guess that two questions mean the same thing; a wrong guess serves a confidently wrong answer.</strong></figcaption>
+</figure>
+
+<p>Caches raise questions the model never did. When do entries expire, for example after a policy document changes? Which answers are safe to share between customers (policy questions) and which never are (anything about one person's order)? Where should the cache sit relative to guardrails? Our lab checks the cache before anything else, which is fine for a demo; a production system would usually run input guardrails first so a blocked message never reaches the cache, and only cache answers that passed the output guardrail. Lab 11 itself prints the classic semantic-cache risk: "standard shipping" and "express shipping" questions look alike to embeddings but need different answers.</p>
+
+<p>The real run of lab 11 makes the trade-off concrete. A fresh answer took 4.00 s, the exact cache answered the repeat in under 0.01 s, and the semantic cache answered the lower-case copy in 0.06 s (similarity 1.00). The paraphrase "How many days does standard delivery take?" scored 0.88, just below the 0.9 threshold, so it went to the model although the cached answer would have been right; the express question scored 0.82 and correctly went to the model too. Lower the threshold to catch the paraphrase and you move closer to serving the wrong answer for express. There is no free setting: pick the threshold with a labelled set of question pairs.</p>
+
+<h2>Step 6: agent patterns and write actions</h2>
+
+<p>The last step gives the system more autonomy. An <a class="term" href="glossary.html#agent">agent</a> (lab 09) decides which tools to call and in what order. All of our tools only <em>read</em>: <code>search_docs</code>, <code>get_order</code>, <code>days_since</code>. The real jump in risk comes with <strong>write actions</strong>: cancelling an order, issuing a refund, sending an e-mail. A wrong read gives a wrong answer that a human may catch; a wrong write changes the world.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="The agent calls read tools freely; write tools such as cancel_order and issue_refund pass through a confirmation step first">
+  <rect x="20" y="100" width="150" height="64" rx="8" class="box-info"/>
+  <text x="95" y="128" text-anchor="middle">agent loop</text>
+  <text x="95" y="148" text-anchor="middle" class="small mono">run_agent()</text>
+  <rect x="220" y="16" width="520" height="104" rx="8" class="zone"/>
+  <text x="240" y="38" class="label ok">read tools (in the labs)</text>
+  <rect x="240" y="52" width="150" height="50" rx="8" class="box-ok"/>
+  <text x="315" y="82" text-anchor="middle" class="mono">search_docs</text>
+  <rect x="405" y="52" width="150" height="50" rx="8" class="box-ok"/>
+  <text x="480" y="82" text-anchor="middle" class="mono">get_order</text>
+  <rect x="570" y="52" width="150" height="50" rx="8" class="box-ok"/>
+  <text x="645" y="82" text-anchor="middle" class="mono">days_since</text>
+  <rect x="220" y="140" width="520" height="104" rx="8" class="zone"/>
+  <text x="240" y="162" class="label warn">write tools (illustrative, not in the labs)</text>
+  <rect x="240" y="176" width="170" height="50" rx="8" class="box-warn"/>
+  <text x="325" y="198" text-anchor="middle" class="label">customer or staff</text>
+  <text x="325" y="214" text-anchor="middle" class="label">confirms</text>
+  <path class="arrow" d="M410,201 H446"/>
+  <rect x="450" y="176" width="130" height="50" rx="8" class="box-bad"/>
+  <text x="515" y="206" text-anchor="middle" class="mono">cancel_order</text>
+  <rect x="595" y="176" width="130" height="50" rx="8" class="box-bad"/>
+  <text x="660" y="206" text-anchor="middle" class="mono">issue_refund</text>
+  <path class="arrow-ok" d="M170,118 L236,80"/>
+  <path class="arrow-accent" d="M170,148 L236,196"/>
+</svg>
+<figcaption>Reads can run freely; writes go through a confirmation gate and tight permissions. <strong>The write tools here are an illustration of the pattern; our project deliberately has none.</strong></figcaption>
+</figure>
+
+<p>Sensible rules for write actions: give each tool the narrowest permission it needs (the lab's <code>get_order</code> already refuses other customers' orders); ask a human to confirm anything irreversible or costly; cap amounts and rates in code; make actions undoable where you can; and log every action with the full <a class="term" href="glossary.html#trajectory">trajectory</a> that led to it. Prompt injection matters most here: text in a document or e-mail that convinces the agent to "issue a refund" is a real attack, not a funny screenshot.</p>
+
+<h2>Monitoring and observability</h2>
+
+<p>Once the system is live, you need to know what it is doing. <strong>Monitoring</strong> watches known numbers and alerts when they cross a line (for example, "error rate above the threshold we agreed"). <a class="term" href="glossary.html#observability">Observability</a> is the broader property of being able to ask new questions about what happened, after the fact, without shipping new code. For AI systems the key tool is <a class="term" href="glossary.html#tracing">tracing</a>: recording, for each request, every step it went through.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Each pipeline step writes into one trace per request; traces and feedback feed a dashboard and alerts">
+  <rect x="20" y="20" width="124" height="44" rx="8" class="box-warn"/>
+  <text x="82" y="47" text-anchor="middle" class="label">input guard</text>
+  <rect x="165" y="20" width="124" height="44" rx="8" class="box"/>
+  <text x="227" y="47" text-anchor="middle" class="label">cache / router</text>
+  <rect x="310" y="20" width="124" height="44" rx="8" class="box"/>
+  <text x="372" y="47" text-anchor="middle" class="label">retrieve</text>
+  <rect x="455" y="20" width="124" height="44" rx="8" class="box"/>
+  <text x="517" y="47" text-anchor="middle" class="label">generate</text>
+  <rect x="600" y="20" width="140" height="44" rx="8" class="box-warn"/>
+  <text x="670" y="47" text-anchor="middle" class="label">output guard</text>
+  <path class="line dashed" d="M82,66 V104 M227,66 V104 M372,66 V104 M517,66 V104 M670,66 V104"/>
+  <rect x="20" y="106" width="720" height="50" rx="8" class="box-info"/>
+  <text x="380" y="128" text-anchor="middle">one trace per request (SQLite table traces)</text>
+  <text x="380" y="146" text-anchor="middle" class="small mono">id · created · question · answer · chunks · model · tokens · seconds · prompt</text>
+  <path class="arrow" d="M200,158 V186"/>
+  <path class="arrow" d="M560,158 V186"/>
+  <rect x="80" y="190" width="240" height="44" rx="8" class="box-ok"/>
+  <text x="200" y="217" text-anchor="middle">feedback table (ratings)</text>
+  <rect x="440" y="190" width="240" height="44" rx="8" class="box2"/>
+  <text x="560" y="217" text-anchor="middle">dashboard and alerts</text>
+</svg>
+<figcaption>Lab 12 logs the final result of each request; a fuller trace would add one record per step (dashed lines). <strong>If you cannot see a request's steps, you cannot debug it.</strong></figcaption>
+</figure>
+
+<h3>What to log</h3>
+<div class="table-wrap"><table>
+<tr><th>What</th><th>Why</th><th>In our project</th></tr>
+<tr><td>Trace id, timestamp</td><td>Find one request again; link feedback to it.</td><td><code>id</code>, <code>created</code> in <code>traces</code></td></tr>
+<tr><td>Input and output text</td><td>See what was asked and answered. Redact personal data first.</td><td><code>question</code>, <code>answer</code></td></tr>
+<tr><td>Context used</td><td>Tell retrieval failures from generation failures.</td><td><code>chunks</code> (chunk ids, as JSON)</td></tr>
+<tr><td>Model and prompt version</td><td>Know which configuration produced the answer; compare versions.</td><td><code>model</code>, <code>prompt</code></td></tr>
+<tr><td>Tokens and latency</td><td>Cost and speed per request, per user, per feature.</td><td><code>input_tokens</code>, <code>output_tokens</code>, <code>seconds</code></td></tr>
+<tr><td>Errors and guardrail decisions</td><td>Count failures, blocks and fallbacks.</td><td>Printed in lab 10; a natural next column to add</td></tr>
+<tr><td>Tool calls and route</td><td>Debug agents and routers step by step.</td><td>The agent's <code>trace</code> list in lab 09; route in lab 11</td></tr>
+<tr><td>User feedback</td><td>Connect quality signals to the exact answer.</td><td><code>feedback</code> table, linked by <code>trace_id</code></td></tr>
+</table></div>
+
+<p>Cost is usually computed rather than logged: tokens times the provider's current price per token, which is why storing token counts is enough. Lab 12 runs a small dashboard query: number of answers, average seconds, average input and output tokens, and the share of thumbs up. In our real run it printed "5 answers, 4.8 s average, 358 input / 19 output tokens, 60% thumbs up". Notice the ratio: most tokens are input (rules plus retrieved chunks), which is typical for RAG and is why prompt length matters for cost and TTFT.</p>
+
+<h3>Metrics to watch</h3>
+<p>Group them by question. <strong>Is it working?</strong> Error rate, timeouts, fallback rate, guardrail block rate. <strong>Is it fast and affordable?</strong> TTFT and total latency as percentiles, tokens and cost per request, cache hit rate. <strong>Is it good?</strong> Thumbs-up rate, share of "I don't know" answers, citation rate, results of an AI judge run on a sample of real traffic (the approach of <a href="05-ai-judge.html">lab 05</a>). <strong>How is it used?</strong> Route distribution, popular topics, conversation length. A metric is only useful if you know what you would do when it moves.</p>
+
+<h3>Drift: things change under you</h3>
+<p>An AI system can get worse without anyone changing your code. A hosted model may be updated behind the same name. Someone edits a prompt. The policy documents change but the cache still holds old answers. Customers start asking about a new product the documents do not cover. Defences: pin model versions where the provider allows it; keep prompts as versioned files (our <code>prompts/</code> folder) and log which version answered (the <code>prompt</code> column); re-run the <a class="term" href="glossary.html#eval-set">eval set</a> on every change to model, prompt, retriever or documents; and watch the quality metrics over time, not only right after a release.</p>
+
+<h2>Orchestration frameworks: when to use one</h2>
+
+<p>An orchestration framework is a library that provides ready-made building blocks for pipelines like this: connectors to model providers and vector stores, retrievers, prompt templates, agent loops, tracing hooks. Well-known examples at the time of writing include LangChain, LlamaIndex and Haystack; check their own docs for current features.</p>
+
+<p>A framework helps when you need many integrations quickly, when your team already standardises on one, or when its tracing and evaluation tooling saves you real work. It hurts when its layers hide the exact prompt sent to the model, when an upgrade changes behaviour you depended on, or when debugging means reading the framework's source. This lab project deliberately uses <strong>plain Python</strong>: a few small modules in <code>aie/</code>, each readable in a minute, with every prompt in a text file. For a pipeline of this size that is easier to understand, test (<code>uv run pytest</code> runs 8 offline tests) and change. A good rule: start with plain code, and adopt a framework when you can name the specific pieces it would save you from writing and maintaining.</p>
+
+<h2>User feedback</h2>
+
+<p><a class="term" href="glossary.html#user-feedback">User feedback</a> is the only quality signal that comes from the people the system is for, on the questions they actually ask. Your eval set is your guess about what users will ask; feedback tells you where the guess was wrong.</p>
+
+<h3>Explicit and implicit feedback</h3>
+<div class="table-wrap"><table>
+<tr><th></th><th>Explicit feedback</th><th>Implicit feedback</th></tr>
+<tr><td>What it is</td><td>The user deliberately tells you what they think.</td><td>You infer satisfaction from what the user does.</td></tr>
+<tr><td>Examples</td><td>Thumbs up or down, star ratings, a written comment, choosing the better of two answers, reporting a problem.</td><td>Copying the answer, editing a draft before sending it, clicking "regenerate", rephrasing the same question, abandoning the chat, asking for a human, conversation length, coming back the next day.</td></tr>
+<tr><td>Strengths</td><td>Clear meaning; comments explain <em>why</em>.</td><td>Plentiful; every user produces it without extra effort.</td></tr>
+<tr><td>Weaknesses</td><td>Few users give it; those who do are not typical.</td><td>Ambiguous: a long conversation can mean engaged or stuck; leaving can mean satisfied or gave up.</td></tr>
+</table></div>
+
+<p>Implicit signals need interpretation that depends on the product. For a support bot, a short conversation that ends without asking for a human is probably good; for a writing assistant, heavy edits to a draft suggest the draft was weak, and the edited version is itself valuable: it shows what the user wanted. Treat each implicit signal as a hypothesis and check a sample of conversations by hand before trusting it.</p>
+
+<h3>When and how to ask</h3>
+<p>Ask at natural moments and keep it cheap: a thumbs control under each answer that the user can ignore, a short question at the end of a conversation, or a comparison when you show two drafts anyway. Ask more directly when something seems wrong (the user rephrased three times) or when the stakes are high (before an action is confirmed). Do not interrupt every message; people stop answering, and the few who still answer are not representative. Make it clear what happens with feedback, and do not store personal data from comments without the user's consent and a reason.</p>
+
+<h3>Biases and limits</h3>
+<ul>
+  <li><strong>Who answers:</strong> very happy and very annoyed users rate more often than the middle, so the rates are skewed.</li>
+  <li><strong>What is rated:</strong> users judge tone, length and speed as well as correctness, and often cannot tell whether a policy answer is right. A confident wrong answer can get a thumbs up.</li>
+  <li><strong>Interface effects:</strong> which button comes first, default choices and wording change the results; this is a cousin of the <a class="term" href="glossary.html#position-bias">position bias</a> seen in AI judges.</li>
+  <li><strong>Feedback loops:</strong> if you optimise only for thumbs up, the system can drift toward pleasing answers rather than accurate ones.</li>
+  <li><strong>Volume:</strong> a handful of ratings on a new feature says little. Our lab 12 has five rated answers; it shows the mechanics, not a statistic.</li>
+</ul>
+
+<h3>Turning feedback into eval cases (lab 12)</h3>
+<p>The most valuable use of a thumbs down is not the rate; it is the specific example. Lab 12 runs simulated traffic (five questions with ratings and comments written into the script), logs each answer with <code>log_trace</code>, stores each rating with <code>log_feedback</code>, then selects the thumbs-down answers and writes them to <code>evals/from_feedback.jsonl</code> with the status "needs a human to write the expected answer".</p>
+
+<pre data-lang="py" data-tag="excerpt from labs/12_feedback.py"><code>new_cases = [{"id": f"fb-{tid}", "question": q, "bad_answer": a, "user_comment": c,
+              "status": "needs a human to write the expected answer"} for tid, q, a, c in bad]</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="A loop: the bot answers, the customer rates, traces and feedback are stored, thumbs-down cases are exported, a human writes the expected answer, the case joins the eval set, and fixes are checked against it before release">
+  <rect x="20" y="30" width="150" height="56" rx="8" class="box-info"/>
+  <text x="95" y="63" text-anchor="middle">bot answers</text>
+  <rect x="210" y="30" width="150" height="56" rx="8" class="box"/>
+  <text x="285" y="63" text-anchor="middle">customer rates</text>
+  <rect x="400" y="30" width="150" height="56" rx="8" class="box"/>
+  <text x="475" y="54" text-anchor="middle">traces +</text>
+  <text x="475" y="72" text-anchor="middle">feedback (SQLite)</text>
+  <rect x="590" y="30" width="150" height="56" rx="8" class="box-bad"/>
+  <text x="665" y="63" text-anchor="middle">thumbs-down</text>
+  <path class="arrow" d="M170,58 H206"/>
+  <path class="arrow" d="M360,58 H396"/>
+  <path class="arrow" d="M550,58 H586"/>
+  <path class="arrow" d="M665,88 V136"/>
+  <rect x="590" y="140" width="150" height="56" rx="8" class="box2"/>
+  <text x="665" y="173" text-anchor="middle" class="mono small">from_feedback.jsonl</text>
+  <rect x="400" y="140" width="150" height="56" rx="8" class="box-warn"/>
+  <text x="475" y="164" text-anchor="middle" class="label">human writes the</text>
+  <text x="475" y="181" text-anchor="middle" class="label">expected answer</text>
+  <rect x="210" y="140" width="150" height="56" rx="8" class="box-ok"/>
+  <text x="285" y="173" text-anchor="middle">add to eval set</text>
+  <rect x="20" y="140" width="150" height="56" rx="8" class="box"/>
+  <text x="95" y="164" text-anchor="middle" class="label">fix prompt or docs,</text>
+  <text x="95" y="181" text-anchor="middle" class="label">re-run evals</text>
+  <path class="arrow" d="M590,168 H554"/>
+  <path class="arrow" d="M400,168 H364"/>
+  <path class="arrow" d="M210,168 H174"/>
+  <path class="arrow" d="M95,138 V90"/>
+</svg>
+<figcaption>The feedback loop of lab 12, finished by a human. <strong>Every real failure becomes a permanent test, so the same mistake cannot quietly come back.</strong></figcaption>
+</figure>
+
+<p>The human step matters, and our real run shows why. The ratings and comments in lab 12 are written into the script before the bot answers, so they are simulated. For "Can I return a bike I rode 80 km?" the bot said <em>no</em>, correctly applying the 50 km limit in <code>data/docs/returns.md</code>, and the scripted customer still gave a thumbs down with the comment "Unfair policy, I only rode it twice". The complaint is about the policy, not the answer: a thumbs down on a correct answer. Real feedback has the same problem: users misread answers, rate the wrong message, or are unhappy for reasons unrelated to correctness. The second thumbs-down ("Not clear") was on an "I don't know" answer to "Is express shipping available for helmets?", which may be a correct refusal or a retrieval gap. Only a person who reads the policy can tell, write the expected answer, and decide whether the case joins <code>evals/qa.jsonl</code>. Once it does, every future change to the prompt, retriever or model is checked against it. Over time, the eval set drifts toward the questions real customers ask, which is exactly what you want.</p>
+
+<div class="callout warn"><strong>Common misconceptions and pitfalls</strong>
+<ul>
+  <li><strong>Building all six layers on day one.</strong> Each layer adds latency, cost and failure modes. Add one when a measurement shows the problem it solves.</li>
+  <li><strong>Logging raw personal data.</strong> Traces are a goldmine and a liability. Redact before logging (lab 10's <code>redact_pii</code>) and decide how long to keep them.</li>
+  <li><strong>Trusting the router and caches blindly.</strong> Both make silent mistakes. Log their decisions and evaluate them like any other model output.</li>
+  <li><strong>Letting the model decide permissions.</strong> Access control and limits on write actions belong in code, not in the prompt.</li>
+  <li><strong>Reading the thumbs-up rate as accuracy.</strong> It measures satisfaction among people who chose to click. Use it to find examples, then judge them properly.</li>
+  <li><strong>Collecting feedback nobody reads.</strong> If thumbs-down answers never become eval cases or fixes, the button is decoration.</li>
+  <li><strong>Assuming nothing changed because the code did not.</strong> Models, documents and users drift; re-run evals and watch quality metrics over time.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>Build up in layers: call the model; add context (RAG, tools); add input and output guardrails; add a router and a gateway; add caches; then agents and, carefully, write actions.</li>
+  <li>Labs map onto the layers: guardrails in lab 10, caches and router in lab 11, tracing and feedback in lab 12, with <code>aie/llm.py</code> as a minimal gateway.</li>
+  <li>Log a trace per request: input, output, context, model and prompt version, tokens, latency, errors, tool calls, and the user's feedback linked by id.</li>
+  <li>Watch metrics for reliability, speed and cost, quality and usage, and expect drift from models, prompts, documents and users.</li>
+  <li>Use an orchestration framework when it saves specific work; plain code is often clearer for small pipelines like ours.</li>
+  <li>Combine explicit and implicit feedback, ask at natural moments, remember its biases, and turn failures into eval cases reviewed by a human.</li>
+</ul>
+</div>
+
+<h2>Learn more</h2>
+<ul>
+  <li><a href="https://www.oreilly.com/library/view/ai-engineering/9781098166298/">AI Engineering (O'Reilly)</a>, chapter 10, and the author's <a href="https://github.com/chiphuyen/aie-book">resources repository</a>.</li>
+  <li><a href="https://opentelemetry.io/docs/concepts/observability-primer/">OpenTelemetry: observability primer</a> and <a href="https://opentelemetry.io/docs/concepts/signals/traces/">OpenTelemetry: traces</a>.</li>
+  <li><a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">OpenTelemetry semantic conventions for generative AI</a> (standard names for model, token and latency fields in traces).</li>
+  <li><a href="https://platform.openai.com/docs/guides/production-best-practices">OpenAI: production best practices</a> and <a href="https://platform.openai.com/docs/guides/safety-best-practices">OpenAI: safety best practices</a>.</li>
+  <li><a href="https://genai.owasp.org/llm-top-10/">OWASP Top 10 for LLM applications</a> (prompt injection, excessive agency, sensitive data).</li>
+  <li><a href="https://www.nist.gov/itl/ai-risk-management-framework">NIST AI Risk Management Framework</a>.</li>
+  <li><a href="https://docs.python.org/3/library/sqlite3.html">Python docs: sqlite3</a> (the database behind lab 12's traces).</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="inference-optimization.html"><small>← Chapter 9</small>Inference optimization</a>
+<a class="next" href="index.html"><small>Done →</small>Contents</a>
+</nav>
+</main>
+</body>
+</html>

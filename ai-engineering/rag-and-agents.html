@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 6 · RAG and agents</title>
+<meta name="description" content="Retrieval architectures and optimizations, then agents: tools, planning, failure modes and evaluation. Read with book chapter 6.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 6/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 6 of 10</div>
+  <h1>RAG and agents</h1>
+  <p class="lead">Retrieval architectures and optimizations, then agents: tools, planning, failure modes and evaluation. Read with book chapter 6.</p>
+</section>
+<div class="callout">Read with <strong>chapter 6 · RAG and Agents</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>A foundation model only knows what was in its training data, frozen at some date, and it knows none of your private documents. Two patterns fix this. <a class="term" href="glossary.html#rag">Retrieval-augmented generation (RAG)</a> finds the relevant pieces of your own data and pastes them into the prompt, so the model answers from them. An <a class="term" href="glossary.html#agent">agent</a> goes further: the model decides by itself which tools to call (search, look up an order, compute a date), reads the results, and keeps going until it can answer.</p>
+<p>This chapter explains both, from the inside: how retrieval actually ranks text, how to measure and improve it, what an agent loop is, how agents fail, and how to keep their tools safe.</p>
+
+<div class="callout ok"><strong>Why this matters for your project.</strong> The Trailhead Bikes bot becomes useful in this part of the labs. <a href="06-retrieval.html">Lab 06</a> builds and measures three retrievers, <a href="07-rag.html">lab 07</a> answers from retrieved chunks, and <a href="09-agent.html">lab 09</a> turns the bot into an agent with three tools. All the numbers on this page come from those real runs.</div>
+
+<h2>Why RAG: context beats memory</h2>
+<p>In <a href="04-eval-set.html">lab 04</a> the bot answered 20 questions from memory alone. Its keyword pass rate was 30 %. It invented a five-year frame warranty, quoted shipping prices in dollars and said it delivers to Switzerland. Nothing was wrong with the model: it simply had never seen the shop's policies, so it produced plausible text, which is what a model does when it lacks facts. That is a <a class="term" href="glossary.html#hallucination">hallucination</a>.</p>
+<p>In <a href="07-rag.html">lab 07</a> the same model, with the same questions, first retrieves three chunks of the shop's documents and answers from them with the <code>rag_v2</code> prompt. The keyword pass rate went to 80 %, and most answers cite the chunk they came from, like <code>[shipping#0]</code>. This is called <a class="term" href="glossary.html#grounding">grounding</a>: the answer is tied to a source you can check.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Baseline answers from memory with a 30 percent keyword pass rate; RAG answers from retrieved chunks with 80 percent">
+  <text class="title" x="20" y="26">Lab 04: from memory</text>
+  <rect class="box-warn" x="20" y="40" width="150" height="50" rx="8"/>
+  <text class="label" x="95" y="70" text-anchor="middle">question</text>
+  <rect class="box-solid" x="210" y="40" width="150" height="50" rx="8"/>
+  <text class="on-solid" x="285" y="70" text-anchor="middle">llama3.2</text>
+  <rect class="box-bad" x="400" y="40" width="190" height="50" rx="8"/>
+  <text class="label" x="495" y="62" text-anchor="middle">plausible guesses</text>
+  <text class="small" x="495" y="80" text-anchor="middle">"5-year warranty", "$"</text>
+  <text class="title" x="670" y="72" text-anchor="middle">30 %</text>
+  <path class="arrow" d="M 170,65 H 208"/><path class="arrow" d="M 360,65 H 398"/>
+  <text class="title" x="20" y="132">Lab 07: from retrieved context</text>
+  <rect class="box-warn" x="20" y="146" width="110" height="50" rx="8"/>
+  <text class="label" x="75" y="176" text-anchor="middle">question</text>
+  <rect class="box-info" x="150" y="146" width="110" height="50" rx="8"/>
+  <text class="label" x="205" y="168" text-anchor="middle">retriever</text>
+  <text class="small" x="205" y="186" text-anchor="middle">top 3 chunks</text>
+  <rect class="box-solid" x="280" y="146" width="100" height="50" rx="8"/>
+  <text class="on-solid" x="330" y="176" text-anchor="middle">llama3.2</text>
+  <rect class="box-ok" x="400" y="146" width="190" height="50" rx="8"/>
+  <text class="label" x="495" y="168" text-anchor="middle">answer + citation</text>
+  <text class="small mono" x="495" y="186" text-anchor="middle">… 9.90 EUR. [shipping#0]</text>
+  <text class="title" x="670" y="178" text-anchor="middle">80 %</text>
+  <path class="arrow" d="M 130,171 H 148"/><path class="arrow" d="M 260,171 H 278"/><path class="arrow" d="M 380,171 H 398"/>
+  <text class="small" x="740" y="220" text-anchor="end">keyword pass rate on the same 20 questions (real runs)</text>
+</svg>
+<figcaption>Same model, same questions; the only change is the context. <strong>For private or fresh facts, giving the model the text beats hoping it remembers.</strong></figcaption>
+</figure>
+
+<p>There is a price. The average input grew from about 63 tokens per question (baseline) to about 372 (RAG), because each prompt now carries three chunks. The answers in that run were still faster on average (5.8 s against 8.8 s), likely because the grounded answers were much shorter; timings on your machine will differ. And RAG brings new ways to fail: if the retriever brings back the wrong chunk, the model faithfully answers from the wrong text. Look at q08 in lab 07: asked about Switzerland, the bot said "I don't know". The shipping document lists the countries it serves, and Switzerland is not among them, so the right answer ("no") has to be inferred from an absence, which the small model did not do. Whether the miss comes from retrieval or from the model is something only a separate retrieval measurement can tell you. A RAG system is only as good as its retriever, which is why most of this chapter is about retrieval.</p>
+
+<details class="primer"><summary>New to RAG vs long context? Why not paste all the documents every time?</summary>
+<p>Our eight policy documents would fit in a modern <a class="term" href="glossary.html#context-window">context window</a>. For a small, stable knowledge base that is a reasonable choice. But real knowledge bases have thousands of pages, cost grows with every token you send on every call, long prompts are slower, and models can overlook facts buried in the middle of a long context (see <a href="prompt-engineering.html">Prompt engineering</a>). Retrieval sends only the few relevant pieces. Many systems combine both: a generous context, filled by a retriever.</p>
+</details>
+
+<h2>The two halves of a RAG system</h2>
+<p>A RAG system has an offline part and an online part. <strong>Indexing</strong> runs once, or whenever documents change: split each document into <a class="term" href="glossary.html#chunk">chunks</a>, compute whatever the search needs (word counts, <a class="term" href="glossary.html#embedding">embeddings</a>) and store it. <strong>Querying</strong> runs on every question: the <a class="term" href="glossary.html#retriever">retriever</a> finds the best chunks, the code pastes them into the prompt, and the model writes the answer. In our project, <code>aie/docs.py</code> does the splitting, <code>aie/retrieve.py</code> holds the retrievers, and <code>aie/rag.py</code> builds the prompt.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="RAG pipeline: indexing splits documents into chunks and builds indexes; querying retrieves the top chunks, builds a prompt and asks the model">
+  <rect class="zone" x="10" y="10" width="740" height="96" rx="8"/>
+  <text class="title" x="24" y="32">Indexing (once)</text>
+  <rect class="box" x="24" y="44" width="150" height="50" rx="8"/>
+  <text class="label" x="99" y="66" text-anchor="middle">8 documents</text>
+  <text class="small mono" x="99" y="84" text-anchor="middle">data/docs/*.md</text>
+  <rect class="box" x="214" y="44" width="150" height="50" rx="8"/>
+  <text class="label" x="289" y="66" text-anchor="middle">split into chunks</text>
+  <text class="small mono" x="289" y="84" text-anchor="middle">aie/docs.py</text>
+  <rect class="box" x="404" y="44" width="150" height="50" rx="8"/>
+  <text class="label" x="479" y="66" text-anchor="middle">23 chunks</text>
+  <text class="small" x="479" y="84" text-anchor="middle">title + paragraphs</text>
+  <rect class="box-info" x="594" y="44" width="146" height="50" rx="8"/>
+  <text class="label" x="667" y="66" text-anchor="middle">BM25 + vectors</text>
+  <text class="small mono" x="667" y="84" text-anchor="middle">aie/retrieve.py</text>
+  <path class="arrow" d="M 174,69 H 212"/><path class="arrow" d="M 364,69 H 402"/><path class="arrow" d="M 554,69 H 592"/>
+  <rect class="zone" x="10" y="120" width="740" height="120" rx="8"/>
+  <text class="title" x="24" y="142">Querying (every question)</text>
+  <rect class="box-warn" x="24" y="160" width="150" height="56" rx="8"/>
+  <text class="label" x="99" y="184" text-anchor="middle">question</text>
+  <text class="small" x="99" y="202" text-anchor="middle">from the customer</text>
+  <rect class="box-info" x="214" y="160" width="150" height="56" rx="8"/>
+  <text class="label" x="289" y="184" text-anchor="middle">search, k=3</text>
+  <text class="small" x="289" y="202" text-anchor="middle">best chunks</text>
+  <rect class="box" x="404" y="160" width="150" height="56" rx="8"/>
+  <text class="label" x="479" y="184" text-anchor="middle">fill {context}</text>
+  <text class="small mono" x="479" y="202" text-anchor="middle">aie/rag.py</text>
+  <rect class="box-solid" x="594" y="160" width="146" height="56" rx="8"/>
+  <text class="on-solid" x="667" y="184" text-anchor="middle">model</text>
+  <text class="on-solid small" x="667" y="202" text-anchor="middle">answer + citations</text>
+  <path class="arrow" d="M 174,188 H 212"/><path class="arrow" d="M 364,188 H 402"/><path class="arrow" d="M 554,188 H 592"/>
+  <path class="line dashed" d="M 667,94 V 118"/><path class="line dashed" d="M 667,118 H 289 V 158"/>
+</svg>
+<figcaption>The dashed line is where the two halves meet: queries search the indexes built offline. <strong>When documents change, re-run indexing, or the bot answers from stale text.</strong></figcaption>
+</figure>
+
+<h2>Retrieval algorithms</h2>
+<p>A retriever takes a question and returns a ranked list of chunks with scores. There are two big families, and our lab builds one of each and then combines them.</p>
+
+<h3>Term-based retrieval: BM25</h3>
+<p>Term-based retrieval matches <em>words</em>. The classic scoring function is <a class="term" href="glossary.html#bm25">BM25</a>, which has powered search engines for decades. For each word of the question that appears in a chunk, it adds points, following three intuitions:</p>
+<ul>
+<li><strong>Rare words matter more.</strong> "the" is in every chunk and tells you nothing; "hygiene" or "odometer" is in very few and is a strong signal. This weight is the <a class="term" href="glossary.html#idf">inverse document frequency (idf)</a>, computed once per word: the fewer chunks contain the word, the higher its idf.</li>
+<li><strong>More occurrences help, with diminishing returns.</strong> A word appearing twice is a better sign than once, but ten times is not ten times better. The parameter <code>k1</code> (1.5 in our code) controls how fast it saturates.</li>
+<li><strong>Long chunks are penalised a little.</strong> A long text contains many words by chance. The parameter <code>b</code> (0.75) controls how much the chunk length counts.</li>
+</ul>
+<p>Our <code>BM25</code> class in <code>aie/retrieve.py</code> is about 20 lines of plain Python. Before counting, <code>tokenize</code> lowercases the text, keeps letters and numbers and drops a short list of stopwords. BM25 is fast, needs no model, is easy to explain, and is excellent at exact terms: product names, order numbers, error codes. Its weakness is that it knows nothing about meaning. In lab 06, BM25 missed q08, "Do you deliver to Switzerland?", because the shipping document says "We ship to …" and lists the countries; "deliver" is not there, and "Switzerland" is not either (it lists the countries served, not the ones excluded). The three chunks it returned all came from the warranty document.</p>
+
+<h3>Embedding-based retrieval: vector search</h3>
+<p>Embedding-based (or "dense") retrieval matches <em>meaning</em>. An embedding model turns any text into a <a class="term" href="glossary.html#vector">vector</a>, a list of numbers, such that texts with similar meaning get vectors that point in similar directions. We use <code>nomic-embed-text</code> through Ollama. At indexing time every chunk is embedded once; at query time the question is embedded and compared with every chunk vector using <a class="term" href="glossary.html#cosine-similarity">cosine similarity</a>. Our <code>EmbeddingIndex</code> normalises all vectors to length 1, so cosine similarity becomes a single matrix product: <code>self.matrix @ q</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Illustrative two-dimensional embedding space: shipping chunks and a delivery question sit close together, battery and warranty chunks are elsewhere">
+  <rect class="box" x="10" y="10" width="440" height="240" rx="8"/>
+  <text class="small" x="24" y="30">meaning space (illustrative 2-D; real vectors have hundreds of dimensions)</text>
+  <circle class="dot-info" cx="300" cy="80" r="7"/>
+  <text class="label" x="312" y="76">shipping#0</text>
+  <circle class="dot-info" cx="340" cy="112" r="7"/>
+  <text class="label" x="352" y="116">shipping#1</text>
+  <circle class="dot-warn" cx="270" cy="120" r="8"/>
+  <text class="label warn" x="150" y="148">"Do you deliver</text>
+  <text class="label warn" x="150" y="164">to Switzerland?"</text>
+  <path class="line dashed" d="M 270,120 L 300,80"/>
+  <circle class="dot" cx="90" cy="200" r="7"/>
+  <text class="label" x="102" y="204">battery-care#2</text>
+  <circle class="dot" cx="120" cy="70" r="7"/>
+  <text class="label" x="132" y="74">warranty#0</text>
+  <circle class="dot" cx="330" cy="210" r="7"/>
+  <text class="label" x="342" y="214">sizing#1</text>
+  <rect class="box2" x="470" y="10" width="280" height="240" rx="8"/>
+  <text class="title" x="486" y="36">How the search works</text>
+  <text class="label" x="486" y="64">1. embed the question</text>
+  <text class="label" x="486" y="90">2. compare its direction with</text>
+  <text class="label" x="486" y="108">   every chunk's vector</text>
+  <text class="label" x="486" y="134">3. keep the k most similar</text>
+  <text class="small" x="486" y="170">"deliver" and "ship" have no letters</text>
+  <text class="small" x="486" y="186">in common, but their meanings are</text>
+  <text class="small" x="486" y="202">close, so their vectors are close.</text>
+</svg>
+<figcaption>Illustrative positions, not real coordinates. <strong>Embeddings find the shipping chunk for a "deliver" question, which BM25 could not.</strong></figcaption>
+</figure>
+
+<p>With 23 chunks, comparing the question with every vector takes no time. With millions, comparing with all of them is too slow, so vector databases use <strong>approximate nearest neighbour</strong> (ANN) indexes. They organise vectors into clusters or graphs so that a search only visits a small part of the collection and returns <em>almost</em> the best matches, much faster. You trade a little recall for a lot of speed, and most libraries let you tune that trade-off.</p>
+<p>Embeddings have their own blind spots: exact identifiers, rare names and numbers. In lab 06 the embedding retriever missed q06, "Where do I find the frame number?". The answer is in the warranty document, but all three chunks it returned came from the sizing guide, which is full of frame sizes. "Frame" dominated the meaning; "number" did not pull hard enough.</p>
+
+<details class="primer"><summary>New to embedding models? The prefixes our code adds</summary>
+<p><code>nomic-embed-text</code> was trained to expect a short task prefix: chunks are embedded as <code>search_document: …</code> and questions as <code>search_query: …</code>. Leaving them out still "works" but usually ranks worse. Other embedding models have other conventions, or none, so read the model card. Also, never mix vectors from two different embedding models in one index: their numbers are not comparable.</p>
+</details>
+
+<h3>Comparing them, and combining them: hybrid search</h3>
+<div class="table-wrap"><table>
+<tr><th></th><th>Term-based (BM25)</th><th>Embedding-based</th></tr>
+<tr><td>Matches</td><td>Exact words</td><td>Meaning, synonyms, paraphrases</td></tr>
+<tr><td>Strong on</td><td>IDs, names, codes, rare terms</td><td>Questions worded differently from the docs</td></tr>
+<tr><td>Needs</td><td>Only the text</td><td>An embedding model, run on every chunk and query</td></tr>
+<tr><td>Explainable</td><td>Yes: which words matched</td><td>Hard: a similarity of two long vectors</td></tr>
+<tr><td>Missed in lab 06</td><td>q08 ("deliver" vs "ship")</td><td>q06 (frame number vs frame size)</td></tr>
+</table></div>
+<p>Because they fail on <em>different</em> questions, combining them is a good bet. That is <a class="term" href="glossary.html#hybrid-search">hybrid search</a>. The scores themselves can't be added (BM25 scores are unbounded; cosine similarities sit between −1 and 1), so a popular trick ignores the scores and uses only the <em>ranks</em>: <a class="term" href="glossary.html#rrf">reciprocal rank fusion (RRF)</a>. Every chunk gets <code>1 / (c + rank)</code> from each list it appears in, and the totals decide the final order. The constant <code>c = 60</code> is the common default from the original RRF paper; it stops the first rank from dominating everything. Here is the whole function from our code:</p>
+<pre data-lang="py" data-tag="excerpt · aie/retrieve.py, lines 63–71"><code>def reciprocal_rank_fusion(result_lists, k=3, c=60):
+    """Merge ranked lists: each chunk gets 1/(c + rank) from every list it appears in."""
+    scores, by_id = {}, {}
+    for results in result_lists:
+        for rank, (chunk, _) in enumerate(results, start=1):
+            scores[chunk.id] = scores.get(chunk.id, 0.0) + 1 / (c + rank)
+            by_id[chunk.id] = chunk
+    best = sorted(scores, key=scores.get, reverse=True)[:k]
+    return [(by_id[i], scores[i]) for i in best]</code></pre>
+<p>Our <code>Hybrid</code> class asks each retriever for its top 10 (<code>pool=10</code>), fuses them, and keeps the top 3.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Reciprocal rank fusion example: two ranked lists are merged by summing one over sixty plus rank for each chunk">
+  <text class="title" x="20" y="30">BM25</text>
+  <rect class="box" x="20" y="44" width="90" height="30" rx="8"/><text class="label mono" x="32" y="64">1  A</text>
+  <rect class="box" x="20" y="82" width="90" height="30" rx="8"/><text class="label mono" x="32" y="102">2  B</text>
+  <rect class="box" x="20" y="120" width="90" height="30" rx="8"/><text class="label mono" x="32" y="140">3  C</text>
+  <text class="title" x="122" y="30">Embeddings</text>
+  <rect class="box-info" x="122" y="44" width="90" height="30" rx="8"/><text class="label mono" x="134" y="64">1  B</text>
+  <rect class="box-info" x="122" y="82" width="90" height="30" rx="8"/><text class="label mono" x="134" y="102">2  D</text>
+  <rect class="box-info" x="122" y="120" width="90" height="30" rx="8"/><text class="label mono" x="134" y="140">3  A</text>
+  <rect class="box2" x="230" y="38" width="290" height="174" rx="8"/>
+  <text class="title" x="246" y="62">RRF scores, c = 60</text>
+  <text class="label mono" x="246" y="92">A: 1/61 + 1/63 = 0.0323</text>
+  <text class="label mono" x="246" y="118">B: 1/62 + 1/61 = 0.0325</text>
+  <text class="label mono" x="246" y="144">C: 1/63        = 0.0159</text>
+  <text class="label mono" x="246" y="170">D: 1/62        = 0.0161</text>
+  <text class="small" x="246" y="198">only ranks are used, never raw scores</text>
+  <path class="arrow" d="M 214,125 H 228"/>
+  <rect class="box-ok" x="560" y="38" width="180" height="174" rx="8"/>
+  <text class="title" x="650" y="62" text-anchor="middle">Fused top 3</text>
+  <text class="label mono" x="650" y="96" text-anchor="middle">1  B</text>
+  <text class="label mono" x="650" y="124" text-anchor="middle">2  A</text>
+  <text class="label mono" x="650" y="152" text-anchor="middle">3  D</text>
+  <text class="small" x="650" y="190" text-anchor="middle">B is high in both lists</text>
+  <path class="arrow-ok" d="M 520,125 H 558"/>
+  <text class="small" x="20" y="236">A, B, C, D are illustrative chunk ids.</text>
+</svg>
+<figcaption>A chunk that both retrievers like beats a chunk that only one retriever ranks first. <strong>RRF rewards agreement between different kinds of search.</strong></figcaption>
+</figure>
+
+<p>Here are the real lab 06 results on the 18 answerable questions (23 chunks from 8 documents, top 3 retrieved):</p>
+<pre data-lang="text" data-tag="real output · lab 06"><code>retriever        hit@1   hit@3     MRR
+BM25               83%     94%    0.89
+Embeddings         89%     94%    0.91
+Hybrid (RRF)       89%     94%    0.92</code></pre>
+<p>On this tiny set the three are close, and hybrid is only slightly ahead on MRR. Hybrid fixed q08 (the BM25 miss) but still missed q06, because both of its inputs ranked sizing chunks high for that question. Don't over-read differences of one question out of 18; with a small eval set, a single question moves hit@1 by more than 5 points. The lesson is the method, not the winner: measure your retrievers on your questions.</p>
+
+<h2>Evaluating retrieval</h2>
+<p>Retrieval can be tested on its own, without the model, which is fast and repeatable. You need questions labelled with where the answer lives; our <code>evals/qa.jsonl</code> has a <code>source</code> document for every answerable question. Common measures:</p>
+<ul>
+<li><strong><a class="term" href="glossary.html#hit-rate">Hit rate</a> at k</strong> (hit@k): the share of questions where a correct source appears in the top k results. Lab 06 counts a hit when any of the top 3 chunks comes from the expected document.</li>
+<li><strong><a class="term" href="glossary.html#mrr">Mean reciprocal rank (MRR)</a></strong>: for each question take 1 / (rank of the first correct result), or 0 if it's missing, then average. Rank 1 gives 1, rank 2 gives 0.5, rank 3 gives 0.33. It rewards putting the right chunk first.</li>
+<li><strong><a class="term" href="glossary.html#precision-recall">Precision and recall</a></strong>: of the chunks you returned, how many were relevant (precision); of all relevant chunks, how many you returned (recall). They need every relevant chunk labelled, which takes more work.</li>
+<li><strong>Context relevance</strong>: whether the retrieved text actually helps answer the question, often judged by an <a class="term" href="glossary.html#ai-judge">AI judge</a> when there are no labels. Even then, check the judge against human labels (lab 05).</li>
+</ul>
+<p>Then evaluate the whole pipeline end to end, as lab 07 does. Good retrieval with a bad prompt still gives bad answers, and the reverse.</p>
+
+<h2>Making retrieval better</h2>
+
+<h3>Chunking</h3>
+<p>How you cut documents matters as much as how you search them. Chunks that are too big dilute the match and waste tokens; chunks that are too small lose the context that makes them understandable. Common strategies: fixed size in characters or tokens; along natural boundaries (sentences, paragraphs, headings); or recursive splitting that tries big boundaries first and smaller ones only when needed. Our <code>chunk_doc</code> keeps whole paragraphs and starts a new chunk when the next paragraph would push it past about 60 words (<code>max_words=60</code>).</p>
+<p><a class="term" href="glossary.html#chunk-overlap">Overlap</a> repeats a bit of the previous chunk at the start of the next, so a fact that sits on a boundary is not cut in half. Ours repeats the last paragraph (<code>overlap=1</code>). The cost is some duplicated text in the index and occasionally two near-identical chunks in the results.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Chunking with overlap: paragraphs grouped into chunks of about 60 words, each chunk repeating the last paragraph of the previous one and starting with the document title">
+  <text class="title" x="20" y="26">returns.md, paragraph by paragraph</text>
+  <rect class="box" x="20" y="40" width="170" height="36" rx="8"/><text class="label" x="105" y="63" text-anchor="middle">P1 30-day window</text>
+  <rect class="box" x="200" y="40" width="170" height="36" rx="8"/><text class="label" x="285" y="63" text-anchor="middle">P2 opened helmets</text>
+  <rect class="box" x="380" y="40" width="170" height="36" rx="8"/><text class="label" x="465" y="63" text-anchor="middle">P3 return label, fees</text>
+  <rect class="box" x="560" y="40" width="180" height="36" rx="8"/><text class="label" x="650" y="63" text-anchor="middle">P4 refund timing</text>
+  <rect class="box-info" x="20" y="104" width="350" height="44" rx="8"/>
+  <text class="label" x="195" y="122" text-anchor="middle">chunk A</text>
+  <text class="small" x="195" y="139" text-anchor="middle">title + P1 + P2</text>
+  <rect class="box-ok" x="200" y="160" width="350" height="44" rx="8"/>
+  <text class="label" x="375" y="178" text-anchor="middle">chunk B</text>
+  <text class="small" x="375" y="195" text-anchor="middle">title + P2 (repeated) + P3</text>
+  <path class="line dashed" d="M 285,78 V 102"/>
+  <text class="small" x="580" y="128">overlap = 1 paragraph</text>
+  <text class="small" x="580" y="146">max_words = 60</text>
+  <text class="small" x="580" y="182">each chunk starts</text>
+  <text class="small" x="580" y="198">with the doc title</text>
+</svg>
+<figcaption>Illustrative grouping; the real split depends on word counts. <strong>Overlap keeps boundary facts whole; the title keeps each chunk understandable on its own.</strong></figcaption>
+</figure>
+
+<h3>Contextual retrieval: give each chunk its context</h3>
+<p>A chunk read alone can be ambiguous. "It is free on orders over 100 EUR": what is free, shipping or returns? A simple fix is to prefix every chunk with information about where it came from. Our <code>chunk_doc</code> starts every chunk with its document title ("Shipping", "Returns and refunds"), which helps both BM25 (the title words become searchable) and embeddings (the vector carries the topic). A stronger version asks a model to write a one- or two-sentence summary of how each chunk fits into its document and prepends that before indexing. It costs one model call per chunk at indexing time, not per question.</p>
+
+<h3>Reranking</h3>
+<p>First-stage retrievers must be fast because they look at everything. A <a class="term" href="glossary.html#reranking">reranker</a> is a slower, more accurate model that looks only at the top candidates, reading the question and each chunk <em>together</em>, and reorders them. The usual pattern: retrieve 20–50 candidates cheaply, rerank, keep the best 3–5 for the prompt. Our hybrid retriever does a light version of this idea (pool of 10 per retriever, fused, top 3), without a reranking model.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Retrieve then rerank: a fast retriever narrows all chunks to candidates, a slower reranker picks the few that go into the prompt">
+  <rect class="box" x="20" y="40" width="200" height="100" rx="8"/>
+  <text class="label" x="120" y="80" text-anchor="middle">all chunks</text>
+  <text class="small" x="120" y="100" text-anchor="middle">thousands to millions</text>
+  <rect class="box-info" x="280" y="55" width="180" height="70" rx="8"/>
+  <text class="label" x="370" y="84" text-anchor="middle">fast retriever</text>
+  <text class="small" x="370" y="104" text-anchor="middle">keeps ~20–50</text>
+  <rect class="box-ok" x="520" y="65" width="140" height="50" rx="8"/>
+  <text class="label" x="590" y="86" text-anchor="middle">reranker</text>
+  <text class="small" x="590" y="104" text-anchor="middle">keeps 3–5</text>
+  <rect class="box-solid" x="690" y="70" width="56" height="40" rx="8"/>
+  <text class="on-solid small" x="718" y="95" text-anchor="middle">prompt</text>
+  <path class="arrow" d="M 220,90 H 278"/><path class="arrow" d="M 460,90 H 518"/><path class="arrow" d="M 660,90 H 688"/>
+  <text class="small" x="370" y="160" text-anchor="middle">cheap per item, sees everything → expensive per item, sees few</text>
+</svg>
+<figcaption>Typical sizes, not fixed rules. <strong>Spend the expensive model only on the candidates that might matter.</strong></figcaption>
+</figure>
+
+<h3>Query rewriting</h3>
+<p>Users don't phrase questions the way documents are written. Query rewriting uses a model (or rules) to turn the user's message into a better search query before retrieval. Two typical cases: a follow-up in a conversation ("and in Annecy?") must become a full question ("Is the Annecy store open on Monday?"), because the retriever does not see the chat history; and a question can be expanded with synonyms ("deliver" → "ship, shipping, delivery countries"), which would have rescued BM25 on q08. Rewriting adds a model call per question, so measure whether it pays off.</p>
+
+<h3>RAG beyond text</h3>
+<p>Not all knowledge is prose. Order data, prices and stock levels live in tables and databases. For those, "retrieval" can mean running a query: the model writes SQL (text-to-SQL) or, more safely, calls a fixed function with parameters, and the result rows go into the context. Our agent's <code>get_order</code> tool is the safe version: the model passes an order number; the code looks it up in <code>data/orders.json</code> and checks who owns it. If you let a model write SQL, give it a read-only account limited to the tables it needs, because generated queries can be wrong or manipulated by injected text.</p>
+
+<h2>Agents</h2>
+<p>An agent is a model that acts in an <strong>environment</strong> through <strong>tools</strong>, choosing what to do next based on what it has seen so far (<strong><a class="term" href="glossary.html#planning">planning</a></strong>). The environment is whatever the tools can reach: a document store, an orders database, a calendar, a codebase, the web. RAG is a fixed pipeline where your code always retrieves once; an agent decides <em>whether</em> to retrieve, what to search for, and what to do with the result.</p>
+
+<h3>Kinds of tools</h3>
+<ul>
+<li><strong>Knowledge tools</strong> read information: <code>search_docs</code> (hybrid search over the policies) and <code>get_order</code> (one order as JSON) in our agent.</li>
+<li><strong>Capability tools</strong> do what models are bad at: arithmetic, dates, code execution, unit conversion. Our <code>days_since</code> computes the days between a date and the fixed <code>TODAY</code> (2026-10-12), instead of trusting the model's arithmetic.</li>
+<li><strong>Write actions</strong> change the world: create a return label, refund a payment, send an email, update a database. Our lab has none on purpose. They are the most useful and the most dangerous kind (see security below).</li>
+</ul>
+
+<h3>The tool loop</h3>
+<p>With <a class="term" href="glossary.html#tool-calling">tool calling</a>, the model never runs anything itself. You describe each tool (name, description, JSON schema of its arguments) in the request. The model replies either with a normal answer or with one or more tool calls: "call <code>get_order</code> with <code>{"order_id": "TH-10234"}</code>". Your code runs the function, appends the result as a <code>tool</code> message, and calls the model again. This repeats until the model answers without a tool call or a step limit is reached. Here is the loop from <code>aie/agent.py</code>:</p>
+<pre data-lang="py" data-tag="excerpt · aie/agent.py, lines 59–76"><code>    for step in range(max_steps):
+        response = client.chat.completions.create(
+            model=model or config.MODEL, messages=messages, tools=TOOLS, temperature=0)
+        message = response.choices[0].message
+        if not message.tool_calls:
+            return message.content, trace
+        messages.append(message.model_dump(exclude_none=True))
+        for call in message.tool_calls:
+            name = call.function.name
+            try:
+                args = json.loads(call.function.arguments or "{}")
+                result = tools[name](**args)
+            except Exception as error:  # a bad tool call becomes feedback the model can recover from
+                args, result = call.function.arguments, f"Tool error: {error}"
+            trace.append({"step": step, "tool": name, "args": args, "result": result[:200]})
+            if verbose:
+                print(f"   step {step}: {name}({args}) -&gt; {result[:90]!r}")
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": result})</code></pre>
+<p>Three design choices are worth copying. The step limit (<code>max_steps=6</code>) stops endless loops and caps cost. A failing tool call becomes an error message the model can read and correct, instead of crashing the program. And every call is recorded in a <code>trace</code>, which is what makes the agent debuggable and testable.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Sequence of the agent loop: code sends messages and tool descriptions to the model, the model asks for a tool call, code runs the tool and sends the result back, until the model answers">
+  <rect class="box-warn" x="40" y="14" width="150" height="34" rx="8"/><text class="label" x="115" y="36" text-anchor="middle">your code</text>
+  <rect class="box-solid" x="305" y="14" width="150" height="34" rx="8"/><text class="on-solid" x="380" y="36" text-anchor="middle">model</text>
+  <rect class="box-info" x="570" y="14" width="150" height="34" rx="8"/><text class="label" x="645" y="36" text-anchor="middle">tools</text>
+  <path class="line dashed" d="M 115,48 V 290"/><path class="line dashed" d="M 380,48 V 290"/><path class="line dashed" d="M 645,48 V 290"/>
+  <path class="arrow" d="M 115,78 H 376"/><text class="small" x="124" y="72">1 messages + TOOLS</text>
+  <path class="arrow-accent" d="M 380,112 H 119"/><text class="small" x="150" y="106">2 tool call: get_order("TH-10234")</text>
+  <path class="arrow" d="M 115,146 H 641"/><text class="small" x="124" y="140">3 run the Python function</text>
+  <path class="arrow" d="M 645,180 H 119"/><text class="small" x="410" y="174">4 result JSON</text>
+  <path class="arrow" d="M 115,214 H 376"/><text class="small" x="124" y="208">5 append "tool" message, call again</text>
+  <path class="arrow-ok" d="M 380,248 H 119"/><text class="small" x="150" y="242">6 no tool call: final answer</text>
+  <text class="small" x="390" y="280">steps 2–5 repeat, at most max_steps = 6 times</text>
+</svg>
+<figcaption>Time flows down. <strong>The model only asks; your code decides whether and how a tool actually runs.</strong></figcaption>
+</figure>
+
+<h3>Planning and reflection</h3>
+<p>For a question like "Can I still return my order TH-10234?" a good plan has four steps: look up the order to get its delivery date, look up the return policy, compute the days since delivery, then compare. Some agents write such a plan explicitly before acting; others plan one step at a time, deciding each next tool call from the results so far (our loop works like this). Plans can be wrong, so many systems add <strong>reflection</strong>: after a step, or before answering, the model (or a second model) checks "Did I get everything I need? Does the answer follow from the results?" and corrects course. Reflection improves results on hard tasks but costs extra calls and latency. Keep agents as simple as the task allows: a fixed pipeline is easier to test than a free-form agent, and many problems don't need autonomy.</p>
+
+<h3>How agents fail</h3>
+<p>Agents add new failure modes on top of the model's usual mistakes. It helps to name them, because each has a different fix:</p>
+<div class="table-wrap"><table>
+<tr><th>Failure</th><th>What happens</th><th>Typical fix</th></tr>
+<tr><td>Planning error</td><td>Skips a needed step, does steps in the wrong order, stops too early</td><td>Clearer system prompt, explicit plan step, reflection, a stronger model</td></tr>
+<tr><td>Wrong tool</td><td>Calls a tool that can't help, or one that doesn't exist</td><td>Better tool names and descriptions; fewer, more distinct tools</td></tr>
+<tr><td>Wrong arguments</td><td>Right tool, bad input: invalid JSON, wrong date format, invented ID</td><td>Strict schemas, validation, return readable errors so the model can retry</td></tr>
+<tr><td>Goal failure</td><td>Completes steps but doesn't solve the task, or breaks a constraint (time, budget)</td><td>Evaluate final outcomes, not just steps; step and cost limits</td></tr>
+<tr><td>Tool failure</td><td>The tool itself is wrong, slow or down</td><td>Test tools like normal code; timeouts and fallbacks</td></tr>
+</table></div>
+
+<h3>Evaluating agents by trajectory</h3>
+<p>Checking only the final answer hides <em>why</em> an agent failed. The <a class="term" href="glossary.html#trajectory">trajectory</a> (the sequence of tool calls with their arguments and results) shows it. Useful checks: did it call the tools it needed, with valid arguments? How many steps and tokens did it use? Did it call anything it should not have?</p>
+<p>Lab 09 does the simplest trajectory check: for each question, a set of tools we expect to see. On the question "Can I still return my order TH-10234?", <code>llama3.2</code> called only <code>get_order</code> and then told the customer the order could not be returned. That is wrong: it was delivered on 2026-09-20, 22 days before the agent's fixed date of 2026-10-12, inside the 30-day window. The trajectory check flagged the missing <code>search_docs</code> call, which points straight at the cause: a planning error, the model answered a policy question without reading the policy. Without the trace you would only know "wrong answer".</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Lab 09 trajectory: expected get_order and search_docs, with days_since helpful; the model only called get_order and answered wrongly">
+  <text class="title" x="20" y="26">"Can I still return my order TH-10234?"</text>
+  <text class="label" x="20" y="58">expected</text>
+  <rect class="box-ok" x="110" y="40" width="150" height="30" rx="8"/><text class="label mono" x="185" y="60" text-anchor="middle">get_order</text>
+  <rect class="box-ok" x="280" y="40" width="150" height="30" rx="8"/><text class="label mono" x="355" y="60" text-anchor="middle">search_docs</text>
+  <rect class="box2" x="450" y="40" width="150" height="30" rx="8"/><text class="label mono" x="525" y="60" text-anchor="middle">days_since</text>
+  <text class="small" x="620" y="60">(helpful)</text>
+  <text class="label" x="20" y="112">actual</text>
+  <rect class="box-ok" x="110" y="94" width="150" height="30" rx="8"/><text class="label mono" x="185" y="114" text-anchor="middle">get_order</text>
+  <rect class="box-bad" x="280" y="94" width="150" height="30" rx="8"/><text class="label bad" x="355" y="114" text-anchor="middle">missing</text>
+  <path class="arrow-bad" d="M 430,109 H 478"/>
+  <rect class="box-bad" x="480" y="90" width="260" height="38" rx="8"/><text class="label" x="610" y="114" text-anchor="middle">answer: "can't be returned"</text>
+  <text class="small" x="20" y="160">Facts: delivered 2026-09-20, TODAY fixed at 2026-10-12, 22 days, return window 30 days.</text>
+  <text class="small" x="20" y="182">The check prints MISSING ['search_docs'], pointing to a planning error, not a retrieval error.</text>
+</svg>
+<figcaption>The answer was wrong, and the trajectory tells you why. <strong>Log every tool call; test the path, not only the destination.</strong></figcaption>
+</figure>
+
+<h3>Memory, briefly</h3>
+<p>An agent's "memory" comes in three forms. The model's own knowledge is in its weights. Short-term memory is the conversation so far, held in the messages list and limited by the context window. Long-term memory is anything you store outside the model (past conversations, user preferences, notes the agent wrote) and bring back with retrieval when relevant, which makes it another RAG problem. Long conversations eventually need summarising or trimming, and stored memories need the same care as any personal data.</p>
+
+<h2>Security: tools are where damage happens</h2>
+<p>A chatbot that says something wrong is embarrassing. An agent that <em>does</em> something wrong can refund the wrong person or leak another customer's data. And everything the agent reads, including tool results and retrieved documents, can contain an injected instruction (see <a href="prompt-engineering.html">Prompt engineering</a>). So:</p>
+<ul>
+<li><strong>Put authorization in the tool, not in the prompt.</strong> Our <code>make_get_order(customer_id)</code> builds a <code>get_order</code> function bound to the logged-in customer. If the order belongs to someone else, it answers "No order … found for this customer" whatever the model asks. In lab 09, asking about TH-10251 (customer <code>c-002</code>) as <code>c-001</code> got exactly that refusal. The model can't talk its way past a check it doesn't control.</li>
+<li><strong>Least privilege.</strong> Give each agent only the tools and data it needs. A support bot does not need a "delete customer" tool.</li>
+<li><strong>Confirm write actions.</strong> Anything that spends money, sends messages or can't be undone should be shown to a human (the customer or an employee) for approval, with limits such as a maximum refund amount enforced in code.</li>
+<li><strong>Validate arguments</strong> like any untrusted input: types, formats, ranges, IDs that must exist.</li>
+<li><strong>Log trajectories</strong> so you can audit what happened and spot abuse (labs 12 and 10 show logging and <a class="term" href="glossary.html#guardrail">guardrails</a>).</li>
+</ul>
+
+<div class="callout warn"><strong>Pitfalls and common misconceptions</strong>
+<ul>
+<li><strong>"RAG stops hallucinations."</strong> It reduces them. If retrieval misses, the model either declines or invents; a wrong chunk gives a confidently wrong answer; and even with the right chunk a small model can fail to draw the conclusion (q08 in lab 07).</li>
+<li><strong>"Embeddings are always better than keywords."</strong> Lab 06: each missed a question the other got. Hybrid is a safer default; measure on your data.</li>
+<li><strong>Tuning the generator when retrieval is the problem.</strong> Measure retrieval separately (hit rate, MRR) before rewriting prompts.</li>
+<li><strong>Changing the embedding model without re-indexing.</strong> Old and new vectors are not comparable.</li>
+<li><strong>Chunks that make no sense alone.</strong> Add the title or a short context line to each chunk.</li>
+<li><strong>Reading too much into a tiny eval set.</strong> One question out of 18 is more than 5 points.</li>
+<li><strong>Judging agents only by final answers.</strong> Keep the trace; check which tools were called and with what.</li>
+<li><strong>Permissions in the prompt.</strong> "Only show the customer's own orders" must be code in the tool.</li>
+<li><strong>An agent where a pipeline would do.</strong> Autonomy adds cost, latency and new failure modes.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>RAG puts relevant chunks of your data into the prompt; in our labs the keyword pass rate went from 30 % (memory) to 80 % (retrieved context).</li>
+<li>Indexing (chunk, embed, store) happens offline; retrieval and generation happen per question.</li>
+<li>BM25 matches rare exact words using idf; embeddings match meaning; hybrid search fuses both with RRF (<code>1/(60 + rank)</code>).</li>
+<li>Lab 06: BM25 83 % / 94 % / 0.89, embeddings 89 % / 94 % / 0.91, hybrid 89 % / 94 % / 0.92 (hit@1 / hit@3 / MRR).</li>
+<li>Measure retrieval on its own (hit rate, MRR, precision and recall, context relevance), then end to end.</li>
+<li>Improve it with better chunking and overlap, titles or context on each chunk, reranking and query rewriting.</li>
+<li>An agent = model + tools + planning in a loop; tools read knowledge, extend capabilities or write to the world.</li>
+<li>Agents fail by bad plans, wrong tools, wrong arguments, unmet goals or broken tools; evaluate the trajectory (lab 09 caught a missing <code>search_docs</code>).</li>
+<li>Put authorization and limits in tool code, confirm write actions, and log everything.</li>
+</ul></div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://www.oreilly.com/library/view/ai-engineering/9781098166298/" target="_blank" rel="noopener">AI Engineering (O'Reilly)</a>, chapter 6, and the author's <a href="https://github.com/chiphuyen/aie-book" target="_blank" rel="noopener">aie-book repository</a> with study notes and a reading list.</li>
+<li><a href="https://docs.ollama.com/capabilities/embeddings" target="_blank" rel="noopener">Ollama: embeddings</a> and the <a href="https://ollama.com/library/nomic-embed-text" target="_blank" rel="noopener">nomic-embed-text model page</a></li>
+<li><a href="https://www.elastic.co/docs/reference/elasticsearch/index-settings/similarity" target="_blank" rel="noopener">Elasticsearch: similarity settings (BM25 and its k1 and b parameters)</a></li>
+<li><a href="https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion" target="_blank" rel="noopener">Elasticsearch: reciprocal rank fusion</a></li>
+<li><a href="https://faiss.ai/" target="_blank" rel="noopener">Faiss: a library for approximate nearest neighbour search</a></li>
+<li><a href="https://sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html" target="_blank" rel="noopener">Sentence Transformers: retrieve and re-rank</a></li>
+<li><a href="https://www.anthropic.com/engineering/contextual-retrieval" target="_blank" rel="noopener">Anthropic: contextual retrieval</a></li>
+<li><a href="https://docs.ollama.com/capabilities/tool-calling" target="_blank" rel="noopener">Ollama: tool calling</a> and <a href="https://developers.openai.com/api/docs/guides/function-calling" target="_blank" rel="noopener">OpenAI: function calling</a></li>
+<li><a href="https://www.anthropic.com/engineering/building-effective-agents" target="_blank" rel="noopener">Anthropic: building effective agents</a></li>
+<li><a href="https://genai.owasp.org/llm-top-10/" target="_blank" rel="noopener">OWASP Top 10 for LLM applications</a> (excessive agency, prompt injection)</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="prompt-engineering.html"><small>← Chapter 5</small>Prompt engineering and prompt security</a>
+<a class="next" href="finetuning.html"><small>Chapter 7 →</small>Finetuning</a>
+</nav>
+</main>
+</body>
+</html>

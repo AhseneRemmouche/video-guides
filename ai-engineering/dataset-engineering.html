@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 8 · Dataset engineering</title>
+<meta name="description" content="Data quality, coverage and quantity, synthetic data, and cleaning, deduplicating and formatting data. Read with book chapter 8.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 8/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 8 of 10</div>
+  <h1>Dataset engineering</h1>
+  <p class="lead">Data quality, coverage and quantity, synthetic data, and cleaning, deduplicating and formatting data. Read with book chapter 8.</p>
+</section>
+<div class="callout">Read with <strong>chapter 8 · Dataset Engineering</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>When people picture AI work, they picture models. In practice, much of the effort in an AI project goes into <strong>data</strong>: deciding what examples you need, collecting or generating them, checking them, removing the bad ones and putting them in the exact format a training tool or an evaluation script expects. That work is called <strong>dataset engineering</strong>.</p>
+
+<p>This chapter covers what makes data good, how much you need, where it comes from (people, rules, other models), how to check data that a model wrote, and the practical processing steps: inspecting, deduplicating, cleaning and formatting. The running example is <a href="13-synthetic-data.html">lab 13</a>, which turns the eight Trailhead policy documents into a small finetuning file, and the eval data from <a href="04-eval-set.html">lab 04</a> and <a href="05-ai-judge.html">lab 05</a>.</p>
+
+<div class="callout ok"><strong>Why this matters for your project.</strong> The quality ceiling of a finetuned model is set by its data, and the trustworthiness of every score in this guide is set by the eval set behind it. In lab 13 you generate data with a model, and every problem in this chapter (invented facts, duplicates, narrow coverage, a filter that lets errors through) can show up in that small file. Knowing what to look for is what makes generated data useful instead of harmful.</div>
+
+<h2>Data-centric vs model-centric thinking</h2>
+
+<p>There are two ways to improve an AI system. <strong>Model-centric</strong> work keeps the data fixed and changes the model: a bigger model, a different architecture, a better training recipe. Research benchmarks encourage this, because everyone uses the same dataset. <strong>Data-centric</strong> work keeps the model fixed and changes the data: fixing wrong labels, adding missing cases, removing noise, rebalancing. In application work, where you usually pick an existing <a class="term" href="glossary.html#foundation-model">foundation model</a> rather than invent one, the data side is often where most of the remaining improvement is.</p>
+
+<div class="table-wrap"><table>
+<tr><th></th><th>Model-centric</th><th>Data-centric</th></tr>
+<tr><td>Held fixed</td><td>The dataset</td><td>The model</td></tr>
+<tr><td>What you change</td><td>Model size, architecture, training settings</td><td>Which examples, their labels, their format and balance</td></tr>
+<tr><td>Typical question</td><td>"Which model scores best on this data?"</td><td>"Which data makes this model best at our task?"</td></tr>
+<tr><td>In this guide</td><td>Comparing <code>llama3.2</code> and <code>gemma4</code> in <a href="03-structured-output.html">lab 03</a></td><td>Better eval questions, human labels, lab 13's filtered dataset</td></tr>
+</table></div>
+
+<p>The two are not opposites. The point is a habit: when results are disappointing, look at the data before reaching for a bigger model.</p>
+
+<h2>Data curation: what good data looks like</h2>
+
+<p>Curation means deciding what goes into a dataset and what stays out. Whether the dataset is for finetuning or for evaluation, three questions matter: is each example good (<em>quality</em>), do the examples cover what users will actually do (<em>coverage</em>), and are there enough of them (<em>quantity</em>)?</p>
+
+<h3>Quality</h3>
+
+<p>A small set of excellent examples usually beats a large set of mediocre ones, because a model learns whatever patterns the data contains, including the bad ones. A useful checklist:</p>
+
+<ul>
+<li><strong>Relevant.</strong> Examples look like the real task. Questions about bike returns, not general trivia.</li>
+<li><strong>Aligned with the task.</strong> The answers show exactly the behaviour you want. If the support bot should answer in one to three sentences, training answers of ten sentences teach the opposite. If it should say "I don't know" when the documents are silent, the data must contain such cases.</li>
+<li><strong>Consistent.</strong> Similar inputs get similar outputs. If two annotators answer the same question differently (one gives the price with "EUR", one without), the model learns that either is fine.</li>
+<li><strong>Correctly formatted.</strong> Every example follows the exact structure the training tool expects, without stray HTML, broken JSON or truncated text.</li>
+<li><strong>Unique.</strong> No duplicates, which would over-weight some examples and can leak into evaluation (see deduplication below).</li>
+<li><strong>Compliant.</strong> You are allowed to use the data, it respects privacy (no unnecessary <a class="term" href="glossary.html#pii">personal data</a>), and it follows the licences and policies that apply to it.</li>
+</ul>
+
+<h3>Coverage and diversity</h3>
+
+<p>Coverage asks whether the data spans the range of inputs the model will see: every topic, easy and hard questions, short and long messages, polite and angry customers, typos, other languages if you serve them, and the "edge" cases such as questions the documents cannot answer. A dataset of a thousand perfectly written questions about returns teaches nothing about shipping.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Two panels of eight topic boxes with dots for examples: on the left most dots are in returns, on the right dots are spread across every topic">
+  <text class="title" x="187" y="22" text-anchor="middle">Narrow coverage</text>
+  <text class="title" x="573" y="22" text-anchor="middle">Broad coverage</text>
+  <rect class="box-warn" x="10" y="40" width="84" height="70" rx="6"/><text class="small" x="52" y="56" text-anchor="middle">returns</text>
+  <rect class="box2" x="100" y="40" width="84" height="70" rx="6"/><text class="small" x="142" y="56" text-anchor="middle">shipping</text>
+  <rect class="box2" x="190" y="40" width="84" height="70" rx="6"/><text class="small" x="232" y="56" text-anchor="middle">warranty</text>
+  <rect class="box2" x="280" y="40" width="84" height="70" rx="6"/><text class="small" x="322" y="56" text-anchor="middle">sizing</text>
+  <rect class="box2" x="10" y="120" width="84" height="70" rx="6"/><text class="small" x="52" y="136" text-anchor="middle">stores</text>
+  <rect class="box2" x="100" y="120" width="84" height="70" rx="6"/><text class="small" x="142" y="136" text-anchor="middle">battery</text>
+  <rect class="box2" x="190" y="120" width="84" height="70" rx="6"/><text class="small" x="232" y="136" text-anchor="middle">orders</text>
+  <rect class="box2" x="280" y="120" width="84" height="70" rx="6"/><text class="small" x="322" y="136" text-anchor="middle">service</text>
+  <circle class="dot-warn" cx="25" cy="72" r="4"/><circle class="dot-warn" cx="39" cy="72" r="4"/><circle class="dot-warn" cx="53" cy="72" r="4"/><circle class="dot-warn" cx="67" cy="72" r="4"/><circle class="dot-warn" cx="81" cy="72" r="4"/>
+  <circle class="dot-warn" cx="25" cy="88" r="4"/><circle class="dot-warn" cx="39" cy="88" r="4"/><circle class="dot-warn" cx="53" cy="88" r="4"/><circle class="dot-warn" cx="67" cy="88" r="4"/><circle class="dot-warn" cx="81" cy="88" r="4"/>
+  <circle class="dot-warn" cx="25" cy="102" r="4"/><circle class="dot-warn" cx="39" cy="102" r="4"/>
+  <circle class="dot" cx="135" cy="80" r="4"/><circle class="dot" cx="149" cy="80" r="4"/>
+  <circle class="dot" cx="232" cy="80" r="4"/>
+  <circle class="dot" cx="142" cy="160" r="4"/>
+  <rect class="box-ok" x="396" y="40" width="84" height="70" rx="6"/><text class="small" x="438" y="56" text-anchor="middle">returns</text>
+  <rect class="box-ok" x="486" y="40" width="84" height="70" rx="6"/><text class="small" x="528" y="56" text-anchor="middle">shipping</text>
+  <rect class="box-ok" x="576" y="40" width="84" height="70" rx="6"/><text class="small" x="618" y="56" text-anchor="middle">warranty</text>
+  <rect class="box-ok" x="666" y="40" width="84" height="70" rx="6"/><text class="small" x="708" y="56" text-anchor="middle">sizing</text>
+  <rect class="box-ok" x="396" y="120" width="84" height="70" rx="6"/><text class="small" x="438" y="136" text-anchor="middle">stores</text>
+  <rect class="box-ok" x="486" y="120" width="84" height="70" rx="6"/><text class="small" x="528" y="136" text-anchor="middle">battery</text>
+  <rect class="box-ok" x="576" y="120" width="84" height="70" rx="6"/><text class="small" x="618" y="136" text-anchor="middle">orders</text>
+  <rect class="box-ok" x="666" y="120" width="84" height="70" rx="6"/><text class="small" x="708" y="136" text-anchor="middle">service</text>
+  <circle class="dot-ok" cx="424" cy="80" r="4"/><circle class="dot-ok" cx="438" cy="80" r="4"/><circle class="dot-ok" cx="452" cy="80" r="4"/>
+  <circle class="dot-ok" cx="514" cy="80" r="4"/><circle class="dot-ok" cx="528" cy="80" r="4"/><circle class="dot-ok" cx="542" cy="80" r="4"/>
+  <circle class="dot-ok" cx="604" cy="80" r="4"/><circle class="dot-ok" cx="618" cy="80" r="4"/><circle class="dot-ok" cx="632" cy="80" r="4"/>
+  <circle class="dot-ok" cx="694" cy="80" r="4"/><circle class="dot-ok" cx="708" cy="80" r="4"/><circle class="dot-ok" cx="722" cy="80" r="4"/>
+  <circle class="dot-ok" cx="424" cy="160" r="4"/><circle class="dot-ok" cx="438" cy="160" r="4"/><circle class="dot-ok" cx="452" cy="160" r="4"/>
+  <circle class="dot-ok" cx="514" cy="160" r="4"/><circle class="dot-ok" cx="528" cy="160" r="4"/><circle class="dot-ok" cx="542" cy="160" r="4"/>
+  <circle class="dot-ok" cx="604" cy="160" r="4"/><circle class="dot-ok" cx="618" cy="160" r="4"/><circle class="dot-ok" cx="632" cy="160" r="4"/>
+  <circle class="dot-ok" cx="694" cy="160" r="4"/><circle class="dot-ok" cx="708" cy="160" r="4"/><circle class="dot-ok" cx="722" cy="160" r="4"/>
+  <text class="small" x="187" y="214" text-anchor="middle">16 examples, 12 about returns</text>
+  <text class="small" x="573" y="214" text-anchor="middle">24 examples, 3 per topic</text>
+</svg>
+<figcaption>Illustrative counts. Boxes are the eight lab documents (names shortened); dots are training or test examples. <strong>More data in one corner does not help the corners with none.</strong> Lab 13 asks for the same number of pairs from every document for this reason.</figcaption>
+</figure>
+
+<p>Diversity is not only about topics. In lab 13 the generation prompt asks for varied wording and some casual questions, because real customers do not write like policy documents. It also helps to check the <em>distribution</em> of simple features: question length, how many answers contain a number, how many questions are unanswerable. If 100 % of training questions are answerable, the model never learns to say "I don't know".</p>
+
+<h3>Quantity</h3>
+
+<p>How many examples do you need? There is no universal number; it depends on the task, how far it is from what the base model already does, the finetuning method and the quality of the data. Some <strong>rules of thumb</strong>:</p>
+
+<ul>
+<li>Narrow changes of style or format can show results with tens to a few hundred good examples. Teaching a genuinely new skill takes far more.</li>
+<li>Start small, with your best examples, and measure. If a small set shows no improvement at all, a big set of the same data is unlikely to save you; fix the data or rethink the approach first.</li>
+<li>Draw a <strong>learning curve</strong>: train on, say, a quarter, a half and all of your data, and plot the eval score for each. The shape tells you whether collecting more is worth it.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Two illustrative learning curves of eval score versus dataset size: one still rising, one flat">
+  <path class="line" d="M 80,30 V 200 H 720"/>
+  <text class="small" x="70" y="40" text-anchor="end">eval</text>
+  <text class="small" x="70" y="54" text-anchor="end">score</text>
+  <text class="small" x="240" y="220" text-anchor="middle">25 % of data</text>
+  <text class="small" x="420" y="220" text-anchor="middle">50 %</text>
+  <text class="small" x="680" y="220" text-anchor="middle">100 %</text>
+  <text class="small" x="400" y="240" text-anchor="middle">training set size</text>
+  <path class="arrow-ok" d="M 240,165 L 420,120 L 668,65"/>
+  <circle class="dot-ok" cx="240" cy="165" r="5"/><circle class="dot-ok" cx="420" cy="120" r="5"/><circle class="dot-ok" cx="680" cy="64" r="5"/>
+  <text class="ok" x="560" y="72" text-anchor="end">still rising: more data helps</text>
+  <path class="line dashed" d="M 240,150 L 420,142 L 680,140"/>
+  <circle class="dot-warn" cx="240" cy="150" r="5"/><circle class="dot-warn" cx="420" cy="142" r="5"/><circle class="dot-warn" cx="680" cy="140" r="5"/>
+  <text class="warn" x="560" y="164">flat: fix quality, not size</text>
+</svg>
+<figcaption>Illustrative curves, not measurements. <strong>The slope at the right end tells you what more data of the same kind would buy you.</strong> A flat curve says the limit is elsewhere: data quality, the task definition, or the model.</figcaption>
+</figure>
+
+<p>Quantity also interacts with the finetuning method: methods that train fewer parameters (such as LoRA, see <a href="finetuning.html">Finetuning</a>) tend to be more forgiving with small datasets, while full finetuning on very little data overfits easily.</p>
+
+<h2>Data acquisition and annotation</h2>
+
+<p>Where do examples come from? The best source is usually your own application: real user questions, real conversations, and the feedback attached to them (<a href="12-feedback.html">lab 12</a> logs exactly that). Other sources are public datasets (check their licences), data you buy, data written by people you pay or employ, and data generated by rules or models (next section). Very often you combine them.</p>
+
+<p>When people write or judge examples, that is <strong>annotation</strong> (or labelling). It sounds simple and is not. Two things make it work:</p>
+
+<ul>
+<li><strong>Guidelines.</strong> A written document that says what a good answer is, with examples of good and bad answers and decisions for the tricky cases. "Is an answer that is right but adds an invented detail correct?" must have a written answer before labelling starts, or each person will decide differently. Writing guidelines also forces you to define the task precisely, which is valuable in itself.</li>
+<li><strong>Agreement checks.</strong> Give the same items to two or more annotators and measure how often they agree. <a class="term" href="glossary.html#human-labels">Inter-annotator agreement</a> can be a simple percentage, or a statistic such as Cohen's kappa that corrects for agreement you would expect by chance. Low agreement means the guidelines are unclear or the task is genuinely ambiguous; either way, models trained or judged on such labels inherit the confusion.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Annotation loop: write guidelines, two people label the same items, measure agreement, discuss disagreements, then update the guidelines">
+  <rect class="box" x="10" y="30" width="170" height="64" rx="8"/>
+  <text x="95" y="58" text-anchor="middle">Write guidelines</text>
+  <text class="small" x="95" y="76" text-anchor="middle">with tricky examples</text>
+  <path class="arrow" d="M 180,62 H 198"/>
+  <rect class="box2" x="200" y="30" width="170" height="64" rx="8"/>
+  <text x="285" y="58" text-anchor="middle">Two people label</text>
+  <text class="small" x="285" y="76" text-anchor="middle">the same items</text>
+  <path class="arrow" d="M 370,62 H 388"/>
+  <rect class="box-info" x="390" y="30" width="170" height="64" rx="8"/>
+  <text x="475" y="58" text-anchor="middle">Measure agreement</text>
+  <text class="small" x="475" y="76" text-anchor="middle">% or Cohen's kappa</text>
+  <path class="arrow" d="M 560,62 H 578"/>
+  <rect class="box-warn" x="580" y="30" width="170" height="64" rx="8"/>
+  <text x="665" y="58" text-anchor="middle">Discuss</text>
+  <text class="small" x="665" y="76" text-anchor="middle">every disagreement</text>
+  <path class="arrow-accent" d="M 665,94 V 150 H 95 V 98"/>
+  <text class="label" x="380" y="170" text-anchor="middle">update the guidelines, then label the rest</text>
+</svg>
+<figcaption>The loop runs a few times on a small sample before large-scale labelling. <strong>Disagreements are information:</strong> each one shows a rule your guidelines have not written down yet.</figcaption>
+</figure>
+
+<p>You have already seen this in the labs. The human labels in <code>evals/judge_calibration.jsonl</code> were written by one person, the guide author, for one saved baseline run. In <a href="05-ai-judge.html">lab 05</a> the AI judge agreed with those labels on 17 of 20 answers (85 %), and the keyword check on 16 of 20 (80 %). The disagreements were instructive: on q01 and q16 the judge was stricter than the human and penalised small invented extras, because the rubric said so literally; on q20 the judge accepted "No, we don't sell skateboards" although no document says that. Those are exactly guideline questions. With a second human labeller on the same 20 answers, you could also measure human-human agreement, which tells you how much agreement to expect from any judge at all.</p>
+
+<h2>Data augmentation and synthesis</h2>
+
+<p>Real, human-written data is the gold standard, but it is slow and expensive, and for a new product you may have none. Two families of techniques create more:</p>
+
+<ul>
+<li><strong>Augmentation</strong> makes variations of real examples: rephrase a question, change a name or a number, add typos, translate. The meaning (and therefore the label) is kept.</li>
+<li><strong>Synthesis</strong> creates new examples from scratch, from documents, from a description of the task, or from a few seed examples.</li>
+</ul>
+
+<p>Both can be done with rules or with models:</p>
+
+<ul>
+<li><strong>Rule-based</strong> methods use templates and simple transformations. For the shop, a template like "Can I return my order {order_id}?" filled with made-up order ids in the <code>TH-</code> format, or "Is the {city} store open on {day}?" with the three store cities and seven days. Rules are cheap, predictable and always correct by construction, but the variety is limited to what you thought of.</li>
+<li><strong>Model-generated</strong> data asks a model to write examples. <a class="term" href="glossary.html#synthetic-data">Synthetic data</a> from models is far more varied and natural, but the model can make mistakes, invent facts or repeat itself, so it always needs checking.</li>
+</ul>
+
+<details class="primer"><summary>New to self-instruct style generation? How a model can grow a dataset from a few seeds</summary>
+<p>The idea, popularised by the Self-Instruct paper, is a loop. You start from a small pool of hand-written seed tasks. A model is shown a few of them and asked to write <em>new</em> instructions in the same spirit; then it (or another model) writes answers for them. Generated items that are too similar to items already in the pool, malformed, or otherwise low quality are filtered out, and the survivors join the pool, so later rounds draw on a growing variety of examples.</p>
+<p>Lab 13 is a simpler cousin: instead of seed tasks, it starts from the shop's documents and asks for questions those documents answer, which keeps the content grounded in a known source.</p>
+</details>
+
+<h3>Lab 13's pipeline</h3>
+
+<p>Here is what <a href="13-synthetic-data.html">lab 13</a> does. For each of the eight documents, <code>generate()</code> asks <code>llama3.2</code> (at temperature 0.8, for variety) for four question-answer pairs as validated JSON. Each pair then has to pass two filters before it is written to <code>runs/finetune.jsonl</code>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Lab 13 pipeline: documents, generate, is_grounded filter, normalize-based deduplication, then the JSONL file; failing pairs are dropped">
+  <rect class="box2" x="10" y="30" width="136" height="64" rx="8"/>
+  <text x="78" y="58" text-anchor="middle">8 documents</text>
+  <text class="mono" x="78" y="78" text-anchor="middle">data/docs</text>
+  <path class="arrow" d="M 146,62 H 159"/>
+  <rect class="box" x="161" y="30" width="136" height="64" rx="8"/>
+  <text class="mono" x="229" y="54" text-anchor="middle">generate()</text>
+  <text class="small" x="229" y="70" text-anchor="middle">llama3.2 · T 0.8</text>
+  <text class="small" x="229" y="84" text-anchor="middle">4 pairs per doc</text>
+  <path class="arrow" d="M 297,62 H 310"/>
+  <rect class="box-info" x="312" y="30" width="136" height="64" rx="8"/>
+  <text class="mono" x="380" y="58" text-anchor="middle">is_grounded()</text>
+  <text class="small" x="380" y="78" text-anchor="middle">numbers in doc?</text>
+  <path class="arrow" d="M 448,62 H 461"/>
+  <rect class="box-info" x="463" y="30" width="136" height="64" rx="8"/>
+  <text class="mono" x="531" y="58" text-anchor="middle">normalize()</text>
+  <text class="small" x="531" y="78" text-anchor="middle">question seen?</text>
+  <path class="arrow-ok" d="M 599,62 H 612"/>
+  <rect class="box-ok" x="614" y="30" width="136" height="64" rx="8"/>
+  <text class="mono" x="682" y="58" text-anchor="middle">runs/</text>
+  <text class="mono" x="682" y="76" text-anchor="middle">finetune.jsonl</text>
+  <path class="arrow-bad" d="M 380,94 V 133"/>
+  <rect class="box-bad" x="312" y="135" width="136" height="44" rx="8"/>
+  <text x="380" y="162" text-anchor="middle">not grounded</text>
+  <path class="arrow-bad" d="M 531,94 V 133"/>
+  <rect class="box-bad" x="463" y="135" width="136" height="44" rx="8"/>
+  <text x="531" y="162" text-anchor="middle">duplicate</text>
+</svg>
+<figcaption>The lab's three counters are <code>generated</code>, <code>not grounded</code> and <code>duplicate</code>. <strong>Generation is cheap; the filters are where the dataset's quality is decided.</strong></figcaption>
+</figure>
+
+<p>In our run, all 32 generated pairs (8 documents × 4) passed both filters. Here is the summary line and the first two kept pairs:</p>
+
+<pre data-lang="text" data-tag="real output, excerpt · llama3.2 · your results will differ"><code>{'generated': 32, 'not grounded': 0, 'duplicate': 0} -&gt; kept 32 examples in runs/finetune.jsonl
+  [battery-care] Q: What's the ideal temperature range for charging my e-bike battery?
+                 A: Between 10 and 30 degrees Celsius
+  [battery-care] Q: How long should I let my e-bike battery warm up if it's below 0 degrees?
+                 A: Let it warm up indoors first before charging.</code></pre>
+
+<p>Zero drops does not mean 32 perfect examples. The first pair is good: the document does say "between 10 and 30 degrees Celsius". The second shows a gap. The question asks "how long", the battery document gives no duration, and the answer quietly avoids the question. It has no number, so the grounding filter never checks it, and as a training example it would teach the model to answer "how long" with something that is not a duration. Only reading the data finds this kind of problem. Because generation uses temperature 0.8, your counts and pairs will differ on every run; the full output is on the <a href="13-synthetic-data.html">lab 13 page</a>.</p>
+
+<h3>Verifying synthetic data, and the limits of a cheap filter</h3>
+
+<p>The grounding filter in <code>aie/synth.py</code> is one line:</p>
+
+<pre data-lang="py" data-tag="excerpt from aie/synth.py"><code>def is_grounded(pair, doc_text):
+    """Cheap filter: every number in the answer must appear in the document."""
+    return all(num in doc_text for num in re.findall(r"\d+(?:[.,]\d+)?", pair.answer))</code></pre>
+
+<p>It finds every number in the answer (like <code>30</code> or <code>6.90</code>) and requires each to appear somewhere in the source document's text. That catches a common and dangerous kind of hallucination, an invented price, period or distance, at zero cost. But look carefully at what it does <em>not</em> check. We ran the function on a few made-up answers against the real <code>returns</code> document (which says 30 days, 50 km, 100 EUR, 6.90 EUR and 5 business days):</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Four example answers checked by is_grounded: two handled correctly, two wrong answers that pass the filter">
+  <text class="label" x="20" y="24">Answer (about returns)</text>
+  <text class="label" x="290" y="24">Numbers</text>
+  <text class="label" x="390" y="24">Filter says</text>
+  <text class="label" x="520" y="24">Is that right?</text>
+  <rect class="box-ok" x="10" y="36" width="740" height="40" rx="6"/>
+  <text class="mono" x="20" y="61">You have 30 days.</text>
+  <text class="mono" x="290" y="61">30</text>
+  <text x="390" y="61">keep</text>
+  <text class="ok" x="520" y="61">yes: correct answer kept</text>
+  <rect class="box-ok" x="10" y="84" width="740" height="40" rx="6"/>
+  <text class="mono" x="20" y="109">You have 60 days.</text>
+  <text class="mono" x="290" y="109">60</text>
+  <text x="390" y="109">drop</text>
+  <text class="ok" x="520" y="109">yes: invented number caught</text>
+  <rect class="box-bad" x="10" y="132" width="740" height="40" rx="6"/>
+  <text class="mono" x="20" y="157">You have 3 days.</text>
+  <text class="mono" x="290" y="157">3</text>
+  <text x="390" y="157">keep</text>
+  <text class="bad" x="520" y="157">no: "3" is inside "30"</text>
+  <rect class="box-bad" x="10" y="180" width="740" height="40" rx="6"/>
+  <text class="mono" x="20" y="205">Opened helmets can be returned.</text>
+  <text class="mono" x="290" y="205">(none)</text>
+  <text x="390" y="205">keep</text>
+  <text class="bad" x="520" y="205">no: no number to check</text>
+  <text class="small" x="20" y="240">Made-up answers, checked with the real is_grounded() and data/docs/returns.md.</text>
+</svg>
+<figcaption>Green rows: the filter does its job. Red rows: wrong answers it lets through. <strong>A cheap filter reduces errors; it does not prove correctness.</strong></figcaption>
+</figure>
+
+<p>The full list of gaps, so you know what the kept data can still contain:</p>
+<ul>
+<li><strong>Substring matching.</strong> <code>num in doc_text</code> searches the raw text, so a number passes if it appears <em>inside</em> another number ("3" in "30", "5" in "50").</li>
+<li><strong>Answers without numbers pass automatically.</strong> A wrong yes/no answer, a wrong city or a wrong rule is not checked at all.</li>
+<li><strong>Right number, wrong meaning.</strong> "Returns within 100 days" passes because "100" appears in the document (as 100 EUR).</li>
+<li><strong>Numbers in words</strong> ("thirty days") are not extracted, so they are never checked.</li>
+<li><strong>The question is not checked.</strong> A question the document does not really answer, or an ambiguous one, gets through.</li>
+</ul>
+
+<p>Stronger verification options, from cheap to expensive: stricter rules (match whole numbers with units, check yes/no against key phrases), asking an <a class="term" href="glossary.html#ai-judge">AI judge</a> whether the answer is supported by the document (calibrated like in lab 05), round-trip checks (can a retriever find the source document from the generated question?), and finally a human reading a sample. A human sample is always worth it: reading twenty generated pairs often reveals problems no metric shows.</p>
+
+<h3>Limitations of synthetic data</h3>
+
+<ul>
+<li><strong>Quality control.</strong> As above, generated data contains errors at some rate, and every filter has blind spots.</li>
+<li><strong>Imitation, not capability.</strong> A small model trained on a big model's answers can learn to <em>sound</em> like it (style, confidence, structure) without gaining its knowledge or reasoning. The result can be more fluent and more confidently wrong.</li>
+<li><strong>Narrow and repetitive.</strong> Models favour certain phrasings and topics. Without explicit variety, synthetic data clusters around the generator's habits, which hurts coverage.</li>
+<li><strong>Model collapse risk.</strong> Research has shown that if models are trained repeatedly, generation after generation, on data produced by earlier models, the rare and unusual parts of the original data distribution gradually disappear and quality degrades. Mixing in real data and keeping humans in the loop are the usual counter-measures.</li>
+<li><strong>Provenance.</strong> Months later, can you tell which examples were human-written, which were generated, by which model and prompt, and from which source? Record it. Lab 13 keeps the source <code>doc_id</code> for each kept pair in memory (and prints it), but writes only the messages to the file; in a real project you would store that metadata alongside.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Three distribution curves becoming narrower over generations as the rare tails disappear">
+  <path class="line" d="M 20,170 H 240"/>
+  <path class="line" d="M 30,168 C 85,168 90,70 130,70 C 170,70 175,168 230,168"/>
+  <circle class="dot-warn" cx="40" cy="160" r="4"/><circle class="dot-warn" cx="220" cy="160" r="4"/>
+  <text class="label" x="130" y="195" text-anchor="middle">real data</text>
+  <text class="small" x="130" y="211" text-anchor="middle">rare cases in the tails</text>
+  <path class="arrow" d="M 245,120 H 273"/>
+  <path class="line" d="M 275,170 H 485"/>
+  <path class="line" d="M 310,168 C 355,168 355,55 380,55 C 405,55 405,168 450,168"/>
+  <text class="label" x="380" y="195" text-anchor="middle">trained on model output</text>
+  <text class="small" x="380" y="211" text-anchor="middle">tails thinner</text>
+  <path class="arrow" d="M 490,120 H 518"/>
+  <path class="line" d="M 520,170 H 740"/>
+  <path class="line" d="M 595,168 C 620,168 618,40 630,40 C 642,40 640,168 665,168"/>
+  <text class="label" x="630" y="195" text-anchor="middle">after many generations</text>
+  <text class="small" x="630" y="211" text-anchor="middle">only the common cases left</text>
+</svg>
+<figcaption>Conceptual picture, not data. <strong>Each round of training on generated data can lose a little of the unusual:</strong> the dots (rare cases) on the left have no counterpart on the right.</figcaption>
+</figure>
+
+<h3>Model distillation and the terms of model outputs</h3>
+
+<p><strong>Distillation</strong> trains a smaller "student" model to imitate a larger "teacher". In the classic form the student learns from the teacher's full probability distributions; in the common LLM form, the teacher simply generates answers (synthetic data, as above) and the student is finetuned on them. It is a standard way to get a cheaper, faster model for a narrow task, and lab 13 is a small version of the idea, except that teacher and student would be the same model.</p>
+
+<p>There is a non-technical catch. Model outputs come with terms. Some providers' terms of service have restricted using their outputs to develop competing models, and open-weight model licences differ in what they allow, including what you may do with derived models and outputs. These terms change and depend on how you use the data. Check the current terms of every model whose outputs you train on, and ask a lawyer for real decisions; this is general information, <strong>not legal advice</strong>. Lab 13 uses <code>llama3.2</code>'s outputs, so its licence would be the one to read if you used the data beyond learning.</p>
+
+<h2>Data processing</h2>
+
+<p>Whatever the source, raw data goes through the same steps before training. The order varies; the steps do not.</p>
+
+<h3>1. Inspect</h3>
+<p>Before any automation, read the data. Look at random samples, not just the first lines. Count simple things: number of examples per source document, length distribution of questions and answers, how many answers contain numbers or refusals, the most frequent opening words (synthetic data often starts every question the same way). Plot what you can. Most data problems are obvious once you look, and invisible if you do not.</p>
+
+<h3>2. Deduplicate</h3>
+<p><a class="term" href="glossary.html#deduplication">Deduplication</a> removes repeated examples. Duplicates make the model over-learn some examples, waste compute, and, worst, can put test questions into the training data. There are three levels:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Three levels of deduplication with example question pairs: exact, normalized and near-duplicate">
+  <rect class="box2" x="10" y="20" width="240" height="190" rx="8"/>
+  <text class="title" x="130" y="44" text-anchor="middle">Exact</text>
+  <text class="small" x="130" y="62" text-anchor="middle">same characters (or same hash)</text>
+  <text class="mono" x="22" y="96">Is return shipping free?</text>
+  <text class="mono" x="22" y="118">Is return shipping free?</text>
+  <text class="ok" x="130" y="160" text-anchor="middle">caught</text>
+  <text class="small" x="130" y="184" text-anchor="middle">cheapest; misses any variation</text>
+  <rect class="box-info" x="260" y="20" width="240" height="190" rx="8"/>
+  <text class="title" x="380" y="44" text-anchor="middle">Normalized</text>
+  <text class="small" x="380" y="62" text-anchor="middle">lower case, no punctuation</text>
+  <text class="mono" x="272" y="96">Is return shipping FREE?</text>
+  <text class="mono" x="272" y="118">is return shipping free!</text>
+  <text class="mono" x="380" y="140" text-anchor="middle">→ is return shipping free</text>
+  <text class="ok" x="380" y="160" text-anchor="middle">caught (lab 13)</text>
+  <text class="small" x="380" y="184" text-anchor="middle">synth.normalize as the key</text>
+  <rect class="box-warn" x="510" y="20" width="240" height="190" rx="8"/>
+  <text class="title" x="630" y="44" text-anchor="middle">Near-duplicate</text>
+  <text class="small" x="630" y="62" text-anchor="middle">MinHash or embeddings</text>
+  <text class="mono" x="522" y="96">Is return shipping free?</text>
+  <text class="mono" x="522" y="118">Do I pay to ship a return?</text>
+  <text class="warn" x="630" y="160" text-anchor="middle">only caught here</text>
+  <text class="small" x="630" y="184" text-anchor="middle">needs a similarity threshold</text>
+</svg>
+<figcaption>Each level catches everything the previous one does, and more. <strong>Lab 13 stops at the middle level:</strong> its key comes from <code>normalize()</code>, so reworded questions survive as separate examples.</figcaption>
+</figure>
+
+<ul>
+<li><strong>Exact</strong>: identical strings, usually detected by hashing each example.</li>
+<li><strong>Normalized</strong>: compare after removing differences that do not matter. Lab 13 uses <code>synth.normalize</code>, which lower-cases, keeps only letters, digits and spaces, and collapses runs of spaces. We checked: <code>"Is return shipping FREE?"</code> and <code>"is return shipping free!"</code> both become <code>"is return shipping free"</code>. (A side effect worth knowing: <code>6.90</code> becomes <code>690</code>, harmless for a dedup key, wrong if you reused the function to compare prices.)</li>
+<li><strong>Near-duplicate</strong>: texts that say the same thing in different words, or share most of their content. Two standard techniques: <em>MinHash</em> estimates how many word sequences (shingles) two documents share, cheaply enough to compare millions of documents; <em>embeddings</em> turn each text into a <a class="term" href="glossary.html#vector">vector</a> and treat pairs with high <a class="term" href="glossary.html#cosine-similarity">cosine similarity</a> as duplicates. You already have both ingredients in the project: the <code>nomic-embed-text</code> embeddings of <a href="06-retrieval.html">lab 06</a>, and the similarity threshold idea of the semantic cache in <a href="11-cache-router.html">lab 11</a>. The hard part is choosing the threshold: too low and you remove genuinely different questions, too high and paraphrases survive.</li>
+</ul>
+
+<p>Deduplicate <em>across</em> datasets too, especially between training data and the eval set. This small illustrative check, built from the project's own helpers, lists generated questions that are, after normalization, identical to an eval question:</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>import json
+
+from aie.config import EVALS, RUNS
+from aie.synth import normalize
+
+with open(EVALS / "qa.jsonl", encoding="utf-8") as f:
+    eval_questions = {normalize(json.loads(line)["question"]) for line in f}
+
+with open(RUNS / "finetune.jsonl", encoding="utf-8") as f:
+    for line in f:
+        question = json.loads(line)["messages"][1]["content"]
+        if normalize(question) in eval_questions:
+            print("also in the eval set:", question)</code></pre>
+
+<p>It only finds normalized matches; for paraphrases you would compare embeddings in the same way. Any hit should be removed from the training file, or the finetuned model's score in <a href="04-eval-set.html">lab 04</a> would be inflated.</p>
+
+<h3>3. Clean and filter</h3>
+<p>Cleaning removes noise inside examples: leftover HTML or Markdown, boilerplate such as signatures, broken encodings, truncated text. Filtering removes whole examples: too short or too long, wrong language, low quality (by rules or a quality classifier or judge), toxic content, and examples that fail checks like <code>is_grounded</code>.</p>
+<p>Personal data deserves its own step. Real support conversations contain names, emails, phone numbers and card numbers, and a model can memorise and repeat what it was trained on. Remove or replace <a class="term" href="glossary.html#pii">PII</a> before training. The same <code>redact_pii()</code> function from <a href="10-guardrails.html">lab 10</a>, which replaces emails, French phone numbers and card-like numbers with placeholders such as <code>[EMAIL]</code>, is a starting point; dedicated tools go further (names, addresses, many formats and languages). Note that lab 13's data comes from policy documents, not customers, so it has no PII to remove, but real customer messages logged the way <a href="12-feedback.html">lab 12</a> logs them could.</p>
+
+<h3>4. Format</h3>
+<p>Finally, every example must be in the exact format the training tool expects. For chat models that is almost always a list of messages with roles, stored as <a class="term" href="glossary.html#jsonl">JSONL</a> (one JSON object per line), which is what lab 13 writes:</p>
+
+<pre data-lang="json" data-tag="illustrative: the shape of one line, shortened"><code>{"messages": [{"role": "system", "content": "You are the customer support assistant of Trailhead Bikes, ..."}, {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="One JSONL line holds system, user and assistant messages; a chat template turns them into one token sequence, and training usually computes loss on the assistant part only">
+  <rect class="box2" x="10" y="20" width="740" height="40" rx="8"/>
+  <text class="mono" x="380" y="45" text-anchor="middle">one line of finetune.jsonl = {"messages": [ system, user, assistant ]}</text>
+  <path class="arrow" d="M 130,60 V 83"/>
+  <path class="arrow" d="M 380,60 V 83"/>
+  <path class="arrow" d="M 630,60 V 83"/>
+  <rect class="box2" x="10" y="85" width="240" height="50" rx="8"/>
+  <text x="130" y="106" text-anchor="middle">system</text>
+  <text class="small" x="130" y="124" text-anchor="middle">prompts/baseline.txt</text>
+  <rect class="box2" x="260" y="85" width="240" height="50" rx="8"/>
+  <text x="380" y="106" text-anchor="middle">user</text>
+  <text class="small" x="380" y="124" text-anchor="middle">the generated question</text>
+  <rect class="box-ok" x="510" y="85" width="240" height="50" rx="8"/>
+  <text x="630" y="106" text-anchor="middle">assistant</text>
+  <text class="small" x="630" y="124" text-anchor="middle">the answer to learn</text>
+  <path class="arrow-accent" d="M 380,135 V 163"/>
+  <text class="small" x="390" y="154">the model's chat template</text>
+  <rect class="box-info" x="10" y="165" width="740" height="40" rx="8"/>
+  <text class="mono" x="380" y="190" text-anchor="middle">[role marker] system text [role marker] question [role marker] answer [end]</text>
+  <text class="small" x="130" y="232" text-anchor="middle">context only</text>
+  <text class="small" x="380" y="232" text-anchor="middle">context only</text>
+  <text class="ok" x="630" y="232" text-anchor="middle">loss usually here</text>
+</svg>
+<figcaption>Simplified: each model family has its own role markers. <strong>The trainer, not you, should apply the model's own chat template</strong>, and usually only the assistant tokens are used to compute the loss.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to chat templates? Why the format must match the model</summary>
+<p>A model does not really see "messages". It sees one long sequence of <a class="term" href="glossary.html#token">tokens</a>. A <strong>chat template</strong> is the recipe that turns a list of messages into that sequence, inserting special tokens that mark where the system prompt, the user turn and the assistant turn begin and end. Each model family (Llama, Gemma, and so on) was post-trained with its own template.</p>
+<p>When you finetune, the training examples must be rendered with the <em>same</em> template the model uses at inference time, or the model learns from text that looks different from what it will later receive. That is why it is safer to store data as role-based messages (as lab 13 does) and let the training library apply the model's template, rather than writing the special tokens by hand. Ollama applies the template for you when you call the chat API, which is why the labs never had to think about it.</p>
+</details>
+
+<p>The system message deserves a thought too. Lab 13 puts the baseline support prompt in every example. That teaches the model to behave this way <em>when it sees that prompt</em>. If you later serve the finetuned model with a different system prompt, the learned behaviour may transfer less well; keep the training and serving prompts consistent, or vary them deliberately in the data.</p>
+
+<div class="callout warn"><strong>Common misconceptions and pitfalls</strong>
+<ul>
+<li><strong>"More data is always better."</strong> More of the same quality, maybe. More noisy or repetitive data can make things worse. Check the learning curve.</li>
+<li><strong>"Synthetic data passed the filter, so it is correct."</strong> Lab 13's filter lets through wrong answers with no numbers, and numbers that appear inside other numbers. Read a sample.</li>
+<li><strong>Eval questions leaking into training.</strong> Deduplicate the training data against the eval set, not only against itself.</li>
+<li><strong>Exact dedup only.</strong> Paraphrased duplicates still over-weight a topic; consider embeddings or MinHash for larger sets.</li>
+<li><strong>Labelling without guidelines.</strong> Each annotator invents their own rules, agreement is low, and the model learns the confusion.</li>
+<li><strong>Forgetting provenance and licences.</strong> Record where each example came from and check the terms of any model whose output you train on (not legal advice).</li>
+<li><strong>Hand-writing chat tokens.</strong> Store role-based messages and let the trainer apply the model's chat template.</li>
+<li><strong>Training on raw logs.</strong> Real conversations contain personal data; redact it first.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Data-centric work improves the data while keeping the model fixed; in applications it is often where the biggest gains are.</li>
+<li>Good data is relevant, aligned with the task, consistent, correctly formatted, unique and compliant; it must also cover the range of real inputs.</li>
+<li>Quantity has no magic number: start small with your best examples and use a learning curve to decide whether to collect more.</li>
+<li>Annotation needs written guidelines and agreement checks; lab 05's single human labeller and 85 % judge agreement show why.</li>
+<li>Augmentation and synthesis (rule-based or model-generated, as in self-instruct or lab 13) add data quickly but need verification, variety, provenance, and care about model collapse and licence terms.</li>
+<li>Lab 13's <code>is_grounded</code> filter catches invented numbers but misses wrong answers without numbers and substring matches; a human sample is still needed.</li>
+<li>Processing: inspect, deduplicate (exact, normalized, near-duplicate; also against the eval set), clean and filter (including PII), and format as role-based JSONL rendered with the model's chat template.</li>
+</ul>
+</div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://www.oreilly.com/library/view/ai-engineering/9781098166298/">AI Engineering</a> (O'Reilly) — chapter 8, Dataset Engineering.</li>
+<li><a href="https://github.com/chiphuyen/aie-book">chiphuyen/aie-book</a> — the author's study notes, chapter summaries and reading list.</li>
+<li><a href="https://arxiv.org/abs/2212.10560">Self-Instruct: Aligning Language Models with Self-Generated Instructions</a> — the paper behind self-instruct style generation.</li>
+<li><a href="https://www.nature.com/articles/s41586-024-07566-y">AI models collapse when trained on recursively generated data</a> (Nature) — the model collapse study.</li>
+<li><a href="https://arxiv.org/abs/2107.06499">Deduplicating Training Data Makes Language Models Better</a> — why and how to deduplicate at scale.</li>
+<li><a href="https://ekzhu.com/datasketch/minhash.html">datasketch: MinHash</a> — documentation of a Python MinHash library for near-duplicate detection.</li>
+<li><a href="https://arxiv.org/abs/1503.02531">Distilling the Knowledge in a Neural Network</a> — the classic distillation paper.</li>
+<li><a href="https://arxiv.org/abs/1803.09010">Datasheets for Datasets</a> — a template for documenting a dataset's provenance and limits.</li>
+<li><a href="https://scikit-learn.org/stable/modules/generated/sklearn.metrics.cohen_kappa_score.html">scikit-learn: Cohen's kappa</a> — measuring inter-annotator agreement.</li>
+<li><a href="https://microsoft.github.io/presidio/">Microsoft Presidio</a> — open-source PII detection and anonymisation.</li>
+<li><a href="https://huggingface.co/docs/transformers/chat_templating">Transformers: chat templates</a> and <a href="https://huggingface.co/docs/datasets/index">Hugging Face Datasets</a>.</li>
+<li><a href="https://jsonlines.org/">JSON Lines</a> — the JSONL format specification.</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="finetuning.html"><small>← Chapter 7</small>Finetuning</a>
+<a class="next" href="inference-optimization.html"><small>Chapter 9 →</small>Inference optimization</a>
+</nav>
+</main>
+</body>
+</html>

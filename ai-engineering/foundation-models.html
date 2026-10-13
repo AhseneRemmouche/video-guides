@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 2 · How foundation models work</title>
+<meta name="description" content="Training data, the transformer, post-training, sampling and why models hallucinate. Read with book chapter 2.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 2/10</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Concepts · Chapter 2 of 10</div>
+  <h1>How foundation models work</h1>
+  <p class="lead">Training data, the transformer, post-training, sampling and why models hallucinate. Read with book chapter 2.</p>
+</section>
+<div class="callout">Read with <strong>chapter 2 · Understanding Foundation Models</strong> of the book. This page explains the ideas in its own words and links them to the labs.</div>
+
+<p>You can build an AI application without knowing how a transformer computes attention, just as you can build a web
+app without knowing how a CPU executes instructions. But a rough picture of what happens inside the model explains a
+lot of behaviour that otherwise looks random: why the same question gets different answers, why a model invents a
+warranty that does not exist, why asking for JSON sometimes still goes wrong, and why one model takes ten times longer
+than another to answer.</p>
+
+<p>This page walks through the life of a model: the data it learns from, how text becomes tokens, the transformer
+architecture, what "size" means, how a raw model is turned into a helpful assistant, and how it picks each word when it
+answers. It ends with structured outputs and hallucinations, two topics you meet directly in the labs.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> In <a href="02-sampling.html">lab 02</a>
+you change <code>temperature</code> and <code>seed</code> and watch the answers change. In
+<a href="03-structured-output.html">lab 03</a> you force the model to answer in a JSON format and see that valid JSON
+can still be wrong. Both labs only make sense once you know how a model chooses its next token.</div>
+
+<h2>The life of a model, in one picture</h2>
+
+<p>A modern chat model is made in stages. First, <strong>pre-training</strong> on a huge pile of text produces a
+<em>base model</em> that is very good at continuing text. Then <strong>post-training</strong> teaches it to behave like
+an assistant. Finally, at <a class="term" href="glossary.html#inference">inference</a> time, a
+<strong>sampling</strong> step decides which words actually come out. You control only the last stage directly; the
+first two were done by the model's creators, but their choices shape everything you see.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Pipeline from training data through pre-training, base model, post-training and chat model to sampling at inference time">
+  <rect x="10" y="40" width="625" height="100" rx="8" class="zone"/>
+  <rect x="15" y="60" width="110" height="56" rx="8" class="box"/>
+  <text x="70" y="84" text-anchor="middle" class="label">Training</text>
+  <text x="70" y="100" text-anchor="middle" class="label">data</text>
+  <path class="arrow" d="M 127,88 H 145"/>
+  <rect x="147" y="60" width="110" height="56" rx="8" class="box-warn"/>
+  <text x="202" y="84" text-anchor="middle" class="label">Pre-training</text>
+  <text x="202" y="100" text-anchor="middle" class="small">self-supervised</text>
+  <path class="arrow" d="M 259,88 H 277"/>
+  <rect x="279" y="60" width="100" height="56" rx="8" class="box2"/>
+  <text x="329" y="84" text-anchor="middle" class="label">Base</text>
+  <text x="329" y="100" text-anchor="middle" class="label">model</text>
+  <path class="arrow" d="M 381,88 H 399"/>
+  <rect x="401" y="60" width="120" height="56" rx="8" class="box-info"/>
+  <text x="461" y="84" text-anchor="middle" class="label">Post-training</text>
+  <text x="461" y="100" text-anchor="middle" class="small">SFT + preferences</text>
+  <path class="arrow" d="M 523,88 H 541"/>
+  <rect x="543" y="60" width="90" height="56" rx="8" class="box2"/>
+  <text x="588" y="84" text-anchor="middle" class="label">Chat</text>
+  <text x="588" y="100" text-anchor="middle" class="label">model</text>
+  <path class="arrow-accent" d="M 635,88 H 653"/>
+  <rect x="655" y="60" width="90" height="56" rx="8" class="box-solid"/>
+  <text x="700" y="84" text-anchor="middle" class="label on-solid">Sampling</text>
+  <text x="700" y="100" text-anchor="middle" class="small on-solid">your settings</text>
+  <text x="20" y="160" class="small">done once by the model's creators (expensive, weeks to months)</text>
+  <text x="700" y="160" text-anchor="middle" class="small">every request</text>
+  <text x="20" y="28" class="title">From raw text to the answer you receive</text>
+  <text x="380" y="192" text-anchor="middle" class="small">llama3.2 and gemma4 in the labs are chat models; you only choose the sampling settings.</text>
+</svg>
+<figcaption>The dashed zone happened before you downloaded the model. <strong>Data and post-training decide what the
+model knows and how it behaves; sampling decides which of its possible answers you get.</strong></figcaption>
+</figure>
+
+<h2>Training data shapes what a model knows</h2>
+
+<p>A model can only learn patterns that appear in its training data. That sounds obvious, but its consequences show up
+everywhere in practice.</p>
+
+<ul>
+<li><strong>Domains.</strong> Most training text comes from the public web, plus books, code and other collected
+sources. Topics that are common there (programming, general knowledge, popular products) are well covered. Topics that
+are rare, specialised or private are not. Your company's internal documents were never in the training data at all.</li>
+<li><strong>Languages.</strong> Some languages, English above all, are heavily represented online; many others have far
+less text. Models are usually noticeably better in the well-represented languages. They often also need more tokens
+to write the same sentence in a less-represented language, which makes those answers slower and more expensive.</li>
+<li><strong>Time.</strong> Training data is collected up to some date, the <em>training cutoff</em>. The model knows
+nothing that happened later unless you tell it in the prompt.</li>
+<li><strong>Quality and filtering.</strong> Creators filter out spam, duplicates and harmful content, and choose how much
+of each source to include. These choices are part of why two models of similar size behave differently.</li>
+</ul>
+
+<p>You saw the effect of training data in <a href="04-eval-set.html">lab 04</a>. Asked about a shop it has never heard
+of, <code>llama3.2</code> did not say "I don't know". It answered with what a typical online shop might say: standard
+shipping in dollars, a multi-year frame warranty, deliveries to Switzerland. Those answers sound plausible precisely
+because they resemble a lot of text the model has seen. They are just not Trailhead's policies.</p>
+
+<details class="primer"><summary>New to the idea of "knowledge in a model"? What the model actually stores</summary>
+<p>A model does not keep a copy of its training documents that it looks things up in. Training adjusts its
+<a class="term" href="glossary.html#parameters">parameters</a> so that likely continuations get high probability.
+Facts that appear often end up "baked in" as strong patterns; facts that appear rarely may be fuzzy or mixed up with
+similar facts. This is why models can be fluent and wrong at the same time, and why, for private or changing
+information, you give the model the facts in the prompt instead of hoping it remembers them.</p>
+</details>
+
+<h2>Tokens and tokenizers</h2>
+
+<p>Models do not read letters or words. A <a class="term" href="glossary.html#tokenizer">tokenizer</a> first cuts text
+into <a class="term" href="glossary.html#token">tokens</a>, chunks from a fixed vocabulary, and replaces each one with a
+number (its ID). Common words are usually one token. Rare words, names and numbers are split into several pieces.
+Each model family has its own tokenizer, so the same sentence can be a different number of tokens for different
+models.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="The text 'Return my Trailhead e-bike' split into tokens, each mapped to a number">
+  <text x="20" y="30" class="title">Text in, numbers out (illustrative split and IDs)</text>
+  <rect x="20" y="46" width="260" height="36" rx="8" class="box"/>
+  <text x="150" y="69" text-anchor="middle" class="mono">Return my Trailhead e-bike</text>
+  <path class="arrow" d="M 282,64 H 312"/>
+  <rect x="315" y="46" width="72" height="36" rx="8" class="box-info"/>
+  <text x="351" y="69" text-anchor="middle" class="mono">Return</text>
+  <rect x="392" y="46" width="44" height="36" rx="8" class="box-info"/>
+  <text x="414" y="69" text-anchor="middle" class="mono">˽my</text>
+  <rect x="441" y="46" width="58" height="36" rx="8" class="box-info"/>
+  <text x="470" y="69" text-anchor="middle" class="mono">˽Tra</text>
+  <rect x="504" y="46" width="44" height="36" rx="8" class="box-info"/>
+  <text x="526" y="69" text-anchor="middle" class="mono">il</text>
+  <rect x="553" y="46" width="58" height="36" rx="8" class="box-info"/>
+  <text x="582" y="69" text-anchor="middle" class="mono">head</text>
+  <rect x="616" y="46" width="44" height="36" rx="8" class="box-info"/>
+  <text x="638" y="69" text-anchor="middle" class="mono">˽e</text>
+  <rect x="665" y="46" width="30" height="36" rx="8" class="box-info"/>
+  <text x="680" y="69" text-anchor="middle" class="mono">-</text>
+  <rect x="700" y="46" width="50" height="36" rx="8" class="box-info"/>
+  <text x="725" y="69" text-anchor="middle" class="mono">bike</text>
+  <text x="351" y="104" text-anchor="middle" class="small mono">8341</text>
+  <text x="414" y="104" text-anchor="middle" class="small mono">856</text>
+  <text x="470" y="104" text-anchor="middle" class="small mono">4413</text>
+  <text x="526" y="104" text-anchor="middle" class="small mono">321</text>
+  <text x="582" y="104" text-anchor="middle" class="small mono">2025</text>
+  <text x="638" y="104" text-anchor="middle" class="small mono">384</text>
+  <text x="680" y="104" text-anchor="middle" class="small mono">12</text>
+  <text x="725" y="104" text-anchor="middle" class="small mono">13383</text>
+  <text x="20" y="140" class="label">4 words became 8 tokens. "Trailhead" is rare, so it is split into pieces.</text>
+  <text x="20" y="162" class="label">˽ marks a leading space: " my" and "my" are different tokens.</text>
+  <text x="20" y="186" class="small">The model only ever sees the numbers. Billing, speed and context limits all count tokens.</text>
+</svg>
+<figcaption>The split and IDs are <strong>illustrative</strong>; a real tokenizer may cut differently. <strong>Count in
+tokens, not words</strong>: that is what the model, the bill and the context window measure.</figcaption>
+</figure>
+
+<p>Why not just use whole words? A vocabulary of every word in every language would be enormous, and unknown words
+would be impossible to represent. Why not single characters? Sequences would become very long, and the model would
+waste effort learning spelling. Sub-word tokens are a compromise: a vocabulary of tens of thousands to a few hundred
+thousand pieces that can spell out any text.</p>
+
+<p>Tokens matter to you in three practical ways. You pay per token with hosted APIs. Generation time grows with the
+number of output tokens, because they are produced one at a time. And each model has a
+<a class="term" href="glossary.html#context-window">context window</a>, a maximum number of tokens it can handle in one
+request (prompt plus answer). In <a href="01-setup.html">lab 01</a>, a one-sentence system message and the question
+"What is an e-bike?" counted as 43 input tokens. That is more than the words you typed, because the server wraps
+each message in special role markers before the model sees it (more on that below, under post-training).</p>
+
+<h2>The transformer and attention</h2>
+
+<p>Almost all of today's language models use an architecture called the
+<a class="term" href="glossary.html#transformer">transformer</a>, introduced by researchers in 2017. You do not need
+the maths to use one. Here is the idea in four steps.</p>
+
+<ol>
+<li><strong>Embed.</strong> Each token ID is turned into a long list of numbers (a <a class="term" href="glossary.html#vector">vector</a>)
+that the model learned during training. Tokens with related meanings end up with similar vectors.</li>
+<li><strong>Mix with attention.</strong> In an <a class="term" href="glossary.html#attention">attention</a> step, every
+token looks at the earlier tokens and decides which ones are relevant to it, then blends in information from them.
+This is how "it" in a sentence picks up what "it" refers to.</li>
+<li><strong>Process.</strong> A feed-forward step transforms each token's vector on its own. Attention plus feed-forward
+make one <em>layer</em> (a transformer block). Models stack dozens of these layers.</li>
+<li><strong>Predict.</strong> At the end, the vector of the last position is turned into a score for every token in
+the vocabulary: how well each would fit as the next token. Those scores are called <strong>logits</strong>.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Attention: in the sentence about a battery, the word 'it' attends most strongly to 'battery'">
+  <text x="20" y="28" class="title">Attention: which earlier tokens matter for "it"? (illustrative)</text>
+  <rect x="20" y="180" width="60" height="34" rx="8" class="box"/>
+  <text x="50" y="202" text-anchor="middle" class="mono">The</text>
+  <rect x="90" y="180" width="90" height="34" rx="8" class="box-ok"/>
+  <text x="135" y="202" text-anchor="middle" class="mono">battery</text>
+  <rect x="190" y="180" width="70" height="34" rx="8" class="box"/>
+  <text x="225" y="202" text-anchor="middle" class="mono">won't</text>
+  <rect x="270" y="180" width="80" height="34" rx="8" class="box"/>
+  <text x="310" y="202" text-anchor="middle" class="mono">charge</text>
+  <rect x="360" y="180" width="90" height="34" rx="8" class="box"/>
+  <text x="405" y="202" text-anchor="middle" class="mono">because</text>
+  <rect x="460" y="180" width="50" height="34" rx="8" class="box-solid"/>
+  <text x="485" y="202" text-anchor="middle" class="mono on-solid">it</text>
+  <rect x="520" y="180" width="50" height="34" rx="8" class="box2"/>
+  <text x="545" y="202" text-anchor="middle" class="mono">is</text>
+  <rect x="580" y="180" width="70" height="34" rx="8" class="box2"/>
+  <text x="615" y="202" text-anchor="middle" class="mono">cold</text>
+  <path class="arrow-accent" d="M 485,178 C 470,70 160,70 137,176"/>
+  <path class="arrow" d="M 485,178 C 470,120 330,120 312,176"/>
+  <path class="line dashed" d="M 485,178 C 480,150 420,150 407,180"/>
+  <text x="135" y="232" text-anchor="middle" class="label accent">0.71</text>
+  <text x="310" y="232" text-anchor="middle" class="label">0.12</text>
+  <text x="405" y="232" text-anchor="middle" class="label">0.04</text>
+  <text x="440" y="232" class="small">← attention weight from "it"</text>
+  <text x="20" y="258" class="small">Weights to all earlier tokens add up to 1; only three are drawn. Later tokens ("is", "cold") are not visible to "it".</text>
+  <text x="20" y="276" class="small">Many attention "heads" run in parallel in every layer, each learning its own kind of relation.</text>
+</svg>
+<figcaption>Attention weights are <strong>illustrative</strong>. When the model processes "it", it pulls most of its
+information from "battery". <strong>Attention is how context flows between tokens</strong>, and why adding the right
+documents to a prompt changes the answer.</figcaption>
+</figure>
+
+<p>Two consequences are useful to remember. First, every token attends to every earlier token, so the work grows quickly
+with prompt length; long prompts are slower and need more memory. Second, generation is
+<strong>autoregressive</strong>: the model produces one token, appends it to the input, and runs again to get the next.
+An answer of 56 tokens (like lab 01's) means 56 rounds of this loop. Servers save time by caching intermediate
+results of earlier tokens (the <a class="term" href="glossary.html#kv-cache">KV cache</a>), a topic for
+<a href="inference-optimization.html">inference optimization</a>.</p>
+
+<details class="primer"><summary>New to "architecture"? Do I need to choose one?</summary>
+<p>An architecture is the design of the computation: which steps happen, in which order, how they connect. The
+transformer is the dominant one for language models. Researchers keep proposing alternatives and variations, and some
+production models mix in other designs. As an application builder, you mostly pick <em>models</em>, not architectures;
+what you notice is the effect (speed, context length, memory use), which model cards and provider docs describe.</p>
+</details>
+
+<h2>Model size: parameters, data and compute</h2>
+
+<p>Three numbers describe how "big" a model is.</p>
+
+<ul>
+<li><strong>Parameters</strong>: how many learned numbers the model has. More parameters can store more patterns, but
+every token you generate must pass through them, so bigger models are slower and need more memory to run.
+<code>llama3.2</code> in the labs has about 3 billion; frontier hosted models are much larger.</li>
+<li><strong>Training tokens</strong>: how much data the model saw during pre-training. A model with many parameters
+but too little data is under-trained; a small model trained on a lot of data can punch above its size.</li>
+<li><strong>Compute</strong>: the total amount of calculation spent on training, usually counted in floating-point
+operations (FLOPs). It grows with both parameters and training tokens; a common rough estimate is
+6 × parameters × training tokens. Compute is what costs money and time.</li>
+</ul>
+
+<p>A quick calculation shows why model files are smaller than you might expect. Stored at 16 bits (2 bytes) per
+parameter, 3 billion parameters would take about 6 GB. The <code>llama3.2</code> download is 2.0 GB, which means its
+numbers are stored with fewer bits each, roughly 5 on average. Storing weights with fewer bits is called
+<a class="term" href="glossary.html#quantization">quantization</a>; it is what lets a 3-billion-parameter model fit on the
+4 GB laptop GPU used to test these labs, at a small cost in quality.</p>
+
+<p>Some models use a <strong>mixture of experts</strong> design: they have many parameters in total, but only a part of
+them is used for each token. For these models, look at both the total and the "active" parameter count; the active
+count decides speed, the total decides memory.</p>
+
+<div class="callout"><strong>Bigger is not automatically better for your app.</strong> In the labs, <code>gemma4</code>
+is larger and more accurate (it got all three tickets right in lab 03 where <code>llama3.2</code> did not), but it is
+also much slower on a small GPU. The right size is the smallest model that passes <em>your</em> evaluation at an
+acceptable speed and cost. Model sizes and rankings change constantly, so compare current models on your own eval set
+rather than trusting a leaderboard.</div>
+
+<h2>Post-training: from text completer to assistant</h2>
+
+<p>A base model straight out of pre-training is a text completer. Give it "What is your return policy?" and it may
+continue with more questions, as if writing a FAQ page, because that is a likely continuation on the web. It has
+knowledge but no notion of "a user asked me something and I should answer helpfully".</p>
+
+<p><strong>Post-training</strong> fixes this in two main steps.</p>
+
+<ol>
+<li><strong><a class="term" href="glossary.html#sft">Supervised finetuning</a> (SFT).</strong> The model is trained
+further on example conversations: an instruction and a high-quality answer, written or checked by people. It learns
+the format of a helpful reply, how to follow instructions, and the chat format with roles (system, user,
+assistant).</li>
+<li><strong><a class="term" href="glossary.html#preference-finetuning">Preference finetuning</a>.</strong> People (or
+models) compare two answers to the same prompt and say which is better. The model is then pushed toward the preferred
+kind of answer. Common methods include reinforcement learning from human feedback (RLHF), which trains a separate
+"reward model" to score answers, and direct preference optimization (DPO), which learns from the comparisons
+directly.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Before and after post-training: a base model continues a question with more questions, a chat model answers it">
+  <rect x="20" y="20" width="350" height="210" rx="8" class="zone"/>
+  <text x="195" y="44" text-anchor="middle" class="title">Base model (completes text)</text>
+  <rect x="40" y="60" width="310" height="34" rx="8" class="box2"/>
+  <text x="56" y="82" class="mono">What is your return policy?</text>
+  <rect x="40" y="104" width="310" height="96" rx="8" class="box-warn"/>
+  <text x="56" y="126" class="mono">What is your shipping policy?</text>
+  <text x="56" y="146" class="mono">How do I contact support?</text>
+  <text x="56" y="166" class="mono">Do you ship abroad?</text>
+  <text x="56" y="188" class="small">continues the "FAQ page" it imagines</text>
+  <rect x="390" y="20" width="350" height="210" rx="8" class="zone"/>
+  <text x="565" y="44" text-anchor="middle" class="title">Chat model (after SFT + preferences)</text>
+  <rect x="410" y="60" width="310" height="34" rx="8" class="ui-bubble-user"/>
+  <text x="426" y="82" class="ui-on-user">What is your return policy?</text>
+  <rect x="410" y="104" width="310" height="96" rx="8" class="ui-bubble-ai"/>
+  <text x="426" y="126">You can return most items within</text>
+  <text x="426" y="146">a set number of days. Please check</text>
+  <text x="426" y="166">the shop's policy page for details.</text>
+  <text x="426" y="188" class="small">answers as an assistant</text>
+</svg>
+<figcaption>Illustration (simplified, invented outputs). <strong>Post-training changes behaviour, not knowledge</strong>:
+neither model knows Trailhead's real policy; the chat model just knows it should answer.</figcaption>
+</figure>
+
+<p>This explains several things you will notice in the labs:</p>
+<ul>
+<li><strong>Roles and chat templates.</strong> Chat models were trained on conversations marked up with special tokens
+for "system", "user" and "assistant". The server converts your list of messages into that format. That is why the
+labs send <code>{"role": "system", ...}</code> and <code>{"role": "user", ...}</code> messages, and part of why a short
+question costs dozens of input tokens.</li>
+<li><strong>Style.</strong> Politeness, refusals, a habit of adding "However, ..." caveats, and a tendency to answer at
+length all come largely from post-training. The lab 04 baseline answers often end with an offer to help further;
+that is learned style, not knowledge.</li>
+<li><strong>Confidence.</strong> If training rewards answers that people like, and people like confident, complete
+answers, the model can learn to sound sure even when it has no basis. More on this under hallucination.</li>
+</ul>
+
+<p>The models in the labs are already post-trained chat models. You will not post-train anything, but
+<a href="finetuning.html">Finetuning</a> and <a href="13-synthetic-data.html">lab 13</a> show how the same idea applies
+when you adapt a model to your own data.</p>
+
+<h2>Sampling: how the model picks the next token</h2>
+
+<p>At every step the model produces a logit (a raw score) for each token in its vocabulary. A function called softmax
+turns these scores into probabilities that add up to 1. Then the server has to pick <em>one</em> token. Always taking
+the most likely one is called <strong>greedy decoding</strong>. It is predictable but can be bland or repetitive.
+Picking at random according to the probabilities is <a class="term" href="glossary.html#sampling">sampling</a>. The
+settings below shape that random choice.</p>
+
+<h3>Temperature</h3>
+<p><a class="term" href="glossary.html#temperature">Temperature</a> divides the logits before softmax. A low
+temperature (below 1) widens the gaps between scores, so the top token becomes even more likely. A high temperature
+(above 1) shrinks the gaps, so unlikely tokens get a real chance. Temperature 0 is treated as "always take the top
+token", which is greedy decoding.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Three bar charts of next-token probabilities at low, normal and high temperature">
+  <text x="133" y="36" text-anchor="middle" class="label">temperature 0.2 (sharper)</text>
+  <text x="383" y="36" text-anchor="middle" class="label">temperature 1.0 (as trained)</text>
+  <text x="633" y="36" text-anchor="middle" class="label">temperature 1.5 (flatter)</text>
+  <path class="line" d="M 30,180 H 236"/>
+  <path class="line" d="M 280,180 H 486"/>
+  <path class="line" d="M 530,180 H 736"/>
+  <rect x="40" y="84" width="36" height="96" class="box-solid"/>
+  <rect x="90" y="166" width="36" height="14" class="box-info"/>
+  <rect x="140" y="174" width="36" height="6" class="box-info"/>
+  <rect x="190" y="176" width="36" height="4" class="box-info"/>
+  <text x="58" y="78" text-anchor="middle" class="small">0.80</text>
+  <text x="108" y="160" text-anchor="middle" class="small">0.12</text>
+  <text x="158" y="168" text-anchor="middle" class="small">0.05</text>
+  <text x="208" y="170" text-anchor="middle" class="small">0.03</text>
+  <rect x="290" y="114" width="36" height="66" class="box-solid"/>
+  <rect x="340" y="154" width="36" height="26" class="box-info"/>
+  <rect x="390" y="164" width="36" height="16" class="box-info"/>
+  <rect x="440" y="168" width="36" height="12" class="box-info"/>
+  <text x="308" y="108" text-anchor="middle" class="small">0.55</text>
+  <text x="358" y="148" text-anchor="middle" class="small">0.22</text>
+  <text x="408" y="158" text-anchor="middle" class="small">0.13</text>
+  <text x="458" y="162" text-anchor="middle" class="small">0.10</text>
+  <rect x="540" y="134" width="36" height="46" class="box-solid"/>
+  <rect x="590" y="149" width="36" height="31" class="box-info"/>
+  <rect x="640" y="156" width="36" height="24" class="box-info"/>
+  <rect x="690" y="161" width="36" height="19" class="box-info"/>
+  <text x="558" y="128" text-anchor="middle" class="small">0.38</text>
+  <text x="608" y="143" text-anchor="middle" class="small">0.26</text>
+  <text x="658" y="150" text-anchor="middle" class="small">0.20</text>
+  <text x="708" y="155" text-anchor="middle" class="small">0.16</text>
+  <text x="58" y="196" text-anchor="middle" class="small mono">Pedal</text>
+  <text x="108" y="196" text-anchor="middle" class="small mono">Gear</text>
+  <text x="158" y="196" text-anchor="middle" class="small mono">Cycle</text>
+  <text x="208" y="196" text-anchor="middle" class="small mono">The</text>
+  <text x="308" y="196" text-anchor="middle" class="small mono">Pedal</text>
+  <text x="358" y="196" text-anchor="middle" class="small mono">Gear</text>
+  <text x="408" y="196" text-anchor="middle" class="small mono">Cycle</text>
+  <text x="458" y="196" text-anchor="middle" class="small mono">The</text>
+  <text x="558" y="196" text-anchor="middle" class="small mono">Pedal</text>
+  <text x="608" y="196" text-anchor="middle" class="small mono">Gear</text>
+  <text x="658" y="196" text-anchor="middle" class="small mono">Cycle</text>
+  <text x="708" y="196" text-anchor="middle" class="small mono">The</text>
+  <text x="380" y="226" text-anchor="middle" class="small">Same logits, three temperatures: the order never changes, only how much the leader dominates.</text>
+</svg>
+<figcaption>Probabilities are <strong>illustrative</strong>, for the first token of a shop name. <strong>Low temperature
+makes the favourite almost certain; high temperature spreads the chances</strong>, which brings variety and also
+mistakes.</figcaption>
+</figure>
+
+<p><a href="02-sampling.html">Lab 02</a> asks <code>llama3.2</code> for a bike shop name six times at each of three
+temperatures, then twice more with a fixed seed. Here is the real run:</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 · your answers will differ"><code>temperature=0.0: 1 different answers out of 6
+   6 x Pedal &amp; Co
+temperature=0.7: 1 different answers out of 6
+   6 x Pedal &amp; Co
+temperature=1.5: 6 different answers out of 6
+   1 x The Gear Hub
+   1 x Piston &amp; Pedal Co
+   1 x Pedal &amp; Post
+   1 x CycleWorks
+   1 x Pedals &amp; Passion
+   1 x Pedalhaven
+
+seed=42 twice at temperature 1.0: 'Gearhaven' and 'Gearhaven' -&gt; same: True</code></pre>
+
+<p>Three things stand out. At temperature 0 every answer was the same, as expected from greedy decoding. At 0.7 the
+answers were <em>also</em> all the same: for this prompt the model's favourite name was so dominant that moderate
+randomness never picked anything else. Only at 1.5 did every run differ. How much variety a temperature produces
+depends on the model and the prompt, so test it rather than assume it.</p>
+
+<h3>Top-k and top-p</h3>
+<p>High temperatures give a small chance to thousands of nonsense tokens. Two filters cut off that long tail before
+sampling. <strong>Top-k</strong> keeps only the k most likely tokens. <a class="term" href="glossary.html#top-p">Top-p</a>
+(also called nucleus sampling) keeps the smallest set of top tokens whose probabilities add up to at least p, so the
+number of candidates adapts: few when the model is sure, more when it is not.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Five candidate tokens sorted by probability, with top-k 2 and top-p 0.9 cut-offs">
+  <text x="20" y="28" class="title">Which candidates survive the filter? (illustrative)</text>
+  <rect x="60" y="60" width="70" height="100" class="box-solid"/>
+  <rect x="180" y="110" width="70" height="50" class="box-solid"/>
+  <rect x="300" y="130" width="70" height="30" class="box-info"/>
+  <rect x="420" y="148" width="70" height="12" class="box2"/>
+  <rect x="540" y="152" width="70" height="8" class="box2"/>
+  <path class="line" d="M 40,160 H 640"/>
+  <text x="95" y="54" text-anchor="middle" class="small">0.50</text>
+  <text x="215" y="104" text-anchor="middle" class="small">0.25</text>
+  <text x="335" y="124" text-anchor="middle" class="small">0.15</text>
+  <text x="455" y="142" text-anchor="middle" class="small">0.06</text>
+  <text x="575" y="146" text-anchor="middle" class="small">0.04</text>
+  <text x="95" y="176" text-anchor="middle" class="small">sum 0.50</text>
+  <text x="215" y="176" text-anchor="middle" class="small">sum 0.75</text>
+  <text x="335" y="176" text-anchor="middle" class="small">sum 0.90</text>
+  <text x="455" y="176" text-anchor="middle" class="small">sum 0.96</text>
+  <text x="575" y="176" text-anchor="middle" class="small">sum 1.00</text>
+  <path class="line dashed" d="M 275,44 V 196"/>
+  <text x="270" y="212" text-anchor="end" class="label accent">top-k = 2 keeps these</text>
+  <path class="line dashed" d="M 395,44 V 196"/>
+  <text x="400" y="212" class="label accent">top-p = 0.9 keeps the first three</text>
+  <text x="660" y="100" class="small">cut off:</text>
+  <text x="660" y="116" class="small">never picked</text>
+</svg>
+<figcaption>After filtering, the surviving probabilities are rescaled to add up to 1 and one token is drawn.
+<strong>Top-p adapts to the model's confidence; top-k always keeps the same number.</strong></figcaption>
+</figure>
+
+<h3>Seeds: repeatable randomness</h3>
+<p>Computers produce "random" numbers from a starting value called a <a class="term" href="glossary.html#seed">seed</a>.
+Use the same seed, the same model, the same prompt and the same settings, and the server makes the same random choices.
+In lab 02, two calls at temperature 1.0 with <code>seed=42</code> both returned <code>Gearhaven</code>. Seeds are great
+for debugging and for repeatable experiments. Do not rely on them across machines, server versions or providers:
+hardware differences and server optimisations such as batching can still change results, and some hosted APIs treat
+the seed as best effort only.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Task in the labs</th><th>Sensible setting</th><th>Why</th></tr>
+<tr><td>Extracting a ticket as JSON (lab 03)</td><td><code>temperature=0</code></td><td>One correct answer; variety only adds errors</td></tr>
+<tr><td>Answering policy questions (labs 04, 07)</td><td>Low temperature</td><td>Customers should get consistent answers</td></tr>
+<tr><td>Brainstorming names (lab 02)</td><td>Higher temperature</td><td>Variety is the point</td></tr>
+<tr><td>Generating varied training questions (lab 13)</td><td>Higher temperature</td><td>Many different phrasings are wanted</td></tr>
+</table></div>
+
+<h3>Test-time compute and reasoning models</h3>
+<p>Another way to get better answers is to spend more computation at inference time instead of training a bigger model.
+One simple version: generate several answers and pick the best one, using a checker, a scoring model or a majority
+vote. Another is to let the model "think out loud" before answering: produce a chain of intermediate reasoning, then
+the final answer. Models trained to do this by default are called
+<a class="term" href="glossary.html#reasoning-model">reasoning models</a> (or "thinking" models). The thinking tokens
+are real generated tokens: they take time, and with hosted APIs they are usually billed, even if they are hidden from
+the final reply.</p>
+
+<p>The labs ran into this directly. <code>gemma4</code>, the judge model, is a thinking model. With thinking left on,
+one answer took about 95–110 seconds on the test machine, spending roughly 350–400 hidden thinking tokens. Passing
+<code>reasoning_effort="none"</code> brought the same kind of answer down to about 13 seconds and 32 tokens. That is why
+<code>aie/config.py</code> sets <code>AIE_REASONING_EFFORT</code> to <code>none</code> by default and
+<code>aie/llm.py</code> adds it to every request.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Measured gemma4 answer time with thinking on, about 95 to 110 seconds, versus thinking off, about 13 seconds">
+  <text x="20" y="28" class="title">gemma4, one answer on the test laptop (measured)</text>
+  <text x="20" y="66" class="label">thinking on</text>
+  <rect x="605" y="48" width="75" height="28" rx="6" class="zone"/>
+  <rect x="130" y="48" width="475" height="28" rx="6" class="box-warn"/>
+  <text x="367" y="67" text-anchor="middle" class="label">≈350–400 hidden thinking tokens, then the answer</text>
+  <text x="688" y="67" class="small">95–110 s</text>
+  <text x="20" y="118" class="label">effort "none"</text>
+  <rect x="130" y="100" width="66" height="28" rx="6" class="box-ok"/>
+  <text x="206" y="119" class="small">≈13 s · 32 tokens</text>
+  <path class="line" d="M 130,150 H 700"/>
+  <text x="130" y="168" text-anchor="middle" class="small">0 s</text>
+  <text x="380" y="168" text-anchor="middle" class="small">50 s</text>
+  <text x="630" y="168" text-anchor="middle" class="small">100 s</text>
+  <text x="20" y="192" class="small">Bar lengths to scale (5 px per second); dashed part shows the measured range. NVIDIA T500 4 GB.</text>
+</svg>
+<figcaption>Real measurements from building the labs. <strong>Thinking can improve hard answers but costs time and
+tokens</strong>; for a simple grading task it was not worth a sevenfold wait. Your timings will differ.</figcaption>
+</figure>
+
+<h2>Structured outputs</h2>
+
+<p>Applications often need data, not prose: a support ticket with an intent, an order number and an urgency flag. You
+want <a class="term" href="glossary.html#structured-output">structured output</a>, usually JSON that matches a
+<a class="term" href="glossary.html#json-schema">JSON Schema</a>. There are three layers of defence, and lab 03 uses all
+of them.</p>
+
+<ol>
+<li><strong>Ask in the prompt.</strong> "Reply with JSON only" plus a description of the fields. Usually works,
+sometimes adds a sentence before the JSON or forgets a field.</li>
+<li><strong>Constrain the decoding.</strong> The server receives the schema and, at every step, blocks tokens that
+would break it. If the JSON so far is <code>{"intent": "</code> and the schema allows only five values, every token that
+cannot start one of them gets probability zero before sampling. The output is then guaranteed to <em>parse</em>.
+In the labs, <code>chat_json()</code> sends the schema as <code>response_format</code> with type
+<code>json_schema</code>; Ollama supports this through its structured-outputs feature.</li>
+<li><strong>Validate and retry.</strong> After the reply arrives, <a class="term" href="glossary.html#pydantic">Pydantic</a>
+checks it against the <code>Ticket</code> model, including rules the decoder may not enforce, like the order-id
+pattern <code>^TH-\d{5}$</code>. If validation fails, <code>chat_json()</code> sends the error back and asks for a fix,
+up to two retries.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Constrained decoding: after the JSON prefix, only tokens that can start an allowed intent value keep their probability">
+  <text x="20" y="28" class="title">Constrained decoding: a mask before sampling (illustrative)</text>
+  <rect x="20" y="44" width="250" height="36" rx="8" class="box"/>
+  <text x="34" y="67" class="mono">{"intent": "</text>
+  <text x="20" y="100" class="small">JSON generated so far</text>
+  <path class="arrow" d="M 272,62 H 298"/>
+  <rect x="300" y="44" width="200" height="30" rx="8" class="box-ok"/>
+  <text x="314" y="64" class="mono">return</text>
+  <text x="486" y="64" text-anchor="end" class="small">allowed</text>
+  <rect x="300" y="80" width="200" height="30" rx="8" class="box-ok"/>
+  <text x="314" y="100" class="mono">warranty</text>
+  <text x="486" y="100" text-anchor="end" class="small">allowed</text>
+  <rect x="300" y="116" width="200" height="30" rx="8" class="box-ok"/>
+  <text x="314" y="136" class="mono">shipping</text>
+  <text x="486" y="136" text-anchor="end" class="small">allowed</text>
+  <rect x="300" y="152" width="200" height="30" rx="8" class="box-bad"/>
+  <text x="314" y="172" class="mono">refund</text>
+  <text x="486" y="172" text-anchor="end" class="small">p = 0</text>
+  <rect x="300" y="188" width="200" height="30" rx="8" class="box-bad"/>
+  <text x="314" y="208" class="mono">Sure, here</text>
+  <text x="486" y="208" text-anchor="end" class="small">p = 0</text>
+  <path class="arrow-accent" d="M 502,120 H 548"/>
+  <rect x="550" y="92" width="190" height="56" rx="8" class="box-solid"/>
+  <text x="645" y="115" text-anchor="middle" class="label on-solid">sample among the</text>
+  <text x="645" y="133" text-anchor="middle" class="label on-solid">allowed tokens only</text>
+  <text x="550" y="176" class="small">Guarantees the format.</text>
+  <text x="550" y="194" class="small">Does not guarantee the</text>
+  <text x="550" y="210" class="small">right choice among them.</text>
+</svg>
+<figcaption>Allowed values come from the <code>Ticket</code> schema in lab 03 (order_status and other are also allowed,
+not drawn). <strong>The mask controls the shape of the answer, not its truth.</strong></figcaption>
+</figure>
+
+<p>Lab 03's real runs show exactly that limit. In the first version, without the order-id pattern and without the
+"never invent" rule, <code>llama3.2</code> returned perfectly valid JSON with made-up order numbers:</p>
+
+<pre data-file="Output · first version" data-lang="text" data-tag="real run · llama3.2 · before the pattern and the &quot;never invent&quot; rule"><code>Hi, my order TH-10251 still hasn't arrived and I need the helmet for a race on Saturday!
+  -&gt; {'intent': 'order_status', 'order_id': 'TH-10251', 'urgent': True, 'summary': 'Missing Order'}
+The battery of my Volt won't charge since yesterday, the light blinks red.
+  -&gt; {'intent': 'shipping', 'order_id': '123456789', 'urgent': True, 'summary': 'Battery charging issue with Volt car'}
+Do you have stores in Paris?
+  -&gt; {'intent': 'order_status', 'order_id': 'ST-001234', 'urgent': False, 'summary': 'Support Ticket Extracted from Customer Message'}</code></pre>
+
+<p>After adding the pattern, the rule and a check in code, the order ids were right, but the model labelled every
+message as a <code>return</code>, including a broken battery and a question about stores:</p>
+
+<pre data-file="Output · final version" data-lang="text" data-tag="real run · llama3.2 · your answers will differ"><code>Hi, my order TH-10251 still hasn't arrived and I need the helmet for a race on Saturday!
+  -&gt; {'intent': 'return', 'order_id': 'TH-10251', 'urgent': True, 'summary': 'Missing order shipment'}
+The battery of my Volt won't charge since yesterday, the light blinks red.
+  -&gt; {'intent': 'return', 'order_id': None, 'urgent': False, 'summary': 'Faulty battery charging issue with Volt, blinking red light'}
+Do you have stores in Paris?
+  -&gt; {'intent': 'return', 'order_id': None, 'urgent': False, 'summary': 'No stores in Paris'}</code></pre>
+
+<p>Running the same script with the larger <code>gemma4</code> got all three intents right. The lesson carries through
+the whole guide: <strong>valid JSON is not the same as a correct answer</strong>. Schemas guarantee shape; evaluation
+checks content.</p>
+
+<h2>Hallucination: confident answers without a basis</h2>
+
+<p>A <a class="term" href="glossary.html#hallucination">hallucination</a> is an answer that sounds right but is not
+supported by facts or by the information the model was given. The lab 04 baseline is full of them: a 5-year frame
+warranty, shipping prices in dollars, deliveries to Switzerland. None of these exist in Trailhead's documents. Why
+does a model do this?</p>
+
+<ul>
+<li><strong>It was trained to continue text plausibly, not truthfully.</strong> A fluent, typical answer is exactly
+what pre-training rewards. "Our frames have a 5-year warranty" is a very typical sentence for a bike shop.</li>
+<li><strong>It does not know what it does not know.</strong> Nothing in the generation loop checks a fact against a
+source. The model has no separate signal that says "this part is a guess", and its wording sounds equally sure
+either way.</li>
+<li><strong>It builds on its own output.</strong> Each generated token becomes input for the next one. Once the model
+has written "Yes, we deliver to", the most plausible continuation is a country name and a confident explanation, not
+a retraction.</li>
+<li><strong>Training can reward guessing.</strong> If post-training examples always contain an answer, the model
+learns that answering is what is expected, even about things it never saw.</li>
+<li><strong>The facts are missing.</strong> Private, recent or very specific information was never in the training
+data. Here, that is all of Trailhead's policies.</li>
+</ul>
+
+<p>You cannot remove hallucinations completely, but you can make them much rarer and easier to catch:</p>
+
+<div class="table-wrap"><table>
+<tr><th>Technique</th><th>What it does</th><th>Where in the labs</th></tr>
+<tr><td><a class="term" href="glossary.html#grounding">Grounding</a> with retrieved documents</td><td>Puts the real facts in the prompt and asks the model to use only them</td><td><a href="07-rag.html">Lab 07</a>: keyword pass rose from 30% to 80% in our run</td></tr>
+<tr><td>Allow "I don't know"</td><td>Gives the model a safe answer when the documents are silent</td><td>Lab 07 prompts; the bot declines the CEO and skateboard questions</td></tr>
+<tr><td>Citations</td><td>Each answer names its source chunk, so you can check it</td><td>Lab 07 answers end with tags like <code>[returns#0]</code></td></tr>
+<tr><td>Checks in code</td><td>Verifies facts you can verify, like an order id in the message</td><td>Lab 03; output guardrails in <a href="10-guardrails.html">lab 10</a></td></tr>
+<tr><td>Evaluation</td><td>Measures how often it happens, so you know if a change helped</td><td>Labs 04, 05, 07</td></tr>
+<tr><td>Tools instead of memory</td><td>Looks up live data (orders, dates) instead of guessing</td><td><a href="09-agent.html">Lab 09</a></td></tr>
+</table></div>
+
+<div class="callout warn"><strong>Pitfalls and misconceptions</strong>
+<ul>
+<li><strong>"Temperature 0 makes the model correct."</strong> It makes it <em>consistent</em>. In lab 03 the model was
+wrong at temperature 0, the same way every time.</li>
+<li><strong>"Temperature 0 is always perfectly deterministic."</strong> Usually close, but servers, hardware and
+batching can still cause small differences. Use a seed for repeatable experiments and still expect occasional drift.</li>
+<li><strong>"JSON mode means the data is right."</strong> It means the data parses. Lab 03 produced valid JSON with
+invented order ids.</li>
+<li><strong>"The model knows it is unsure."</strong> Its tone carries no reliable information about accuracy. Measure
+instead.</li>
+<li><strong>"Thinking models are always better."</strong> They can be, on hard problems, at a large cost in time and
+tokens. For the lab's judge, thinking turned a 13-second answer into a wait of over a minute and a half.</li>
+<li><strong>"Words and tokens are the same."</strong> Limits and costs are in tokens; rare words, names and some
+languages use many tokens per word.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A chat model is pre-trained on huge amounts of text (knowledge), then post-trained with SFT and preference
+finetuning (behaviour). Sampling at inference time picks the words you get.</li>
+<li>Training data decides which domains and languages a model handles well; private and recent facts are missing.</li>
+<li>Text becomes tokens; tokens drive cost, speed and the context window.</li>
+<li>Transformers mix information between tokens with attention and generate one token per loop.</li>
+<li>Size means parameters, training tokens and compute; quantization makes models smaller to run.</li>
+<li>Temperature, top-k, top-p and seeds shape sampling; reasoning models spend extra tokens thinking.</li>
+<li>Constrained decoding guarantees JSON shape, not content. Hallucinations come from plausible-text training and
+missing facts; grounding, tools, checks and evaluation reduce them.</li>
+</ul>
+</div>
+
+<h2>Learn more</h2>
+<ul>
+<li><a href="https://github.com/chiphuyen/aie-book">The author's resources repository</a> (chapter summaries and reading list)</li>
+<li><a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a> (the original transformer paper)</li>
+<li><a href="https://huggingface.co/docs/transformers/tokenizer_summary">Hugging Face: summary of the tokenizers</a></li>
+<li><a href="https://huggingface.co/docs/transformers/generation_strategies">Hugging Face: generation strategies</a> (greedy, sampling, top-k, top-p)</li>
+<li><a href="https://arxiv.org/abs/2203.02155">Training language models to follow instructions with human feedback</a> (SFT and RLHF)</li>
+<li><a href="https://arxiv.org/abs/2305.18290">Direct Preference Optimization</a> (DPO paper)</li>
+<li><a href="https://docs.ollama.com/capabilities/structured-outputs">Ollama: structured outputs</a> and <a href="https://docs.ollama.com/capabilities/thinking">Ollama: thinking</a></li>
+<li><a href="https://platform.openai.com/docs/guides/structured-outputs">OpenAI: structured outputs guide</a></li>
+<li><a href="https://docs.pydantic.dev/latest/concepts/json_schema/">Pydantic: JSON Schema</a></li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="what-is-ai-engineering.html"><small>← Chapter 1</small>What AI engineering is</a>
+<a class="next" href="evaluation-methods.html"><small>Chapter 3 →</small>Evaluation methods</a>
+</nav>
+</main>
+</body>
+</html>

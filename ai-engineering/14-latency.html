@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>14 · Latency and throughput</title>
+<meta name="description" content="Measure time to first token, time per token and throughput with streaming and parallel requests.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 14/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 14 of 14 · Hands-on lab</div>
+  <h1>Latency and throughput</h1>
+  <p class="lead">Measure time to first token, time per token and throughput with streaming and parallel requests.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<p>"The bot is slow" is not something you can fix. "The first word appears after 0.4 s, then each token takes 160 ms, and the server handles one request at a time" is. In this last lab you measure the speed of the local model the way inference engineers do: <a class="term" href="glossary.html#ttft">time to first token</a> (TTFT), <a class="term" href="glossary.html#tpot">time per output token</a> (TPOT) and <a class="term" href="glossary.html#throughput">throughput</a>. You will also find out something about your own setup that no benchmark from elsewhere could tell you.</p>
+
+<div class="callout"><strong>Goal.</strong> Stream one answer and time its first and following chunks; send the same request 1, 4 and 8 times at once with an async client and compare total tokens per second; explain the numbers from what the server is doing.</div>
+
+<h2>The idea in brief</h2>
+
+<p>A model answers in two phases. First it reads the whole prompt at once (prefill); the wait until the first token appears is the TTFT. Then it writes the answer one token at a time (decode); the time per token is the TPOT. Total <a class="term" href="glossary.html#latency">latency</a> is roughly TTFT plus TPOT times the number of tokens. Throughput is a property of the server, not of one answer: how many tokens per second it produces for all users together. A server that can work on several requests in the same step (<a class="term" href="glossary.html#batching">batching</a>) gets much higher throughput than one that serves them one after another. The concept chapter <a href="inference-optimization.html">Inference optimization</a> explains these phases, the metrics and the techniques in depth.</p>
+
+<details class="primer"><summary>New to streaming? Why the first token matters most</summary>
+<p>Without <a class="term" href="glossary.html#streaming">streaming</a>, the API returns the answer only when it is complete, so the user stares at a spinner for the whole latency (15 seconds in this lab). With <code>stream=True</code>, the server sends small pieces ("chunks") as soon as they are generated, and the user starts reading after the TTFT. The total time is the same; the wait <em>feels</em> much shorter. That is why chat apps stream, and why TTFT is measured separately.</p>
+</details>
+
+<details class="primer"><summary>New to async Python? What asyncio.gather does</summary>
+<p>Normal Python code waits for each network call to finish before starting the next. With <code>asyncio</code>, a function marked <code>async def</code> can pause at <code>await</code> while it waits for the network, letting other tasks run. <code>asyncio.gather(a, b, c)</code> starts several such tasks and waits until all are done. All of them run on one <em>event loop</em>, the scheduler that switches between waiting tasks. <code>asyncio.run(main())</code> creates an event loop, runs <code>main()</code> to the end and then closes the loop. That last detail caused the bug described under "Common mistakes".</p>
+</details>
+
+<h2>Steps</h2>
+<ol class="steps">
+  <li>Make sure Ollama is running and <code>llama3.2</code> is pulled. No new package is needed: <code>AsyncOpenAI</code> is part of the <code>openai</code> package installed in lab 01.</li>
+  <li>Create <code>labs/14_latency.py</code> (complete file below). It uses the existing <code>client</code> from <code>aie/llm.py</code> for streaming and creates its own async client for the throughput test.</li>
+  <li>Run <code>uv run python -m labs.14_latency</code>. It takes a few minutes: our run produced 16 answers (3 streamed, then 1 + 4 + 8) at about 15 s each, about four and a half minutes in total.</li>
+  <li>While part 2 runs, open a second terminal and run <code>ollama ps</code> to see how the model is loaded (explained below).</li>
+</ol>
+
+<h2>The code</h2>
+<pre data-file="labs/14_latency.py" data-lang="py" data-tag="complete file"><code>"""Lab 14: measure time to first token, time per output token, and throughput with parallel requests."""
+import asyncio
+import time
+
+from openai import AsyncOpenAI
+
+from aie import config
+from aie.llm import client
+
+PROMPT = [{"role": "user", "content": "In three sentences, how should I store an e-bike battery for the winter?"}]
+
+
+def stream_once():
+    start = time.perf_counter()
+    first, pieces = None, 0
+    stream = client.chat.completions.create(model=config.MODEL, messages=PROMPT, stream=True, temperature=0)
+    for event in stream:
+        if event.choices and event.choices[0].delta.content:
+            first = first or time.perf_counter()
+            pieces += 1
+    end = time.perf_counter()
+    return first - start, (end - first) / max(pieces - 1, 1), end - start, pieces
+
+
+print("1) Streaming one answer (3 runs)")
+for _ in range(3):
+    ttft, tpot, total, pieces = stream_once()
+    print(f"   TTFT {ttft:5.2f} s   TPOT {tpot * 1000:4.0f} ms   total {total:5.2f} s   {pieces} chunks")
+
+aclient = AsyncOpenAI(base_url=config.BASE_URL, api_key=config.API_KEY)
+
+
+async def one():
+    r = await aclient.chat.completions.create(model=config.MODEL, messages=PROMPT, temperature=0)
+    return r.usage.completion_tokens
+
+
+async def burst(n):
+    start = time.perf_counter()
+    tokens = await asyncio.gather(*(one() for _ in range(n)))
+    seconds = time.perf_counter() - start
+    return seconds, sum(tokens) / seconds
+
+
+async def main():
+    # One event loop for all bursts: the async client must not outlive the loop it was used in.
+    for n in (1, 4, 8):
+        seconds, tps = await burst(n)
+        print(f"   {n} at once: {seconds:5.1f} s wall time, {tps:5.1f} output tokens/s in total")
+
+
+print("\n2) Throughput: the same request sent 1, 4 and 8 times at once")
+asyncio.run(main())</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2–3</td><td><code>import asyncio</code> <code>import time</code></td><td><code>asyncio</code> runs many requests concurrently; <code>time.perf_counter()</code> is a high-resolution stopwatch for measuring durations.</td></tr>
+<tr><td>5</td><td><code>from openai import AsyncOpenAI</code></td><td>The async version of the OpenAI client: its methods are awaited instead of blocking.</td></tr>
+<tr><td>7–8</td><td><code>from aie import config</code> <code>from aie.llm import client</code></td><td>Settings (model name, server address, key) and the normal synchronous client from our wrapper. We call the client directly here instead of <code>chat()</code>, because <code>chat()</code> doesn't stream.</td></tr>
+<tr><td>10</td><td><code>PROMPT = [{"role": "user", "content": "In three sentences, how should I store an e-bike battery for the winter?"}]</code></td><td>One fixed question with no system prompt and no documents, so every run does exactly the same work. "Three sentences" gives an answer of about 90 chunks, long enough to measure TPOT.</td></tr>
+<tr><td>13–15</td><td><code>def stream_once():</code> <code>start = time.perf_counter()</code> <code>first, pieces = None, 0</code></td><td>Times one streamed answer. <code>first</code> will hold the arrival time of the first content chunk; <code>pieces</code> counts chunks.</td></tr>
+<tr><td>16</td><td><code>stream = client.chat.completions.create(model=config.MODEL, messages=PROMPT, stream=True, temperature=0)</code></td><td><code>stream=True</code> returns an iterator of chunks instead of one finished response. <code>temperature=0</code> keeps the answers, and so their lengths, as similar as possible between runs.</td></tr>
+<tr><td>17–20</td><td><code>for event in stream:</code> <code>if event.choices and event.choices[0].delta.content:</code> <code>first = first or time.perf_counter()</code> <code>pieces += 1</code></td><td>Loops over chunks as they arrive. Some chunks carry no text (for example the final one), so only chunks with content count. <code>first or ...</code> sets <code>first</code> once, at the first content chunk, and leaves it alone afterwards.</td></tr>
+<tr><td>21</td><td><code>end = time.perf_counter()</code></td><td>The stream is finished when the loop ends.</td></tr>
+<tr><td>22</td><td><code>return first - start, (end - first) / max(pieces - 1, 1), end - start, pieces</code></td><td>TTFT = first chunk minus start. TPOT = time from first to last chunk divided by the number of gaps between chunks (<code>pieces - 1</code>; <code>max(..., 1)</code> avoids dividing by zero for a one-chunk answer). With Ollama a chunk is usually about one token, so this is close to TPOT but counts chunks, not exact tokens.</td></tr>
+<tr><td>25–28</td><td><code>print("1) Streaming one answer (3 runs)")</code> <code>for _ in range(3):</code> …</td><td>Three runs, because one measurement says little and the first one is often different. <code>_</code> is the usual name for a loop variable you don't use. <code>tpot * 1000</code> shows milliseconds.</td></tr>
+<tr><td>30</td><td><code>aclient = AsyncOpenAI(base_url=config.BASE_URL, api_key=config.API_KEY)</code></td><td>An async client pointed at the same Ollama server.</td></tr>
+<tr><td>33–35</td><td><code>async def one():</code> <code>r = await aclient.chat.completions.create(...)</code> <code>return r.usage.completion_tokens</code></td><td>One non-streamed request. <code>await</code> lets other requests be sent while this one waits. It returns the number of output tokens the server reports in <code>usage</code>.</td></tr>
+<tr><td>38–42</td><td><code>async def burst(n):</code> … <code>tokens = await asyncio.gather(*(one() for _ in range(n)))</code> … <code>return seconds, sum(tokens) / seconds</code></td><td>Sends <code>n</code> identical requests at the same moment and waits for all of them. <code>*(...)</code> unpacks the <code>n</code> tasks as separate arguments. Returns the wall time and the throughput: all output tokens divided by the wall time.</td></tr>
+<tr><td>45–49</td><td><code>async def main():</code> <code># One event loop for all bursts ...</code> <code>for n in (1, 4, 8):</code> …</td><td>Runs the three bursts one after another <em>inside one event loop</em>. The comment records why: our first version called <code>asyncio.run()</code> once per burst and crashed (see "Common mistakes").</td></tr>
+<tr><td>52–53</td><td><code>print("\n2) Throughput: ...")</code> <code>asyncio.run(main())</code></td><td>Starts the event loop once, runs everything async, closes the loop at the end.</td></tr>
+</table></div>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="from the project folder"><code>uv run python -m labs.14_latency</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>1) Streaming one answer (3 runs)
+   TTFT  1.18 s   TPOT  163 ms   total 16.37 s   94 chunks
+   TTFT  0.42 s   TPOT  179 ms   total 16.37 s   90 chunks
+   TTFT  0.35 s   TPOT  160 ms   total 14.62 s   90 chunks
+
+2) Throughput: the same request sent 1, 4 and 8 times at once
+   1 at once:  15.7 s wall time,   5.8 output tokens/s in total
+   4 at once:  67.6 s wall time,   5.4 output tokens/s in total
+   8 at once: 135.7 s wall time,   5.4 output tokens/s in total</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> Three streaming lines with TTFT, TPOT, total time and number of chunks, then three throughput lines. On our laptop (NVIDIA T500, 4 GB): TTFT 1.18 s on the first run and about 0.4 s afterwards, TPOT 160–180 ms, about 15–16 s per answer of about 90 chunks; throughput about 5.4–5.8 output tokens per second whether we sent 1, 4 or 8 requests. On a different GPU or with different Ollama settings your numbers can be very different. That is the point of measuring.</div>
+
+<h2>Reading the output</h2>
+
+<h3>One answer: TTFT and TPOT</h3>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Three bars for the three streaming runs; each starts with a short TTFT part (1.18, 0.42 and 0.35 seconds) followed by a long decode part, totals 16.37, 16.37 and 14.62 seconds">
+  <text x="20" y="41" class="label">run 1 · 94 chunks</text>
+  <rect class="box-warn" x="130" y="26" width="40" height="22" rx="3"/>
+  <rect class="box-info" x="170" y="26" width="520" height="22" rx="3"/>
+  <text x="698" y="42" class="label">16.37 s</text>
+  <text x="20" y="81" class="label">run 2 · 90 chunks</text>
+  <rect class="box-warn" x="130" y="66" width="14" height="22" rx="3"/>
+  <rect class="box-info" x="144" y="66" width="546" height="22" rx="3"/>
+  <text x="698" y="82" class="label">16.37 s</text>
+  <text x="20" y="121" class="label">run 3 · 90 chunks</text>
+  <rect class="box-warn" x="130" y="106" width="12" height="22" rx="3"/>
+  <rect class="box-info" x="142" y="106" width="488" height="22" rx="3"/>
+  <text x="638" y="122" class="label">14.62 s</text>
+  <rect class="box-warn" x="130" y="150" width="14" height="14" rx="2"/>
+  <text x="150" y="162" class="small">TTFT: 1.18 / 0.42 / 0.35 s</text>
+  <rect class="box-info" x="350" y="150" width="14" height="14" rx="2"/>
+  <text x="370" y="162" class="small">decode: one chunk every 163 / 179 / 160 ms</text>
+</svg>
+<figcaption>Our three streaming runs drawn to scale. <strong>Almost all of the time is decode: the user waits well under a second for the first word, then reads as the text arrives.</strong></figcaption>
+</figure>
+
+<p>The numbers fit together. For run 3: 0.35 s + 89 gaps × 0.160 s ≈ 14.6 s, which is the measured total of 14.62 s. A TPOT of about 160 ms means roughly 6 tokens per second, which is also what the single-request throughput test measured (5.8 tokens per second). With a short prompt like this one, prefill is quick and decode dominates; for a RAG prompt with 350 input tokens (lab 12) the TTFT would be a larger share.</p>
+<p><strong>Why is the first run slower?</strong> Run 1 had a TTFT of 1.18 s, runs 2 and 3 about 0.4 s. It was not a cold start: loading <code>llama3.2</code> from disk takes 35–56 s on this machine, so the model was already in memory. Likely reasons are one-time work on the first request and the fact that runs 2 and 3 send exactly the same prompt, which a server can partly reuse (prefix caching). We did not check which applies to our Ollama version. The general habit matters more than the cause: run measurements several times and report the first one separately.</p>
+
+<h3>Throughput: no gain at all</h3>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Wall time bars: 1 request 15.7 seconds, 4 requests 67.6 seconds, 8 requests 135.7 seconds; throughput 5.8, 5.4 and 5.4 tokens per second">
+  <text x="20" y="41" class="label">1 at once · 5.8 tok/s</text>
+  <rect class="box" x="200" y="26" width="53" height="22" rx="3"/>
+  <text x="261" y="42" class="label">15.7 s</text>
+  <text x="20" y="81" class="label">4 at once · 5.4 tok/s</text>
+  <rect class="box" x="200" y="66" width="229" height="22" rx="3"/>
+  <text x="437" y="82" class="label">67.6 s</text>
+  <text x="20" y="121" class="label">8 at once · 5.4 tok/s</text>
+  <rect class="box-warn" x="200" y="106" width="460" height="22" rx="3"/>
+  <text x="668" y="122" class="label">135.7 s</text>
+  <text x="380" y="156" text-anchor="middle" class="small">bar = wall time until all requests of the burst were answered (same scale)</text>
+</svg>
+<figcaption>Our throughput test. Wall time grew with the number of requests (4 × 15.7 = 62.8, 8 × 15.7 = 125.6) while tokens per second stayed flat. <strong>The server answered our requests one after another.</strong></figcaption>
+</figure>
+
+<p>If the server batched requests, sending 4 at once would take only a little longer than sending 1, and the total tokens per second would rise sharply. Ours did the opposite: 4 requests took about 4 times as long, 8 took about 8 to 9 times as long, and the throughput stayed at about 5.4 tokens per second. The async client did send the requests together; the server queued them.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Top: with batching, four requests decode at the same time (illustrative). Bottom: what we measured, four requests answered one after another">
+  <text x="20" y="26" class="title">If the server batched (illustrative)</text>
+  <text x="20" y="66" class="small">4 requests</text>
+  <rect class="box-ok" x="140" y="40" width="190" height="11" rx="3"/>
+  <rect class="box-ok" x="140" y="55" width="190" height="11" rx="3"/>
+  <rect class="box-ok" x="140" y="70" width="190" height="11" rx="3"/>
+  <rect class="box-ok" x="140" y="85" width="190" height="11" rx="3"/>
+  <text x="340" y="72" class="small">all finish at about the same time</text>
+  <text x="20" y="130" class="title">What we measured: one after another (67.6 s)</text>
+  <text x="20" y="170" class="small">4 requests</text>
+  <rect class="box-warn" x="140" y="144" width="140" height="11" rx="3"/>
+  <rect class="box-warn" x="280" y="159" width="140" height="11" rx="3"/>
+  <rect class="box-warn" x="420" y="174" width="140" height="11" rx="3"/>
+  <rect class="box-warn" x="560" y="189" width="140" height="11" rx="3"/>
+  <path class="arrow" d="M140,226 H738"/>
+  <text x="140" y="242" class="small">time →</text>
+</svg>
+<figcaption>Batching (top) is how GPU servers raise throughput; the bar lengths there are illustrative. The bottom row is consistent with our wall times. <strong>Throughput only grows if the server actually works on requests together.</strong></figcaption>
+</figure>
+
+<p>Why? <code>ollama ps</code> lists the models currently loaded, with their memory size, how they are split between CPU and GPU, and their context length. During our run it showed <code>llama3.2</code> loaded at <strong>10 GB</strong> with a <strong>65536-token context</strong>, running <strong>79 % on the CPU and 21 % on the GPU</strong>. The model file is only 2.0 GB; most of the rest is memory reserved for the <a class="term" href="glossary.html#kv-cache">KV cache</a> of such a long <a class="term" href="glossary.html#context-window">context window</a>. That does not fit in the T500's 4 GB, so most of the work ran on the CPU, which is much slower and leaves no room to serve several requests side by side.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="A bar of 10 GB for llama3.2 with a 65536-token context, 21 percent on the GPU and 79 percent on the CPU; the GPU has only 4 GB">
+  <text x="380" y="26" text-anchor="middle" class="label">what ollama ps showed: llama3.2 · 10 GB · context 65536</text>
+  <rect class="box-ok" x="80" y="42" width="126" height="40" rx="4"/>
+  <text x="143" y="67" text-anchor="middle" class="small">GPU 21 %</text>
+  <rect class="box-warn" x="206" y="42" width="474" height="40" rx="4"/>
+  <text x="443" y="67" text-anchor="middle" class="small">CPU 79 % (system memory, much slower)</text>
+  <rect class="box2" x="80" y="110" width="240" height="40" rx="8"/>
+  <text x="200" y="135" text-anchor="middle" class="small">NVIDIA T500: 4 GB in total</text>
+  <rect class="box2" x="340" y="110" width="340" height="40" rx="8"/>
+  <text x="510" y="128" text-anchor="middle" class="small">model file 2.0 GB + memory reserved</text>
+  <text x="510" y="143" text-anchor="middle" class="small">for a 65536-token context (KV cache)</text>
+  <text x="380" y="178" text-anchor="middle" class="small">bar widths follow the 21 / 79 split; the boxes below are not to scale</text>
+</svg>
+<figcaption>Where our model actually ran. <strong>A context window far larger than our prompts need pushed most of the work off the GPU.</strong></figcaption>
+</figure>
+
+<h3>Settings to try (we did not)</h3>
+<p>Ollama has settings that control exactly this, set as environment variables for the Ollama server (not for your Python script). At the time of writing, the <a href="https://docs.ollama.com/faq">Ollama FAQ</a> documents <code>OLLAMA_NUM_PARALLEL</code> (how many requests a loaded model works on at the same time) and <code>OLLAMA_CONTEXT_LENGTH</code> (the default context length). A smaller context could let more of the model fit on the GPU, and parallel requests could raise throughput if memory allows. <strong>We did not change these settings and did not measure their effect</strong>, so we can't tell you what they will do on your machine. Check the FAQ for the current defaults and how to set them on your system, restart Ollama, run <code>ollama ps</code>, and run this lab again. Whatever you change, re-run the eval set afterwards: a shorter context window must still fit your longest RAG prompts.</p>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+  <li><strong>Calling <code>asyncio.run()</code> several times with one async client.</strong> Our first version of part 2 ran each burst in its own <code>asyncio.run()</code>:
+<pre data-lang="py" data-tag="the version that crashed"><code>for n in (1, 4, 8):
+    seconds, tps = asyncio.run(burst(n))
+    print(f"   {n} at once: {seconds:5.1f} s wall time, {tps:5.1f} output tokens/s in total")</code></pre>
+  The first burst worked; the next one crashed with <code>RuntimeError: Event loop is closed</code>. Each <code>asyncio.run()</code> creates a new event loop and closes it at the end, but the <code>AsyncOpenAI</code> client keeps its network connections open for reuse, and those belong to the first, now closed loop. The fix is the version in the file: put all bursts in one <code>async def main()</code> and call <code>asyncio.run(main())</code> once (lines 45–53). Creating the async client inside <code>main()</code> would also work.</li>
+  <li><strong>Averaging the first run with the others.</strong> Our first TTFT was three times the others. A cold start after loading the model is worse still (35–56 s here). Report them separately.</li>
+  <li><strong>Assuming parallel requests are faster.</strong> Sending requests concurrently only helps if the server batches them. Ours didn't: 8 at once took 135.7 s. Measure before you build on it.</li>
+  <li><strong>Comparing with numbers from the internet.</strong> TPOT depends on the GPU, the model's size and quantization, the context length and the server settings. Your own measurement is the only one that applies to you.</li>
+  <li><strong>Speeding up without re-checking quality.</strong> A smaller model, a lower reasoning effort or a shorter context can make answers worse. Re-run the eval set after each change.</li>
+</ul>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Wrong: asyncio.run called per burst, the second call fails because the client's connections belong to the closed first loop. Right: one asyncio.run(main()) with all bursts inside one loop">
+  <rect class="box-bad" x="10" y="14" width="365" height="172" rx="8"/>
+  <text x="192" y="38" text-anchor="middle" class="title">Crashed</text>
+  <text x="30" y="68" class="mono small">asyncio.run(burst(1))</text>
+  <text x="30" y="86" class="small">loop A: works, then closed</text>
+  <text x="30" y="116" class="mono small">asyncio.run(burst(4))</text>
+  <text x="30" y="134" class="small">loop B: client reuses loop A's connections</text>
+  <text x="30" y="164" class="mono small bad">RuntimeError: Event loop is closed</text>
+  <rect class="box-ok" x="385" y="14" width="365" height="172" rx="8"/>
+  <text x="567" y="38" text-anchor="middle" class="title">Fixed</text>
+  <text x="405" y="68" class="mono small">asyncio.run(main())</text>
+  <text x="405" y="86" class="small">one loop for the whole program</text>
+  <text x="405" y="116" class="mono small">await burst(1) · burst(4) · burst(8)</text>
+  <text x="405" y="134" class="small">all bursts share the same loop</text>
+  <text x="405" y="164" class="small ok">the client never outlives its loop</text>
+</svg>
+<figcaption>The bug we hit while writing this lab, and the fix in lines 45–53. <strong>Create one event loop and keep every async client inside it.</strong></figcaption>
+</figure>
+
+<h2>Try it yourself</h2>
+<ol>
+  <li><strong>Shorter answers, same TPOT.</strong> Change the prompt in line 10 to "In one sentence, ..." and run again. The number of chunks and the total time should drop a lot, while TPOT stays about the same: decode time is proportional to the number of output tokens.</li>
+  <li><strong>Look at your own setup.</strong> Run <code>ollama ps</code> while the lab runs. Note the size, the CPU/GPU split and the context length. If your model is 100 % on the GPU, compare your TPOT with our 160–180 ms.</li>
+  <li><strong>Measure a cold start.</strong> Run <code>ollama stop llama3.2</code> to unload the model, then run the lab again. The first TTFT should now include loading the model and be much larger than our 1.18 s (on our machine a first call after loading took 35–56 s).</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>TTFT is the wait for the first chunk; TPOT is the time per chunk after that; total ≈ TTFT + (chunks − 1) × TPOT. Ours: TTFT 1.18 / 0.42 / 0.35 s, TPOT 160–180 ms, about 15–16 s for about 90 chunks.</li>
+  <li>The first run was slower; always repeat measurements and report the first one separately.</li>
+  <li>Throughput did not grow with concurrency (5.8 → 5.4 → 5.4 tokens/s): our Ollama server answered requests one after another, with the model 79 % on the CPU because of a 65536-token context on a 4 GB GPU.</li>
+  <li><code>OLLAMA_NUM_PARALLEL</code> and <code>OLLAMA_CONTEXT_LENGTH</code> are the settings to explore; we did not test them, so measure the effect yourself.</li>
+  <li>Use one <code>asyncio.run(main())</code> per program; calling <code>asyncio.run()</code> repeatedly with one async client gives "Event loop is closed".</li>
+</ul>
+</div>
+
+<h2>Where to go next</h2>
+<p>You now have the whole loop of AI engineering in one small project: a model behind one wrapper, an eval set and a calibrated judge, retrieval and a grounded prompt, an agent with checked tools, guardrails, caches and a router, traces and feedback, a dataset for finetuning, and speed measurements. Three habits carry over to any project:</p>
+<ul>
+  <li><strong>Repeat the eval after every change.</strong> A new prompt, a different model, a lower cache threshold, a shorter context window: each can make answers worse in ways you only see on the eval set from <a href="04-eval-set.html">lab 04</a>, extended with the cases from <a href="12-feedback.html">lab 12</a>.</li>
+  <li><strong>Measure on your own setup.</strong> Our numbers come from one laptop and one run each; yours will differ, and only yours count.</li>
+  <li><strong>Read the concepts behind the labs.</strong> Start with <a href="inference-optimization.html">Inference optimization</a> for this lab, then <a href="architecture-and-feedback.html">Architecture and user feedback</a>, <a href="finetuning.html">Finetuning</a> and <a href="dataset-engineering.html">Dataset engineering</a>; the <a href="index.html">home page</a> lists all ten concept chapters, each paired with a chapter of the book.</li>
+</ul>
+
+<nav class="pager">
+<a class="prev" href="13-synthetic-data.html"><small>← Previous · Step 13</small>Synthetic data for fine-tuning</a>
+<a class="next" href="index.html"><small>Done →</small>All steps</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12 · Tracing and user feedback</title>
+<meta name="description" content="Log every answer to SQLite, collect thumbs up and down, and turn bad answers into new eval cases.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 12/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 12 of 14 · Hands-on lab</div>
+  <h1>Tracing and user feedback</h1>
+  <p class="lead">Log every answer to SQLite, collect thumbs up and down, and turn bad answers into new eval cases.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<p>Once real customers use the bot, the eval set of <a href="04-eval-set.html">lab 04</a> is no longer the only source of truth. Every answer the bot gives in use is evidence: what was asked, which chunks were retrieved, what the model said, how long it took. If you don't record that, a complaint like "the bot told me something wrong yesterday" is impossible to investigate. In this lab you write every answer to a small database (a <a class="term" href="glossary.html#tracing">trace</a>), attach the customer's thumbs up or down to it, print a mini dashboard, and turn the thumbs-down answers into candidate eval cases.</p>
+
+<div class="callout"><strong>Goal.</strong> Log each answer with its question, chunks, model, tokens and time to <a class="term" href="glossary.html#sqlite">SQLite</a>; store <a class="term" href="glossary.html#user-feedback">user feedback</a> next to it; query both; and learn why a thumbs down is a lead to investigate, not a verdict.</div>
+
+<h2>The idea in brief</h2>
+
+<p><a class="term" href="glossary.html#observability">Observability</a> means being able to answer "what happened, and why?" about a system from the data it records. For an AI app the most useful record is the trace: one row per request with everything needed to replay it in your head. Feedback is the second half: a signal from the user about whether the answer helped. Together they let you find bad answers you never thought to test, and feed them back into the eval set. The concept chapter <a href="architecture-and-feedback.html">Architecture and user feedback</a> explains monitoring, what feedback can and cannot tell you, and how feedback loops are designed.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Each question goes through rag.answer, log_trace writes a row to the traces table, the rating goes through log_feedback to the feedback table, a dashboard query joins both, and thumbs-down rows are written to evals/from_feedback.jsonl">
+  <rect class="box2" x="10" y="30" width="120" height="44" rx="8"/>
+  <text x="70" y="57" text-anchor="middle">question</text>
+  <path class="arrow" d="M130,52 H158"/>
+  <rect class="box-info" x="160" y="30" width="140" height="44" rx="8"/>
+  <text x="230" y="57" text-anchor="middle" class="mono">rag.answer()</text>
+  <path class="arrow" d="M300,52 H328"/>
+  <rect class="box" x="330" y="30" width="130" height="44" rx="8"/>
+  <text x="395" y="57" text-anchor="middle" class="mono">log_trace()</text>
+  <path class="arrow" d="M460,52 H518"/>
+  <rect class="zone" x="520" y="16" width="230" height="140" rx="8"/>
+  <text x="635" y="34" text-anchor="middle" class="small">runs/traces.db</text>
+  <rect class="box-solid" x="540" y="42" width="190" height="36" rx="8"/>
+  <text x="635" y="65" text-anchor="middle" class="on-solid mono">traces</text>
+  <rect class="box-solid" x="540" y="104" width="190" height="36" rx="8"/>
+  <text x="635" y="127" text-anchor="middle" class="on-solid mono">feedback</text>
+  <rect class="box2" x="10" y="102" width="120" height="44" rx="8"/>
+  <text x="70" y="129" text-anchor="middle">+1 or -1</text>
+  <path class="arrow" d="M130,124 H328"/>
+  <rect class="box" x="330" y="102" width="130" height="44" rx="8"/>
+  <text x="395" y="129" text-anchor="middle" class="mono">log_feedback()</text>
+  <path class="arrow" d="M460,122 H538"/>
+  <path class="arrow" d="M635,156 V184"/>
+  <rect class="box-ok" x="430" y="186" width="160" height="50" rx="8"/>
+  <text x="510" y="208" text-anchor="middle">Dashboard</text>
+  <text x="510" y="225" text-anchor="middle" class="small">JOIN, averages</text>
+  <rect class="box-warn" x="600" y="186" width="150" height="50" rx="8"/>
+  <text x="675" y="208" text-anchor="middle" class="small">thumbs down →</text>
+  <text x="675" y="225" text-anchor="middle" class="small mono">from_feedback.jsonl</text>
+  <text x="230" y="98" text-anchor="middle" class="small">the customer's rating</text>
+</svg>
+<figcaption>What <code>labs/12_feedback.py</code> does for each of its five simulated requests, then once at the end. <strong>The trace and the rating are stored separately and joined by the trace id.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to SQLite? A database in one file</summary>
+<p><a class="term" href="glossary.html#sqlite">SQLite</a> is a complete SQL database that lives in a single file (here <code>runs/traces.db</code>). There is no server to install: Python ships with the <code>sqlite3</code> module. You create <em>tables</em> (like spreadsheets with fixed columns), add rows with <code>INSERT</code>, and ask questions with <code>SELECT</code>. A <code>JOIN</code> combines rows of two tables that share a value, here a trace's <code>id</code> and a feedback row's <code>trace_id</code>. SQLite is a good fit for a single program on one machine. A production service with many servers writing at the same time would use a server database or a dedicated tracing tool, but the idea is the same.</p>
+</details>
+
+<details class="primer"><summary>New to traces? What to log, and what not to</summary>
+<p>Log what you need to understand a request later: the input, the context the model saw (here the chunk ids), the output, which model and prompt version produced it, and the cost (tokens, seconds). Store the prompt <em>version name</em> (<code>rag_v2</code>), not the whole prompt, because prompts are versioned files (<a href="08-prompts.html">lab 08</a>). Be careful with personal data: questions can contain emails or card numbers. A real system would redact them first (<code>redact_pii</code> from <a href="10-guardrails.html">lab 10</a>) and decide how long to keep traces.</p>
+</details>
+
+<h2>Steps</h2>
+<ol class="steps">
+  <li>Create <code>aie/tracing.py</code> with the table definitions and the two logging functions.</li>
+  <li>Create <code>labs/12_feedback.py</code>. It sends five questions through the RAG bot with prompt <code>rag_v2</code>, attaches a scripted rating and comment to each, prints a dashboard and exports the thumbs-down answers.</li>
+  <li>Run <code>uv run python -m labs.12_feedback</code> from the project folder. It creates <code>runs/traces.db</code> and <code>evals/from_feedback.jsonl</code>.</li>
+  <li>Open the database yourself with a one-line Python command (shown after the output) and look at the rows.</li>
+  <li>Read <code>evals/from_feedback.jsonl</code> and decide, for each case, what the right answer is. That step is yours; the script cannot do it.</li>
+</ol>
+
+<h2>The code</h2>
+
+<h3>Tracing and feedback storage</h3>
+<pre data-file="aie/tracing.py" data-lang="py" data-tag="complete file"><code>"""Log every request to SQLite so you can debug it later and learn from user feedback."""
+import json
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+
+from aie.config import RUNS
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS traces (
+    id TEXT PRIMARY KEY, created TEXT, question TEXT, answer TEXT, chunks TEXT,
+    model TEXT, input_tokens INT, output_tokens INT, seconds REAL, prompt TEXT
+);
+CREATE TABLE IF NOT EXISTS feedback (
+    trace_id TEXT REFERENCES traces(id), rating INT, comment TEXT, created TEXT
+);
+"""
+
+
+def connect(path=RUNS / "traces.db"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.executescript(SCHEMA)
+    return db
+
+
+def log_trace(db, question, out, prompt):
+    trace_id = uuid.uuid4().hex[:8]
+    r = out["reply"]
+    db.execute("INSERT INTO traces VALUES (?,?,?,?,?,?,?,?,?,?)", (
+        trace_id, datetime.now(timezone.utc).isoformat(), question, out["answer"], json.dumps(out["chunks"]),
+        r.model, r.input_tokens, r.output_tokens, round(r.seconds, 2), prompt))
+    db.commit()
+    return trace_id
+
+
+def log_feedback(db, trace_id, rating, comment=""):
+    """rating: +1 (thumbs up) or -1 (thumbs down)."""
+    db.execute("INSERT INTO feedback VALUES (?,?,?,?)", (trace_id, rating, comment, datetime.now(timezone.utc).isoformat()))
+    db.commit()</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2–5</td><td><code>import json</code>, <code>sqlite3</code>, <code>uuid</code>, <code>datetime, timezone</code></td><td>All from Python's standard library: <code>json</code> turns the chunk list into text for one column, <code>sqlite3</code> talks to the database file, <code>uuid</code> makes random ids, <code>datetime</code> timestamps each row.</td></tr>
+<tr><td>7</td><td><code>from aie.config import RUNS</code></td><td>The project's <code>runs/</code> folder, where generated files go.</td></tr>
+<tr><td>9–17</td><td><code>SCHEMA = """CREATE TABLE IF NOT EXISTS traces (...); CREATE TABLE IF NOT EXISTS feedback (...);"""</code></td><td>Two tables. <code>traces</code> has ten columns: id, creation time, question, answer, retrieved chunk ids, model, input and output tokens, seconds and prompt version. <code>feedback</code> has the trace it belongs to, the rating, the comment and a time. <code>IF NOT EXISTS</code> makes the script safe to run again. <code>REFERENCES traces(id)</code> documents the link between the tables (SQLite only enforces it when foreign keys are switched on, which we don't do).</td></tr>
+<tr><td>20</td><td><code>def connect(path=RUNS / "traces.db"):</code></td><td>Opens the database; the default path is <code>runs/traces.db</code>. The <code>/</code> joins paths (it is a <code>pathlib.Path</code>).</td></tr>
+<tr><td>21</td><td><code>path.parent.mkdir(parents=True, exist_ok=True)</code></td><td>Creates <code>runs/</code> if it doesn't exist yet. Without it, a fresh project fails with "unable to open database file".</td></tr>
+<tr><td>22–24</td><td><code>db = sqlite3.connect(path)</code> <code>db.executescript(SCHEMA)</code> <code>return db</code></td><td>Opens (or creates) the file, runs both <code>CREATE TABLE</code> statements, and returns the connection.</td></tr>
+<tr><td>27–28</td><td><code>def log_trace(db, question, out, prompt):</code> <code>trace_id = uuid.uuid4().hex[:8]</code></td><td><code>out</code> is the dict returned by <code>rag.answer()</code>. The id is the first 8 hex characters of a random UUID, short enough to read in the output (<code>dcfb81a3</code>) and very unlikely to repeat in a small lab.</td></tr>
+<tr><td>29</td><td><code>r = out["reply"]</code></td><td>The <code>Reply</code> object from <code>aie/llm.py</code>, which carries the model name, token counts and seconds of the call.</td></tr>
+<tr><td>30–32</td><td><code>db.execute("INSERT INTO traces VALUES (?,?,?,?,?,?,?,?,?,?)", (...))</code></td><td>Inserts one row. The ten <code>?</code> are placeholders filled from the tuple in order; never paste values into SQL text yourself, because a quote in a question would break the statement (or worse, let it be abused). <code>datetime.now(timezone.utc).isoformat()</code> stores the time in UTC as text; <code>json.dumps(out["chunks"])</code> stores the list of chunk ids as a JSON string; <code>round(r.seconds, 2)</code> keeps two decimals.</td></tr>
+<tr><td>33–34</td><td><code>db.commit()</code> <code>return trace_id</code></td><td><code>commit()</code> writes the row to disk; without it the row is lost when the program ends. The id is returned so the rating can be attached to it.</td></tr>
+<tr><td>37–40</td><td><code>def log_feedback(db, trace_id, rating, comment=""):</code> …</td><td>Inserts one feedback row: which trace, +1 or -1, an optional comment, and a time. Feedback is a separate table because it arrives later than the answer (or never), and one answer could get several ratings.</td></tr>
+</table></div>
+
+<h3>The lab script</h3>
+<pre data-file="labs/12_feedback.py" data-lang="py" data-tag="complete file"><code>"""Lab 12: trace every answer, collect thumbs up/down, and turn bad answers into new eval cases."""
+from aie import rag
+from aie.config import EVALS
+from aie.docs import load_chunks
+from aie.evalset import save_jsonl
+from aie.retrieve import Hybrid
+from aie.tracing import connect, log_feedback, log_trace
+
+retriever = Hybrid(load_chunks())
+db = connect()
+db.execute("DELETE FROM feedback")
+db.execute("DELETE FROM traces")
+
+# Simulated traffic: (question, the customer's rating, their comment)
+traffic = [
+    ("Can I return a bike I rode 80 km?", -1, "Unfair policy, I only rode it twice"),
+    ("Do you ship to Italy?", +1, ""),
+    ("How long does a full service take?", +1, ""),
+    ("Can I cancel Trailhead Care?", +1, ""),
+    ("Is express shipping available for helmets?", -1, "Not clear"),
+]
+for question, rating, comment in traffic:
+    out = rag.answer(question, retriever, prompt="rag_v2")
+    trace_id = log_trace(db, question, out, "rag_v2")
+    log_feedback(db, trace_id, rating, comment)
+    print(f"{trace_id}  {'+1' if rating &gt; 0 else '-1'}  {question}\n          {out['answer'][:130]!r}")
+
+print("\nDashboard")
+row = db.execute("""SELECT COUNT(*), AVG(seconds), AVG(input_tokens), AVG(output_tokens),
+                    AVG(CASE WHEN f.rating &gt; 0 THEN 1.0 ELSE 0 END)
+                    FROM traces t JOIN feedback f ON f.trace_id = t.id""").fetchone()
+print(f"  {row[0]} answers, {row[1]:.1f} s average, {row[2]:.0f} input / {row[3]:.0f} output tokens, {row[4]:.0%} thumbs up")
+
+bad = db.execute("""SELECT t.id, t.question, t.answer, f.comment FROM traces t JOIN feedback f ON f.trace_id = t.id
+                    WHERE f.rating &lt; 0""").fetchall()
+new_cases = [{"id": f"fb-{tid}", "question": q, "bad_answer": a, "user_comment": c,
+              "status": "needs a human to write the expected answer"} for tid, q, a, c in bad]
+save_jsonl(EVALS / "from_feedback.jsonl", new_cases)
+print(f"\n{len(new_cases)} thumbs-down answers saved to evals/from_feedback.jsonl for review:")
+for c in new_cases:
+    print(f"  {c['id']}: {c['question']}  (user: {c['user_comment']!r})")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2–7</td><td><code>from aie import rag</code> … <code>from aie.tracing import connect, log_feedback, log_trace</code></td><td>The RAG answer, the evals folder, the chunk loader, <code>save_jsonl</code> (writes one JSON object per line), the hybrid retriever, and the new tracing functions.</td></tr>
+<tr><td>9</td><td><code>retriever = Hybrid(load_chunks())</code></td><td>The same hybrid retriever as labs 07 and 11.</td></tr>
+<tr><td>10–12</td><td><code>db = connect()</code> <code>db.execute("DELETE FROM feedback")</code> <code>db.execute("DELETE FROM traces")</code></td><td>Opens the database and empties both tables, so every run of the lab starts clean and the dashboard shows only this run. A real system would never delete its traces like this.</td></tr>
+<tr><td>14–21</td><td><code>traffic = [("Can I return a bike I rode 80 km?", -1, "Unfair policy, I only rode it twice"), ...]</code></td><td>Simulated customers: question, rating, comment. The ratings are written <strong>before</strong> the bot answers, so they are not reactions to the real answer. That is deliberate: real feedback is also noisy, and two of these ratings show how.</td></tr>
+<tr><td>22–23</td><td><code>for question, rating, comment in traffic:</code> <code>out = rag.answer(question, retriever, prompt="rag_v2")</code></td><td>Answers each question with the grounded prompt from labs 07 and 08.</td></tr>
+<tr><td>24–25</td><td><code>trace_id = log_trace(...)</code> <code>log_feedback(db, trace_id, rating, comment)</code></td><td>Logs the answer, then attaches the rating to it by id.</td></tr>
+<tr><td>26</td><td><code>print(f"{trace_id}  {'+1' if rating &gt; 0 else '-1'}  {question}\n          {out['answer'][:130]!r}")</code></td><td>Prints the id, the rating and the question, then the first 130 characters of the answer on the next line.</td></tr>
+<tr><td>28–31</td><td><code>row = db.execute("""SELECT COUNT(*), AVG(seconds), ... FROM traces t JOIN feedback f ON f.trace_id = t.id""").fetchone()</code></td><td>The dashboard in one SQL query. <code>t</code> and <code>f</code> are short aliases for the tables. <code>AVG(CASE WHEN f.rating &gt; 0 THEN 1.0 ELSE 0 END)</code> counts a thumbs up as 1 and a thumbs down as 0, so the average is the share of thumbs up. <code>fetchone()</code> returns the single result row as a tuple.</td></tr>
+<tr><td>32</td><td><code>print(f"  {row[0]} answers, {row[1]:.1f} s average, ... {row[4]:.0%} thumbs up")</code></td><td>Formats the five numbers. <code>:.0%</code> turns 0.6 into <code>60%</code>.</td></tr>
+<tr><td>34–35</td><td><code>bad = db.execute("""SELECT t.id, t.question, t.answer, f.comment ... WHERE f.rating &lt; 0""").fetchall()</code></td><td>All thumbs-down answers with their comments.</td></tr>
+<tr><td>36–37</td><td><code>new_cases = [{"id": f"fb-{tid}", ..., "status": "needs a human to write the expected answer"} for tid, q, a, c in bad]</code></td><td>Turns each into a candidate eval case. There is no <code>expected</code> field, on purpose: the bad answer is not the right one, and a model cannot be trusted to write the right one. The status says what is missing.</td></tr>
+<tr><td>38</td><td><code>save_jsonl(EVALS / "from_feedback.jsonl", new_cases)</code></td><td>Writes the candidates to <code>evals/from_feedback.jsonl</code>, next to <code>qa.jsonl</code>, but as a separate file, so they never enter the real eval set without review.</td></tr>
+<tr><td>39–41</td><td><code>print(...)</code> <code>for c in new_cases: print(...)</code></td><td>Lists the exported cases with the user's comment.</td></tr>
+</table></div>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="from the project folder"><code>uv run python -m labs.12_feedback</code></pre>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>dcfb81a3  -1  Can I return a bike I rode 80 km?
+          'No, you cannot return a bike that has 80 km on the odometer, as it exceeds the limit of 50 km. [returns#0]'
+184587cf  +1  Do you ship to Italy?
+          'Yes, we ship to Italy. [shipping#0]'
+def9da91  +1  How long does a full service take?
+          'A full service takes a full day. [service-plans#0]'
+d38d7454  +1  Can I cancel Trailhead Care?
+          'You can cancel Trailhead Care at any time from your account. [service-plans#1]'
+b213b8be  -1  Is express shipping available for helmets?
+          "I don't know. Please contact support@trailhead.example."
+
+Dashboard
+  5 answers, 4.8 s average, 358 input / 19 output tokens, 60% thumbs up
+
+2 thumbs-down answers saved to evals/from_feedback.jsonl for review:
+  fb-dcfb81a3: Can I return a bike I rode 80 km?  (user: 'Unfair policy, I only rode it twice')
+  fb-b213b8be: Is express shipping available for helmets?  (user: 'Not clear')</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> Five blocks, each with an 8-character trace id, the scripted rating, the question and the start of the answer. Then a dashboard line (our run: 5 answers, 4.8 s average, 358 input / 19 output tokens, 60% thumbs up) and the two thumbs-down cases saved to <code>evals/from_feedback.jsonl</code>. Your ids are random and your answers and times will differ. The files <code>runs/traces.db</code> and <code>evals/from_feedback.jsonl</code> now exist.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Two tables: traces with ten columns, and feedback with four columns whose trace_id points to traces.id">
+  <rect class="box" x="10" y="14" width="420" height="172" rx="8"/>
+  <text x="24" y="38" class="title mono">traces</text>
+  <text x="24" y="62" class="mono small">id (TEXT, primary key)  ·  created</text>
+  <text x="24" y="82" class="mono small">question  ·  answer</text>
+  <text x="24" y="102" class="mono small">chunks  (JSON list of chunk ids)</text>
+  <text x="24" y="122" class="mono small">model  ·  prompt  ("rag_v2")</text>
+  <text x="24" y="142" class="mono small">input_tokens  ·  output_tokens</text>
+  <text x="24" y="162" class="mono small">seconds</text>
+  <rect class="box2" x="520" y="14" width="230" height="132" rx="8"/>
+  <text x="534" y="38" class="title mono">feedback</text>
+  <text x="534" y="62" class="mono small">trace_id</text>
+  <text x="534" y="82" class="mono small">rating  (+1 / -1)</text>
+  <text x="534" y="102" class="mono small">comment</text>
+  <text x="534" y="122" class="mono small">created</text>
+  <path class="arrow-accent" d="M518,58 H432"/>
+  <text x="635" y="172" text-anchor="middle" class="small mono">f.trace_id = t.id</text>
+</svg>
+<figcaption>The two tables created by <code>SCHEMA</code>. The arrow is the link the dashboard query follows. <strong>Keeping the chunk ids in each trace is what lets you tell a retrieval problem from a model problem later.</strong></figcaption>
+</figure>
+
+<h3>Open the database yourself</h3>
+<p>You don't need any extra tool to look inside <code>runs/traces.db</code>. Run this one-liner from the project folder (it works in PowerShell and in bash):</p>
+<pre data-lang="sh" data-tag="from the project folder"><code>uv run python -c "import sqlite3; db = sqlite3.connect('runs/traces.db'); [print(r) for r in db.execute('SELECT t.id, f.rating, t.seconds, t.question FROM traces t JOIN feedback f ON f.trace_id = t.id')]"</code></pre>
+<pre data-lang="text" data-tag="real output · same run as above"><code>('dcfb81a3', -1, 6.81, 'Can I return a bike I rode 80 km?')
+('184587cf', 1, 3.83, 'Do you ship to Italy?')
+('def9da91', 1, 3.87, 'How long does a full service take?')
+('d38d7454', 1, 5.92, 'Can I cancel Trailhead Care?')
+('b213b8be', -1, 3.57, 'Is express shipping available for helmets?')</code></pre>
+<p><code>python -c "..."</code> runs the Python code in the quotes. It connects to the file, runs a <code>SELECT</code>, and prints each row as a tuple (the list brackets are just a compact way to loop in one line). Change the column list to see other columns, for example <code>SELECT id, chunks, output_tokens FROM traces</code>. If you prefer a window to a terminal, free tools such as "DB Browser for SQLite" open the same file.</p>
+
+<h2>Reading the output</h2>
+
+<h3>The dashboard</h3>
+<p>Five answers took 4.8 s on average and used 358 input tokens but only 19 output tokens each. Almost all the tokens are the prompt: the rules of <code>rag_v2</code> plus three retrieved chunks. That ratio is typical for RAG, and it tells you where cost and time go (see <a href="inference-optimization.html">Inference optimization</a>). 60% thumbs up means 3 of 5. With five ratings this is a demonstration of the mechanics, not a statistic.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="Bar comparing 358 average input tokens with 19 average output tokens per answer">
+  <text x="20" y="44" class="label">input tokens</text>
+  <rect class="box-info" x="140" y="26" width="537" height="28" rx="4"/>
+  <text x="685" y="45" class="label">358</text>
+  <text x="20" y="94" class="label">output tokens</text>
+  <rect class="box-ok" x="140" y="76" width="29" height="28" rx="4"/>
+  <text x="177" y="95" class="label">19</text>
+  <text x="380" y="134" text-anchor="middle" class="small">averages per answer from the dashboard line; bars drawn to the same scale</text>
+</svg>
+<figcaption>Where the tokens of a RAG answer go. <strong>The prompt (rules plus chunks) is about 95% of the tokens; shorter context makes every answer cheaper.</strong></figcaption>
+</figure>
+
+<h3>A thumbs down is not proof of a wrong answer</h3>
+<p>Look at the first thumbs down. The customer asked "Can I return a bike I rode 80 km?" and the bot said no, because the limit is 50 km, citing <code>[returns#0]</code>. That is exactly what <code>data/docs/returns.md</code> says: the answer is <strong>correct</strong>. The comment, "Unfair policy, I only rode it twice", is about the policy, not about the bot. If you treated every thumbs down as a bug and "fixed" the bot until this customer was happy, you would teach it to promise returns the shop doesn't accept.</p>
+<p>The second thumbs down ("Not clear") is on "I don't know" for "Is express shipping available for helmets?". The documents only say that express shipping is not available for complete bikes; they never mention helmets. The bot refused instead of guessing, which follows the rules of <code>rag_v2</code>. So the useful lesson here is a <strong>gap in the documents</strong>: the shop should add one sentence to <code>shipping.md</code>, and then the bot can answer.</p>
+<p>It works the other way too. The trace stores the retrieved chunk ids, and a quick look shows that two thumbs-up answers cite the wrong chunk. "A full service takes a full day. [service-plans#0]" is true, but that fact is in <code>stores.md</code>, and the trace shows <code>stores#2</code> and <code>stores#1</code> were retrieved. "You can cancel Trailhead Care at any time" cites <code>service-plans#1</code>, but the cancellation sentence is only in <code>service-plans#2</code>. The customers were happy; the citations were still wrong. You only see this because the trace kept the chunks.</p>
+<pre data-lang="text" data-tag="real output · SELECT id, chunks, output_tokens FROM traces (same run)"><code>('dcfb81a3', '["returns#0", "returns#1", "sizing#2"]', 33)
+('184587cf', '["shipping#0", "warranty#2", "sizing#2"]', 13)
+('def9da91', '["stores#2", "stores#1", "service-plans#0"]', 16)
+('d38d7454', '["service-plans#2", "service-plans#1", "service-plans#0"]', 21)
+('b213b8be', '["shipping#0", "returns#1", "shipping#1"]', 14)</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Two by two grid: answer correct or wrong against thumbs up or down; the 80 km answer is correct with a thumbs down, the helmet answer is a documentation gap, and the full service answer got a thumbs up with a wrong citation">
+  <text x="290" y="28" text-anchor="middle" class="title">thumbs up</text>
+  <text x="590" y="28" text-anchor="middle" class="title">thumbs down</text>
+  <text x="70" y="90" text-anchor="middle" class="title">answer</text>
+  <text x="70" y="108" text-anchor="middle" class="title">correct</text>
+  <text x="70" y="190" text-anchor="middle" class="title">answer</text>
+  <text x="70" y="208" text-anchor="middle" class="title">not right</text>
+  <rect class="box-ok" x="140" y="44" width="300" height="94" rx="8"/>
+  <text x="290" y="72" text-anchor="middle">"ship to Italy?" → Yes</text>
+  <text x="290" y="94" text-anchor="middle" class="small">what you hope for: right fact,</text>
+  <text x="290" y="110" text-anchor="middle" class="small">right chunk, happy customer</text>
+  <rect class="box-warn" x="450" y="44" width="300" height="94" rx="8"/>
+  <text x="600" y="72" text-anchor="middle">"rode 80 km" → No (50 km limit)</text>
+  <text x="600" y="94" text-anchor="middle" class="small">the user dislikes the policy,</text>
+  <text x="600" y="110" text-anchor="middle" class="small">not the answer: don't "fix" the bot</text>
+  <rect class="box-warn" x="140" y="148" width="300" height="94" rx="8"/>
+  <text x="290" y="176" text-anchor="middle">"full service" · "cancel Care"</text>
+  <text x="290" y="198" text-anchor="middle" class="small">facts right, citations wrong</text>
+  <text x="290" y="214" text-anchor="middle" class="small">(the chunk cited lacks the fact)</text>
+  <rect class="box-info" x="450" y="148" width="300" height="94" rx="8"/>
+  <text x="600" y="176" text-anchor="middle">"express for helmets?" → I don't know</text>
+  <text x="600" y="198" text-anchor="middle" class="small">a correct refusal that reveals</text>
+  <text x="600" y="214" text-anchor="middle" class="small">a gap in the shop's documents</text>
+</svg>
+<figcaption>Our five answers placed by rating and by what a human finds on checking them against <code>data/docs/</code>. <strong>Feedback tells you where to look; only a check against the documents tells you what is wrong.</strong></figcaption>
+</figure>
+
+<h3>Why <code>from_feedback.jsonl</code> needs a human</h3>
+<p>The exported file holds the question, the bad answer and the comment, with the status "needs a human to write the expected answer". Someone who knows the policy must read each case and decide: is the answer wrong (write the expected answer and add the case to <code>evals/qa.jsonl</code>), is it right (keep it as a test that the bot <em>keeps</em> saying no to an 80 km bike), or is the problem elsewhere (fix the documents)? Once a case is in the eval set, every future change to the prompt, retriever or model is checked against it.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Loop: thumbs down, from_feedback.jsonl, a human checks and writes the expected answer, qa.jsonl, eval after every change, the bot, and back to users">
+  <rect class="box-warn" x="10" y="30" width="130" height="50" rx="8"/>
+  <text x="75" y="60" text-anchor="middle">thumbs down</text>
+  <path class="arrow" d="M140,55 H168"/>
+  <rect class="box" x="170" y="30" width="160" height="50" rx="8"/>
+  <text x="250" y="52" text-anchor="middle" class="small mono">evals/</text>
+  <text x="250" y="68" text-anchor="middle" class="small mono">from_feedback.jsonl</text>
+  <path class="arrow" d="M330,55 H358"/>
+  <rect class="box-solid" x="360" y="30" width="150" height="50" rx="8"/>
+  <text x="435" y="52" text-anchor="middle" class="on-solid">a human checks</text>
+  <text x="435" y="68" text-anchor="middle" class="on-solid small">writes expected answer</text>
+  <path class="arrow" d="M510,55 H538"/>
+  <rect class="box-ok" x="540" y="30" width="210" height="50" rx="8"/>
+  <text x="645" y="60" text-anchor="middle" class="mono">evals/qa.jsonl</text>
+  <path class="arrow" d="M645,80 V118"/>
+  <rect class="box-info" x="470" y="120" width="280" height="40" rx="8"/>
+  <text x="610" y="145" text-anchor="middle">eval after every change</text>
+  <path class="arrow" d="M470,140 H362"/>
+  <rect class="box2" x="160" y="120" width="200" height="40" rx="8"/>
+  <text x="260" y="145" text-anchor="middle">bot in use, new traces</text>
+  <path class="arrow" d="M160,140 H75 V82"/>
+</svg>
+<figcaption>The feedback loop. The script automates the first arrow; the step in the dark box is a person's job. <strong>Every confirmed failure becomes a permanent test.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+  <li><strong>Treating the thumbs-up rate as accuracy.</strong> Our 60% includes a correct answer rated down and two answers with wrong citations rated up. Use it as a trend and a pointer to cases, never as a quality score.</li>
+  <li><strong>Copying the bad answer into the eval set as "expected".</strong> The script deliberately leaves the expected answer empty. A model-written "correct" answer can be just as wrong.</li>
+  <li><strong>Forgetting <code>db.commit()</code>.</strong> Rows inserted without a commit disappear when the program ends, and your dashboard shows 0 answers next time.</li>
+  <li><strong>Building SQL with f-strings.</strong> <code>f"INSERT ... VALUES ('{question}')"</code> breaks on any question with an apostrophe ("What's ...") and opens the door to SQL injection. Always use <code>?</code> placeholders.</li>
+  <li><strong>Opening the wrong file.</strong> <code>sqlite3.connect</code> creates an empty database if the path doesn't exist, so a typo gives you "no such table: traces" instead of "file not found". Run the one-liner from the project folder.</li>
+  <li><strong>Logging personal data unfiltered.</strong> Traces keep questions verbatim. Redact first, and decide how long to keep them.</li>
+</ul>
+</div>
+
+<h2>Try it yourself</h2>
+<ol>
+  <li><strong>Query the traces.</strong> With the one-liner above, select <code>id, chunks, output_tokens FROM traces</code> and check for each answer whether the cited chunk is in the retrieved list and actually contains the fact. You should find the same citation problem we found, or a different one in your run.</li>
+  <li><strong>Add a customer.</strong> Add a sixth tuple to <code>traffic</code>, for example <code>("Can I return an opened helmet?", -1, "Wrong answer")</code>, and run again. The dashboard now counts 6 answers, and the new case appears in <code>evals/from_feedback.jsonl</code> if you rated it -1. Read the bot's answer against <code>returns.md</code> before you decide whether the rating was fair.</li>
+  <li><strong>Close the documentation gap.</strong> Add a sentence to <code>data/docs/shipping.md</code> such as "Helmets and accessories can be sent by express shipping." and run again. The helmet question should now get an answer with a citation instead of "I don't know". (Remove the sentence afterwards if you want your eval results to stay comparable with ours.)</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+  <li>A trace records one request: question, chunks, answer, model, prompt version, tokens and seconds. <code>aie/tracing.py</code> stores traces and feedback in two SQLite tables joined by the trace id.</li>
+  <li>The dashboard query showed 5 answers, 4.8 s average, 358 input / 19 output tokens, 60% thumbs up. Most tokens are the prompt.</li>
+  <li>Feedback is not correctness: the "Unfair policy" thumbs down was on a correct answer, the "Not clear" one revealed a documentation gap, and two thumbs-up answers cited the wrong chunk.</li>
+  <li>Thumbs-down answers become candidates in <code>evals/from_feedback.jsonl</code>; a human writes the expected answer before any case joins the eval set.</li>
+  <li>Use <code>?</code> placeholders, commit after writing, and redact personal data before logging.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="11-cache-router.html"><small>← Previous · Step 11</small>Caching and routing</a>
+<a class="next" href="13-synthetic-data.html"><small>Next · Step 13 →</small>Synthetic data for fine-tuning</a>
+</nav>
+</main>
+</body>
+</html>

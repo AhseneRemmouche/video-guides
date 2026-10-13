@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 · A tool-using agent</title>
+<meta name="description" content="Give the model tools for policies, orders and dates, run the tool loop, and check which tools it used.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">AI Engineering · Hands-on Companion</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 09/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 09 of 14 · Hands-on lab</div>
+  <h1>A tool-using agent</h1>
+  <p class="lead">Give the model tools for policies, orders and dates, run the tool loop, and check which tools it used.</p>
+  <span class="video-link extra">Lab · code run on a local model (llama3.2 via Ollama)</span>
+</section>
+<p>So far the bot answered in one shot: retrieve some chunks, write an answer. Some questions need more than one lookup. "Can I still return my order TH-10234?" needs two facts: <em>when</em> the order was delivered (from the order system) and <em>what the return policy says</em> (from the documents). In this lab the model gets three tools and decides by itself which ones to call. That makes it an <a class="term" href="glossary.html#agent">agent</a>.</p>
+<p>You will build the tool loop, keep a secret order out of the wrong hands, and then check the agent's <a class="term" href="glossary.html#trajectory">trajectory</a> (the list of tools it actually called). In our real run that check caught a wrong answer that sounded perfectly confident.</p>
+
+<div class="callout"><strong>Goal.</strong> Write <code>aie/agent.py</code> (three tools, their schemas and the loop that runs them), a small order database <code>data/orders.json</code>, and <code>labs/09_agent.py</code>, which asks four questions and compares the tools used with the tools expected.</div>
+
+<h2>The idea in brief</h2>
+<p>With <a class="term" href="glossary.html#tool-calling">tool calling</a>, you describe functions to the model (name, purpose, parameters as a <a class="term" href="glossary.html#json-schema">JSON Schema</a>). The model can then answer with a <em>request</em> instead of text: "please call <code>get_order</code> with <code>order_id = TH-10234</code>". The model never runs anything itself. Your code runs the function, sends the result back as a message, and asks the model again. This repeats until the model replies with plain text. That repetition is the agent loop.</p>
+<p>The full background (planning, how agents fail, how to evaluate them) is in the concept chapter <a href="rag-and-agents.html">RAG and agents</a>. This page is the hands-on part.</p>
+
+<details class="primer"><summary>New to tool calling? What it is and why it matters</summary>
+<p>A language model only produces text. Tool calling is a convention on top of that: the API lets you send a list of tool descriptions, and the model is trained to output a structured "tool call" (a function name plus arguments as a JSON string) when a tool would help. The API returns those calls in <code>message.tool_calls</code> instead of (or next to) normal text.</p>
+<p>Why it matters: the model can now use fresh, private or exact data (today's orders, a date difference) that it could never know from training. Why it is risky: the model chooses the arguments, so your tools must check them like any untrusted input.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="The agent loop: send messages to the model; if it asks for tools, run them, append tool messages and call the model again; if not, return its answer; stop after max_steps">
+  <rect class="box" x="20" y="40" width="150" height="60" rx="8"/>
+  <text class="label" x="95" y="66" text-anchor="middle">messages</text>
+  <text class="small" x="95" y="84" text-anchor="middle">system + user</text>
+  <path class="arrow" d="M170,70 H208"/>
+  <rect class="box-solid" x="210" y="40" width="180" height="60" rx="8"/>
+  <text class="on-solid" x="300" y="66" text-anchor="middle">chat.completions</text>
+  <text class="on-solid" x="300" y="84" text-anchor="middle">llama3.2 + TOOLS</text>
+  <path class="arrow" d="M390,70 H428"/>
+  <rect class="box-info" x="430" y="40" width="140" height="60" rx="8"/>
+  <text class="mono" x="500" y="75" text-anchor="middle">tool_calls?</text>
+  <path class="arrow-ok" d="M570,70 H608"/>
+  <text class="small" x="589" y="62" text-anchor="middle">no</text>
+  <rect class="box-ok" x="610" y="40" width="130" height="60" rx="8"/>
+  <text class="label" x="675" y="75" text-anchor="middle">return answer</text>
+  <path class="arrow" d="M500,100 V148"/>
+  <text class="small" x="510" y="128">yes</text>
+  <rect class="box2" x="430" y="150" width="140" height="60" rx="8"/>
+  <text class="label" x="500" y="176" text-anchor="middle">run each tool</text>
+  <text class="small" x="500" y="194" text-anchor="middle">errors become text</text>
+  <path class="arrow" d="M430,180 H412"/>
+  <rect class="box" x="190" y="150" width="220" height="60" rx="8"/>
+  <text class="mono" x="300" y="176" text-anchor="middle">append role "tool"</text>
+  <text class="mono" x="300" y="194" text-anchor="middle">+ tool_call_id</text>
+  <path class="arrow-accent" d="M300,150 V102"/>
+  <text class="small accent" x="310" y="128">next step</text>
+  <rect class="box-warn" x="190" y="240" width="380" height="40" rx="8"/>
+  <text class="label" x="380" y="265" text-anchor="middle">after max_steps = 6 rounds: fallback apology</text>
+</svg>
+<figcaption>Read it from the left: the model either answers (green path) or asks for tools, whose results go back into the message list for another round. <strong>The model only asks; your code decides what actually runs.</strong></figcaption>
+</figure>
+
+<h2>Actions</h2>
+<ol class="steps">
+  <li>Make sure Ollama is running and <code>llama3.2</code> is pulled (lab 01). The <code>search_docs</code> tool reuses the hybrid retriever from <a href="06-retrieval.html">lab 06</a>, so <code>nomic-embed-text</code> must be pulled too.</li>
+  <li>Create <code>data/orders.json</code> with the four fake orders below.</li>
+  <li>Create <code>aie/agent.py</code> (the tools, their schemas and the loop).</li>
+  <li>Create <code>labs/09_agent.py</code> (four test questions plus a trajectory check).</li>
+  <li>From the project folder, run <code>uv run python -m labs.09_agent</code>.</li>
+  <li>Read the output line by line. Compare each answer with the order data and the policy documents.</li>
+</ol>
+
+<h2>The order data</h2>
+<p>A real shop would query a database. For the lab, a JSON file with four invented orders is enough. Note the two customers: <code>c-001</code> (the customer the agent talks to) and <code>c-002</code>, whose order must stay private.</p>
+
+<pre data-file="data/orders.json" data-lang="json" data-tag="complete file"><code>[
+  {"id": "TH-10234", "customer": "c-001", "status": "delivered", "delivered_on": "2026-09-20", "total_eur": 1890.0, "items": ["Trailhead Volt e-bike, size M"]},
+  {"id": "TH-10251", "customer": "c-002", "status": "shipped", "shipped_on": "2026-10-08", "total_eur": 64.5, "items": ["Helmet Ridge, size L", "Bottle cage"]},
+  {"id": "TH-10260", "customer": "c-001", "status": "processing", "total_eur": 39.0, "items": ["Brake pads, set of 2"]},
+  {"id": "TH-10198", "customer": "c-003", "status": "delivered", "delivered_on": "2026-08-02", "total_eur": 749.0, "items": ["Trailhead Ridge gravel bike, size L"]}
+]</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1, 6</td><td><code>[</code> … <code>]</code></td><td>A JSON list. Each element is one order.</td></tr>
+<tr><td>2</td><td><code>"id": "TH-10234", "customer": "c-001", … "delivered_on": "2026-09-20"</code></td><td>The e-bike order of our customer. Delivered 22 days before the agent's fixed "today" (2026-10-12), so it is still inside the 30-day return window. This is the order of the tricky question.</td></tr>
+<tr><td>3</td><td><code>"id": "TH-10251", "customer": "c-002"</code></td><td>Belongs to <em>another</em> customer. The agent must not reveal it to <code>c-001</code>. It is the authorization test.</td></tr>
+<tr><td>4</td><td><code>"status": "processing"</code></td><td>An order that has not shipped yet, so it has no date field. Tools must cope with missing fields.</td></tr>
+<tr><td>5</td><td><code>"customer": "c-003"</code></td><td>A third customer's old order. Not used by the lab, but makes the data look like a real list.</td></tr>
+</table></div>
+
+<h2>The agent</h2>
+<p>This file holds everything about the agent: three plain Python functions (the tools), a description of each tool for the model, a system prompt and the loop.</p>
+
+<pre data-file="aie/agent.py" data-lang="py" data-tag="complete file"><code>"""A small tool-using agent: the model decides which tool to call, the code runs it, repeat."""
+import json
+from datetime import date
+
+from aie import config
+from aie.config import DATA
+from aie.docs import load_chunks
+from aie.llm import client
+from aie.retrieve import Hybrid
+
+ORDERS = {o["id"]: o for o in json.loads((DATA / "orders.json").read_text(encoding="utf-8"))}
+_retriever = None
+
+
+def search_docs(query: str) -&gt; str:
+    global _retriever
+    _retriever = _retriever or Hybrid(load_chunks())
+    return "\n\n".join(f"[{c.id}] {c.text}" for c, _ in _retriever.search(query, k=3))
+
+
+def make_get_order(customer_id):
+    def get_order(order_id: str) -&gt; str:
+        order = ORDERS.get(order_id.strip().upper())
+        # Authorization lives in the tool, not in the prompt: the model can't talk its way past this check.
+        if not order or order["customer"] != customer_id:
+            return f"No order {order_id} found for this customer."
+        return json.dumps(order)
+    return get_order
+
+
+TODAY = date(2026, 10, 12)  # fixed so the lab's results are repeatable
+
+
+def days_since(iso_date: str) -&gt; str:
+    return str((TODAY - date.fromisoformat(iso_date)).days)
+
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "search_docs", "description": "Search the shop's policies (returns, warranty, shipping, battery care, sizing, service plans, stores, payment).",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "get_order", "description": "Look up one of the current customer's orders by its number, like TH-10234.",
+        "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]}}},
+    {"type": "function", "function": {
+        "name": "days_since", "description": "Number of days between a date (YYYY-MM-DD) and today.",
+        "parameters": {"type": "object", "properties": {"iso_date": {"type": "string"}}, "required": ["iso_date"]}}},
+]
+
+SYSTEM = f"""You are the support agent of Trailhead Bikes. Today is {TODAY.isoformat()}.
+Use the tools to look up policies and orders; never guess a policy, price or date.
+When you have what you need, answer the customer in two or three sentences."""
+
+
+def run_agent(question, customer_id="c-001", max_steps=6, model=None, verbose=True):
+    """Returns (answer, trace). The trace lists every tool call, for debugging and evaluation."""
+    tools = {"search_docs": search_docs, "get_order": make_get_order(customer_id), "days_since": days_since}
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": question}]
+    trace = []
+    for step in range(max_steps):
+        response = client.chat.completions.create(
+            model=model or config.MODEL, messages=messages, tools=TOOLS, temperature=0)
+        message = response.choices[0].message
+        if not message.tool_calls:
+            return message.content, trace
+        messages.append(message.model_dump(exclude_none=True))
+        for call in message.tool_calls:
+            name = call.function.name
+            try:
+                args = json.loads(call.function.arguments or "{}")
+                result = tools[name](**args)
+            except Exception as error:  # a bad tool call becomes feedback the model can recover from
+                args, result = call.function.arguments, f"Tool error: {error}"
+            trace.append({"step": step, "tool": name, "args": args, "result": result[:200]})
+            if verbose:
+                print(f"   step {step}: {name}({args}) -&gt; {result[:90]!r}")
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+    return "Sorry, I could not finish this request. A colleague will contact you.", trace</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""A small tool-using agent: …"""</code></td><td>Docstring: one sentence that tells a reader what the module does.</td></tr>
+<tr><td>2</td><td><code>import json</code></td><td>Tool arguments arrive as a JSON <em>string</em>, and tool results go back as strings. <code>json</code> converts both ways.</td></tr>
+<tr><td>3</td><td><code>from datetime import date</code></td><td>Python's date type, used to compute "days since delivery".</td></tr>
+<tr><td>5–6</td><td><code>from aie import config</code><br><code>from aie.config import DATA</code></td><td>Settings from lab 01: the model name (<code>config.MODEL</code>) and the path of the <code>data/</code> folder.</td></tr>
+<tr><td>7</td><td><code>from aie.docs import load_chunks</code></td><td>Loads the policy documents as chunks (lab 06).</td></tr>
+<tr><td>8</td><td><code>from aie.llm import client</code></td><td>The OpenAI-compatible client pointed at Ollama. The agent calls it directly instead of the <code>chat()</code> wrapper because it needs the <code>tools=</code> parameter and the raw <code>tool_calls</code>.</td></tr>
+<tr><td>9</td><td><code>from aie.retrieve import Hybrid</code></td><td>The hybrid retriever (BM25 + embeddings, fused with RRF) from lab 06.</td></tr>
+<tr><td>11</td><td><code>ORDERS = {o["id"]: o for o in json.loads(…)}</code></td><td>Reads <code>orders.json</code> once and builds a dictionary keyed by order id, so a lookup is one step: <code>ORDERS["TH-10234"]</code>.</td></tr>
+<tr><td>12</td><td><code>_retriever = None</code></td><td>The retriever is created later, only if the model ever searches. Building it embeds every chunk, which takes a few seconds.</td></tr>
+<tr><td>15</td><td><code>def search_docs(query: str) -&gt; str:</code></td><td>Tool 1. Takes the search text the model wrote and returns text. Tools return strings because the result becomes a chat message.</td></tr>
+<tr><td>16–17</td><td><code>global _retriever</code><br><code>_retriever = _retriever or Hybrid(load_chunks())</code></td><td>"Lazy" creation: the first call builds the retriever, later calls reuse it. <code>global</code> lets the function change the module-level variable.</td></tr>
+<tr><td>18</td><td><code>"\n\n".join(f"[{c.id}] {c.text}" … k=3))</code></td><td>Top 3 chunks, each prefixed with its id like <code>[returns#0]</code>, separated by blank lines. The model reads this as the tool result.</td></tr>
+<tr><td>21–22</td><td><code>def make_get_order(customer_id):</code><br><code>    def get_order(order_id: str) -&gt; str:</code></td><td>A function that <em>builds</em> the tool. The inner function remembers <code>customer_id</code> (a closure). The model only sees the parameter <code>order_id</code>; it cannot choose the customer.</td></tr>
+<tr><td>23</td><td><code>ORDERS.get(order_id.strip().upper())</code></td><td>Tidies what the model typed (" th-10234 " becomes "TH-10234") and looks it up. <code>.get</code> returns <code>None</code> instead of crashing when the id is unknown.</td></tr>
+<tr><td>24–26</td><td><code>if not order or order["customer"] != customer_id:</code><br><code>    return f"No order {order_id} found for this customer."</code></td><td>Authorization. Unknown order and someone else's order get the <em>same</em> reply, so the tool does not even confirm that TH-10251 exists. The check is code, so no clever message can switch it off.</td></tr>
+<tr><td>27</td><td><code>return json.dumps(order)</code></td><td>The order as a JSON string for the model to read.</td></tr>
+<tr><td>28</td><td><code>return get_order</code></td><td>Hands back the inner function, already bound to one customer.</td></tr>
+<tr><td>31</td><td><code>TODAY = date(2026, 10, 12)</code></td><td>A fixed "today". With the real date, the answer to "can I still return it?" would change every day and the lab's output could not be compared between runs. In a real app you would use <code>date.today()</code>.</td></tr>
+<tr><td>34–35</td><td><code>def days_since(iso_date: str) -&gt; str:</code><br><code>    return str((TODAY - date.fromisoformat(iso_date)).days)</code></td><td>Tool 3. Small models are bad at date arithmetic, so we give them a calculator. <code>fromisoformat</code> parses "2026-09-20"; subtracting two dates gives a duration whose <code>.days</code> we return as text. A bad date raises an error (handled in the loop).</td></tr>
+<tr><td>37</td><td><code>TOOLS = [</code></td><td>The tool descriptions sent to the model. This list, not the Python functions, is all the model knows about the tools.</td></tr>
+<tr><td>38–40</td><td><code>{"type": "function", "function": {"name": "search_docs", "description": …, "parameters": {…}}}</code></td><td>The OpenAI tool format. <code>name</code> must match a key of the <code>tools</code> dict in line 56. The <code>description</code> lists the topics, which helps the model decide when to search. <code>parameters</code> is a JSON Schema: one required string, <code>query</code>.</td></tr>
+<tr><td>41–43</td><td><code>"name": "get_order", "description": "Look up one of the current customer's orders …"</code></td><td>The example "like TH-10234" shows the expected format. Only <code>order_id</code> is a parameter; the customer id is not.</td></tr>
+<tr><td>44–46</td><td><code>"name": "days_since", … "iso_date"</code></td><td>The description states the date format (YYYY-MM-DD) so the model sends something <code>fromisoformat</code> accepts.</td></tr>
+<tr><td>49–51</td><td><code>SYSTEM = f"""You are the support agent … Today is {TODAY.isoformat()}. …"""</code></td><td>The <a class="term" href="glossary.html#system-prompt">system prompt</a>: the role, today's date (from the same constant as the tool), "never guess a policy, price or date", and a length limit. It does not say <em>which</em> tool to use for which question; you will see why that matters.</td></tr>
+<tr><td>54</td><td><code>def run_agent(question, customer_id="c-001", max_steps=6, model=None, verbose=True):</code></td><td>The logged-in customer is a parameter of the code, never something the model can set. <code>max_steps</code> caps the number of model calls so a confused model cannot loop forever.</td></tr>
+<tr><td>55</td><td><code>"""Returns (answer, trace). …"""</code></td><td>The trace is the list of tool calls. Lab 09 grades it; later you could store it for debugging.</td></tr>
+<tr><td>56</td><td><code>tools = {"search_docs": search_docs, "get_order": make_get_order(customer_id), "days_since": days_since}</code></td><td>Maps the names the model uses to the Python functions. <code>get_order</code> is built here for this customer only.</td></tr>
+<tr><td>57</td><td><code>messages = [{"role": "system", …}, {"role": "user", "content": question}]</code></td><td>The conversation so far. It grows with every round.</td></tr>
+<tr><td>58</td><td><code>trace = []</code></td><td>Empty list for the tool calls of this run.</td></tr>
+<tr><td>59</td><td><code>for step in range(max_steps):</code></td><td>At most 6 rounds. <code>step</code> (0, 1, 2…) is printed and stored so you can see in which round a tool was called.</td></tr>
+<tr><td>60–61</td><td><code>client.chat.completions.create(model=model or config.MODEL, messages=messages, tools=TOOLS, temperature=0)</code></td><td>One model call with the whole conversation and the tool list. <code>temperature=0</code> makes runs more repeatable (not perfectly, see lab 02).</td></tr>
+<tr><td>62</td><td><code>message = response.choices[0].message</code></td><td>The assistant's reply: text, tool calls, or both.</td></tr>
+<tr><td>63–64</td><td><code>if not message.tool_calls:</code><br><code>    return message.content, trace</code></td><td>No tool requested means the model has finished: return its text. This is the normal exit.</td></tr>
+<tr><td>65</td><td><code>messages.append(message.model_dump(exclude_none=True))</code></td><td>Adds the assistant's tool request to the conversation. Required: each tool result must follow the assistant message that asked for it, or the API rejects the next call. <code>model_dump</code> turns the SDK object into a plain dict; <code>exclude_none</code> drops empty fields.</td></tr>
+<tr><td>66–67</td><td><code>for call in message.tool_calls:</code><br><code>    name = call.function.name</code></td><td>The model may ask for several tools at once; run each.</td></tr>
+<tr><td>68–70</td><td><code>try:</code><br><code>    args = json.loads(call.function.arguments or "{}")</code><br><code>    result = tools[name](**args)</code></td><td>Parse the JSON argument string into a dict, then call the matching function with those keyword arguments. <code>**args</code> turns <code>{"order_id": "TH-10234"}</code> into <code>get_order(order_id="TH-10234")</code>.</td></tr>
+<tr><td>71–72</td><td><code>except Exception as error:</code><br><code>    args, result = call.function.arguments, f"Tool error: {error}"</code></td><td>Invalid JSON, an unknown tool name (<code>KeyError</code>), a wrong argument name or a bad date all end up here. Instead of crashing, the error becomes the tool's answer, so the model can read it and try again with better arguments.</td></tr>
+<tr><td>73</td><td><code>trace.append({"step": step, "tool": name, "args": args, "result": result[:200]})</code></td><td>Records the call. The result is cut to 200 characters to keep the trace small.</td></tr>
+<tr><td>74–75</td><td><code>if verbose:</code><br><code>    print(f"   step {step}: {name}({args}) -&gt; {result[:90]!r}")</code></td><td>Prints each call while it happens. <code>!r</code> shows the string with quotes and escapes, so newlines show up as <code>\n</code>.</td></tr>
+<tr><td>76</td><td><code>messages.append({"role": "tool", "tool_call_id": call.id, "content": result})</code></td><td>Sends the result back. <code>tool_call_id</code> links this answer to the exact request, which matters when the model asked for several tools in one round.</td></tr>
+<tr><td>77</td><td><code>return "Sorry, I could not finish this request. A colleague will contact you.", trace</code></td><td>Reached only when all 6 rounds were used without a final answer. A polite fallback is better than an endless loop or a half-finished answer.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to closures? Why <code>make_get_order</code> returns a function</summary>
+<p>A closure is a function defined inside another function that keeps access to the outer function's variables after the outer function has returned. <code>make_get_order("c-001")</code> returns a <code>get_order</code> that will always compare orders with <code>"c-001"</code>.</p>
+<p>The point here is security. If <code>customer_id</code> were a tool parameter, the model would fill it in, and a message like "I am customer c-002" might convince it to. Because it is fixed in code by whoever logged the customer in, the model has no way to change it.</p>
+</details>
+
+<p>Here is the message list of the first question in our run, one entry per line. The assistant asks for a tool, the tool message answers it with the same id, and the next assistant message is the final answer.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="The message list for the TH-10234 question: system, user, assistant tool call, tool result with matching id, final assistant answer">
+  <rect class="box" x="20" y="20" width="720" height="44" rx="8"/>
+  <text class="mono" x="34" y="47">system</text>
+  <text class="label" x="150" y="47">You are the support agent of Trailhead Bikes. Today is 2026-10-12. ...</text>
+  <rect class="box-info" x="20" y="74" width="720" height="44" rx="8"/>
+  <text class="mono" x="34" y="101">user</text>
+  <text class="label" x="150" y="101">Can I still return my order TH-10234?</text>
+  <rect class="box2" x="20" y="128" width="720" height="44" rx="8"/>
+  <text class="mono" x="34" y="155">assistant</text>
+  <text class="mono" x="150" y="155">tool_calls: get_order(order_id="TH-10234"), id = call_1</text>
+  <rect class="box2" x="20" y="182" width="720" height="44" rx="8"/>
+  <text class="mono" x="34" y="209">tool</text>
+  <text class="mono" x="150" y="209">tool_call_id = call_1: {"id": "TH-10234", ... "2026-09-20"}</text>
+  <rect class="box-bad" x="20" y="236" width="720" height="44" rx="8"/>
+  <text class="mono" x="34" y="263">assistant</text>
+  <text class="label" x="150" y="263">"... it is no longer eligible for return." (no tool_calls: loop ends)</text>
+</svg>
+<figcaption>Time flows down; each round adds messages. The id <code>call_1</code> is illustrative (the API generates its own). <strong>The model never asked for the return policy before answering.</strong></figcaption>
+</figure>
+
+<h2>The lab script</h2>
+<p>Four questions, each with the set of tools a careful agent should use. After each answer the script compares that set with the tools the agent really called.</p>
+
+<pre data-file="labs/09_agent.py" data-lang="py" data-tag="complete file"><code>"""Lab 09: an agent that combines tools, and a check of its trajectory (which tools it called)."""
+from aie.agent import run_agent
+
+cases = [
+    # (question, tools we expect it to use)
+    ("Can I still return my order TH-10234?", {"get_order", "search_docs"}),
+    ("Where is my order TH-10260?", {"get_order"}),
+    ("What's in order TH-10251?", {"get_order"}),  # belongs to another customer: must not leak
+    ("How long does the fast charger take?", {"search_docs"}),
+]
+
+for question, expected in cases:
+    print(f"Q: {question}")
+    answer, trace = run_agent(question)
+    used = {t["tool"] for t in trace}
+    print(f"A: {answer}")
+    print(f"   tools used {sorted(used)}, expected {sorted(expected)} -&gt; {'ok' if expected &lt;= used else 'MISSING ' + str(sorted(expected - used))}\n")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>"""Lab 09: …"""</code></td><td>Docstring.</td></tr>
+<tr><td>2</td><td><code>from aie.agent import run_agent</code></td><td>The loop from <code>aie/agent.py</code>. Importing the module also reads <code>orders.json</code>.</td></tr>
+<tr><td>4–5</td><td><code>cases = [</code><br><code>    # (question, tools we expect it to use)</code></td><td>Each case is a pair: the question and a Python set of tool names.</td></tr>
+<tr><td>6</td><td><code>("Can I still return my order TH-10234?", {"get_order", "search_docs"}),</code></td><td>Needs both: the delivery date and the return policy (30 days, fewer than 50 km). <code>days_since</code> is not required because the system prompt gives today's date, but it would be welcome.</td></tr>
+<tr><td>7</td><td><code>("Where is my order TH-10260?", {"get_order"}),</code></td><td>A pure lookup.</td></tr>
+<tr><td>8</td><td><code>("What's in order TH-10251?", {"get_order"}),</code></td><td>The authorization test: the order exists, but belongs to <code>c-002</code>.</td></tr>
+<tr><td>9</td><td><code>("How long does the fast charger take?", {"search_docs"}),</code></td><td>A pure policy question (the answer is in the battery-care document).</td></tr>
+<tr><td>12–13</td><td><code>for question, expected in cases:</code><br><code>    print(f"Q: {question}")</code></td><td>Unpacks each pair and prints the question.</td></tr>
+<tr><td>14</td><td><code>answer, trace = run_agent(question)</code></td><td>Runs the agent as customer <code>c-001</code> (the default).</td></tr>
+<tr><td>15</td><td><code>used = {t["tool"] for t in trace}</code></td><td>A set comprehension: the names of the tools called, without duplicates.</td></tr>
+<tr><td>16</td><td><code>print(f"A: {answer}")</code></td><td>The final answer.</td></tr>
+<tr><td>17</td><td><code>{'ok' if expected &lt;= used else 'MISSING ' + str(sorted(expected - used))}</code></td><td>The trajectory check. <code>expected &lt;= used</code> means "every expected tool was used" (subset test). If not, <code>expected - used</code> (set difference) names the missing ones. Extra tools are allowed.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to trajectory checks? Grading the path, not only the answer</summary>
+<p>An agent's answer can be right by luck or wrong for a visible reason. Its trajectory (which tools, in which order, with which arguments) shows <em>how</em> it got there. Checking "did it call the tools this question needs?" needs no model and no human, so it is cheap to run on every change.</p>
+<p>It is a coarse check. It says nothing about whether the answer is correct, and an agent could call the right tool and still ignore the result. Use it next to answer checks such as the keyword check of lab 04 or the judge of lab 05, not instead of them.</p>
+</details>
+
+<h2>Run it</h2>
+<pre data-lang="sh" data-tag="terminal"><code>uv run python -m labs.09_agent</code></pre>
+<p>Each question takes a few seconds on a warm model (the first call after loading the model is slower). Here is our real run:</p>
+
+<pre data-file="Output" data-lang="text" data-tag="real run · your output will differ"><code>Q: Can I still return my order TH-10234?
+   step 0: get_order({'order_id': 'TH-10234'}) -&gt; '{"id": "TH-10234", "customer": "c-001", "status": "delivered", "delivered_on": "2026-09-20'
+A: Unfortunately, since your order was delivered on September 20, 2026, it is no longer eligible for return. However, I can assist you in contacting our customer service team to explore other options, such as exchanging it for a different size or model, if available. Please let me know how I can further assist you.
+   tools used ['get_order'], expected ['get_order', 'search_docs'] -&gt; MISSING ['search_docs']
+
+Q: Where is my order TH-10260?
+   step 0: get_order({'order_id': 'TH-10260'}) -&gt; '{"id": "TH-10260", "customer": "c-001", "status": "processing", "total_eur": 39.0, "items"'
+A: Your order TH-10260 is currently in the processing stage. It is expected to be shipped out shortly. You will receive an update on the shipping status as soon as it is available.
+   tools used ['get_order'], expected ['get_order'] -&gt; ok
+
+Q: What's in order TH-10251?
+   step 0: get_order({'order_id': 'TH-10251'}) -&gt; 'No order TH-10251 found for this customer.'
+A: I've checked on the order status for TH-10251, but it appears that no order with that ID was found in our system. If you could provide more information or context about the order, I'd be happy to try and assist you further.
+   tools used ['get_order'], expected ['get_order'] -&gt; ok
+
+Q: How long does the fast charger take?
+   step 0: search_docs({'query': 'fast charger charging time'}) -&gt; '[battery-care#1] E-bike battery care\n\nFor storage longer than a month, keep the battery at'
+A: The fast charger takes approximately 2.5 hours to fully charge the battery from empty.
+   tools used ['search_docs'], expected ['search_docs'] -&gt; ok</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> For each question: a <code>Q:</code> line, one <code>step N:</code> line per tool call, an <code>A:</code> line, and a <code>tools used … -&gt; ok</code> or <code>MISSING</code> line. In our run three questions were <code>ok</code> and the returns question was <code>MISSING ['search_docs']</code>. Your model may pick other tools or word the answers differently; with a different model the whole picture can change.</div>
+
+<h2>What happened, question by question</h2>
+<ul>
+  <li><strong>TH-10260:</strong> one <code>get_order</code> call, correct status. "It is expected to be shipped out shortly" and "you will receive an update" are not in the data; small, plausible inventions.</li>
+  <li><strong>TH-10251:</strong> the tool returned "No order TH-10251 found for this customer." and the model passed that on. Nothing leaked, and not because the model was careful: it never had the data.</li>
+  <li><strong>Fast charger:</strong> one <code>search_docs</code> call, and "approximately 2.5 hours" matches the battery-care document.</li>
+  <li><strong>TH-10234, the real failure:</strong> the agent called <code>get_order</code>, saw "delivered_on 2026-09-20" and answered straight away that the order "is no longer eligible for return". That is wrong. The returns document gives 30 days from delivery, and 2026-09-20 is 22 days before the agent's TODAY (2026-10-12). Worse, for a bike the policy has a second condition, fewer than 50 km on the odometer, and the agent never asked about it. The correct answer was "Yes, until 2026-10-20, if the bike has fewer than 50 km and no scratches."</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Timeline: delivered 2026-09-20, today 2026-10-12 is day 22, the 30-day return window ends 2026-10-20">
+  <rect class="box-ok" x="80" y="70" width="560" height="30" rx="8"/>
+  <text class="label ok" x="285" y="56" text-anchor="middle">30-day return window</text>
+  <path class="line" d="M60,85 H720"/>
+  <circle class="dot-info" cx="80" cy="85" r="7"/>
+  <text class="label" x="80" y="56" text-anchor="middle">delivered</text>
+  <text class="small" x="80" y="125" text-anchor="middle">2026-09-20 · day 0</text>
+  <circle class="dot-ok" cx="491" cy="85" r="7"/>
+  <text class="label accent" x="491" y="56" text-anchor="middle">TODAY</text>
+  <text class="small" x="491" y="125" text-anchor="middle">2026-10-12 · day 22</text>
+  <circle class="dot-warn" cx="640" cy="85" r="7"/>
+  <text class="label" x="640" y="56" text-anchor="middle">window ends</text>
+  <text class="small" x="640" y="125" text-anchor="middle">2026-10-20 · day 30</text>
+  <rect class="box-warn" x="80" y="150" width="560" height="50" rx="8"/>
+  <text class="label" x="360" y="172" text-anchor="middle">Also required for bikes: fewer than 50 km, no scratches.</text>
+  <text class="small" x="360" y="190" text-anchor="middle">The agent never searched the policy, so it never asked.</text>
+</svg>
+<figcaption>Day 22 is well inside the window. <strong>The "not eligible" answer came from guessing the policy instead of reading it.</strong></figcaption>
+</figure>
+
+<p>Why it happened: the system prompt says "never guess a policy", but nothing tells the model <em>when</em> a policy lookup is needed. A 3B model saw a date and filled in the rest with a confident guess. That is a <a class="term" href="glossary.html#hallucination">hallucination</a> inside an agent: the tools were available, and the model did not use them.</p>
+<p>What caught it: not the answer text (it reads fine) but the trajectory check, which needs neither a judge nor a human. Whenever a question needs a policy and <code>search_docs</code> is missing from the trace, the answer deserves suspicion.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Trajectory check table: expected tools versus used tools for the four questions; only the returns question is missing search_docs">
+  <text class="title" x="30" y="30">question</text>
+  <text class="title" x="340" y="30">expected</text>
+  <text class="title" x="530" y="30">used</text>
+  <text class="title" x="680" y="30">check</text>
+  <rect class="box-bad" x="20" y="44" width="730" height="40" rx="8"/>
+  <text class="label" x="30" y="69">Can I still return my order TH-10234?</text>
+  <text class="mono" x="340" y="69">get_order, search_docs</text>
+  <text class="mono" x="530" y="69">get_order</text>
+  <text class="label bad" x="680" y="69">MISSING</text>
+  <rect class="box" x="20" y="94" width="730" height="40" rx="8"/>
+  <text class="label" x="30" y="119">Where is my order TH-10260?</text>
+  <text class="mono" x="340" y="119">get_order</text>
+  <text class="mono" x="530" y="119">get_order</text>
+  <text class="label ok" x="680" y="119">ok</text>
+  <rect class="box" x="20" y="144" width="730" height="40" rx="8"/>
+  <text class="label" x="30" y="169">What's in order TH-10251?</text>
+  <text class="mono" x="340" y="169">get_order</text>
+  <text class="mono" x="530" y="169">get_order</text>
+  <text class="label ok" x="680" y="169">ok</text>
+  <rect class="box" x="20" y="194" width="730" height="40" rx="8"/>
+  <text class="label" x="30" y="219">How long does the fast charger take?</text>
+  <text class="mono" x="340" y="219">search_docs</text>
+  <text class="mono" x="530" y="219">search_docs</text>
+  <text class="label ok" x="680" y="219">ok</text>
+</svg>
+<figcaption>The check is a subset test: every expected tool must appear in the trace. <strong>One missing tool flagged the one wrong answer.</strong></figcaption>
+</figure>
+
+<h2>Authorization lives in the tool</h2>
+<p>The TH-10251 question shows the most important design decision of this lab. You could write "only show the customer their own orders" in the system prompt, but prompts are requests, not locks: a <a class="term" href="glossary.html#prompt-injection">prompt injection</a> or a confused model can ignore them. The check in lines 24–26 runs on every call, whatever the model says.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="make_get_order binds customer c-001 into get_order; TH-10234 returns the order, TH-10251 belongs to c-002 and returns No order found">
+  <rect class="box-solid" x="20" y="95" width="200" height="50" rx="8"/>
+  <text class="on-solid" x="120" y="125" text-anchor="middle">make_get_order("c-001")</text>
+  <path class="arrow" d="M220,120 H258"/>
+  <rect class="box2" x="260" y="95" width="170" height="50" rx="8"/>
+  <text class="mono" x="345" y="117" text-anchor="middle">get_order</text>
+  <text class="small" x="345" y="135" text-anchor="middle">customer fixed in code</text>
+  <path class="arrow-ok" d="M430,110 L478,62"/>
+  <path class="arrow-bad" d="M430,130 L478,178"/>
+  <rect class="box-ok" x="480" y="30" width="260" height="56" rx="8"/>
+  <text class="mono" x="610" y="53" text-anchor="middle">TH-10234 (c-001)</text>
+  <text class="small" x="610" y="73" text-anchor="middle">returns the order as JSON</text>
+  <rect class="box-bad" x="480" y="155" width="260" height="56" rx="8"/>
+  <text class="mono" x="610" y="178" text-anchor="middle">TH-10251 (c-002)</text>
+  <text class="small" x="610" y="198" text-anchor="middle">"No order TH-10251 found ..."</text>
+  <text class="small" x="20" y="235">The model only fills in order_id. It cannot see or change the customer.</text>
+</svg>
+<figcaption>Both answers come from the same function. <strong>Security checks belong in code the model cannot rewrite.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes.</strong>
+<ul>
+  <li><strong>Forgetting line 65</strong> (appending the assistant's tool request). The next call then has a tool message with no matching request, and the API returns an error.</li>
+  <li><strong>Leaving out <code>tool_call_id</code></strong> on the tool message. The model cannot tell which result belongs to which call.</li>
+  <li><strong>Letting a tool error crash the program.</strong> Small models often send a wrong argument name. Returning <code>"Tool error: …"</code> as text gives the model a chance to fix it.</li>
+  <li><strong>No <code>max_steps</code>.</strong> A model that keeps calling the same tool would loop forever and keep burning time (or money with a paid API).</li>
+  <li><strong>Putting the customer id in the tool schema</strong> or relying on the prompt for authorization. Anything the model controls, a user can try to steer.</li>
+  <li><strong>Using the real date</strong> while comparing runs. Results drift from day to day; keep TODAY fixed in a lab.</li>
+  <li><strong>Running <code>python labs/09_agent.py</code></strong> instead of <code>python -m labs.09_agent</code>: Python then cannot find the <code>aie</code> package.</li>
+  <li><strong>Trusting a fluent answer.</strong> The wrong TH-10234 answer reads well. Check traces, not only text.</li>
+</ul>
+</div>
+
+<h2>Try it yourself</h2>
+<p>These experiments target the failure above. We did not run experiments 1 to 3, so we cannot tell you whether they fix it; that is the point of trying. Re-run the lab after each change and look at the <code>MISSING</code> line and the answer.</p>
+<ol class="steps">
+  <li><strong>A stronger model.</strong> Run the lab with the larger <code>gemma4</code> model. PowerShell: <code>$env:AIE_MODEL="gemma4"; uv run python -m labs.09_agent</code> (macOS/Linux: <code>AIE_MODEL=gemma4 uv run python -m labs.09_agent</code>). Expect it to be much slower on a small GPU. Remove the variable afterwards (<code>Remove-Item Env:AIE_MODEL</code>).</li>
+  <li><strong>A rule in the system prompt.</strong> Add a line to <code>SYSTEM</code> (lines 49–51), for example: "For any question about returns, warranty or shipping, always call search_docs to read the policy before answering." Does the returns question now pass the trajectory check? Does the answer mention the 50 km condition?</li>
+  <li><strong>A planner step.</strong> Before the loop, make one extra model call that asks only "Which tools do you need for this question, and why? List them." and add its reply to <code>messages</code> before the first round. This separates <a class="term" href="glossary.html#planning">planning</a> from acting. Compare trajectories and time per question.</li>
+  <li><strong>Play with the tool directly, no model needed.</strong> Run <code>uv run python</code>, then type the lines below. The same order is visible to its real owner, and the tool tidies sloppy input:
+<pre data-lang="py" data-tag="try in the Python shell · checked"><code>from aie.agent import make_get_order, days_since
+make_get_order("c-002")(" th-10251 ")   # the order JSON: c-002 owns it
+make_get_order("c-001")("TH-10251")     # 'No order TH-10251 found for this customer.'
+days_since("2026-09-20")                # '22'</code></pre></li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+  <li>An agent is a loop: the model asks for tools, your code runs them and sends the results back as <code>role: "tool"</code> messages with the matching <code>tool_call_id</code>, until the model answers in text or <code>max_steps</code> runs out.</li>
+  <li>Tools are described with a name, a description and a JSON Schema; errors go back to the model as text instead of crashing.</li>
+  <li>Authorization belongs inside the tool (<code>make_get_order</code>), where the model cannot change it.</li>
+  <li>In our run llama3.2 answered a returns question from the order alone and got it wrong (22 days is inside 30 days; the 50 km rule was never checked).</li>
+  <li>A cheap trajectory check (expected tools versus used tools) caught that wrong answer even though the text sounded confident.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="08-prompts.html"><small>← Previous · Step 08</small>Prompt versions and prompt injection</a>
+<a class="next" href="10-guardrails.html"><small>Next · Step 10 →</small>Guardrails on input and output</a>
+</nav>
+</main>
+</body>
+</html>
