@@ -19,11 +19,11 @@
 </defs></svg>
 <header class="top"><div class="wrap">
   <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
-  <span class="meta"><a href="glossary.html">Glossary</a> · Step 14/19</span>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 14/20</span>
 </div></header>
 <main class="wrap">
 <section class="hero">
-  <div class="eyebrow">Step 14 of 19 · 02:12:28</div>
+  <div class="eyebrow">Step 14 of 20 · 02:12:28</div>
   <h1>Graph 9: Memory with a Checkpointer</h1>
   <p class="lead">MemorySaver and thread_id, so the agent remembers earlier turns.</p>
   <a class="video-link" href="https://www.youtube.com/watch?v=jbDkfh7XYFA&amp;t=7948s" target="_blank" rel="noopener">▶ Watch this part (02:12:28)</a>
@@ -121,7 +121,8 @@
 </ol>
 
 <h2>The complete file</h2>
-<pre data-file="module1/9_graph_agent_memory.py" data-lang="py" data-tag="repo"><code># check mural for explenation
+<p data-only="ts">This is the same graph in TypeScript, in <code>module1/9-graph-agent-memory.ts</code>. Lines 1–46 are graph 8 again; the memory starts on line 48.</p>
+<div class="code-tabs"><pre data-file="module1/9_graph_agent_memory.py" data-lang="py" data-tag="repo"><code># check mural for explenation
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
@@ -180,9 +181,79 @@ messages = [HumanMessage(content="Add 3 and 4.")]
 
 # Run
 response = graph.invoke({"messages": messages},config)
-print(response["messages"][-1].content)</code></pre>
+print(response["messages"][-1].content)</code></pre><pre data-file="module1/9-graph-agent-memory.ts" data-lang="ts" data-tag="complete file"><code>import { END, MemorySaver, MessagesAnnotation, START, StateGraph } from "@langchain/langgraph";
+import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";
+import { HumanMessage, SystemMessage, tool } from "langchain";
+import { z } from "zod";
+import { isMain } from "../src/is-main.js";
+import { getModel } from "../src/model.js";
 
-<div class="callout warn"><p><strong>This file crashes as written: <code>NameError: name 'HumanMessage' is not defined</code></strong></p>
+const modelLlm = getModel();
+
+// z.coerce.number() also accepts "4" (some models, like llama3.2, send numbers as text)
+const numbers = z.object({ nb1: z.coerce.number(), nb2: z.coerce.number() });
+
+const multiply = tool(({ nb1, nb2 }) =&gt; nb1 * nb2, {
+  name: "multiply",
+  description: "this tool return the multiplication of 2 numbers",
+  schema: numbers,
+});
+
+const addition = tool(({ nb1, nb2 }) =&gt; nb1 + nb2, {
+  name: "addition",
+  description: "this tool return the sum of 2 numbers",
+  schema: numbers,
+});
+
+const subtraction = tool(({ nb1, nb2 }) =&gt; nb1 - nb2, {
+  name: "subtraction",
+  description: "this tool return the subtraction of 2 numbers (nb1 - nb2)",
+  schema: numbers,
+});
+
+const tools = [multiply, addition, subtraction];
+const modelLlmWithTools = modelLlm.bindTools(tools);
+
+const systemMessage = new SystemMessage("You are a helpful math teacher. Use the tools for every calculation.");
+
+// nodes
+async function chatWithTools(state: typeof MessagesAnnotation.State) {
+  return { messages: [await modelLlmWithTools.invoke([systemMessage, ...state.messages])] };
+}
+
+const builder = new StateGraph(MessagesAnnotation)
+  .addNode("chat_with_tools", chatWithTools)
+  .addNode("tools", new ToolNode(tools))
+  .addEdge(START, "chat_with_tools")
+  .addConditionalEdges("chat_with_tools", toolsCondition, ["tools", END])
+  .addEdge("tools", "chat_with_tools");
+
+// the checkpointer saves the state after every step, one history per thread_id
+export const memory = new MemorySaver();
+export const graph = builder.compile({ checkpointer: memory });
+
+if (isMain(import.meta.url)) { // run only with `pnpm graph 9`, not on import
+  const config = { configurable: { thread_id: "1" } };
+
+  let response = await graph.invoke({ messages: [new HumanMessage("Add 3 and 4.")] }, config);
+  console.log(response.messages.at(-1)!.text);
+
+  // same thread: the graph remembers the previous turn
+  response = await graph.invoke({ messages: [new HumanMessage("Now multiply that by 10.")] }, config);
+  console.log(response.messages.at(-1)!.text);
+
+  // a different thread starts with an empty memory
+  const other = { configurable: { thread_id: "2" } };
+  response = await graph.invoke({ messages: [new HumanMessage("What was my last result?")] }, other);
+  console.log(response.messages.at(-1)!.text);
+}</code></pre></div>
+
+<div class="callout" data-only="ts"><p><strong>The TypeScript file already contains the fixes.</strong> It imports <code>HumanMessage</code> (line 3), runs its demo only inside <code>if (isMain(import.meta.url))</code> (line 52), sends the system message first, and asks three questions: two on thread "1" and one on thread "2".</p>
+<p>The Python bug could not slip through in TypeScript anyway. A missing import is a <a class="term" href="glossary.html#compile-error">compile error</a>: on a copy of this file without <code>HumanMessage</code> in line 3, <code>pnpm typecheck</code> reported it once for each use (verified):</p>
+<pre data-lang="text" data-tag="pnpm typecheck (copy without the import)"><code>error TS2304: Cannot find name 'HumanMessage'.</code></pre>
+<p>Note that <code>pnpm graph 9</code> starts the file with <a class="term" href="glossary.html#tsx">tsx</a>, which does not check types. Without <code>pnpm typecheck</code> the same mistake would only show up at run time, as a <code>ReferenceError</code>.</p></div>
+
+<div class="callout warn" data-only="py"><p><strong>This file crashes as written: <code>NameError: name 'HumanMessage' is not defined</code></strong></p>
 <p>Line 56 uses <code>HumanMessage</code>, but the file only imports <code>SystemMessage</code> (line 7). Running it gives (verified):</p>
 <pre data-lang="text" data-tag="error"><code>Traceback (most recent call last):
   File "…\module1\9_graph_agent_memory.py", line 56, in &lt;module&gt;
@@ -193,6 +264,7 @@ NameError: name 'HumanMessage' is not defined</code></pre>
 <pre data-lang="py" data-tag="fix"><code>from langchain.messages import SystemMessage, HumanMessage</code></pre>
 <p>A second issue: lines 52–60 are at <strong>module level</strong> (not inside a function or an <code>if __name__ == "__main__":</code> block), so they run whenever the file is <em>imported</em>, not only when you run it. Importing it from a test, a notebook or <code>langgraph dev</code> would call the model (and spend tokens) every time. Step 15 wraps the demo in <code>if __name__ == "__main__":</code>.</p></div>
 
+<div data-only="py">
 <h3>Line by line</h3>
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
@@ -217,6 +289,27 @@ NameError: name 'HumanMessage' is not defined</code></pre>
 <tr><td>59</td><td><code>response = graph.invoke({"messages": messages},config)</code></td><td>Runs the graph. First argument: the input state (a dict with the <code>messages</code> key, as <code>MessagesState</code> expects). Second argument: the config with the thread. If you forget the config on a graph with a checkpointer, LangGraph raises <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, …</code> (verified).</td></tr>
 <tr><td>60</td><td><code>print(response["messages"][-1].content)</code></td><td><code>invoke</code> returns the final state. <code>["messages"][-1]</code> is the last message (the AI's answer) and <code>.content</code> its text. Unlike <code>main.py</code> in step 4, this line really prints.</td></tr>
 </table></div>
+</div>
+
+<div data-only="ts">
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { END, MemorySaver, MessagesAnnotation, START, StateGraph } from "@langchain/langgraph";</code></td><td>Graph 8's imports plus <strong><code>MemorySaver</code></strong>, the in-memory <a class="term" href="glossary.html#checkpointer">checkpointer</a>. In JavaScript it comes from the main <code>@langchain/langgraph</code> package (Python: <code>langgraph.checkpoint.memory</code>).</td></tr>
+<tr><td>2–6</td><td><code>import { ToolNode, toolsCondition } …</code> … <code>import { getModel } from "../src/model.js";</code></td><td>As in graph 8. Line 3 imports <code>HumanMessage</code> next to <code>SystemMessage</code> and <code>tool</code>: the import the Python file forgot. There is no <code>show</code> helper here, because this file prints only the answers.</td></tr>
+<tr><td>8–46</td><td><code>const modelLlm = getModel();</code> … <code>.addEdge("tools", "chat_with_tools");</code></td><td>Graph 8 unchanged (see step 13): the model, the shared <code>numbers</code> schema with <code>z.coerce.number()</code>, three tools, one <code>tools</code> list, the system message (sent first, line 38), the <code>chat_with_tools</code> node, the <code>tools</code> node and the loop. One difference: <code>builder</code> on line 41 is not exported.</td></tr>
+<tr><td>48</td><td><code>// the checkpointer saves the state after every step, one history per thread_id</code></td><td>A comment that sums up this step.</td></tr>
+<tr><td>49</td><td><code>export const memory = new MemorySaver();</code></td><td>Creates the saver: an empty in-memory store for checkpoints, organised by thread ID. It is exported because the web app's server (step 20) reads the saved threads from it.</td></tr>
+<tr><td>50</td><td><code>export const graph = builder.compile({ checkpointer: memory });</code></td><td><strong>The key line.</strong> <code>compile</code> takes an options object; with <code>checkpointer</code> set, every step of every run is saved, and every <code>invoke</code> with a thread ID starts from that thread's saved state. Python writes the same thing as a keyword argument, <code>compile(checkpointer=memory)</code>.</td></tr>
+<tr><td>52</td><td><code>if (isMain(import.meta.url)) { // run only with `pnpm graph 9`, not on import</code></td><td>The demo below runs only when you start this file directly. Importing the file (a test, the web server) builds the graph but calls no model.</td></tr>
+<tr><td>53</td><td><code>const config = { configurable: { thread_id: "1" } };</code></td><td>The per-run config, the same shape as in Python: an object with <code>configurable</code> inside, holding <code>thread_id</code>. The value is a string you choose.</td></tr>
+<tr><td>55</td><td><code>let response = await graph.invoke({ messages: [new HumanMessage("Add 3 and 4.")] }, config);</code></td><td>Turn 1. First argument: the input state; second: the config with the thread. <code>let</code> (not <code>const</code>) because <code>response</code> is reassigned on lines 59 and 64.</td></tr>
+<tr><td>56</td><td><code>console.log(response.messages.at(-1)!.text);</code></td><td>Prints the last message: the model's answer. <code>.at(-1)</code> is the last item of an array, like Python's <code>[-1]</code>. It could in theory be <code>undefined</code> (an empty array), and the <code>!</code> tells TypeScript "it is there". <code>.text</code> is the reply as a string.</td></tr>
+<tr><td>58–60</td><td><code>// same thread: the graph remembers the previous turn</code><br><code>response = await graph.invoke({ messages: [new HumanMessage("Now multiply that by 10.")] }, config);</code></td><td>Turn 2 <strong>on the same thread</strong>. You send only the new question; the checkpointer loads turn 1 first, so the model can know what "that" is. Line 60 prints the answer.</td></tr>
+<tr><td>62–63</td><td><code>// a different thread starts with an empty memory</code><br><code>const other = { configurable: { thread_id: "2" } };</code></td><td>A <strong>different</strong> thread ID: a separate conversation with its own, empty, history.</td></tr>
+<tr><td>64–66</td><td><code>response = await graph.invoke({ messages: [new HumanMessage("What was my last result?")] }, other);</code> … <code>}</code></td><td>Asks thread "2" about a result it has never seen, and prints the answer. The model sees only this one question. Watch what it says (below).</td></tr>
+</table></div>
+</div>
 
 <figure class="diagram">
 <svg viewBox="0 0 760 210" role="img" aria-label="Code map of lines 49 to 60: MemorySaver goes into compile; the config with thread_id and the messages input both go into invoke, which returns the final state that is printed">
@@ -238,6 +331,7 @@ NameError: name 'HumanMessage' is not defined</code></pre>
 </figure>
 
 <h2>Run it (with the import fixed)</h2>
+<div data-only="py">
 <p>With <code>HumanMessage</code> added to line 7, run the file from the project folder:</p>
 <pre data-lang="ps" data-tag="terminal"><code>uv run python module1/9_graph_agent_memory.py</code></pre>
 <p>With a real key you get gpt-4o's sentence (something like "3 + 4 = 7."). With the test harness's fake model the printed line is (verified):</p>
@@ -250,8 +344,22 @@ NameError: name 'HumanMessage' is not defined</code></pre>
 <tr><td>Thread "2", "hi"</td><td>2: Human, AI. Nothing from thread "1"</td></tr>
 <tr><td>Graph 8 (no checkpointer), second question with the same config</td><td>2: only the new question and a reply. The thread ID is ignored</td></tr>
 </table></div>
+</div>
 
-<div class="callout"><p><strong>Try it: the corrected demo is in step 15</strong></p>
+<div data-only="ts">
+<p>The TypeScript file needs no change. From the project folder, with Ollama running and <code>MODEL_PROVIDER=ollama</code> in <code>.env</code> (or an OpenAI key):</p>
+<pre data-lang="sh" data-tag="terminal"><code>pnpm graph 9</code></pre>
+<p>It prints one line per question: thread "1", thread "1" again, then thread "2".</p>
+<pre data-file="Output" data-lang="text" data-tag="real run · llama3.2 via Ollama · your output will differ"><code>The result of adding 3 and 4 is 7.
+The result of multiplying 7 by 10 is 70.
+Your last result was 5, which was the result of the subtraction 10 - 5.</code></pre>
+<p>Line 2 shows the memory: "that" became 7, the result of turn 1.</p>
+<div class="callout warn"><p><strong>Line 3 is made up.</strong> Thread "2" has no history: the model saw only "What was my last result?". The honest answer is "I don't know". llama3.2 instead invented a result, 5 from "10 - 5", which appears nowhere in this run. This is a <a class="term" href="glossary.html#hallucination">hallucination</a>. It does not mean the threads leak into each other: the memory works (thread "1" remembered 7), the model's honesty doesn't. The same invented answer came back in step 17 on a new thread. A stronger model or a system message such as "If you don't know, say so" may help; we did not test either.</p></div>
+<p>An earlier run, before lines 10–11 used <code>z.coerce.number()</code>, shows a second failure mode: llama3.2 called no tool at all and wrote "To add 3 and 4, I will enter the numbers manually." before giving 7 and 70. The answers were right, but they came from the model's own arithmetic, not from the tools.</p>
+</div>
+
+<p data-only="ts">In TypeScript you have already run the corrected demo: the file above is the version that step 15 builds for Python.</p>
+<div class="callout" data-only="py"><p><strong>Try it: the corrected demo is in step 15</strong></p>
 <p>Step 15's version of this file fixes the import, moves the demo under <code>if __name__ == "__main__":</code>, and runs a second turn and a second thread. The heart of it:</p>
 <pre data-lang="py" data-tag="excerpt from step 15"><code># same thread: the graph remembers the previous turn
 response = graph.invoke({"messages": [HumanMessage(content="Now multiply that by 10.")]}, config)
@@ -296,6 +404,7 @@ response = graph.invoke({"messages": [HumanMessage(content="What was my last res
 langgraph_api.utils.errors.GraphLoadError: Failed to load graph '9_graph' from ./module1/9_graph_agent_memory.py: Heads up! Your graph 'graph' …
 … [error    ] Application startup failed. Exiting.</code></pre>
 <p>Note the message also names <code>InMemorySaver</code>, the real class behind <code>MemorySaver</code>. So graph 9 is a <strong>plain-Python</strong> example. For Studio, register graph 8 (which has no checkpointer) and let the server remember. Step 17 shows the same split with a SQLite saver.</p>
+<p data-only="ts">The TypeScript <code>langgraph.json</code> leaves graph 9 out in the same way. We did not run the JavaScript dev server (<code>npx @langchain/langgraph-cli dev</code>), so whether it also refuses a graph with its own checkpointer is untested. Graph 9 is run with <code>pnpm graph 9</code>, and the web app of step 20 serves it through its own small server.</p>
 
 <figure class="diagram">
 <svg viewBox="0 0 760 250" role="img" aria-label="Where memory lives: when you run python module1 9_graph_agent_memory.py, your MemorySaver keeps the threads in your process; under langgraph dev, the server's own persistence keeps Studio threads and a graph with its own checkpointer is refused">
@@ -343,21 +452,25 @@ langgraph_api.utils.errors.GraphLoadError: Failed to load graph '9_graph' from .
 
 <div class="callout ok"><p><strong>What you should see</strong></p>
 <ul>
-<li>With the import fixed: the script prints one line, the AI's answer to "Add 3 and 4." (7, in whatever words the model chooses).</li>
-<li>A second <code>invoke</code> with the same <code>config</code>: the result holds the earlier messages too (8 instead of 4 for the two math questions).</li>
+<li data-only="py">With the import fixed: the script prints one line, the AI's answer to "Add 3 and 4." (7, in whatever words the model chooses).</li>
+<li data-only="ts"><code>pnpm graph 9</code> prints three lines: 7, then 70 (memory), then an answer from a thread with no history, which should be "I don't know" but may be invented.</li>
+<li>A second <code>invoke</code> with the same <code>config</code>: the result holds the earlier messages too<span data-only="py"> (8 instead of 4 for the two math questions)</span>.</li>
 <li>A different <code>thread_id</code>: a fresh conversation that knows nothing of thread "1".</li>
 <li>Run the script again: it starts from zero. <code>MemorySaver</code> lives only as long as the program.</li>
 </ul></div>
 
 <div class="callout warn"><p><strong>Common mistakes</strong></p>
 <ul>
-<li><strong>Running the repo file unchanged</strong> → <code>NameError: name 'HumanMessage' is not defined</code>. Add the import.</li>
-<li><strong>Forgetting the config</strong> on a graph with a checkpointer → <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id</code> (verified). Pass <code>config</code> to every <code>invoke</code>.</li>
-<li><strong>Misspelling the key</strong>, like <code>{"configurable": {"threadid": "1"}}</code> → <code>KeyError: 'thread_id'</code> (verified). It must be exactly <code>thread_id</code>.</li>
+<li data-only="py"><strong>Running the repo file unchanged</strong> → <code>NameError: name 'HumanMessage' is not defined</code>. Add the import.</li>
+<li data-only="ts"><strong>A missing import</strong> → <code>error TS2304: Cannot find name 'HumanMessage'.</code> from <code>pnpm typecheck</code>. <code>pnpm graph 9</code> does not check types, so run the type check after editing.</li>
+<li data-only="py"><strong>Forgetting the config</strong> on a graph with a checkpointer → <code>ValueError: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id</code> (verified). Pass <code>config</code> to every <code>invoke</code>.</li>
+<li data-only="py"><strong>Misspelling the key</strong>, like <code>{"configurable": {"threadid": "1"}}</code> → <code>KeyError: 'thread_id'</code> (verified). It must be exactly <code>thread_id</code>.</li>
 <li><strong>Creating a new <code>MemorySaver()</code> per run</strong> (for example inside a function). Each new saver is empty, so nothing is remembered. Create it once and compile once.</li>
 <li><strong>Expecting memory after a restart.</strong> In-memory means in this process only. Use SQLite (step 17).</li>
 <li><strong>Registering graph 9 in <code>langgraph.json</code></strong> → "custom checkpointer" error and the server won't start. Studio already remembers threads.</li>
-<li><strong>Module-level demo code.</strong> Lines 52–60 run on every import, calling the model. Put them under <code>if __name__ == "__main__":</code> (step 15).</li>
+<li data-only="ts"><strong>Forgetting the config</strong> on a graph with a checkpointer. Pass <code>config</code> to every <code>invoke</code>, with the key spelled exactly <code>thread_id</code>.</li>
+<li data-only="ts"><strong>Trusting the answer on a fresh thread.</strong> A model may invent a "last result" it never saw, as llama3.2 did above.</li>
+<li data-only="py"><strong>Module-level demo code.</strong> Lines 52–60 run on every import, calling the model. Put them under <code>if __name__ == "__main__":</code> (step 15).</li>
 </ul></div>
 
 <p>For what the checkpointer stores between steps and how a new input is merged into a saved thread, read <a href="how-state-flows.html">How State Flows Through a Graph</a>.</p>
@@ -390,6 +503,7 @@ langgraph_api.utils.errors.GraphLoadError: Failed to load graph '9_graph' from .
 <li><a href="17-persistent-memory-sqlite.html">Step 17: Memory That Survives a Restart</a>: <code>SqliteSaver</code> instead of <code>MemorySaver</code>, and a chat loop.</li>
 <li><a href="18-testing-graphs.html">Step 18: Test Your Graphs Without an API Key</a>: pytest with a fake model, checking routing, tools and memory.</li>
 <li><a href="19-streaming-and-drawing.html">Step 19: Stream Steps &amp; Draw Your Graph</a>: watch each node's update as it happens, and print a Mermaid drawing of any graph.</li>
+<li data-only="ts"><a href="20-react-web-app.html">Step 20: The React web app</a>: a chat page with threads, served by a small server that runs this graph 9 and reads its memory.</li>
 <li>The handbook goes deeper on everything here: start with <a href="lg-05-agent-architectures.html">Agent Architectures</a> and <a href="lg-06-persistence-and-memory.html">Persistence, Memory &amp; Time Travel</a>. All steps: <a href="index.html">guide home</a>.</li>
 </ul>
 
@@ -400,6 +514,7 @@ langgraph_api.utils.errors.GraphLoadError: Failed to load graph '9_graph' from .
 <li>The checkpointer saves the state after every step (10 checkpoints for two math turns, verified); the next run continues from the latest one.</li>
 <li>The repo file crashes with <code>NameError: name 'HumanMessage' is not defined</code> (line 56; never run in the video). Import <code>HumanMessage</code> on line 7, and move the demo under <code>if __name__ == "__main__":</code>.</li>
 <li><code>MemorySaver</code> is in-memory only (gone on exit). <code>langgraph dev</code> has its own persistence and refuses a graph with a custom checkpointer.</li>
+<li data-only="ts">In TypeScript: <code>module1/9-graph-agent-memory.ts</code> already has the import and the <code>isMain</code> guard (a missing import would be <code>TS2304</code> under <code>pnpm typecheck</code>). <code>pnpm graph 9</code> answered 7 and 70 on thread "1", and invented "Your last result was 5" on the empty thread "2".</li>
 <li>The course covered graphs, state, routing, models, tools, the agent loop and memory; steps 15–19 fix and extend it.</li>
 </ul></div>
 

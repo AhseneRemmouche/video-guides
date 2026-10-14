@@ -40,7 +40,68 @@ document.addEventListener("DOMContentLoaded", () => {
     if (code) addLineNumbers(pre, code);
   });
   if (window.hljs) window.hljs.highlightAll();
+  setupLanguageTabs();
 });
+
+// Bilingual guides: <div class="code-tabs"> holds one Python and one TypeScript block. They become
+// one card with a Python | TypeScript switch. One choice drives every group on the page and every
+// element marked data-only="py" / data-only="ts", and is remembered between pages when storage works.
+const LANGS = { py: "Python", ts: "TypeScript" };
+const langKey = (lang) => (lang === "py" ? "py" : /^(ts|tsx|js|jsx)$/.test(lang) ? "ts" : null);
+
+function setupLanguageTabs() {
+  const groups = document.querySelectorAll(".code-tabs");
+  if (!groups.length && !document.querySelector("[data-only]")) return;
+  groups.forEach((group) => {
+    const strip = document.createElement("div");
+    strip.className = "lang-strip";
+    strip.setAttribute("role", "group");
+    strip.setAttribute("aria-label", "Code language");
+    group.querySelectorAll(":scope > .code").forEach((card) => {
+      const key = langKey(card.querySelector("pre")?.dataset.lang || "");
+      if (!key) return;
+      card.dataset.langKey = key;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.dataset.langKey = key;
+      btn.textContent = LANGS[key];
+      btn.addEventListener("click", () => setLanguage(key, true));
+      strip.append(btn);
+    });
+    group.prepend(strip);
+  });
+  // The same switch at the top of the page, so the choice is visible before the first code block.
+  const hero = document.querySelector(".hero");
+  if (hero) {
+    const top = document.createElement("div");
+    top.className = "lang-strip page-lang";
+    top.setAttribute("role", "group");
+    top.setAttribute("aria-label", "Code language for this guide");
+    const label = document.createElement("span");
+    label.textContent = "Code in:";
+    top.append(label);
+    for (const key of Object.keys(LANGS)) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.dataset.langKey = key;
+      btn.textContent = LANGS[key];
+      btn.addEventListener("click", () => setLanguage(key, true));
+      top.append(btn);
+    }
+    hero.append(top);
+  }
+  let saved = null;
+  try { saved = localStorage.getItem("guide-code-lang"); } catch {}
+  setLanguage(saved === "ts" ? "ts" : "py", false);
+}
+
+function setLanguage(key, remember) {
+  document.documentElement.dataset.codeLang = key;
+  document.querySelectorAll(".code-tabs > .code").forEach((card) => (card.hidden = card.dataset.langKey !== key));
+  document.querySelectorAll(".lang-strip button").forEach((b) =>
+    b.setAttribute("aria-pressed", String(b.dataset.langKey === key)));
+  if (remember) try { localStorage.setItem("guide-code-lang", key); } catch {}
+}
 
 // Line numbers in a gutter beside the code. Full files start at 1. An excerpt whose tag names one
 // range ("lines 42–59") starts at 42; other excerpts and "changed lines" snippets get no numbers,

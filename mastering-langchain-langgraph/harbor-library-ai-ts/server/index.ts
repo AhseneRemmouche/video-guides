@@ -1,4 +1,4 @@
-// A small HTTP server for the web app. Run: pnpm server  (then pnpm web in a second terminal)
+// A small HTTP server for the web app. Run: pnpm api  (then pnpm web in a second terminal)
 //   POST /api/chat    { threadId, message }            -> a stream of events
 //   POST /api/resume  { threadId, approve, reason? }   -> continues a run that paused for approval
 // Events are Server-Sent Events: "token" (answer text), "tool_call", "tool_result", "approval", "done", "error".

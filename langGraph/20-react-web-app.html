@@ -1,0 +1,985 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>20 · The React web app</title>
+<meta name="description" content="Chat with the graph-9 agent in the browser: a live trace of every graph step, threads you can switch between, and the graph drawn as Mermaid text.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangGraph Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 20/20</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 20 of 20 · Extra, not in the video</div>
+  <h1>The React web app</h1>
+  <p class="lead">Chat with the graph-9 agent in the browser: a live trace of every graph step, threads you can switch between, and the graph drawn as Mermaid text.</p>
+  <span class="video-link extra">TypeScript · verified with LangGraph.js 1.5.0 and llama3.2</span>
+</section>
+<div class="callout"><p><strong>TypeScript only. Extension: not in the video.</strong> This page has no Python version. It takes the agent with memory from <a href="14-graph-9-memory.html">step 14</a> (graph 9, which builds on the agent loop of <a href="13-graph-8-agent-loop.html">step 13</a>) and puts it in a web page. The code is in the TypeScript project <code>langgraph-acl-ts</code>, in the folders <code>server/</code> and <code>web/</code>.</p>
+<p><strong>What was checked:</strong> we ran the app in Chrome with <code>MODEL_PROVIDER=ollama</code> (llama3.2 on a laptop) and asked two questions on one thread, opened a new thread, and switched back. The answers and steps quoted on this page come from that run. <strong>What it doesn't prove:</strong> how OpenAI's gpt-4o would word the answers, or how fast it would stream.</p></div>
+
+<h2>Goal</h2>
+<p>So far every graph ran in the <a class="term" href="glossary.html#terminal">terminal</a>. In this step you open the math teacher from graph 9 in a browser. You type a question and see the answer appear. Next to it, a "Graph steps" panel shows every <a class="term" href="glossary.html#node">node</a> as it finishes: the model asking for a <a class="term" href="glossary.html#tool">tool</a>, the tool's result, the final answer. Each conversation is a <a class="term" href="glossary.html#thread-id">thread</a>; you can start a new one and switch back to an old one, and the server's <a class="term" href="glossary.html#checkpointer">checkpointer</a> gives you its history back. You will read every file of the app.</p>
+<p>It is the same idea as <a href="19-streaming-and-drawing.html">step 19</a> (stream the steps, draw the graph), but the output goes to a web page instead of the terminal.</p>
+
+<h2>The idea in brief</h2>
+<ul>
+<li><strong>Two programs, two terminals.</strong> A <a class="term" href="glossary.html#nodejs">Node.js</a> server (<code>server/index.ts</code>) owns the <a class="term" href="glossary.html#graph">graph</a>, the tools, the model and the memory. A <a class="term" href="glossary.html#react">React</a> app (<code>web/</code>) runs in the browser and only shows things.</li>
+<li><strong>The graph is graph 9, unchanged.</strong> The server imports <code>graph</code> and <code>memory</code> from <code>module1/9-graph-agent-memory.ts</code>. No new graph code is written for the web.</li>
+<li><strong>The server streams.</strong> <code>POST /api/chat</code> runs one turn with <code>graph.stream(...)</code> and sends what happens as <a class="term" href="glossary.html#sse">Server-Sent Events</a>: <code>token</code> (answer text), <code>step</code> (one finished node), <code>done</code> and <code>error</code>. Three small <a class="term" href="glossary.html#api-endpoint">API endpoints</a> read the memory and the graph's drawing.</li>
+<li><strong>The browser reacts.</strong> Each event changes a piece of React state, and React redraws the parts of the page that depend on it.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Architecture: the browser talks only to the Vite dev server on port 5173, which serves the React app and forwards /api requests to the Hono server on port 8787; the Hono server imports graph 9 and its MemorySaver, and the graph's model node calls Ollama (or OpenAI)">
+  <rect class="zone" x="10" y="10" width="170" height="240" rx="8"/>
+  <text class="title" x="95" y="34" text-anchor="middle">Browser</text>
+  <rect class="zone" x="200" y="10" width="550" height="240" rx="8"/>
+  <text class="title" x="475" y="34" text-anchor="middle">Your computer (two terminals)</text>
+  <rect class="box-ok" x="25" y="70" width="140" height="70" rx="8"/>
+  <text x="95" y="96" text-anchor="middle">React app</text>
+  <text class="small" x="95" y="114" text-anchor="middle">App.tsx, sse.ts</text>
+  <text class="small" x="95" y="130" text-anchor="middle">localhost:5173</text>
+  <rect class="box" x="220" y="70" width="140" height="70" rx="8"/>
+  <text x="290" y="96" text-anchor="middle">Vite dev server</text>
+  <text class="small" x="290" y="114" text-anchor="middle">pnpm web · :5173</text>
+  <text class="small" x="290" y="130" text-anchor="middle">proxy /api</text>
+  <rect class="box-info" x="400" y="70" width="140" height="70" rx="8"/>
+  <text x="470" y="96" text-anchor="middle">Hono server</text>
+  <text class="small" x="470" y="114" text-anchor="middle">pnpm api · :8787</text>
+  <text class="small" x="470" y="130" text-anchor="middle">server/index.ts</text>
+  <rect class="box-solid" x="580" y="70" width="160" height="70" rx="8"/>
+  <text class="on-solid" x="660" y="96" text-anchor="middle">graph 9</text>
+  <text class="on-solid small" x="660" y="114" text-anchor="middle">chat_with_tools ⇄ tools</text>
+  <text class="on-solid small" x="660" y="130" text-anchor="middle">+ MemorySaver</text>
+  <rect class="box2" x="580" y="186" width="160" height="50" rx="8"/>
+  <text x="660" y="206" text-anchor="middle">Ollama llama3.2</text>
+  <text class="small" x="660" y="224" text-anchor="middle">(or OpenAI gpt-4o)</text>
+  <path class="arrow" d="M165,95 H216"/>
+  <path class="arrow" d="M220,115 H169"/>
+  <path class="arrow" d="M360,95 H396"/>
+  <path class="arrow" d="M400,115 H364"/>
+  <path class="arrow" d="M540,95 H576"/>
+  <path class="arrow" d="M580,115 H544"/>
+  <path class="arrow" d="M650,140 V182"/>
+  <path class="arrow" d="M670,186 V144"/>
+  <text class="small" x="192" y="62" text-anchor="middle">POST</text>
+  <text class="small" x="380" y="62" text-anchor="middle">/api/*</text>
+  <text class="small" x="560" y="62" text-anchor="middle">import</text>
+  <text class="small" x="192" y="160" text-anchor="middle">events</text>
+  <text class="small" x="380" y="160" text-anchor="middle">events</text>
+  <text class="small" x="220" y="200">The page itself (HTML, TSX, CSS) also comes from Vite.</text>
+  <text class="small" x="220" y="218">Only the server knows the graph, the tools and the memory.</text>
+</svg>
+<figcaption>Requests go left to right, events come back right to left. The browser only ever talks to port 5173; Vite forwards anything under <code>/api</code> to port 8787. <strong>The graph, its tools and its memory live in the server process, never in the browser.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to React? Components, state and why the page redraws itself</summary>
+<p><a class="term" href="glossary.html#react">React</a> is a library for building user interfaces out of
+<a class="term" href="glossary.html#react-component">components</a>: functions that return a description of what the screen should look like,
+written in JSX (HTML-like tags inside <a class="term" href="glossary.html#typescript">TypeScript</a>, in <code>.tsx</code> files). You never change the page by hand. Instead you keep the
+data that matters in <em>state</em>, created with the <a class="term" href="glossary.html#react-hook">hook</a> <code>useState</code>. Calling a
+state setter, such as <code>setMessages(...)</code>, tells React "this data changed"; React calls your component again and updates only the
+parts of the page that differ. In this app every event from the server becomes one or two setter calls, and the chat and the "Graph steps"
+panel follow automatically. It is a bit like a LangGraph node: you never edit the <a class="term" href="glossary.html#state">state</a> in place, you return an update.</p>
+</details>
+
+<details class="primer"><summary>New to Server-Sent Events? How a server streams to a browser</summary>
+<p>A normal HTTP request gets one reply and is finished. With <a class="term" href="glossary.html#sse">Server-Sent Events (SSE)</a>, the
+server keeps the reply open and writes small text messages into it whenever it has something new. Each message has an
+<code>event:</code> line (its type) and a <code>data:</code> line (its content), and ends with a blank line. This is the web version of
+<a class="term" href="glossary.html#stream">streaming</a> from <a href="19-streaming-and-drawing.html">step 19</a>: instead of printing each chunk,
+the server writes it into the open reply.</p>
+</details>
+
+<details class="primer"><summary>New to web servers? What an API endpoint and Hono are</summary>
+<p>A web server listens on a port (here 8787) and answers requests. An <a class="term" href="glossary.html#api-endpoint">API endpoint</a> is
+one address plus a method, like <code>POST /api/chat</code>, that runs a piece of your code and returns data instead of a web page.
+<a class="term" href="glossary.html#hono">Hono</a> is a small TypeScript framework for writing such servers: you create an app, register a
+function per endpoint with <code>app.post(path, handler)</code> or <code>app.get(path, handler)</code>, and start it. The handler receives a context object <code>c</code> with the
+request (<code>c.req</code>) and helpers to build the response (<code>c.json</code>, <code>c.text</code>).</p>
+</details>
+
+<h2>Run it</h2>
+<ol class="steps">
+<li><strong>Open a terminal in the TypeScript project folder.</strong> If you have not done it yet for the earlier steps, run
+<code>pnpm install</code> (it installs React, Vite and Hono too).</li>
+<li><strong>Choose the model in <code>.env</code>.</strong> With an OpenAI key, keep <code>MODEL_PROVIDER=openai</code> and set <code>OPENAI_API_KEY</code>.
+Without one, set <code>MODEL_PROVIDER=ollama</code>, install Ollama and run <code>ollama pull llama3.2</code> once; Ollama must be running while you use the app. This is the setup we used.</li>
+<li><strong>Start the API server:</strong> <code>pnpm api</code>. It prints <code>LangGraph agent API on http://localhost:8787</code>. Leave this terminal open.</li>
+<li><strong>Open a second terminal</strong> in the same folder and start the web app: <code>pnpm web</code>. <a class="term" href="glossary.html#vite">Vite</a> prints the address of the app.</li>
+<li><strong>Open <code>http://localhost:5173</code></strong> in your browser. Click <em>Add 3 and 4.</em> (it fills the input box), then <strong>Send</strong>. When the answer is there, click <em>Now multiply that by 10.</em> and Send again: same thread, so the graph remembers the 7.</li>
+<li>To stop, press <kbd>Ctrl</kbd>+<kbd>C</kbd> in each terminal.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 380" role="img" aria-label="Wireframe of the app: a header with LangGraph.js graph 9, the title Math teacher with memory and a New thread button; a row of thread chips; a chat column with two questions and two answers and the input; a Graph steps panel listing chat_with_tools asking for multiply, tools returning 70, and the final answer, with a collapsed Mermaid block">
+  <rect class="ui-window" x="10" y="10" width="740" height="360" rx="8"/>
+  <rect class="ui-chrome" x="10" y="10" width="740" height="28" rx="8"/>
+  <text class="small mono" x="30" y="29">localhost:5173</text>
+  <text class="small accent" x="30" y="60">LANGGRAPH.JS · GRAPH 9</text>
+  <text class="title" x="30" y="80">Math teacher with memory</text>
+  <rect class="ui-button" x="630" y="56" width="100" height="28" rx="8"/>
+  <text class="label on-solid" x="680" y="75" text-anchor="middle">New thread</text>
+  <text class="small" x="30" y="108">Threads:</text>
+  <rect class="ui-button" x="84" y="95" width="110" height="20" rx="10"/>
+  <text class="small mono on-solid" x="139" y="109" text-anchor="middle">thread-3f9a1c</text>
+  <rect class="ui-button-ghost" x="200" y="95" width="110" height="20" rx="10"/>
+  <text class="small mono accent" x="255" y="109" text-anchor="middle">thread-b27e40</text>
+  <rect class="box" x="30" y="126" width="420" height="230" rx="8"/>
+  <rect class="ui-bubble-user" x="336" y="138" width="100" height="26" rx="8"/>
+  <text class="small ui-on-user" x="386" y="155" text-anchor="middle">Add 3 and 4.</text>
+  <rect class="ui-bubble-ai" x="44" y="172" width="236" height="26" rx="8"/>
+  <text class="small" x="56" y="189">The result of adding 3 and 4 is 7.</text>
+  <rect class="ui-bubble-user" x="276" y="206" width="160" height="26" rx="8"/>
+  <text class="small ui-on-user" x="356" y="223" text-anchor="middle">Now multiply that by 10.</text>
+  <rect class="ui-bubble-ai" x="44" y="240" width="290" height="26" rx="8"/>
+  <text class="small" x="56" y="257">The result of multiplying 7 by 10 is 70.</text>
+  <rect class="ui-field" x="44" y="316" width="320" height="28" rx="6"/>
+  <text class="small" x="56" y="334">Type a question</text>
+  <rect class="ui-button" x="372" y="316" width="64" height="28" rx="6"/>
+  <text class="label on-solid" x="404" y="334" text-anchor="middle">Send</text>
+  <rect class="box" x="470" y="126" width="260" height="230" rx="8"/>
+  <text class="title" x="484" y="148">Graph steps</text>
+  <text class="small mono" x="484" y="172">1. chat_with_tools</text>
+  <rect class="ui-skeleton" x="498" y="178" width="220" height="32" rx="4"/>
+  <text class="small" x="506" y="191">asks for a tool:</text>
+  <text class="small mono" x="506" y="205">multiply({"nb1":"7","nb2":"10"})</text>
+  <text class="small mono" x="484" y="228">2. tools</text>
+  <rect class="ui-skeleton" x="498" y="234" width="220" height="20" rx="4"/>
+  <text class="small" x="506" y="248">tool result: multiply → 70</text>
+  <text class="small mono" x="484" y="272">3. chat_with_tools</text>
+  <rect class="ui-skeleton" x="498" y="278" width="220" height="20" rx="4"/>
+  <text class="small" x="506" y="292">final answer: The result of …</text>
+  <text class="small" x="484" y="334">▸ The graph (Mermaid text)</text>
+</svg>
+<figcaption>Illustration (simplified) of what <code>App.tsx</code> draws after the second question. The thread ids are random (these two are made up); the steps and answers are the ones from our Chrome run. The panel shows only the <em>last</em> turn: it is cleared at each Send. <strong>Each area on screen is driven by one piece of React state.</strong></figcaption>
+</figure>
+
+<h2>The server: <code>server/index.ts</code></h2>
+<p>This is the whole back end: one file, four endpoints, and two helpers. <code>describe</code> turns a LangChain message into a small object the browser can show; <code>relay</code> runs one turn of the graph and forwards each step as an event.</p>
+<pre data-file="server/index.ts" data-lang="ts" data-tag="complete file"><code>// A small HTTP server for the web app. Run: pnpm api  (then pnpm web in a second terminal)
+//   POST /api/chat          { threadId, message } -&gt; a stream of events while the graph runs
+//   GET  /api/threads       the thread ids the memory knows
+//   GET  /api/threads/:id   the messages saved for one thread (read with graph.getState)
+//   GET  /api/graph         the graph as Mermaid text
+// Events are Server-Sent Events: "token" (answer text), "step" (one finished node), "done", "error".
+import { serve } from "@hono/node-server";
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "langchain";
+import { Hono } from "hono";
+import { streamSSE, type SSEStreamingApi } from "hono/streaming";
+// the agent with math tools and MemorySaver from graph 9
+import { graph, memory } from "../module1/9-graph-agent-memory.js";
+
+/** What one message added, in a shape the browser can show. */
+function describe(message: BaseMessage) {
+  if (AIMessage.isInstance(message) &amp;&amp; message.tool_calls?.length) {
+    return { kind: "tool_call", text: message.tool_calls.map((c) =&gt; `${c.name}(${JSON.stringify(c.args)})`).join(", ") };
+  }
+  if (ToolMessage.isInstance(message)) return { kind: "tool_result", text: `${message.name ?? "tool"} → ${message.text}` };
+  if (AIMessage.isInstance(message)) return { kind: "answer", text: message.text };
+  return { kind: "input", text: message.text };
+}
+
+/** Run one turn of the graph and forward each step to the browser as it happens. */
+async function relay(sse: SSEStreamingApi, threadId: string, message: string) {
+  const send = (event: string, data: unknown) =&gt; sse.writeSSE({ event, data: JSON.stringify(data) });
+  try {
+    const stream = await graph.stream(
+      { messages: [new HumanMessage(message)] },
+      { configurable: { thread_id: threadId }, streamMode: ["updates", "messages"] },
+    );
+    let step = 0;
+    for await (const [mode, chunk] of stream) {
+      if (mode === "messages") { // pieces of text while the model writes
+        const [token, meta] = chunk;
+        if (meta.langgraph_node === "chat_with_tools" &amp;&amp; token.text) await send("token", token.text);
+        continue;
+      }
+      // "updates": { nodeName: { messages: [what this node added] } }, once per finished node
+      for (const [node, update] of Object.entries(chunk)) {
+        const added = (update?.messages ?? []) as BaseMessage[];
+        await send("step", { step: ++step, node, added: added.map(describe) });
+      }
+    }
+    await send("done", {});
+  } catch (error) {
+    await send("error", (error as Error).message);
+  }
+}
+
+const app = new Hono();
+
+app.post("/api/chat", async (c) =&gt; {
+  const { threadId, message } = await c.req.json&lt;{ threadId: string; message: string }&gt;();
+  return streamSSE(c, (sse) =&gt; relay(sse, threadId, message));
+});
+
+app.get("/api/threads", async (c) =&gt; {
+  const ids = new Set&lt;string&gt;();
+  for await (const saved of memory.list({})) { // every checkpoint of every thread
+    ids.add(saved.config.configurable!.thread_id);
+  }
+  return c.json([...ids]);
+});
+
+app.get("/api/threads/:id", async (c) =&gt; {
+  const state = await graph.getState({ configurable: { thread_id: c.req.param("id") } });
+  const messages = (state.values.messages ?? []) as BaseMessage[];
+  return c.json(messages.map((m) =&gt; ({ type: m.type, ...describe(m) })));
+});
+
+app.get("/api/graph", async (c) =&gt; c.text((await graph.getGraphAsync()).drawMermaid()));
+
+const port = Number(process.env.PORT ?? 8787);
+serve({ fetch: app.fetch, port });
+console.log(`LangGraph agent API on http://localhost:${port}`);</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–6</td><td><code>// A small HTTP server for the web app. Run: pnpm api ...</code></td><td>A summary of how to start it, the four endpoints and the four event types. Worth keeping at the top of any server file.</td></tr>
+<tr><td>7</td><td><code>import { serve } from "@hono/node-server";</code></td><td>Runs a <a class="term" href="glossary.html#hono">Hono</a> app on Node.js's built-in HTTP server. Hono also runs in other places (Deno, Bun, edge platforms); this adapter is the Node part.</td></tr>
+<tr><td>8</td><td><code>import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "langchain";</code></td><td>The message classes. <code>HumanMessage</code> wraps the visitor's question; <code>AIMessage</code> and <code>ToolMessage</code> are used to recognise what a node added. <code>type BaseMessage</code> is imported only for type checking (the word <code>type</code> makes it disappear at run time).</td></tr>
+<tr><td>9</td><td><code>import { Hono } from "hono";</code></td><td>The web framework.</td></tr>
+<tr><td>10</td><td><code>import { streamSSE, type SSEStreamingApi } from "hono/streaming";</code></td><td><code>streamSSE</code> builds a response that stays open and carries <a class="term" href="glossary.html#sse">Server-Sent Events</a>; <code>SSEStreamingApi</code> is the type of the object you write events with.</td></tr>
+<tr><td>11–12</td><td><code>import { graph, memory } from "../module1/9-graph-agent-memory.js";</code></td><td>The compiled graph 9 and its <code>MemorySaver</code>, exactly as in <a href="14-graph-9-memory.html">step 14</a> (the file exports both). Importing it does not call the model: the demo at the bottom of that file only runs when the file is started directly (<code>isMain</code>). The <code>.js</code> ending names the file as it will be after compiling; in this <a class="term" href="glossary.html#esm">ES module</a> project <a class="term" href="glossary.html#tsx">tsx</a> and TypeScript map it back to the <code>.ts</code> file.</td></tr>
+<tr><td>14–15</td><td><code>/** What one message added, ... */<br>function describe(message: BaseMessage) {</code></td><td>A helper used twice: for the live steps (line 42) and for a thread's saved history (line 69). It returns <code>{ kind, text }</code>.</td></tr>
+<tr><td>16–18</td><td><code>if (AIMessage.isInstance(message) &amp;&amp; message.tool_calls?.length) {<br>  return { kind: "tool_call", text: message.tool_calls.map((c) =&gt; `${c.name}(${JSON.stringify(c.args)})`).join(", ") };</code></td><td>An AI message that asks for tools becomes <code>kind: "tool_call"</code> with a text like <code>addition({"nb2":"4","nb1":"3"})</code>. <code>?.</code> gives <code>undefined</code> instead of crashing if there is no list; <code>.length</code> of an empty list is 0, which counts as false. The backticks build a <em>template literal</em>: <code>${...}</code> inserts a value into the text.</td></tr>
+<tr><td>19</td><td><code>if (ToolMessage.isInstance(message)) return { kind: "tool_result", text: `${message.name ?? "tool"} → ${message.text}` };</code></td><td>A tool's result, e.g. <code>addition → 7</code>. <code>??</code> uses <code>"tool"</code> if the message has no name. <code>.text</code> is the content as a string.</td></tr>
+<tr><td>20</td><td><code>if (AIMessage.isInstance(message)) return { kind: "answer", text: message.text };</code></td><td>An AI message without tool calls is the final answer.</td></tr>
+<tr><td>21</td><td><code>return { kind: "input", text: message.text };</code></td><td>Anything else: here, the visitor's question (a human message). It appears only in the saved history.</td></tr>
+<tr><td>24–25</td><td><code>/** Run one turn of the graph ... */<br>async function relay(sse: SSEStreamingApi, threadId: string, message: string) {</code></td><td>Gets the event writer, the thread id and the question. It is <code>async</code> because it waits for the graph (<a class="term" href="glossary.html#async-await">async/await</a>).</td></tr>
+<tr><td>26</td><td><code>const send = (event: string, data: unknown) =&gt; sse.writeSSE({ event, data: JSON.stringify(data) });</code></td><td>A small helper that writes one event. <code>JSON.stringify</code> turns any value into text, and also turns line breaks inside the text into <code>\n</code>, so each event's data is a single line, which is what the browser code expects.</td></tr>
+<tr><td>27</td><td><code>try {</code></td><td>Any error while the graph runs is caught on line 46 and sent to the browser instead of breaking the request.</td></tr>
+<tr><td>28–29</td><td><code>const stream = await graph.stream(<br>  { messages: [new HumanMessage(message)] },</code></td><td>Starts one turn in streaming mode. The input is the same as in graph 9's demo: one new human message. Thanks to the <a class="term" href="glossary.html#add-messages">add_messages</a> reducer it is <em>added</em> to the thread's saved messages.</td></tr>
+<tr><td>30</td><td><code>{ configurable: { thread_id: threadId }, streamMode: ["updates", "messages"] },</code></td><td><code>thread_id</code> picks the conversation, exactly like <code>config</code> in step 14: the checkpointer loads its earlier messages first. Two stream modes at once: <code>"updates"</code> gives what each node added when it finishes (step 19); <code>"messages"</code> gives pieces of text while the model writes.</td></tr>
+<tr><td>32</td><td><code>let step = 0;</code></td><td>A counter, so the browser can number the steps 1, 2, 3.</td></tr>
+<tr><td>33</td><td><code>for await (const [mode, chunk] of stream) {</code></td><td>Reads the stream piece by piece; <code>for await</code> waits for each one. With two modes, every piece is a pair: the mode's name and its data.</td></tr>
+<tr><td>34–35</td><td><code>if (mode === "messages") {<br>  const [token, meta] = chunk;</code></td><td>A <code>"messages"</code> piece is itself a pair: a fragment of a message and metadata about where it came from.</td></tr>
+<tr><td>36</td><td><code>if (meta.langgraph_node === "chat_with_tools" &amp;&amp; token.text) await send("token", token.text);</code></td><td>Forwards only text written in the <code>chat_with_tools</code> node, the one that calls the model. Without the node check, the <code>tools</code> node's results would also arrive as if the model had written them. Empty fragments (for example while the model writes a tool call) are skipped.</td></tr>
+<tr><td>37</td><td><code>continue;</code></td><td>Done with this piece; go to the next one.</td></tr>
+<tr><td>39–40</td><td><code>// "updates": { nodeName: { messages: [...] } } ...<br>for (const [node, update] of Object.entries(chunk)) {</code></td><td>An <code>"updates"</code> piece has the shape you printed in step 19: an object with the node's name as key. <code>Object.entries</code> turns it into <code>[name, value]</code> pairs.</td></tr>
+<tr><td>41</td><td><code>const added = (update?.messages ?? []) as BaseMessage[];</code></td><td>The messages this node added, or an empty list. <code>as</code> tells TypeScript what the list holds.</td></tr>
+<tr><td>42</td><td><code>await send("step", { step: ++step, node, added: added.map(describe) });</code></td><td>Sends one <code>step</code> event: its number (<code>++step</code> adds 1 first, then uses the value), the node's name, and what it added, described by line 15.</td></tr>
+<tr><td>45</td><td><code>await send("done", {});</code></td><td>Tells the browser this turn is over.</td></tr>
+<tr><td>46–48</td><td><code>} catch (error) {<br>  await send("error", (error as Error).message);</code></td><td>If anything fails (Ollama not running, no OpenAI key…), the browser gets an <code>error</code> event with the message.</td></tr>
+<tr><td>51</td><td><code>const app = new Hono();</code></td><td>Creates the web app.</td></tr>
+<tr><td>53–54</td><td><code>app.post("/api/chat", async (c) =&gt; {<br>  const { threadId, message } = await c.req.json&lt;{ threadId: string; message: string }&gt;();</code></td><td>The endpoint for a question. It reads the JSON body sent by the browser. The type in angle brackets only informs TypeScript; nothing checks the body at run time (a <a class="term" href="glossary.html#zod">Zod</a> schema would, in a real app).</td></tr>
+<tr><td>55</td><td><code>return streamSSE(c, (sse) =&gt; relay(sse, threadId, message));</code></td><td>Opens an event stream and runs <code>relay</code>. The response stays open until <code>relay</code> finishes.</td></tr>
+<tr><td>58–59</td><td><code>app.get("/api/threads", async (c) =&gt; {<br>  const ids = new Set&lt;string&gt;();</code></td><td>Lists the threads the memory knows. A <code>Set</code> keeps each value once.</td></tr>
+<tr><td>60–62</td><td><code>for await (const saved of memory.list({})) {<br>  ids.add(saved.config.configurable!.thread_id);</code></td><td><code>memory.list({})</code> goes through <em>every</em> saved checkpoint of every thread (many per thread), so the same id comes back many times; the <code>Set</code> removes the repeats. The <code>!</code> tells TypeScript "<code>configurable</code> is not undefined here".</td></tr>
+<tr><td>63</td><td><code>return c.json([...ids]);</code></td><td>Sends the ids as a JSON list. <code>[...ids]</code> copies the Set into a normal list.</td></tr>
+<tr><td>66–67</td><td><code>app.get("/api/threads/:id", async (c) =&gt; {<br>  const state = await graph.getState({ configurable: { thread_id: c.req.param("id") } });</code></td><td>One thread's history. <code>:id</code> is a placeholder in the path; <code>c.req.param("id")</code> reads it. <code>graph.getState</code> returns the thread's latest saved state, the same call as <code>graph.get_state(config)</code> in Python.</td></tr>
+<tr><td>68</td><td><code>const messages = (state.values.messages ?? []) as BaseMessage[];</code></td><td>The saved messages, or an empty list for a thread the memory has never seen.</td></tr>
+<tr><td>69</td><td><code>return c.json(messages.map((m) =&gt; ({ type: m.type, ...describe(m) })));</code></td><td>Each message as <code>{ type, kind, text }</code>. <code>type</code> is <code>"human"</code>, <code>"ai"</code> or <code>"tool"</code>; <code>...describe(m)</code> copies <code>kind</code> and <code>text</code> into the same object.</td></tr>
+<tr><td>72</td><td><code>app.get("/api/graph", async (c) =&gt; c.text((await graph.getGraphAsync()).drawMermaid()));</code></td><td>The graph's drawing as <a class="term" href="glossary.html#mermaid">Mermaid</a> text, the same call as in step 19. It contains <code>chat_with_tools -.-&gt; tools;</code> and <code>chat_with_tools -.-&gt; __end__;</code>.</td></tr>
+<tr><td>74</td><td><code>const port = Number(process.env.PORT ?? 8787);</code></td><td>The port: the <code>PORT</code> environment variable if set, otherwise 8787. If you change it, change the proxy in <code>web/vite.config.ts</code> too.</td></tr>
+<tr><td>75–76</td><td><code>serve({ fetch: app.fetch, port });<br>console.log(`LangGraph agent API on http://localhost:${port}`);</code></td><td>Starts listening and prints the line you see in the terminal.</td></tr>
+</table></div>
+
+<h3>What travels over the wire for one question</h3>
+<figure class="diagram">
+<svg viewBox="0 0 760 470" role="img" aria-label="Sequence for Add 3 and 4: the browser posts to /api/chat, relay starts graph.stream, chat_with_tools asks the model which asks for addition, a step 1 event goes to the browser, the tools node runs addition and returns 7, a step 2 event, chat_with_tools asks the model again, token events stream the answer, a step 3 event carries the final answer, then done">
+  <rect class="box" x="20" y="10" width="140" height="30" rx="8"/>
+  <text class="label" x="90" y="30" text-anchor="middle">browser</text>
+  <rect class="box" x="220" y="10" width="140" height="30" rx="8"/>
+  <text class="label" x="290" y="30" text-anchor="middle">Hono relay()</text>
+  <rect class="box" x="420" y="10" width="140" height="30" rx="8"/>
+  <text class="label" x="490" y="30" text-anchor="middle">graph 9</text>
+  <rect class="box" x="610" y="10" width="130" height="30" rx="8"/>
+  <text class="label" x="675" y="30" text-anchor="middle">llama3.2</text>
+  <path class="line dashed" d="M90,40 V455"/>
+  <path class="line dashed" d="M290,40 V455"/>
+  <path class="line dashed" d="M490,40 V455"/>
+  <path class="line dashed" d="M675,40 V455"/>
+  <path class="arrow" d="M90,70 H286"/>
+  <text class="small" x="190" y="64" text-anchor="middle">1 POST /api/chat</text>
+  <path class="arrow" d="M290,100 H486"/>
+  <text class="small" x="390" y="94" text-anchor="middle">2 graph.stream(...)</text>
+  <path class="arrow" d="M490,130 H671"/>
+  <text class="small" x="582" y="124" text-anchor="middle">3 chat_with_tools</text>
+  <path class="arrow" d="M675,160 H494"/>
+  <text class="small" x="582" y="154" text-anchor="middle">4 call addition</text>
+  <path class="arrow-accent" d="M290,190 H94"/>
+  <text class="small" x="190" y="184" text-anchor="middle">5 step 1 (tool call)</text>
+  <rect class="box-info" x="420" y="200" width="140" height="26" rx="8"/>
+  <text class="small" x="490" y="217" text-anchor="middle">6 tools: addition → 7</text>
+  <path class="arrow-accent" d="M290,250 H94"/>
+  <text class="small" x="190" y="244" text-anchor="middle">7 step 2 (tool result)</text>
+  <path class="arrow" d="M490,280 H671"/>
+  <text class="small" x="582" y="274" text-anchor="middle">8 chat_with_tools again</text>
+  <path class="arrow" d="M675,310 H494"/>
+  <text class="small" x="582" y="304" text-anchor="middle">9 answer, piece by piece</text>
+  <path class="arrow-accent" d="M290,340 H94"/>
+  <text class="small" x="190" y="334" text-anchor="middle">10 token (many)</text>
+  <path class="arrow-accent" d="M290,375 H94"/>
+  <text class="small" x="190" y="369" text-anchor="middle">11 step 3 (final answer)</text>
+  <path class="arrow-ok" d="M290,410 H94"/>
+  <text class="small" x="190" y="404" text-anchor="middle">12 done</text>
+  <rect class="box-ok" x="420" y="420" width="140" height="26" rx="8"/>
+  <text class="small" x="490" y="437" text-anchor="middle">thread saved</text>
+</svg>
+<figcaption>Time flows down; one request, many events on the same open response. Steps 5, 7 and 11 come from the <code>"updates"</code> mode (one per finished node), step 10 from <code>"messages"</code>. In our Chrome run, step 1 showed <code>addition({"nb2":"4","nb1":"3"})</code>, step 2 <code>addition → 7</code>, and the answer was "The result of adding 3 and 4 is 7." <strong>The checkpointer saves the thread after every step, so the next question on this thread starts from these messages.</strong></figcaption>
+</figure>
+
+<div class="callout"><p><strong>Numbers sent as text, again.</strong> Look at step 1 above: llama3.2 sent <code>"nb1":"3"</code>, text in quotes, not the number 3. Graph 9's tools use <code>z.coerce.number()</code>, so <a class="term" href="glossary.html#zod">Zod</a> turns <code>"3"</code> into 3 and the tool runs. With plain <code>z.number()</code> the tools node would have answered with a schema error instead (see the TypeScript notes in <a href="13-graph-8-agent-loop.html">step 13</a>).</p></div>
+
+<h2>The web app: <code>web/vite.config.ts</code></h2>
+<p><a class="term" href="glossary.html#vite">Vite</a> is the development server for the front end. It turns the <code>.tsx</code> files into
+JavaScript the browser can run, reloads the page when you save a file, and here also forwards API requests to the graph server.</p>
+<pre data-file="web/vite.config.ts" data-lang="ts" data-tag="complete file"><code>import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  root: import.meta.dirname,
+  plugins: [react()],
+  server: {
+    port: 5173,
+    // The browser talks to Vite only; Vite forwards /api to the agent server, so no CORS setup is needed.
+    proxy: { "/api": "http://localhost:8787" },
+  },
+});</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import react from "@vitejs/plugin-react";</code></td><td>Vite's React plugin: it handles JSX and makes edits to components show up without a full page reload.</td></tr>
+<tr><td>2</td><td><code>import { defineConfig } from "vite";</code></td><td>A helper that gives your editor auto-completion and type checks for the config object.</td></tr>
+<tr><td>4</td><td><code>export default defineConfig({</code></td><td>Vite reads the default export of this file.</td></tr>
+<tr><td>5</td><td><code>root: import.meta.dirname,</code></td><td>The app's root folder is the folder of this file, <code>web/</code>, where <code>index.html</code> lives. <code>import.meta.dirname</code> is the ES-module way to get the current folder in Node.js.</td></tr>
+<tr><td>6</td><td><code>plugins: [react()],</code></td><td>Turns the React plugin on.</td></tr>
+<tr><td>7–8</td><td><code>server: {<br>  port: 5173,</code></td><td>The dev server's port, the address you open in the browser.</td></tr>
+<tr><td>9–10</td><td><code>proxy: { "/api": "http://localhost:8787" },</code></td><td>Every request whose path starts with <code>/api</code> is forwarded to the Hono server. For the browser, the page and the API come from the same address, so it applies no cross-origin (CORS) rules and the server needs no CORS setup.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/index.html</code> and <code>web/src/main.tsx</code></h2>
+<p>The HTML page is almost empty. React fills it in.</p>
+<pre data-file="web/index.html" data-lang="html" data-tag="complete file"><code>&lt;!doctype html&gt;
+&lt;html lang="en"&gt;
+  &lt;head&gt;
+    &lt;meta charset="utf-8" /&gt;
+    &lt;meta name="viewport" content="width=device-width, initial-scale=1" /&gt;
+    &lt;title&gt;Math Teacher Graph&lt;/title&gt;
+  &lt;/head&gt;
+  &lt;body&gt;
+    &lt;div id="root"&gt;&lt;/div&gt;
+    &lt;script type="module" src="/src/main.tsx"&gt;&lt;/script&gt;
+  &lt;/body&gt;
+&lt;/html&gt;</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>&lt;!doctype html&gt;<br>&lt;html lang="en"&gt;</code></td><td>A modern HTML page in English (the language helps screen readers).</td></tr>
+<tr><td>4–5</td><td><code>&lt;meta charset="utf-8" /&gt;<br>&lt;meta name="viewport" ... /&gt;</code></td><td>Text encoding, and the line that makes the page use the real screen width on phones.</td></tr>
+<tr><td>6</td><td><code>&lt;title&gt;Math Teacher Graph&lt;/title&gt;</code></td><td>The browser tab's title.</td></tr>
+<tr><td>9</td><td><code>&lt;div id="root"&gt;&lt;/div&gt;</code></td><td>The empty box React draws the whole app into.</td></tr>
+<tr><td>10</td><td><code>&lt;script type="module" src="/src/main.tsx"&gt;&lt;/script&gt;</code></td><td>Loads the app's entry file. Browsers cannot run TypeScript; Vite converts <code>main.tsx</code> to JavaScript when the browser asks for it.</td></tr>
+</table></div>
+
+<pre data-file="web/src/main.tsx" data-lang="tsx" data-tag="complete file"><code>import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./styles.css";
+
+createRoot(document.getElementById("root")!).render(
+  &lt;StrictMode&gt;
+    &lt;App /&gt;
+  &lt;/StrictMode&gt;,
+);</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { StrictMode } from "react";</code></td><td>A wrapper that turns on extra checks during development, to catch common mistakes early. One visible effect: in development React runs the start-up code of <code>App</code> (its <code>useEffect</code>) twice, so you may see two <code>/api/threads</code> requests in the browser's Network tab. That is normal.</td></tr>
+<tr><td>2</td><td><code>import { createRoot } from "react-dom/client";</code></td><td>The function that connects React to a real element of the page.</td></tr>
+<tr><td>3</td><td><code>import App from "./App";</code></td><td>The main <a class="term" href="glossary.html#react-component">component</a>. No extension is needed here: Vite (and the <code>"Bundler"</code> setting in <code>web/tsconfig.json</code>) find <code>App.tsx</code>.</td></tr>
+<tr><td>4</td><td><code>import "./styles.css";</code></td><td>Importing a CSS file is a Vite feature: it adds the styles to the page.</td></tr>
+<tr><td>6</td><td><code>createRoot(document.getElementById("root")!).render(</code></td><td>Finds the <code>&lt;div id="root"&gt;</code> from <code>index.html</code> and draws into it. The <code>!</code> says "this element exists", because <code>getElementById</code> could return <code>null</code>.</td></tr>
+<tr><td>7–9</td><td><code>&lt;StrictMode&gt;<br>  &lt;App /&gt;<br>&lt;/StrictMode&gt;,</code></td><td>Draws the <code>App</code> component inside <code>StrictMode</code>. This is JSX, which is why the file ends in <code>.tsx</code>.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/src/sse.ts</code></h2>
+<p>The browser has a built-in reader for Server-Sent Events, <code>EventSource</code>, but it can only send GET requests without a body.
+<code>/api/chat</code> needs a JSON body, so this file sends a POST with <code>fetch</code> and reads the event stream itself. It also defines the types of the events, shared with <code>App.tsx</code>.</p>
+<pre data-file="web/src/sse.ts" data-lang="ts" data-tag="complete file"><code>// POST a JSON body and read the Server-Sent Events that come back.
+// (The browser's EventSource only does GET requests, so we read the stream ourselves.)
+export type Added = { kind: "input" | "tool_call" | "tool_result" | "answer"; text: string };
+export type Step = { step: number; node: string; added: Added[] };
+
+export type GraphEvent =
+  | { event: "token"; data: string }
+  | { event: "step"; data: Step }
+  | { event: "done"; data: Record&lt;string, never&gt; }
+  | { event: "error"; data: string };
+
+export async function postEvents(url: string, body: unknown, onEvent: (e: GraphEvent) =&gt; void) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) throw new Error(`Server answered ${response.status}`);
+
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    // Events are separated by a blank line; each has "event: ..." and "data: ..." lines.
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop()!; // the last piece may be incomplete: keep it for the next read
+    for (const block of blocks) {
+      const event = block.match(/^event: (.*)$/m)?.[1];
+      const data = block.match(/^data: (.*)$/m)?.[1];
+      if (event &amp;&amp; data !== undefined) onEvent({ event, data: JSON.parse(data) } as GraphEvent);
+    }
+  }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>// POST a JSON body and read the Server-Sent Events that come back. ...</code></td><td>Says why this file exists instead of using <code>EventSource</code>.</td></tr>
+<tr><td>3</td><td><code>export type Added = { kind: "input" | "tool_call" | "tool_result" | "answer"; text: string };</code></td><td>One item a node added, as the server's <code>describe</code> builds it. <code>|</code> means "one of": <code>kind</code> can only be one of these four texts.</td></tr>
+<tr><td>4</td><td><code>export type Step = { step: number; node: string; added: Added[] };</code></td><td>One <code>step</code> event: its number, the node's name (<code>chat_with_tools</code> or <code>tools</code>) and the list of what it added.</td></tr>
+<tr><td>6–10</td><td><code>export type GraphEvent =<br>  | { event: "token"; data: string }<br>  | ...</code></td><td>The four events the server can send and the shape of each one's data. This kind of type (a "discriminated union") lets TypeScript know, inside <code>case "step":</code>, that <code>data</code> is a <code>Step</code>. It must match what <code>server/index.ts</code> sends. <code>Record&lt;string, never&gt;</code> means "an empty object".</td></tr>
+<tr><td>12</td><td><code>export async function postEvents(url: string, body: unknown, onEvent: (e: GraphEvent) =&gt; void) {</code></td><td>Takes the address, the body to send, and a function to call for every event that arrives. The promise it returns finishes when the stream ends.</td></tr>
+<tr><td>13–17</td><td><code>const response = await fetch(url, { method: "POST", headers: {...}, body: JSON.stringify(body) });</code></td><td>Sends the request. The <code>content-type</code> header tells the server the body is <a class="term" href="glossary.html#json">JSON</a>.</td></tr>
+<tr><td>18</td><td><code>if (!response.ok || !response.body) throw new Error(`Server answered ${response.status}`);</code></td><td>Stops with a clear error if the server answered with an error status (for example 502 when the API server is not running) or without a body.</td></tr>
+<tr><td>20</td><td><code>const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();</code></td><td>The body arrives as bytes, in pieces. <code>TextDecoderStream</code> turns the bytes into text, and the reader hands out the text pieces one by one.</td></tr>
+<tr><td>21</td><td><code>let buffer = "";</code></td><td>Holds text that has arrived but does not yet form a complete event.</td></tr>
+<tr><td>22–24</td><td><code>for (;;) {<br>  const { value, done } = await reader.read();<br>  if (done) break;</code></td><td>A loop with no condition: read the next piece, and leave the loop when the server closes the stream (after <code>done</code> or <code>error</code>).</td></tr>
+<tr><td>25</td><td><code>buffer += value;</code></td><td>Adds the new text to whatever was left over.</td></tr>
+<tr><td>26–27</td><td><code>const blocks = buffer.split(/\r?\n\r?\n/);</code></td><td>Cuts the text at blank lines, the separator between events. <code>\r?</code> also accepts Windows-style line endings.</td></tr>
+<tr><td>28</td><td><code>buffer = blocks.pop()!;</code></td><td>The last piece may be an event cut in half by the network. Keep it for the next read instead of reading it now.</td></tr>
+<tr><td>29–31</td><td><code>for (const block of blocks) {<br>  const event = block.match(/^event: (.*)$/m)?.[1];<br>  const data = block.match(/^data: (.*)$/m)?.[1];</code></td><td>Reads the event type and the data from their lines. The <code>m</code> flag makes <code>^</code> and <code>$</code> match at the start and end of each line; <code>?.[1]</code> gives <code>undefined</code> if the line is missing.</td></tr>
+<tr><td>32</td><td><code>if (event &amp;&amp; data !== undefined) onEvent({ event, data: JSON.parse(data) } as GraphEvent);</code></td><td>Turns the JSON text back into a value and hands the event to the app. <code>as GraphEvent</code> trusts that the server sent one of the four known shapes.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/src/App.tsx</code></h2>
+<p>The whole user interface is one <a class="term" href="glossary.html#react-component">component</a>. Read it in five parts: the state
+(lines 11–18), the start-up requests (21–24), the event handler <code>handle</code> (27–45), the actions (47–81: send a question, open a thread, start a new one), and the JSX that draws the page (83–143).</p>
+<pre data-file="web/src/App.tsx" data-lang="tsx" data-tag="complete file"><code>import { useEffect, useState, type FormEvent } from "react";
+import { postEvents, type Added, type GraphEvent, type Step } from "./sse";
+
+type Message = { role: "user" | "assistant"; text: string };
+
+const EXAMPLES = ["Add 3 and 4.", "Now multiply that by 10.", "What is 12 multiplied by 7?"];
+
+const newThreadId = () =&gt; `thread-${crypto.randomUUID().slice(0, 6)}`;
+
+export default function App() {
+  const [threads, setThreads] = useState&lt;string[]&gt;([]);
+  const [threadId, setThreadId] = useState(newThreadId);
+  const [messages, setMessages] = useState&lt;Message[]&gt;([]);
+  const [steps, setSteps] = useState&lt;Step[]&gt;([]);
+  const [saved, setSaved] = useState&lt;number | null&gt;(null); // messages the memory had when the thread was opened
+  const [mermaid, setMermaid] = useState("");
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // On start: the threads the server's memory already knows, and the drawing of the graph.
+  useEffect(() =&gt; {
+    fetch("/api/threads").then((r) =&gt; r.json()).then((ids: string[]) =&gt; setThreads(ids)).catch(() =&gt; {});
+    fetch("/api/graph").then((r) =&gt; r.text()).then(setMermaid).catch(() =&gt; setMermaid("(server not running)"));
+  }, []);
+
+  // Change only the last message (the answer being written).
+  const updateLast = (change: (m: Message) =&gt; Message) =&gt;
+    setMessages((all) =&gt; [...all.slice(0, -1), change(all[all.length - 1])]);
+
+  function handle(e: GraphEvent) {
+    switch (e.event) {
+      case "token":
+        updateLast((m) =&gt; ({ ...m, text: m.text + e.data }));
+        break;
+      case "step": {
+        setSteps((all) =&gt; [...all, e.data]);
+        const answer = e.data.added.find((a) =&gt; a.kind === "answer");
+        if (answer) updateLast((m) =&gt; ({ ...m, text: answer.text })); // the finished answer replaces the pieces
+        break;
+      }
+      case "error":
+        updateLast((m) =&gt; ({ ...m, text: `${m.text}\n[Error: ${e.data}]` }));
+        break;
+    }
+  }
+
+  async function send(event: FormEvent) {
+    event.preventDefault();
+    const text = input.trim();
+    if (!text || busy) return;
+    setInput("");
+    setBusy(true);
+    setSteps([]);
+    setThreads((all) =&gt; (all.includes(threadId) ? all : [...all, threadId]));
+    setMessages((all) =&gt; [...all, { role: "user", text }, { role: "assistant", text: "" }]);
+    try {
+      await postEvents("/api/chat", { threadId, message: text }, handle);
+    } catch (error) {
+      handle({ event: "error", data: (error as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Open an older thread: the server reads what its memory saved for it (graph.getState).
+  async function openThread(id: string) {
+    setThreadId(id);
+    setSteps([]);
+    const history: (Added &amp; { type: string })[] = await (await fetch(`/api/threads/${encodeURIComponent(id)}`)).json();
+    setSaved(history.length);
+    setMessages(history
+      .filter((m) =&gt; m.type === "human" || m.kind === "answer")
+      .map((m) =&gt; ({ role: m.type === "human" ? "user" : "assistant", text: m.text })));
+  }
+
+  function newThread() {
+    setThreadId(newThreadId());
+    setMessages([]);
+    setSteps([]);
+    setSaved(null);
+  }
+
+  return (
+    &lt;div className="page"&gt;
+      &lt;header&gt;
+        &lt;div&gt;
+          &lt;p className="eyebrow"&gt;LangGraph.js · graph 9&lt;/p&gt;
+          &lt;h1&gt;Math teacher with memory&lt;/h1&gt;
+        &lt;/div&gt;
+        &lt;button onClick={newThread} disabled={busy}&gt;New thread&lt;/button&gt;
+      &lt;/header&gt;
+
+      &lt;nav aria-label="Threads"&gt;
+        &lt;span className="muted"&gt;Threads:&lt;/span&gt;
+        {[...new Set([...threads, threadId])].map((id) =&gt; (
+          &lt;button key={id} className={`chip ${id === threadId ? "current" : ""}`} onClick={() =&gt; openThread(id)}
+            disabled={busy} aria-current={id === threadId}&gt;{id}&lt;/button&gt;
+        ))}
+      &lt;/nav&gt;
+
+      &lt;main&gt;
+        &lt;section className="chat" aria-label="Conversation"&gt;
+          {saved !== null &amp;&amp; &lt;p className="muted"&gt;Loaded {saved} saved messages for {threadId}.&lt;/p&gt;}
+          {messages.length === 0 &amp;&amp; (
+            &lt;div className="empty"&gt;
+              &lt;p&gt;Ask a math question. Try, one after the other:&lt;/p&gt;
+              {EXAMPLES.map((q) =&gt; (
+                &lt;button key={q} className="example" onClick={() =&gt; setInput(q)}&gt;{q}&lt;/button&gt;
+              ))}
+            &lt;/div&gt;
+          )}
+          {messages.map((m, i) =&gt; (
+            &lt;article key={i} className={`bubble ${m.role}`}&gt;
+              &lt;p&gt;{m.text || (i === messages.length - 1 &amp;&amp; busy ? "…" : "")}&lt;/p&gt;
+            &lt;/article&gt;
+          ))}
+          &lt;form onSubmit={send}&gt;
+            &lt;input value={input} onChange={(e) =&gt; setInput(e.target.value)} placeholder="Type a question" disabled={busy} /&gt;
+            &lt;button disabled={busy || !input.trim()}&gt;Send&lt;/button&gt;
+          &lt;/form&gt;
+        &lt;/section&gt;
+
+        &lt;aside aria-label="Graph steps"&gt;
+          &lt;h2&gt;Graph steps&lt;/h2&gt;
+          {steps.length === 0 &amp;&amp; &lt;p className="muted"&gt;Each node appears here as it finishes.&lt;/p&gt;}
+          &lt;ol&gt;
+            {steps.map((s) =&gt; (
+              &lt;li key={s.step}&gt;
+                &lt;code className="node"&gt;{s.node}&lt;/code&gt;
+                {s.added.map((a, i) =&gt; (
+                  &lt;div key={i} className={`added ${a.kind}`}&gt;&lt;span&gt;{LABELS[a.kind]}&lt;/span&gt; {a.text}&lt;/div&gt;
+                ))}
+              &lt;/li&gt;
+            ))}
+          &lt;/ol&gt;
+          &lt;details&gt;
+            &lt;summary&gt;The graph (Mermaid text)&lt;/summary&gt;
+            &lt;pre&gt;{mermaid}&lt;/pre&gt;
+          &lt;/details&gt;
+        &lt;/aside&gt;
+      &lt;/main&gt;
+    &lt;/div&gt;
+  );
+}
+
+const LABELS: Record&lt;Added["kind"], string&gt; = {
+  input: "input",
+  tool_call: "asks for a tool:",
+  tool_result: "tool result:",
+  answer: "final answer:",
+};</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { useEffect, useState, type FormEvent } from "react";</code></td><td><code>useState</code> is the <a class="term" href="glossary.html#react-hook">hook</a> that gives a component memory between redraws; <code>useEffect</code> runs code after the component appears on screen. <code>FormEvent</code> is the type of a form's submit event.</td></tr>
+<tr><td>2</td><td><code>import { postEvents, type Added, type GraphEvent, type Step } from "./sse";</code></td><td>The stream reader and the event types from the previous file.</td></tr>
+<tr><td>4</td><td><code>type Message = { role: "user" | "assistant"; text: string };</code></td><td>One chat bubble: who wrote it and its text.</td></tr>
+<tr><td>6</td><td><code>const EXAMPLES = ["Add 3 and 4.", "Now multiply that by 10.", "What is 12 multiplied by 7?"];</code></td><td>Example questions shown on an empty chat. The first two only make sense in this order, on the same thread: they test the memory.</td></tr>
+<tr><td>8</td><td><code>const newThreadId = () =&gt; `thread-${crypto.randomUUID().slice(0, 6)}`;</code></td><td>Makes a short random thread id like <code>thread-3f9a1c</code>: the word <code>thread-</code> plus the first 6 characters of a random UUID. Short enough to read on a chip.</td></tr>
+<tr><td>10</td><td><code>export default function App() {</code></td><td>The component. React calls this function every time the state changes, and draws what it returns.</td></tr>
+<tr><td>11</td><td><code>const [threads, setThreads] = useState&lt;string[]&gt;([]);</code></td><td>The thread ids shown as chips. <code>&lt;string[]&gt;</code> tells TypeScript what the list will hold, since it starts empty.</td></tr>
+<tr><td>12</td><td><code>const [threadId, setThreadId] = useState(newThreadId);</code></td><td>The current thread, sent with every question. Passing the <em>function</em> <code>newThreadId</code> (not calling it) means React calls it only once, on the first draw; otherwise a new id would be made on every redraw and thrown away.</td></tr>
+<tr><td>13</td><td><code>const [messages, setMessages] = useState&lt;Message[]&gt;([]);</code></td><td>The chat bubbles.</td></tr>
+<tr><td>14</td><td><code>const [steps, setSteps] = useState&lt;Step[]&gt;([]);</code></td><td>The items of the "Graph steps" panel.</td></tr>
+<tr><td>15</td><td><code>const [saved, setSaved] = useState&lt;number | null&gt;(null);</code></td><td>How many messages the memory returned when you opened a thread, or <code>null</code> before that. Drives the "Loaded … saved messages" line.</td></tr>
+<tr><td>16</td><td><code>const [mermaid, setMermaid] = useState("");</code></td><td>The graph's Mermaid text.</td></tr>
+<tr><td>17–18</td><td><code>const [input, setInput] = useState("");<br>const [busy, setBusy] = useState(false);</code></td><td>The text of the question box, and <code>true</code> while a question is running (to disable buttons and show "…").</td></tr>
+<tr><td>21–24</td><td><code>useEffect(() =&gt; {<br>  fetch("/api/threads")...<br>  fetch("/api/graph")...<br>}, []);</code></td><td>Runs once when the page opens (the empty list <code>[]</code> at the end means "no reason to run again"). It asks the server for the threads its memory already knows (so a page reload still shows them) and for the Mermaid text. <code>.then(...)</code> runs the next part when the answer arrives; <code>.catch(...)</code> handles a network failure.</td></tr>
+<tr><td>27–28</td><td><code>const updateLast = (change: (m: Message) =&gt; Message) =&gt;<br>  setMessages((all) =&gt; [...all.slice(0, -1), change(all[all.length - 1])]);</code></td><td>A helper that changes only the last bubble (the answer being written). It never edits the old list: it builds a new list with all bubbles but the last, plus a changed copy of the last. React notices a change only when it gets a <em>new</em> object (the same rule as returning an update from a LangGraph node). Passing a function to <code>setMessages</code> makes React give us the latest list, which matters because many events arrive quickly.</td></tr>
+<tr><td>30–31</td><td><code>function handle(e: GraphEvent) {<br>  switch (e.event) {</code></td><td>Called once per event from the server. The <code>switch</code> picks the code for each event type.</td></tr>
+<tr><td>32–34</td><td><code>case "token":<br>  updateLast((m) =&gt; ({ ...m, text: m.text + e.data }));</code></td><td>Adds the new piece of text to the answer. <code>{ ...m, text: ... }</code> copies the bubble and replaces its text.</td></tr>
+<tr><td>35–36</td><td><code>case "step": {<br>  setSteps((all) =&gt; [...all, e.data]);</code></td><td>Adds the finished node to the "Graph steps" panel.</td></tr>
+<tr><td>37–38</td><td><code>const answer = e.data.added.find((a) =&gt; a.kind === "answer");<br>if (answer) updateLast((m) =&gt; ({ ...m, text: answer.text }));</code></td><td>If this step contains the final answer, it <em>replaces</em> the text built from tokens. The finished message is the reliable version; the tokens were only there to show progress.</td></tr>
+<tr><td>41–42</td><td><code>case "error":<br>  updateLast((m) =&gt; ({ ...m, text: `${m.text}\n[Error: ${e.data}]` }));</code></td><td>Shows the error at the end of the answer. There is no <code>case "done"</code>: the end of the stream is handled by <code>finally</code> on line 60.</td></tr>
+<tr><td>47–48</td><td><code>async function send(event: FormEvent) {<br>  event.preventDefault();</code></td><td>Runs when the form is submitted (Send button or <kbd>Enter</kbd>). <code>preventDefault</code> stops the browser's default behaviour for forms, which is to reload the page.</td></tr>
+<tr><td>49–51</td><td><code>const text = input.trim();<br>if (!text || busy) return;<br>setInput("");</code></td><td>Ignores empty questions and double sends, then clears the box.</td></tr>
+<tr><td>52–53</td><td><code>setBusy(true);<br>setSteps([]);</code></td><td>Disables the inputs and empties the steps panel: it always shows the current turn only.</td></tr>
+<tr><td>54</td><td><code>setThreads((all) =&gt; (all.includes(threadId) ? all : [...all, threadId]));</code></td><td>Adds the current thread to the chips if it is not there yet. <code>a ? b : c</code> means "if a then b else c".</td></tr>
+<tr><td>55</td><td><code>setMessages((all) =&gt; [...all, { role: "user", text }, { role: "assistant", text: "" }]);</code></td><td>Adds the question bubble and an empty answer bubble that the events will fill.</td></tr>
+<tr><td>56–57</td><td><code>try {<br>  await postEvents("/api/chat", { threadId, message: text }, handle);</code></td><td>Sends the question with the thread id and calls <code>handle</code> for each event until the stream ends. <code>{ threadId }</code> is short for <code>{ threadId: threadId }</code>.</td></tr>
+<tr><td>58–59</td><td><code>} catch (error) {<br>  handle({ event: "error", data: (error as Error).message });</code></td><td>If the request itself fails (server not running, for example), show it like any other error.</td></tr>
+<tr><td>60–61</td><td><code>} finally {<br>  setBusy(false);</code></td><td>Whatever happened, re-enable the inputs.</td></tr>
+<tr><td>66–68</td><td><code>async function openThread(id: string) {<br>  setThreadId(id);<br>  setSteps([]);</code></td><td>Runs when you click a chip: that thread becomes the current one.</td></tr>
+<tr><td>69</td><td><code>const history: (Added &amp; { type: string })[] = await (await fetch(`/api/threads/${encodeURIComponent(id)}`)).json();</code></td><td>Asks the server for the thread's saved messages (<code>graph.getState</code> on the server). <code>encodeURIComponent</code> makes the id safe inside a URL. <code>Added &amp; { type: string }</code> means "an <code>Added</code> plus a <code>type</code> field", the shape line 69 of the server sends.</td></tr>
+<tr><td>70</td><td><code>setSaved(history.length);</code></td><td>Remembers how many messages were saved, <em>all</em> of them: questions, tool calls, tool results and answers. A math question with one tool call saves 4 messages.</td></tr>
+<tr><td>71–73</td><td><code>setMessages(history<br>  .filter((m) =&gt; m.type === "human" || m.kind === "answer")<br>  .map((m) =&gt; ({ role: ..., text: m.text })));</code></td><td>Rebuilds the chat from the memory, keeping only questions and final answers (tool calls and results are not chat bubbles). <code>filter</code> keeps the items that pass the test; <code>map</code> turns each into a bubble.</td></tr>
+<tr><td>76–81</td><td><code>function newThread() {<br>  setThreadId(newThreadId());<br>  ...</code></td><td>A fresh thread id means a fresh, empty memory on the server. The screen is cleared too. The old thread stays in the server's memory, and its chip stays on screen.</td></tr>
+<tr><td>83–91</td><td><code>return (<br>  &lt;div className="page"&gt;<br>    &lt;header&gt; ... &lt;/header&gt;</code></td><td>The JSX the component draws. In JSX, the HTML attribute <code>class</code> is written <code>className</code>. The header holds the title and the New thread button, disabled while busy (<code>disabled={busy}</code>).</td></tr>
+<tr><td>93–99</td><td><code>&lt;nav aria-label="Threads"&gt; ...<br>{[...new Set([...threads, threadId])].map((id) =&gt; ( &lt;button key={id} ...</code></td><td>One chip per thread: the known threads plus the current one, without repeats (<code>new Set</code>). <code>map</code> turns each id into a button; <code>key</code> gives each a stable name so React can tell them apart. The current chip gets the class <code>current</code> and <code>aria-current</code> (for screen readers). Clicking a chip calls <code>openThread</code>.</td></tr>
+<tr><td>102</td><td><code>&lt;section className="chat" aria-label="Conversation"&gt;</code></td><td>The chat column. <code>aria-label</code> names the region for screen readers.</td></tr>
+<tr><td>103</td><td><code>{saved !== null &amp;&amp; &lt;p className="muted"&gt;Loaded {saved} saved messages for {threadId}.&lt;/p&gt;}</code></td><td>Curly braces put TypeScript inside JSX. <code>condition &amp;&amp; (...)</code> draws something only when the condition is true: here, after you opened a thread.</td></tr>
+<tr><td>104–111</td><td><code>{messages.length === 0 &amp;&amp; ( &lt;div className="empty"&gt; ... {EXAMPLES.map((q) =&gt; ( &lt;button ... onClick={() =&gt; setInput(q)}&gt;</code></td><td>On an empty chat, the example questions. Clicking one only fills the input; you still press Send.</td></tr>
+<tr><td>112–116</td><td><code>{messages.map((m, i) =&gt; ( &lt;article key={i} className={`bubble ${m.role}`}&gt; ...</code></td><td>One bubble per message, styled <code>bubble user</code> or <code>bubble assistant</code>. Line 114 shows "…" in the last bubble while it is still empty and a question is running.</td></tr>
+<tr><td>117–120</td><td><code>&lt;form onSubmit={send}&gt;<br>  &lt;input value={input} onChange={(e) =&gt; setInput(e.target.value)} ... /&gt;</code></td><td>A "controlled" input: its text comes from state, and every keystroke updates the state. The Send button is disabled while busy or when the box is empty.</td></tr>
+<tr><td>123–125</td><td><code>&lt;aside aria-label="Graph steps"&gt; ... {steps.length === 0 &amp;&amp; ...}</code></td><td>The side panel, with a hint while no step has arrived.</td></tr>
+<tr><td>126–135</td><td><code>&lt;ol&gt;{steps.map((s) =&gt; ( &lt;li key={s.step}&gt; &lt;code className="node"&gt;{s.node}&lt;/code&gt; {s.added.map(...)}</code></td><td>One numbered item per finished node: its name, then each thing it added with a label from <code>LABELS</code> and a class (<code>added tool_call</code>, <code>added tool_result</code>…) that gives it a colour.</td></tr>
+<tr><td>136–139</td><td><code>&lt;details&gt;<br>  &lt;summary&gt;The graph (Mermaid text)&lt;/summary&gt;<br>  &lt;pre&gt;{mermaid}&lt;/pre&gt;</code></td><td>A block you click to open, showing the Mermaid text from <code>/api/graph</code>. Paste it into a Mermaid viewer to see the drawing (step 19).</td></tr>
+<tr><td>146–151</td><td><code>const LABELS: Record&lt;Added["kind"], string&gt; = { input: "input", tool_call: "asks for a tool:", ... };</code></td><td>The label shown before each item. <code>Record&lt;Added["kind"], string&gt;</code> means "an object with exactly one text for each possible <code>kind</code>": if you add a new kind in <code>sse.ts</code> and forget it here, <code>pnpm typecheck</code> fails (a <a class="term" href="glossary.html#compile-error">compile error</a>, not a surprise at run time).</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="React state flow: server events go into handle, which calls setMessages for token and error, setSteps and setMessages for step; clicks call send, openThread or newThread, which change threadId, messages, steps and saved; React redraws the chat, the steps panel and the thread chips">
+  <rect class="box-info" x="20" y="20" width="150" height="46" rx="8"/>
+  <text x="95" y="40" text-anchor="middle">server events</text>
+  <text class="small" x="95" y="56" text-anchor="middle">via postEvents</text>
+  <rect class="box-solid" x="220" y="20" width="130" height="46" rx="8"/>
+  <text class="on-solid mono" x="285" y="48" text-anchor="middle">handle(e)</text>
+  <path class="arrow" d="M170,43 H216"/>
+  <rect class="box" x="400" y="14" width="160" height="30" rx="8"/>
+  <text class="small mono" x="480" y="34" text-anchor="middle">token, error</text>
+  <rect class="box" x="400" y="54" width="160" height="30" rx="8"/>
+  <text class="small mono" x="480" y="74" text-anchor="middle">step</text>
+  <path class="arrow" d="M350,36 L396,30"/>
+  <path class="arrow" d="M350,52 L396,66"/>
+  <rect class="box2" x="580" y="14" width="160" height="30" rx="8"/>
+  <text class="small mono" x="660" y="34" text-anchor="middle">messages</text>
+  <rect class="box2" x="580" y="54" width="160" height="30" rx="8"/>
+  <text class="small mono" x="660" y="74" text-anchor="middle">steps (+ answer)</text>
+  <rect class="box2" x="580" y="94" width="160" height="30" rx="8"/>
+  <text class="small mono" x="660" y="114" text-anchor="middle">threadId, threads</text>
+  <path class="arrow" d="M560,29 H576"/>
+  <path class="arrow" d="M560,69 H576"/>
+  <text class="small" x="660" y="142" text-anchor="middle">state (useState)</text>
+  <path class="arrow-accent" d="M660,148 V176"/>
+  <text class="small accent" x="672" y="166">React redraws</text>
+  <rect class="box-ok" x="400" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="455" y="204" text-anchor="middle">chat bubbles</text>
+  <rect class="box-ok" x="515" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="570" y="204" text-anchor="middle">steps panel</text>
+  <rect class="box-ok" x="630" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="685" y="204" text-anchor="middle">thread chips</text>
+  <rect class="box-warn" x="20" y="180" width="340" height="40" rx="8"/>
+  <text class="small" x="190" y="198" text-anchor="middle">clicks: Send → send(), chip → openThread(),</text>
+  <text class="small" x="190" y="212" text-anchor="middle">New thread → newThread()</text>
+  <path class="arrow" d="M396,200 H364"/>
+  <path class="arrow" d="M95,180 V70"/>
+  <path class="arrow" d="M360,190 C470,160 520,130 576,112"/>
+  <text class="small" x="105" y="130">send() → postEvents</text>
+  <text class="small" x="105" y="146">POSTs /api/chat</text>
+  <text class="small" x="20" y="256">The JSX never changes the page directly. It only reads state; events and clicks only change state.</text>
+  <text class="small" x="20" y="274">One loop: event → setter → redraw → click → request → more events.</text>
+</svg>
+<figcaption>Data flows in one direction: events and clicks change state, state decides what is drawn. Opening a thread changes <code>threadId</code>, <code>messages</code> and <code>saved</code> from the server's memory. <strong>To change what the page shows, change the state, never the HTML.</strong></figcaption>
+</figure>
+
+<h3>Threads, checkpoints and the memory</h3>
+<p>The browser does not store the conversation. It only remembers <em>which</em> thread is current. Everything else is in the server's <code>MemorySaver</code>, the same object as in <a href="14-graph-9-memory.html">step 14</a>. When you click a chip, the browser asks the server, and the server asks the checkpointer.</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Two thread ids each map to a row of checkpoints inside MemorySaver in the server process; GET /api/threads walks all checkpoints with memory.list and keeps unique thread ids; GET /api/threads/:id calls graph.getState and reads the latest checkpoint of one thread">
+  <rect class="zone" x="190" y="10" width="560" height="200" rx="8"/>
+  <text class="title" x="470" y="32" text-anchor="middle">MemorySaver (inside the pnpm api process)</text>
+  <rect class="box" x="20" y="60" width="150" height="34" rx="8"/>
+  <text class="small mono" x="95" y="81" text-anchor="middle">thread-3f9a1c</text>
+  <rect class="box" x="20" y="140" width="150" height="34" rx="8"/>
+  <text class="small mono" x="95" y="161" text-anchor="middle">thread-b27e40</text>
+  <path class="arrow" d="M170,77 H206"/>
+  <path class="arrow" d="M170,157 H206"/>
+  <text class="small" x="210" y="56">turn 1 (Add 3 and 4.)</text>
+  <circle class="dot" cx="222" cy="77" r="7"/>
+  <circle class="dot" cx="250" cy="77" r="7"/>
+  <circle class="dot" cx="278" cy="77" r="7"/>
+  <circle class="dot" cx="306" cy="77" r="7"/>
+  <text class="small" x="350" y="56">turn 2 (Now multiply…)</text>
+  <circle class="dot" cx="362" cy="77" r="7"/>
+  <circle class="dot" cx="390" cy="77" r="7"/>
+  <circle class="dot" cx="418" cy="77" r="7"/>
+  <circle class="dot-ok" cx="446" cy="77" r="7"/>
+  <text class="small" x="466" y="81">latest: 8 messages</text>
+  <circle class="dot" cx="222" cy="157" r="7"/>
+  <circle class="dot" cx="250" cy="157" r="7"/>
+  <circle class="dot-ok" cx="278" cy="157" r="7"/>
+  <text class="small" x="298" y="161">latest: its own messages only</text>
+  <text class="small" x="210" y="196">one dot = one saved checkpoint (count illustrative)</text>
+  <rect class="box-info" x="20" y="230" width="350" height="56" rx="8"/>
+  <text class="small mono" x="34" y="250">GET /api/threads</text>
+  <text class="small" x="34" y="270">memory.list({}) → every dot → Set of ids</text>
+  <rect class="box-info" x="390" y="230" width="350" height="56" rx="8"/>
+  <text class="small mono" x="404" y="250">GET /api/threads/:id</text>
+  <text class="small" x="404" y="270">graph.getState(thread) → the green dot</text>
+  <path class="arrow" d="M195,226 V214"/>
+  <path class="arrow" d="M565,226 C565,140 470,110 452,88"/>
+</svg>
+<figcaption>Each thread id has its own row of checkpoints; the graph saves one after each step of each turn (the number of dots here is illustrative). The list endpoint walks all of them and keeps one id per thread; the history endpoint reads only the newest checkpoint of one thread. Two math questions with one tool call each leave 8 messages (4 per turn). <strong>All of this lives in the server's memory: stop <code>pnpm api</code> and every row is gone.</strong></figcaption>
+</figure>
+
+<h2>The web app: <code>web/src/styles.css</code></h2>
+<p>Plain CSS, no framework. You do not need to understand it to follow the app; here is what each group of lines does.</p>
+<pre data-file="web/src/styles.css" data-lang="css" data-tag="complete file"><code>:root {
+  --bg: #f4f6f8; --surface: #ffffff; --text: #17212b; --muted: #5a6875; --border: #dde3e9;
+  --accent: #4a3fb5; --accent-text: #ffffff; --user: #ebe8fb; --tool: #e6f4ea; --call: #fff5dc;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12131a; --surface: #1b1d26; --text: #e7e8ef; --muted: #9da1b3; --border: #2d3040;
+    --accent: #a59cf5; --accent-text: #12131a; --user: #2a2650; --tool: #18331f; --call: #332a12;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, "Segoe UI", Roboto, sans-serif; }
+.page { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+header { display: flex; justify-content: space-between; align-items: end; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.eyebrow { margin: 0; color: var(--accent); font-weight: 600; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; }
+h1 { margin: 2px 0 0; font-size: 1.6rem; }
+h2 { margin: 0 0 12px; font-size: 1rem; }
+nav { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 16px; }
+main { display: grid; gap: 20px; grid-template-columns: 1fr; }
+@media (min-width: 860px) { main { grid-template-columns: 3fr 2fr; } }
+.chat, aside { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+.chat { display: flex; flex-direction: column; gap: 12px; min-height: 320px; }
+.chat &gt; .muted { margin: 0; }
+.bubble { max-width: 85%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble p { margin: 0; }
+.bubble.user { align-self: flex-end; background: var(--user); }
+.bubble.assistant { align-self: flex-start; border: 1px solid var(--border); }
+.empty { color: var(--muted); display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.empty p { margin: 0; }
+form { display: flex; gap: 8px; margin-top: auto; }
+input { flex: 1; min-width: 0; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); cursor: pointer; }
+button.example, button.chip { background: transparent; color: var(--accent); }
+button.example { border-style: dashed; border-color: var(--border); color: var(--text); text-align: left; font-weight: 400; }
+button.chip { padding: 3px 10px; font: 13px ui-monospace, Consolas, monospace; border-radius: 999px; }
+button.chip.current { background: var(--accent); color: var(--accent-text); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+aside ol { margin: 0 0 16px; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+code, pre { font: 13px ui-monospace, Consolas, monospace; }
+.node { font-weight: 700; }
+.added { margin-top: 4px; padding: 6px 8px; border-radius: 6px; font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.added span { color: var(--muted); font-size: 12px; }
+.added.tool_call { background: var(--call); }
+.added.tool_result { background: var(--tool); }
+.added.answer { border: 1px solid var(--border); }
+details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+aside pre { margin: 8px 0 0; padding: 8px; max-height: 260px; overflow: auto; background: var(--bg); border-radius: 6px; font-size: 12px; }
+.muted { color: var(--muted); font-size: 14px; }</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–5</td><td><code>:root { --bg: ...; --accent: ...; --tool: ...; --call: ...; }</code></td><td>Colour variables for the light theme. Every rule below uses <code>var(--name)</code>, so the colours are defined in one place. <code>--call</code> and <code>--tool</code> colour the "asks for a tool" and "tool result" items.</td></tr>
+<tr><td>6–12</td><td><code>@media (prefers-color-scheme: dark) { :root { ... } }</code></td><td>The same variables with dark colours, used automatically when the computer is in dark mode.</td></tr>
+<tr><td>13–14</td><td><code>* { box-sizing: border-box; }<br>body { ... }</code></td><td>Sizes include padding and borders; page background, text colour and font.</td></tr>
+<tr><td>15–20</td><td><code>.page</code>, <code>header</code>, <code>.eyebrow</code>, <code>h1</code>, <code>h2</code>, <code>nav</code></td><td>A centred page, a header with the button on the right, the small coloured line above the title, and the row of thread chips (it wraps onto several lines if needed).</td></tr>
+<tr><td>21–22</td><td><code>main { display: grid; ... }<br>@media (min-width: 860px) { ... 3fr 2fr ... }</code></td><td>One column on narrow screens; two columns (chat 3 parts, steps 2 parts) on screens at least 860 px wide.</td></tr>
+<tr><td>23–31</td><td><code>.chat, aside</code>, <code>.bubble</code>, <code>.empty</code></td><td>The two panels as cards; user bubbles on the right, assistant bubbles on the left; the example-question block. <code>white-space: pre-wrap</code> keeps the line breaks in the text, including the one before <code>[Error: …]</code>.</td></tr>
+<tr><td>32–33</td><td><code>form</code>, <code>input</code></td><td>The question form stays at the bottom of the chat (<code>margin-top: auto</code>).</td></tr>
+<tr><td>34–40</td><td><code>button</code>, <code>button.example</code>, <code>button.chip</code>, <code>.current</code>, <code>:disabled</code>, <code>:focus-visible</code></td><td>Buttons in the accent colour; examples and chips as outlined buttons, the current chip filled; a dimmed look when disabled; a visible outline for keyboard users.</td></tr>
+<tr><td>41–50</td><td><code>aside ol</code>, <code>code, pre</code>, <code>.node</code>, <code>.added</code>, <code>details summary</code>, <code>aside pre</code></td><td>The steps panel: numbered list, bold node names, coloured boxes for each added item, and a Mermaid box that scrolls after 260 px.</td></tr>
+<tr><td>51</td><td><code>.muted { ... }</code></td><td>Small grey text for hints and the "Loaded … saved messages" line.</td></tr>
+</table></div>
+
+<h2>Configuration: <code>web/tsconfig.json</code> and <code>package.json</code></h2>
+<p>The browser code has its own TypeScript settings, because it runs in a different place than the server: it has the DOM (the
+page's elements) instead of Node.js, and Vite, not Node.js, resolves its imports.</p>
+<pre data-file="web/tsconfig.json" data-lang="json" data-tag="complete file"><code>{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "vite.config.ts"]
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3</td><td><code>"target": "ES2023",</code></td><td>Which JavaScript version the type checker assumes. Modern browsers support it.</td></tr>
+<tr><td>4–5</td><td><code>"module": "ESNext",<br>"moduleResolution": "Bundler",</code></td><td>Imports are resolved the way a bundler like Vite does it, which is why <code>./App</code> and <code>./sse</code> work without an extension. The project's main <code>tsconfig.json</code> uses <code>NodeNext</code> instead, which requires the <code>.js</code> endings you saw in <code>server/index.ts</code>.</td></tr>
+<tr><td>6</td><td><code>"jsx": "react-jsx",</code></td><td>Understands JSX in <code>.tsx</code> files, using React's modern JSX transform (no need to import React in every file).</td></tr>
+<tr><td>7</td><td><code>"lib": ["ES2023", "DOM", "DOM.Iterable"],</code></td><td>Makes browser types available: <code>document</code>, <code>fetch</code>, <code>TextDecoderStream</code>, <code>crypto.randomUUID</code>.</td></tr>
+<tr><td>8</td><td><code>"types": ["vite/client"],</code></td><td>Vite's own types, for example so that <code>import "./styles.css"</code> type-checks.</td></tr>
+<tr><td>9</td><td><code>"strict": true,</code></td><td>The strict checks, as in the rest of the project. They are why the code needs <code>!</code> after <code>getElementById</code>.</td></tr>
+<tr><td>10</td><td><code>"noEmit": true,</code></td><td>TypeScript only checks; Vite does the converting.</td></tr>
+<tr><td>11</td><td><code>"skipLibCheck": true</code></td><td>Skips checking the type files of installed packages, which is faster and avoids errors you could not fix anyway.</td></tr>
+<tr><td>13</td><td><code>"include": ["src", "vite.config.ts"]</code></td><td>The files to check: the app and the Vite config. <code>pnpm typecheck</code> runs <code>tsc --noEmit -p web</code> with this file.</td></tr>
+</table></div>
+
+<p>Last, the project's <code>package.json</code>. For this page the scripts matter most: they are the short commands you run with
+<a class="term" href="glossary.html#pnpm">pnpm</a>.</p>
+<pre data-file="package.json" data-lang="json" data-tag="complete file"><code>{
+  "name": "langgraph-acl-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "graph": "tsx scripts/run.ts graph",
+    "lesson": "tsx scripts/run.ts lesson",
+    "main": "tsx main.ts",
+    "api": "tsx server/index.ts",
+    "web": "vite web",
+    "build:web": "vite build web",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit &amp;&amp; tsc --noEmit -p web"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.4"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@langchain/core": "1.2.17",
+    "@langchain/langgraph": "1.5.0",
+    "@langchain/langgraph-checkpoint-sqlite": "1.1.0",
+    "@langchain/ollama": "1.3.0",
+    "@langchain/openai": "1.6.2",
+    "dotenv": "18.0.7",
+    "hono": "4.13.13",
+    "langchain": "1.5.16",
+    "zod": "4.6.7"
+  },
+  "engines": {
+    "node": "&gt;=22"
+  }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>"name": "langgraph-acl-ts",</code></td><td>The project's name.</td></tr>
+<tr><td>5</td><td><code>"type": "module",</code></td><td>Every <code>.ts</code> and <code>.js</code> file in the project is an <a class="term" href="glossary.html#esm">ES module</a> (<code>import</code>/<code>export</code>). This is what allows the top-level <code>await</code> in graph 9's demo.</td></tr>
+<tr><td>7–8</td><td><code>"graph": "tsx scripts/run.ts graph",<br>"lesson": "tsx scripts/run.ts lesson",</code></td><td><code>pnpm graph 9</code> and <code>pnpm lesson …</code> from the earlier steps, run with <a class="term" href="glossary.html#tsx">tsx</a>, which runs TypeScript directly without a build step.</td></tr>
+<tr><td>9</td><td><code>"main": "tsx main.ts",</code></td><td>The LangSmith quickstart from the setup step.</td></tr>
+<tr><td>10</td><td><code>"api": "tsx server/index.ts",</code></td><td><code>pnpm api</code>: starts the Hono server on port 8787.</td></tr>
+<tr><td>11</td><td><code>"web": "vite web",</code></td><td><code>pnpm web</code>: starts the Vite dev server with <code>web/</code> as its folder.</td></tr>
+<tr><td>12</td><td><code>"build:web": "vite build web",</code></td><td>Builds the app into static files for production. Not needed in this guide.</td></tr>
+<tr><td>13</td><td><code>"test": "vitest run",</code></td><td>Runs the offline tests once with <a class="term" href="glossary.html#vitest">Vitest</a>.</td></tr>
+<tr><td>14</td><td><code>"typecheck": "tsc --noEmit &amp;&amp; tsc --noEmit -p web"</code></td><td>Checks the types of the graphs and the server, then of the web app with its own settings. <code>&amp;&amp;</code> runs the second check only if the first passes.</td></tr>
+<tr><td>16–21</td><td><code>"pnpm": { "onlyBuiltDependencies": ["better-sqlite3", "esbuild"] }</code></td><td>pnpm does not run packages' install scripts unless you allow them. These two need one: <code>better-sqlite3</code> (the SQLite checkpointer of <a href="17-persistent-memory-sqlite.html">step 17</a>) and <code>esbuild</code> (used by tsx and Vite).</td></tr>
+<tr><td>22–33</td><td><code>"devDependencies": { ... "react": "19.3.0", ... "vite": "8.3.4", ... }</code></td><td>Tools and the front-end packages: React, Vite and its React plugin, TypeScript, tsx, Vitest, and type definitions. Exact versions, so your install matches ours.</td></tr>
+<tr><td>34–45</td><td><code>"dependencies": { "@hono/node-server": "2.1.5", ... "hono": "4.13.13", ... }</code></td><td>What the graphs and the server need at run time: LangGraph, the LangChain packages, the OpenAI and Ollama model packages, the SQLite checkpointer, dotenv, Zod, and for this page <code>hono</code> and <code>@hono/node-server</code>.</td></tr>
+<tr><td>46–48</td><td><code>"engines": { "node": "&gt;=22" }</code></td><td>The project needs Node.js 22 or newer.</td></tr>
+</table></div>
+
+<h2>What you should see</h2>
+<div class="callout ok"><p><strong>What you should see.</strong> This is the run we checked in Chrome with llama3.2. Your wording will differ, and a model can choose differently.</p>
+<ul>
+<li><strong>"Add 3 and 4."</strong> The steps panel shows 1 <code>chat_with_tools</code>, asks for a tool: <code>addition({"nb2":"4","nb1":"3"})</code>; 2 <code>tools</code>, tool result: <code>addition → 7</code>; 3 <code>chat_with_tools</code>, final answer. The chat says "The result of adding 3 and 4 is 7."</li>
+<li><strong>"Now multiply that by 10."</strong> on the same thread: <code>multiply({"nb1":"7","nb2":"10"})</code>, then <code>70</code>, then "The result of multiplying 7 by 10 is 70." The model knew "that" meant 7: the memory works.</li>
+<li><strong>New thread</strong> adds a second chip and an empty chat. Clicking the first chip again reloads its questions and answers from the checkpointer, with the line "Loaded … saved messages for thread-…".</li>
+<li>Open <em>The graph (Mermaid text)</em>: you see graph 9's shape, including <code>chat_with_tools -.-&gt; tools;</code> and <code>chat_with_tools -.-&gt; __end__;</code>.</li>
+</ul></div>
+
+<div class="callout warn"><p><strong>Memory is not honesty.</strong> In the terminal run of graph 9 (<a href="14-graph-9-memory.html">step 14</a>), a brand-new thread was asked "What was my last result?" and llama3.2 answered "Your last result was 5, which was the result of the subtraction 10 - 5." That thread had no history; the model made it up (a <a class="term" href="glossary.html#hallucination">hallucination</a>). Try the same question on a new thread in the app. The checkpointer can only give the model what was saved; it cannot stop it from inventing.</p></div>
+
+<div class="callout warn"><p><strong>Common problems.</strong></p>
+<ul>
+<li><strong>Why <code>pnpm api</code> and not <code>pnpm server</code>?</strong> pnpm has a built-in command called <code>server</code>, and
+built-in commands win over scripts with the same name: <code>pnpm server</code> runs pnpm's own command and exits silently without starting
+anything. (<code>pnpm run server</code> would work.) Naming the script <code>api</code> avoids the clash.</li>
+<li><strong>Port already in use.</strong> If <code>pnpm api</code> fails with <code>EADDRINUSE</code>, another program (often a server you
+started earlier and forgot) uses port 8787. Stop it, or start with another port (<code>PORT</code> variable) and change the proxy target in
+<code>web/vite.config.ts</code> to match. If 5173 is busy, Vite picks the next free port and prints it; open that address.</li>
+<li><strong>Only <code>pnpm web</code> is running.</strong> The page loads, but no graph appears in the Mermaid block and every question ends with an <code>[Error: …]</code> line, because the proxy has nowhere to forward <code>/api</code>. Start <code>pnpm api</code> in the other terminal.</li>
+<li><strong>The model is not reachable.</strong> The server starts without calling the model, so problems show up at the first question, as <code>[Error: …]</code> at the end of the answer: Ollama not running (start it and check <code>ollama list</code>), or <code>MODEL_PROVIDER=openai</code> without <code>OPENAI_API_KEY</code> in <code>.env</code>. Restart <code>pnpm api</code> after editing <code>.env</code>.</li>
+<li><strong>The app forgot every thread.</strong> <code>MemorySaver</code> keeps threads in the server's memory. Restarting <code>pnpm api</code> erases them all: a reloaded page shows no chips, and an old chip still on screen loads 0 saved messages. For memory that survives restarts, use the SQLite checkpointer from <a href="17-persistent-memory-sqlite.html">step 17</a>.</li>
+<li><strong>Answers vary.</strong> The same question can lead to a different tool, different wording, or no tool call at all (then the panel shows a single <code>chat_with_tools</code> step). With a small local model this is normal; the steps panel shows what really happened.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Check the memory.</strong> Ask "Add 3 and 4.", then click New thread and ask "Now multiply that by 10." What does the model do without the 7? Click the first chip and compare.</li>
+<li><strong>Count the saved messages.</strong> After two questions on one thread, open another thread and come back. Does "Loaded … saved messages" match 4 per question with one tool call? Ask something that needs two tools ("Add 2 and 3, then multiply by 4") and predict the new count first.</li>
+<li><strong>Watch the raw events.</strong> Open the browser's developer tools (<kbd>F12</kbd>), tab Network, send a question and click the
+<code>chat</code> request. You can see the <code>token</code>, <code>step</code> and <code>done</code> events arrive one by one.</li>
+<li><strong>Keep threads across restarts.</strong> In <code>server/index.ts</code>, instead of importing graph 9, import <code>builder</code> from <code>../module1/8-graph-agent.js</code> and compile it with <code>SqliteSaver.fromConnString("checkpoints.sqlite")</code>, as <code>module1/11-graph-sqlite-memory.ts</code> does (<a href="17-persistent-memory-sqlite.html">step 17</a>). Export the saver as <code>memory</code> so <code>/api/threads</code> still works. Restart <code>pnpm api</code>: the chips come back.</li>
+<li><strong>Add an event.</strong> Make the server send <code>send("thread", threadId)</code> at the start of <code>relay</code>, add the case to the
+<code>GraphEvent</code> type in <code>sse.ts</code>, and run <code>pnpm typecheck</code>. Then add a new <code>kind</code> to <code>Added</code> and see which line TypeScript points to.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>The app is two programs: a Hono server that owns graph 9 (<code>pnpm api</code>, port 8787) and a React app served by Vite
+(<code>pnpm web</code>, port 5173), which forwards <code>/api</code> to the server.</li>
+<li>The server runs <code>graph.stream</code> with the <code>"updates"</code> and <code>"messages"</code> modes and forwards each finished node as a <code>step</code> event, model text as <code>token</code> events, then <code>done</code> or <code>error</code>.</li>
+<li><code>sse.ts</code> reads those events from a POST response with <code>fetch</code>, because <code>EventSource</code> only does GET.</li>
+<li><code>App.tsx</code> keeps everything in <code>useState</code>; each event becomes a state change and React redraws the page.</li>
+<li>The browser only knows the thread id. The history lives in <code>MemorySaver</code>: <code>memory.list</code> gives the thread ids, <code>graph.getState</code> gives one thread's messages, and a server restart forgets them all.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="19-streaming-and-drawing.html"><small>← Previous · Step 19</small>Stream Steps &amp; Draw Your Graph</a>
+<a class="next" href="index.html"><small>Done →</small>All steps</a>
+</nav>
+</main>
+</body>
+</html>

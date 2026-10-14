@@ -19,7 +19,7 @@ call, and an Approve / Reject card before any hold is placed.
    ```
 3. In this folder: `pnpm install`, then run a lab by its number, for example `pnpm lab 01`.
 4. Offline tests (no model needed): `pnpm test`. Type check: `pnpm typecheck`.
-5. The web app: `pnpm server` in one terminal, `pnpm web` in a second, then open http://localhost:5173.
+5. The web app: `pnpm api` in one terminal, `pnpm web` in a second, then open http://localhost:5173.
 
 | Folder | What is in it |
 |---|---|

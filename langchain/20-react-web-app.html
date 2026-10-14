@@ -1,0 +1,1120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>20 · The React web app</title>
+<meta name="description" content="Upload a fridge photo, watch the chef stream a recipe, follow the tool calls, and keep chatting on the same thread.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LangChain Crash Course · Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 20/20</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 20 of 20 · Extra, not in the video</div>
+  <h1>The React web app</h1>
+  <p class="lead">Upload a fridge photo, watch the chef stream a recipe, follow the tool calls, and keep chatting on the same thread.</p>
+  <span class="video-link extra">TypeScript · verified with LangChain.js 1.5.16, gemma4 and llama3.2</span>
+</section>
+<div class="callout"><p><strong>TypeScript only, not in the video.</strong> This page has no Python version. It builds on <a href="11-multimodal-images.html">step 11</a> (sending an image as a data URL), <a href="14-chef-agent-and-logging.html">step 14</a> (the chef agent with web search) and <a href="18-chat-with-your-chef.html">step 18</a> (memory and streaming), and puts the same chef in a web page. The code is in the TypeScript project <code>fasteat-agent-ts</code>, in the folders <code>server/</code> and <code>web/</code>. We ran it for real with Ollama (gemma4 for the photo, llama3.2 for the chef), with <code>curl</code> and in Chrome. We had no OpenAI or Tavily key, so those paths were not run.</p></div>
+
+<h2>Goal</h2>
+<p>Until now the chef ran in a terminal. In this step it gets a web page. A visitor drops a photo of their fridge on the page (or picks it with a button), clicks <strong>Find a recipe</strong>, and sees three things: the ingredients the model found in the photo, the recipe appearing word by word, and a side panel that lists every <a class="term" href="glossary.html#tool-call">tool call</a> the chef made, with its result. Then they can keep asking questions in the same conversation ("Make it vegetarian"). You will read every file of the app, from the server to the last line of the user interface.</p>
+
+<h2>The idea in brief</h2>
+<ul>
+<li><strong>Two programs, two terminals.</strong> A <a class="term" href="glossary.html#nodejs">Node.js</a> server (<code>server/</code>) owns the models, the <a class="term" href="glossary.html#agent">agent</a> and the keys. A <a class="term" href="glossary.html#react">React</a> app (<code>web/</code>) runs in the browser and only shows things. The browser never talks to OpenAI, Ollama or Tavily directly, so your keys stay on the server.</li>
+<li><strong>Two models, one after the other.</strong> First a <a class="term" href="glossary.html#vision-model">vision model</a> looks at the photo and lists the ingredients. Then a text-only chef agent turns that list into a recipe. The command-line chef of step 14 does both in one agent; the reason for the split is explained below.</li>
+<li><strong>The server streams.</strong> Two <a class="term" href="glossary.html#api-endpoint">API endpoints</a>, <code>POST /api/photo</code> and <code>POST /api/chat</code>, send what happens as <a class="term" href="glossary.html#sse">Server-Sent Events</a>: the ingredient list, answer tokens, tool calls, tool results, and "done" or "error".</li>
+<li><strong>Memory per conversation.</strong> A <code>MemorySaver</code> <a class="term" href="glossary.html#checkpointer">checkpointer</a> and a <a class="term" href="glossary.html#thread-id">thread id</a>, as in steps 10 and 18, let the chef remember the recipe when you ask a follow-up.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Architecture: the browser talks only to the Vite dev server on port 5173, which serves the React app and forwards /api requests to the Hono server on port 8787; the server runs the vision model and the chef agent, which call Ollama or OpenAI, and Tavily when a key is set">
+  <rect class="zone" x="10" y="10" width="170" height="270" rx="8"/>
+  <text class="title" x="95" y="34" text-anchor="middle">Browser</text>
+  <rect class="zone" x="200" y="10" width="550" height="270" rx="8"/>
+  <text class="title" x="475" y="34" text-anchor="middle">Your computer (two terminals)</text>
+  <rect class="box-ok" x="25" y="70" width="140" height="70" rx="8"/>
+  <text x="95" y="96" text-anchor="middle">React app</text>
+  <text class="small" x="95" y="114" text-anchor="middle">App.tsx, sse.ts</text>
+  <text class="small" x="95" y="130" text-anchor="middle">localhost:5173</text>
+  <rect class="box" x="225" y="70" width="140" height="70" rx="8"/>
+  <text x="295" y="96" text-anchor="middle">Vite dev server</text>
+  <text class="small" x="295" y="114" text-anchor="middle">pnpm web · :5173</text>
+  <text class="small" x="295" y="130" text-anchor="middle">proxy /api</text>
+  <rect class="box-info" x="405" y="70" width="140" height="70" rx="8"/>
+  <text x="475" y="96" text-anchor="middle">Hono server</text>
+  <text class="small" x="475" y="114" text-anchor="middle">pnpm api · :8787</text>
+  <text class="small" x="475" y="130" text-anchor="middle">server/app.ts</text>
+  <rect class="box-solid" x="585" y="56" width="150" height="46" rx="8"/>
+  <text class="on-solid" x="660" y="76" text-anchor="middle">vision model</text>
+  <text class="on-solid small" x="660" y="92" text-anchor="middle">lists the ingredients</text>
+  <rect class="box-solid" x="585" y="112" width="150" height="46" rx="8"/>
+  <text class="on-solid" x="660" y="132" text-anchor="middle">chef agent</text>
+  <text class="on-solid small" x="660" y="148" text-anchor="middle">createAgent + memory</text>
+  <rect class="box2" x="585" y="190" width="150" height="46" rx="8"/>
+  <text x="660" y="210" text-anchor="middle">Ollama or OpenAI</text>
+  <text class="small" x="660" y="226" text-anchor="middle">MODEL_PROVIDER</text>
+  <rect class="box2" x="405" y="190" width="150" height="46" rx="8"/>
+  <text x="480" y="210" text-anchor="middle">Tavily</text>
+  <text class="small" x="480" y="226" text-anchor="middle">only with a key</text>
+  <path class="arrow" d="M165,95 H221"/>
+  <path class="arrow" d="M225,115 H169"/>
+  <path class="arrow" d="M365,95 H401"/>
+  <path class="arrow" d="M405,115 H369"/>
+  <path class="arrow" d="M545,90 L581,80"/>
+  <path class="arrow" d="M545,120 L581,132"/>
+  <path class="arrow" d="M680,158 V186"/>
+  <path class="arrow" d="M600,158 L545,187"/>
+  <text class="small" x="193" y="62" text-anchor="middle">POST</text>
+  <text class="small" x="383" y="62" text-anchor="middle">/api/*</text>
+  <text class="small" x="193" y="160" text-anchor="middle">events</text>
+  <text class="small" x="383" y="160" text-anchor="middle">events</text>
+  <text class="small" x="215" y="258">The page itself (HTML, TSX, CSS) also comes from Vite.</text>
+  <text class="small" x="215" y="274">Only the server knows the models, the keys and the agent's memory.</text>
+</svg>
+<figcaption>Requests go left to right, events come back right to left. The browser only talks to port 5173; Vite forwards anything under <code>/api</code> to port 8787. <strong>Models, keys and memory stay on the server.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to React? Components, state and why the page redraws itself</summary>
+<p><a class="term" href="glossary.html#react">React</a> is a library for building user interfaces out of
+<a class="term" href="glossary.html#react-component">components</a>: functions that return a description of what the screen should look like,
+written in JSX (HTML-like tags inside TypeScript, in <code>.tsx</code> files). You never change the page by hand. Instead you keep the
+data that matters in <em>state</em>, created with the <a class="term" href="glossary.html#react-hook">hook</a> <code>useState</code>. Calling a
+state setter, such as <code>setMessages(...)</code>, tells React "this data changed"; React calls your component again and updates only the
+parts of the page that differ. In this app, every event from the server becomes one state change, and the chat and the side panel follow
+automatically.</p>
+</details>
+
+<details class="primer"><summary>New to Server-Sent Events? How a server streams to a browser</summary>
+<p>A normal HTTP request gets one reply and is finished. With <a class="term" href="glossary.html#sse">Server-Sent Events (SSE)</a>, the
+server keeps the reply open and writes small text messages into it whenever it has something new. Each message has an
+<code>event:</code> line (its type) and a <code>data:</code> line (its content), and ends with a blank line. This is how the recipe appears
+word by word: each new <a class="term" href="glossary.html#token">token</a> from the model becomes one event. It is the web version of the
+<a class="term" href="glossary.html#stream">streaming</a> you used in <a href="18-chat-with-your-chef.html">step 18</a>, where the tokens went to the terminal.</p>
+</details>
+
+<details class="primer"><summary>New to web servers? What an API endpoint and Hono are</summary>
+<p>A web server listens on a port (here 8787) and answers requests. An <a class="term" href="glossary.html#api-endpoint">API endpoint</a> is
+one address plus a method, like <code>POST /api/photo</code>, that runs a piece of your code and returns data instead of a web page.
+<a class="term" href="glossary.html#hono">Hono</a> is a small TypeScript framework for writing such servers: you create an app, register a
+function per endpoint with <code>app.post(path, handler)</code>, and start it. The handler receives a context object <code>c</code> with the
+request (<code>c.req</code>) and helpers to build the response.</p>
+</details>
+
+<h2>Why two models: look first, then cook</h2>
+<p>In <a href="14-chef-agent-and-logging.html">step 14</a> one agent gets the photo, looks at it, searches the web and writes the recipe. The web app splits that work:</p>
+<ol>
+<li><code>decodeIngredients()</code> sends the photo to the vision model with one instruction: list the ingredients, one per line. It is a single question and a single answer, with no tools.</li>
+<li>The server sends that list to the browser at once (the "Seen in the photo" box), then gives it, as plain text, to the chef agent.</li>
+<li>The chef agent is a normal text agent with the <code>web_search</code> tool and memory. It never sees the photo, only the list.</li>
+</ol>
+<p>Two reasons. On Ollama, <code>llama3.2</code> cannot see images (<code>ollama show</code> lists no vision capability) while <code>gemma4</code> can; the split lets each model do the job it can do. And the visitor sees what the model <em>thought</em> was in the fridge before the recipe arrives, so a wrong guess is easy to spot. With <code>MODEL_PROVIDER=openai</code> both steps use the same <code>gpt-5-nano</code>, which can do both.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="The path of a photo: the browser reads the file as base64, posts it as JSON to /api/photo, checkUpload tests type, base64 and size and answers 400 if bad, the vision model lists the ingredients, the list is sent as an event and given to the chef agent, whose tokens and tool calls stream back as events and update the page">
+  <rect class="box-ok" x="10" y="20" width="170" height="64" rx="8"/>
+  <text x="95" y="46" text-anchor="middle">1 Browser</text>
+  <text class="small" x="95" y="66" text-anchor="middle">FileReader → base64</text>
+  <rect class="box" x="200" y="20" width="170" height="64" rx="8"/>
+  <text x="285" y="46" text-anchor="middle">2 POST /api/photo</text>
+  <text class="small" x="285" y="66" text-anchor="middle">threadId, mimeType, data</text>
+  <rect class="box-info" x="390" y="20" width="170" height="64" rx="8"/>
+  <text x="475" y="46" text-anchor="middle">3 checkUpload()</text>
+  <text class="small" x="475" y="66" text-anchor="middle">type · base64 · ≤ 5 MB</text>
+  <rect class="box-solid" x="580" y="20" width="170" height="64" rx="8"/>
+  <text class="on-solid" x="665" y="46" text-anchor="middle">4 vision model</text>
+  <text class="on-solid small" x="665" y="66" text-anchor="middle">decodeIngredients()</text>
+  <path class="arrow" d="M180,52 H196"/>
+  <path class="arrow" d="M370,52 H386"/>
+  <path class="arrow" d="M560,52 H576"/>
+  <path class="arrow-bad" d="M475,84 V106"/>
+  <rect class="box-bad" x="400" y="108" width="150" height="34" rx="8"/>
+  <text class="small" x="475" y="130" text-anchor="middle">400 + { error } JSON</text>
+  <text class="small bad" x="392" y="130" text-anchor="end">bad photo:</text>
+  <path class="arrow" d="M665,84 V176"/>
+  <text class="small" x="675" y="134">list, one per line</text>
+  <rect class="box" x="580" y="180" width="170" height="64" rx="8"/>
+  <text x="665" y="204" text-anchor="middle">5 ingredients</text>
+  <text class="small" x="665" y="224" text-anchor="middle">sent as an event, too</text>
+  <rect class="box-solid" x="390" y="180" width="170" height="64" rx="8"/>
+  <text class="on-solid" x="475" y="204" text-anchor="middle">6 chef agent</text>
+  <text class="on-solid small" x="475" y="224" text-anchor="middle">text model + web_search</text>
+  <rect class="box" x="200" y="180" width="170" height="64" rx="8"/>
+  <text x="285" y="202" text-anchor="middle">7 SSE events</text>
+  <text class="small" x="285" y="220" text-anchor="middle">token, tool_call,</text>
+  <text class="small" x="285" y="236" text-anchor="middle">tool_result, done</text>
+  <rect class="box-ok" x="10" y="180" width="170" height="64" rx="8"/>
+  <text x="95" y="204" text-anchor="middle">8 Browser</text>
+  <text class="small" x="95" y="224" text-anchor="middle">updates the page</text>
+  <path class="arrow" d="M580,212 H564"/>
+  <path class="arrow" d="M390,212 H374"/>
+  <path class="arrow" d="M200,212 H184"/>
+</svg>
+<figcaption>Read the top row left to right, then the bottom row right to left. A bad photo stops at step 3 with an ordinary JSON answer; a good one opens the event stream. <strong>The chef agent (step 6) only ever receives text: the ingredient list.</strong></figcaption>
+</figure>
+
+<h2>Run it</h2>
+<ol class="steps">
+<li>Open a terminal in the project folder <code>fasteat-agent-ts</code>. If you have not done it yet for the earlier steps, run <code>pnpm install</code>.</li>
+<li>Choose the models in <code>.env</code> (copy <code>.env.example</code> if you have no <code>.env</code> yet). With <code>MODEL_PROVIDER=openai</code> you need <code>OPENAI_API_KEY</code>. With <code>MODEL_PROVIDER=ollama</code> (what we used) you need no key, but <code>ollama list</code> must show <code>llama3.2</code> and <code>gemma4</code>; if one is missing, run <code>ollama pull llama3.2</code> or <code>ollama pull gemma4</code>. <code>TAVILY_API_KEY</code> is optional.</li>
+<li>Start the API server: <code>pnpm api</code>. It prints <code>FastEat chef API on http://localhost:8787</code>. Leave this terminal open; the server's log lines appear here.</li>
+<li>Open a <strong>second</strong> terminal in the same folder and start the web app: <code>pnpm web</code>. Vite prints the address of the app.</li>
+<li>Open <code>http://localhost:5173</code> in your browser. Drop a photo on the dashed area, or click <strong>Choose a photo</strong>. The sample <code>data/fridge.png</code> (a drawing of a fridge with 12 labelled items) works for a first try.</li>
+<li>Click <strong>Find a recipe</strong>. Then type a follow-up question in the box at the bottom and press <strong>Send</strong>.</li>
+<li>To stop, press <kbd>Ctrl</kbd>+<kbd>C</kbd> in each terminal.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 360" role="img" aria-label="Wireframe of the app: a header with the title and a New conversation button; a chat column with the photo drop zone, the user's photo message, an answer with a Seen in the photo box, and the follow-up input; and a side panel listing the web_search call and its result">
+  <rect class="ui-window" x="10" y="10" width="740" height="340" rx="8"/>
+  <rect class="ui-chrome" x="10" y="10" width="740" height="28" rx="8"/>
+  <text class="small mono" x="30" y="29">localhost:5173</text>
+  <text class="small accent" x="30" y="60">FASTEAT</text>
+  <text class="title" x="30" y="80">What can I cook from my fridge?</text>
+  <rect class="ui-button-ghost" x="590" y="56" width="140" height="28" rx="8"/>
+  <text class="label accent" x="660" y="75" text-anchor="middle">New conversation</text>
+  <rect class="box" x="30" y="96" width="430" height="244" rx="8"/>
+  <rect class="zone" x="44" y="106" width="402" height="62" rx="8"/>
+  <text class="small" x="245" y="128" text-anchor="middle">Drop a photo of your fridge here, or</text>
+  <rect class="ui-button-ghost" x="190" y="138" width="110" height="22" rx="6"/>
+  <text class="small accent" x="245" y="153" text-anchor="middle">Choose a photo</text>
+  <rect class="ui-bubble-user" x="220" y="178" width="226" height="44" rx="8"/>
+  <rect class="ui-skeleton" x="230" y="184" width="40" height="32" rx="4"/>
+  <text class="small ui-on-user" x="280" y="204">What can I cook with this?</text>
+  <rect class="ui-bubble-ai" x="44" y="230" width="330" height="70" rx="8"/>
+  <rect class="box-warn" x="54" y="238" width="310" height="22" rx="6"/>
+  <text class="small" x="62" y="253">Seen in the photo: MILK, EGGS, CHEESE, …</text>
+  <text class="small" x="56" y="276">Chicken and Spinach Stir-Fry with Yogurt Sauce</text>
+  <text class="small mono" x="56" y="292">**Ingredients:** …</text>
+  <rect class="ui-field" x="44" y="308" width="330" height="26" rx="6"/>
+  <text class="small" x="56" y="325">Ask the chef a follow-up question</text>
+  <rect class="ui-button" x="382" y="308" width="64" height="26" rx="6"/>
+  <text class="label on-solid" x="414" y="325" text-anchor="middle">Send</text>
+  <rect class="box" x="476" y="96" width="254" height="244" rx="8"/>
+  <text class="title" x="490" y="118">What the chef did</text>
+  <text class="small mono" x="490" y="142">1. web_search({"query":…})</text>
+  <rect class="ui-skeleton" x="490" y="150" width="226" height="46" rx="4"/>
+  <text class="small" x="498" y="168">Web search is not configured</text>
+  <text class="small" x="498" y="186">(no TAVILY_API_KEY). Answer…</text>
+</svg>
+<figcaption>Illustration (simplified) of what <code>App.tsx</code> draws after one photo, from our Chrome run without a Tavily key. The <code>**Ingredients:**</code> line is shown as raw Markdown, as in the real app (see "What you should see"). <strong>Each area on screen is driven by one piece of React state.</strong></figcaption>
+</figure>
+
+<h2>The server: <code>server/upload.ts</code></h2>
+<p>Anything that arrives from a browser can be wrong or hostile, so the server checks the photo before any model sees it. This small file holds that check.</p>
+<pre data-file="server/upload.ts" data-lang="ts" data-tag="complete file"><code>// Checks a photo sent by the browser before any model sees it.
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+export type Upload = { mimeType?: unknown; data?: unknown };
+
+/** Returns { dataUrl } for a good photo, or { error } with a message the user can act on. */
+export function checkUpload({ mimeType, data }: Upload): { dataUrl: string } | { error: string } {
+  if (typeof mimeType !== "string" || !IMAGE_TYPES.includes(mimeType)) {
+    return { error: `Please send a photo (PNG, JPEG, WebP or GIF), not "${String(mimeType || "unknown type")}".` };
+  }
+  if (typeof data !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
+    return { error: "The photo is missing or is not base64 text." };
+  }
+  const bytes = Math.floor((data.length * 3) / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+  if (bytes &gt; MAX_IMAGE_BYTES) {
+    return { error: `The photo is ${(bytes / 1024 / 1024).toFixed(1)} MB; the limit is 5 MB.` };
+  }
+  return { dataUrl: `data:${mimeType};base64,${data}` };
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>// Checks a photo sent by the browser ...</code></td><td>Says what the file is for.</td></tr>
+<tr><td>2</td><td><code>export const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB</code></td><td>The size limit, 5 MB (5 × 1024 × 1024 bytes). Big photos are slow to send, slow for the model, and could fill the server's memory. <code>export</code> makes the value usable in other files (the tests use it).</td></tr>
+<tr><td>3</td><td><code>export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];</code></td><td>The four accepted <a class="term" href="glossary.html#mime-type">MIME types</a>, the same four as <code>MIME_TYPES</code> in <code>chef/photo-decoder.ts</code>.</td></tr>
+<tr><td>5</td><td><code>export type Upload = { mimeType?: unknown; data?: unknown };</code></td><td>The shape of what the browser sends. Both fields are <code>unknown</code> and optional (<code>?</code>) on purpose: data from the network could be anything, and <code>unknown</code> forces the code to check a value before using it.</td></tr>
+<tr><td>7–8</td><td><code>export function checkUpload({ mimeType, data }: Upload): { dataUrl: string } | { error: string } {</code></td><td>Takes the two fields (taken apart right in the parameter list) and returns <em>either</em> a data URL <em>or</em> an error message. The <code>|</code> means "one of these two shapes". Returning an error instead of throwing makes the caller handle both cases.</td></tr>
+<tr><td>9–11</td><td><code>if (typeof mimeType !== "string" || !IMAGE_TYPES.includes(mimeType)) {<br>  return { error: `Please send a photo (PNG, JPEG, WebP or GIF), not "${...}".` };</code></td><td>Refuses anything that is not one of the four types. The message names what was received, so a PDF gives <code>Please send a photo (PNG, JPEG, WebP or GIF), not "application/pdf".</code> (we saw exactly this answer from the running server).</td></tr>
+<tr><td>12–14</td><td><code>if (typeof data !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {</code></td><td>Checks that <code>data</code> is <a class="term" href="glossary.html#base64">base64</a> text: only letters, digits, <code>+</code> and <code>/</code>, with at most two <code>=</code> at the end. A full data URL (with <code>data:image/png;base64,</code> in front) fails this test; the browser removes that prefix before sending.</td></tr>
+<tr><td>15</td><td><code>const bytes = Math.floor((data.length * 3) / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);</code></td><td>Works out the photo's real size without decoding it: every 4 base64 characters carry 3 bytes, and each <code>=</code> at the end is padding. This is the 33% growth from step 11, run backwards.</td></tr>
+<tr><td>16–18</td><td><code>if (bytes &gt; MAX_IMAGE_BYTES) {<br>  return { error: `The photo is ${...toFixed(1)} MB; the limit is 5 MB.` };</code></td><td>Refuses photos over 5 MB with a message that gives the size. <code>toFixed(1)</code> keeps one decimal.</td></tr>
+<tr><td>19</td><td><code>return { dataUrl: `data:${mimeType};base64,${data}` };</code></td><td>Builds the <a class="term" href="glossary.html#data-url">data URL</a> that the image message needs, as in <a href="11-multimodal-images.html">step 11</a>.</td></tr>
+</table></div>
+
+<h2>The server: <code>server/agent.ts</code></h2>
+<p>This file creates the two model parts once, when the server starts: the ingredient decoder and the chef agent. It reuses the chef's code from <code>chef/</code> and the model switch from <code>src/models.ts</code>.</p>
+<pre data-file="server/agent.ts" data-lang="ts" data-tag="complete file"><code>// The two models behind the web app:
+// 1. the vision model lists what it sees in the fridge photo,
+// 2. the chef agent (text model + web search + memory per conversation) turns that list into a recipe.
+import { MemorySaver } from "@langchain/langgraph";
+import { createAgent } from "langchain";
+import { buildDataUrlMessage } from "../chef/photo-decoder.js";
+import { webSearch } from "../chef/tools.js";
+import { getModel, getVisionModel } from "../src/models.js";
+
+const INGREDIENTS_PROMPT =
+  "List the food ingredients you can see in this photo, one per line, with no other text. " +
+  "If you see no food, answer: none.";
+
+/** Ask the vision model which ingredients are in the photo. */
+export async function decodeIngredients(dataUrl: string): Promise&lt;string&gt; {
+  const answer = await getVisionModel().invoke([buildDataUrlMessage(dataUrl, INGREDIENTS_PROMPT)]);
+  return answer.text.trim();
+}
+
+export const chefAgent = createAgent({
+  model: getModel(),
+  tools: [webSearch],
+  systemPrompt:
+    "You are the best chef in the world. You receive the list of ingredients found in a fridge photo. " +
+    "Search online for a recipe that only needs these ingredients, then give the recipe: a title, " +
+    "the ingredients with quantities, and numbered steps. Answer follow-up questions about it briefly.",
+  checkpointer: new MemorySaver(), // one memory per conversation (thread_id), kept while the server runs
+});</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–3</td><td><code>// The two models behind the web app: ...</code></td><td>A comment that names the two jobs.</td></tr>
+<tr><td>4</td><td><code>import { MemorySaver } from "@langchain/langgraph";</code></td><td>The in-memory <a class="term" href="glossary.html#checkpointer">checkpointer</a>, the JavaScript name for Python's <code>InMemorySaver</code> (step 10).</td></tr>
+<tr><td>5</td><td><code>import { createAgent } from "langchain";</code></td><td>The agent builder, the TypeScript twin of <code>create_agent</code>.</td></tr>
+<tr><td>6</td><td><code>import { buildDataUrlMessage } from "../chef/photo-decoder.js";</code></td><td>Builds a <a class="term" href="glossary.html#human-message">HumanMessage</a> with a text block and an image block, as in step 11. This is the fixed version: it sends the variable <code>prompt</code>, not the word "prompt". The import says <code>.js</code> although the file is <code>.ts</code>: in an <a class="term" href="glossary.html#esm">ES module</a> project, imports name the file as it will be after compiling, and <a class="term" href="glossary.html#tsx">tsx</a> maps it back.</td></tr>
+<tr><td>7</td><td><code>import { webSearch } from "../chef/tools.js";</code></td><td>The chef's <code>web_search</code> <a class="term" href="glossary.html#tool">tool</a>. Without <code>TAVILY_API_KEY</code> it answers "Web search is not configured (no TAVILY_API_KEY). Answer from what you already know." and the agent carries on.</td></tr>
+<tr><td>8</td><td><code>import { getModel, getVisionModel } from "../src/models.js";</code></td><td>The model switch. <code>getModel()</code> is the text model (<code>gpt-5-nano</code>, or <code>llama3.2</code> on Ollama); <code>getVisionModel()</code> is the model for photos (the same <code>gpt-5-nano</code>, or <code>gemma4</code> on Ollama). Importing <code>models.ts</code> also loads <code>.env</code>.</td></tr>
+<tr><td>10–12</td><td><code>const INGREDIENTS_PROMPT =<br>  "List the food ingredients you can see in this photo, one per line, with no other text. " +<br>  "If you see no food, answer: none.";</code></td><td>The question for the vision model. "One per line, with no other text" makes the answer easy to show and to pass on: <code>App.tsx</code> splits it at line breaks. The <code>+</code> joins two strings; note the space before the closing quote of the first one (the course's prompt bug was a missing space).</td></tr>
+<tr><td>14–15</td><td><code>export async function decodeIngredients(dataUrl: string): Promise&lt;string&gt; {</code></td><td>Takes the checked data URL and returns the list. <code>async</code> and <code>Promise&lt;string&gt;</code> mean the result arrives later; callers <code>await</code> it (<a class="term" href="glossary.html#async-await">async/await</a>).</td></tr>
+<tr><td>16</td><td><code>const answer = await getVisionModel().invoke([buildDataUrlMessage(dataUrl, INGREDIENTS_PROMPT)]);</code></td><td>Calls the vision model directly, not an agent: one message in, one answer out, no tools and no memory. That is all this job needs, and it is faster than an agent loop.</td></tr>
+<tr><td>17</td><td><code>return answer.text.trim();</code></td><td><code>.text</code> gives the answer as plain text whatever shape its content has; <code>trim()</code> removes spaces and blank lines at both ends.</td></tr>
+<tr><td>20</td><td><code>export const chefAgent = createAgent({</code></td><td>Builds the chef once, when the server starts, and exports it for <code>app.ts</code>.</td></tr>
+<tr><td>21</td><td><code>model: getModel(),</code></td><td>The <em>text</em> model. The chef never receives the photo, so it does not need vision.</td></tr>
+<tr><td>22</td><td><code>tools: [webSearch],</code></td><td>One tool, as in step 14.</td></tr>
+<tr><td>23–26</td><td><code>systemPrompt:<br>  "You are the best chef in the world. You receive the list of ingredients ..." + ...</code></td><td>A new <a class="term" href="glossary.html#system-prompt">system prompt</a>, because this chef gets a list, not a photo. It asks for a title, the ingredients with quantities and numbered steps, and for short answers to follow-up questions.</td></tr>
+<tr><td>27</td><td><code>checkpointer: new MemorySaver(), // one memory per conversation (thread_id) ...</code></td><td>Saves each conversation under its thread id, so a follow-up sees the ingredient list and the recipe. It lives in the server's memory: restarting <code>pnpm api</code> erases every conversation.</td></tr>
+</table></div>
+
+<h2>The server: <code>server/app.ts</code></h2>
+<p>This file defines the two endpoints and one helper, <code>relayChef</code>, that runs the chef and turns everything that happens into events for the browser.</p>
+<pre data-file="server/app.ts" data-lang="ts" data-tag="complete file"><code>// The web app's API. Two routes, both answer with a stream of Server-Sent Events:
+//   POST /api/photo  { threadId, mimeType, data }  data = the photo as base64 text (5 MB at most)
+//   POST /api/chat   { threadId, message }          a follow-up question in the same conversation
+// Events: "ingredients" (what the vision model saw), "token" (answer text), "tool_call", "tool_result",
+// "done" and "error". A bad photo gets a plain 400 answer with { error } instead.
+import { isAIMessage, isToolMessage, type BaseMessage } from "@langchain/core/messages";
+import { Hono } from "hono";
+import { streamSSE, type SSEStreamingApi } from "hono/streaming";
+import { CHEF_PROMPT } from "../chef/prompt.js";
+import { log } from "../src/logger.js";
+import { chefAgent, decodeIngredients } from "./agent.js";
+import { checkUpload, type Upload } from "./upload.js";
+
+type Send = (event: string, data: unknown) =&gt; Promise&lt;void&gt;;
+
+/** Run the chef and forward what happens to the browser, step by step. */
+async function relayChef(send: Send, text: string, threadId: string) {
+  const stream = await chefAgent.stream(
+    { messages: [{ role: "user", content: text }] },
+    {
+      configurable: { thread_id: threadId },
+      streamMode: ["messages", "updates"], // tokens as they are written, and each finished step
+    },
+  );
+  for await (const [mode, chunk] of stream) {
+    if (mode === "messages") {
+      const [token, meta] = chunk;
+      // Only text the model writes; tool results also pass through this stream.
+      if (meta.langgraph_node === "model_request" &amp;&amp; token.text) await send("token", token.text);
+      continue;
+    }
+    for (const update of Object.values(chunk)) {
+      const messages = (update as { messages?: BaseMessage[] } | undefined)?.messages ?? [];
+      for (const m of messages) {
+        if (isAIMessage(m)) {
+          for (const call of m.tool_calls ?? []) await send("tool_call", { id: call.id, name: call.name, args: call.args });
+        } else if (isToolMessage(m)) {
+          await send("tool_result", { id: m.tool_call_id, name: m.name, content: m.text });
+        }
+      }
+    }
+  }
+}
+
+/** Open the event stream, run the work, and always finish with "done" or "error". */
+function events(sse: SSEStreamingApi, work: (send: Send) =&gt; Promise&lt;void&gt;) {
+  const send: Send = (event, data) =&gt; sse.writeSSE({ event, data: JSON.stringify(data) });
+  return work(send).then(
+    () =&gt; send("done", {}),
+    (error: Error) =&gt; {
+      log.warning(error.message);
+      return send("error", error.message);
+    },
+  );
+}
+
+export const app = new Hono();
+
+app.post("/api/photo", async (c) =&gt; {
+  const { threadId, ...upload } = await c.req.json&lt;Upload &amp; { threadId: string }&gt;();
+  const checked = checkUpload(upload);
+  if ("error" in checked) return c.json({ error: checked.error }, 400);
+
+  return streamSSE(c, (sse) =&gt;
+    events(sse, async (send) =&gt; {
+      log.info("decoding the photo...");
+      const ingredients = await decodeIngredients(checked.dataUrl);
+      await send("ingredients", ingredients);
+      log.info("asking the chef...");
+      await relayChef(send, `Ingredients seen in my fridge photo:\n${ingredients}\n\n${CHEF_PROMPT}`, threadId);
+    }),
+  );
+});
+
+app.post("/api/chat", async (c) =&gt; {
+  const { threadId, message } = await c.req.json&lt;{ threadId: string; message: string }&gt;();
+  return streamSSE(c, (sse) =&gt; events(sse, (send) =&gt; relayChef(send, message, threadId)));
+});</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–5</td><td><code>// The web app's API. Two routes, ...</code></td><td>A summary of both endpoints, their request bodies and the six event types. Worth keeping at the top of any server file.</td></tr>
+<tr><td>6</td><td><code>import { isAIMessage, isToolMessage, type BaseMessage } from "@langchain/core/messages";</code></td><td>Two checks that tell what kind of message an object is, and the common message type. <code>type</code> marks an import used only for type checking; it disappears at run time.</td></tr>
+<tr><td>7</td><td><code>import { Hono } from "hono";</code></td><td>The web framework.</td></tr>
+<tr><td>8</td><td><code>import { streamSSE, type SSEStreamingApi } from "hono/streaming";</code></td><td><code>streamSSE</code> builds a response that stays open and carries Server-Sent Events; <code>SSEStreamingApi</code> is the type of the object you write events with.</td></tr>
+<tr><td>9</td><td><code>import { CHEF_PROMPT } from "../chef/prompt.js";</code></td><td>The course's request text, <code>"please find me a good recipe to cook"</code>.</td></tr>
+<tr><td>10</td><td><code>import { log } from "../src/logger.js";</code></td><td>The small logger that prints <code>date time | INFO | message</code> to the server's terminal, like the course's <a class="term" href="glossary.html#logging">logging</a> setup.</td></tr>
+<tr><td>11</td><td><code>import { chefAgent, decodeIngredients } from "./agent.js";</code></td><td>The two parts built in the previous file.</td></tr>
+<tr><td>12</td><td><code>import { checkUpload, type Upload } from "./upload.js";</code></td><td>The photo check and the shape of an upload.</td></tr>
+<tr><td>14</td><td><code>type Send = (event: string, data: unknown) =&gt; Promise&lt;void&gt;;</code></td><td>A name for the type of the "send one event" function: it takes an event name and any data, and finishes later. Naming it keeps the next lines short.</td></tr>
+<tr><td>16–17</td><td><code>async function relayChef(send: Send, text: string, threadId: string) {</code></td><td>Runs the chef on one text message in one conversation and forwards what happens. Both endpoints use it.</td></tr>
+<tr><td>18–19</td><td><code>const stream = await chefAgent.stream(<br>  { messages: [{ role: "user", content: text }] },</code></td><td>Starts the agent in streaming mode with one user message. A plain object with <code>role: "user"</code> works the same as a <code>HumanMessage</code>. Thanks to the checkpointer, the earlier messages of this thread are added automatically.</td></tr>
+<tr><td>20–23</td><td><code>{<br>  configurable: { thread_id: threadId },<br>  streamMode: ["messages", "updates"],</code></td><td>Which conversation this is, and two stream modes at once: <code>"messages"</code> gives each token as the model writes it; <code>"updates"</code> gives what each step added once the step is finished (the AI message with its tool calls, the tool's result).</td></tr>
+<tr><td>25</td><td><code>for await (const [mode, chunk] of stream) {</code></td><td>Reads the stream piece by piece; <code>for await</code> waits for each piece. With two modes, every piece is a pair: the mode name and its data.</td></tr>
+<tr><td>26–27</td><td><code>if (mode === "messages") {<br>  const [token, meta] = chunk;</code></td><td>A <code>"messages"</code> piece is itself a pair: a message fragment and metadata about where it came from.</td></tr>
+<tr><td>29</td><td><code>if (meta.langgraph_node === "model_request" &amp;&amp; token.text) await send("token", token.text);</code></td><td>Forwards only text written by the model. <code>model_request</code> is the name of the model step in a <code>createAgent</code> graph; tool results also pass through this stream and would otherwise look like the chef's words. Empty fragments (for example while the model writes a tool call) are skipped.</td></tr>
+<tr><td>30</td><td><code>continue;</code></td><td>Done with this piece; go to the next one.</td></tr>
+<tr><td>32</td><td><code>for (const update of Object.values(chunk)) {</code></td><td>An <code>"updates"</code> piece is an object of the form <code>{ stepName: whatTheStepAdded }</code>. We do not care which step it was, only what it added.</td></tr>
+<tr><td>33</td><td><code>const messages = (update as { messages?: BaseMessage[] } | undefined)?.messages ?? [];</code></td><td>Gets the new messages of that step, or an empty list. <code>as</code> tells TypeScript the shape; <code>?.</code> and <code>??</code> handle steps that add nothing.</td></tr>
+<tr><td>34–36</td><td><code>for (const m of messages) {<br>  if (isAIMessage(m)) {<br>    for (const call of m.tool_calls ?? []) await send("tool_call", { id: call.id, name: call.name, args: call.args });</code></td><td>When the model's message asks for tools, send one <code>tool_call</code> event per call, with its <code>id</code>. The id is what links a call to its result later.</td></tr>
+<tr><td>37–38</td><td><code>} else if (isToolMessage(m)) {<br>  await send("tool_result", { id: m.tool_call_id, name: m.name, content: m.text });</code></td><td>When a tool has run, send its result with <code>tool_call_id</code>, the id of the call it answers.</td></tr>
+<tr><td>45–46</td><td><code>function events(sse: SSEStreamingApi, work: (send: Send) =&gt; Promise&lt;void&gt;) {</code></td><td>A wrapper for both endpoints: it gives the work a <code>send</code> function and makes sure every stream ends properly.</td></tr>
+<tr><td>47</td><td><code>const send: Send = (event, data) =&gt; sse.writeSSE({ event, data: JSON.stringify(data) });</code></td><td>Writes one event. <code>JSON.stringify</code> turns any value into text, and turns line breaks inside it into <code>\n</code>, so each event's data stays on one line, which is what the browser code expects. The ingredient list has line breaks, so this matters.</td></tr>
+<tr><td>48–54</td><td><code>return work(send).then(<br>  () =&gt; send("done", {}),<br>  (error: Error) =&gt; { log.warning(error.message); return send("error", error.message); },<br>);</code></td><td><code>.then</code> with two functions: the first runs if the work succeeded and sends <code>done</code>; the second runs if it failed (a model that is not running, a missing key) and logs the message in the server terminal and sends it as an <code>error</code> event. Either way the browser learns that the run is over.</td></tr>
+<tr><td>57</td><td><code>export const app = new Hono();</code></td><td>Creates the web app. It is exported so <code>index.ts</code> can start it and the tests can call it without a real network (<code>app.request(...)</code>).</td></tr>
+<tr><td>59</td><td><code>app.post("/api/photo", async (c) =&gt; {</code></td><td>Registers the photo endpoint. <code>c</code> is the request context.</td></tr>
+<tr><td>60</td><td><code>const { threadId, ...upload } = await c.req.json&lt;Upload &amp; { threadId: string }&gt;();</code></td><td>Reads the JSON body. <code>threadId</code> is taken out, and <code>...upload</code> collects the rest (<code>mimeType</code> and <code>data</code>). The type in angle brackets only informs TypeScript; the real check is the next line.</td></tr>
+<tr><td>61–62</td><td><code>const checked = checkUpload(upload);<br>if ("error" in checked) return c.json({ error: checked.error }, 400);</code></td><td>A bad photo gets a normal JSON answer with status <code>400</code> ("bad request"), not a stream. <code>"error" in checked</code> also tells TypeScript that after this line <code>checked</code> has a <code>dataUrl</code>.</td></tr>
+<tr><td>64–65</td><td><code>return streamSSE(c, (sse) =&gt;<br>  events(sse, async (send) =&gt; {</code></td><td>Opens the event stream and runs the work below inside <code>events</code>.</td></tr>
+<tr><td>66–68</td><td><code>log.info("decoding the photo...");<br>const ingredients = await decodeIngredients(checked.dataUrl);<br>await send("ingredients", ingredients);</code></td><td>Asks the vision model for the list and sends it to the browser straight away, before the chef starts. The visitor sees "Seen in the photo" while the recipe is still being written.</td></tr>
+<tr><td>69–70</td><td><code>log.info("asking the chef...");<br>await relayChef(send, `Ingredients seen in my fridge photo:\n${ingredients}\n\n${CHEF_PROMPT}`, threadId);</code></td><td>Builds the chef's message with a template string: a heading, the list, a blank line, and the course's request. <code>\n</code> is a line break. This text, not the photo, is what the chef and its memory receive.</td></tr>
+<tr><td>75–77</td><td><code>app.post("/api/chat", async (c) =&gt; {<br>  const { threadId, message } = await c.req.json&lt;...&gt;();<br>  return streamSSE(c, (sse) =&gt; events(sse, (send) =&gt; relayChef(send, message, threadId)));</code></td><td>The follow-up endpoint: the same chef, the same thread id, a new question. Because of the checkpointer, the chef sees the ingredient list and its own recipe from before.</td></tr>
+</table></div>
+
+<h3>What travels over the wire for one photo</h3>
+<figure class="diagram">
+<svg viewBox="0 0 760 470" role="img" aria-label="Sequence of one photo request: the browser posts to /api/photo, the server checks it, asks the vision model, sends the ingredients event, streams the chef agent, which calls web_search; the server sends tool_call and tool_result events, then token events, then done">
+  <rect class="box" x="15" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="75" y="30" text-anchor="middle">browser</text>
+  <rect class="box" x="165" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="225" y="30" text-anchor="middle">server (app.ts)</text>
+  <rect class="box" x="315" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="375" y="30" text-anchor="middle">vision model</text>
+  <rect class="box" x="465" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="525" y="30" text-anchor="middle">chef agent</text>
+  <rect class="box" x="620" y="10" width="120" height="30" rx="8"/>
+  <text class="label" x="680" y="30" text-anchor="middle">web_search</text>
+  <path class="line dashed" d="M75,40 V455"/>
+  <path class="line dashed" d="M225,40 V455"/>
+  <path class="line dashed" d="M375,40 V455"/>
+  <path class="line dashed" d="M525,40 V455"/>
+  <path class="line dashed" d="M680,40 V455"/>
+  <path class="arrow" d="M75,70 H221"/>
+  <text class="small" x="150" y="64" text-anchor="middle">1 POST /api/photo</text>
+  <rect class="box-info" x="170" y="82" width="110" height="24" rx="8"/>
+  <text class="small" x="225" y="98" text-anchor="middle">2 checkUpload</text>
+  <path class="arrow" d="M225,136 H371"/>
+  <text class="small" x="300" y="130" text-anchor="middle">3 photo + prompt</text>
+  <path class="arrow" d="M375,166 H229"/>
+  <text class="small" x="300" y="160" text-anchor="middle">4 the list</text>
+  <path class="arrow-accent" d="M225,196 H79"/>
+  <text class="small" x="150" y="190" text-anchor="middle">5 event: ingredients</text>
+  <path class="arrow" d="M225,226 H521"/>
+  <text class="small" x="450" y="220" text-anchor="middle">6 stream(list)</text>
+  <path class="arrow" d="M525,256 H676"/>
+  <text class="small" x="602" y="250" text-anchor="middle">7 web_search(query)</text>
+  <path class="arrow-accent" d="M225,286 H79"/>
+  <text class="small" x="150" y="280" text-anchor="middle">8 event: tool_call</text>
+  <path class="arrow" d="M680,316 H529"/>
+  <text class="small" x="602" y="310" text-anchor="middle">9 not configured…</text>
+  <path class="arrow-accent" d="M225,346 H79"/>
+  <text class="small" x="150" y="340" text-anchor="middle">10 event: tool_result</text>
+  <path class="arrow" d="M525,376 H229"/>
+  <text class="small" x="450" y="370" text-anchor="middle">11 tokens</text>
+  <path class="arrow-accent" d="M225,406 H79"/>
+  <text class="small" x="150" y="400" text-anchor="middle">12 event: token (many)</text>
+  <path class="arrow-ok" d="M225,440 H79"/>
+  <text class="small" x="150" y="434" text-anchor="middle">13 event: done</text>
+</svg>
+<figcaption>Time flows down. The browser makes one request and receives many events on the same open response. In our <code>curl</code> run the stream carried 1 <code>ingredients</code> event, 1 <code>tool_call</code>, 1 <code>tool_result</code>, 417 <code>token</code> events and <code>done</code>. Message 9 is the no-key answer; with <code>TAVILY_API_KEY</code> set it would be real search results. <strong>The ingredients arrive first, long before the recipe.</strong></figcaption>
+</figure>
+
+<h2>The server: <code>server/index.ts</code></h2>
+<p>The entry point that <code>pnpm api</code> runs. It only starts the app from <code>app.ts</code> on a port.</p>
+<pre data-file="server/index.ts" data-lang="ts" data-tag="complete file"><code>// A small HTTP server for the web app. Run: pnpm api  (then pnpm web in a second terminal)
+import { serve } from "@hono/node-server";
+import { app } from "./app.js";
+
+const port = Number(process.env.PORT ?? 8787);
+serve({ fetch: app.fetch, port });
+console.log(`FastEat chef API on http://localhost:${port}`);</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>// A small HTTP server for the web app. Run: pnpm api ...</code></td><td>How to run it, and that the web app needs a second terminal.</td></tr>
+<tr><td>2</td><td><code>import { serve } from "@hono/node-server";</code></td><td>Runs a <a class="term" href="glossary.html#hono">Hono</a> app on Node.js's built-in HTTP server. Hono also runs elsewhere (Deno, Bun, edge platforms); this adapter is the Node part.</td></tr>
+<tr><td>3</td><td><code>import { app } from "./app.js";</code></td><td>The app with its two endpoints. Importing it also runs <code>agent.ts</code>, which creates the models and loads <code>.env</code>.</td></tr>
+<tr><td>5</td><td><code>const port = Number(process.env.PORT ?? 8787);</code></td><td>The port: the <code>PORT</code> environment variable if set, otherwise 8787. If you change it, change the proxy in <code>web/vite.config.ts</code> too.</td></tr>
+<tr><td>6</td><td><code>serve({ fetch: app.fetch, port });</code></td><td>Starts listening. <code>app.fetch</code> is the function that answers each request.</td></tr>
+<tr><td>7</td><td><code>console.log(`FastEat chef API on http://localhost:${port}`);</code></td><td>The line you see in the terminal when the server is ready.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/vite.config.ts</code></h2>
+<p><a class="term" href="glossary.html#vite">Vite</a> is the development server for the front end. It turns the <code>.tsx</code> files into
+JavaScript the browser can run, reloads the page when you save a file, and here also forwards API requests to the chef server.</p>
+<pre data-file="web/vite.config.ts" data-lang="ts" data-tag="complete file"><code>import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  root: import.meta.dirname,
+  plugins: [react()],
+  server: {
+    port: 5173,
+    // The browser talks to Vite only; Vite forwards /api to the agent server, so no CORS setup is needed.
+    proxy: { "/api": "http://localhost:8787" },
+  },
+});</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import react from "@vitejs/plugin-react";</code></td><td>Vite's React plugin: it handles JSX and makes edits to components show up without a full page reload.</td></tr>
+<tr><td>2</td><td><code>import { defineConfig } from "vite";</code></td><td>A helper that gives your editor auto-completion and type checks for the config object.</td></tr>
+<tr><td>4</td><td><code>export default defineConfig({</code></td><td>Vite reads the default export of this file.</td></tr>
+<tr><td>5</td><td><code>root: import.meta.dirname,</code></td><td>The app's root folder is the folder of this file, <code>web/</code>, where <code>index.html</code> lives. <code>import.meta.dirname</code> is the ES-module way to get the current folder in Node.js.</td></tr>
+<tr><td>6</td><td><code>plugins: [react()],</code></td><td>Turns the React plugin on.</td></tr>
+<tr><td>7–8</td><td><code>server: {<br>  port: 5173,</code></td><td>The dev server's port, the address you open in the browser.</td></tr>
+<tr><td>9–10</td><td><code>proxy: { "/api": "http://localhost:8787" },</code></td><td>Every request whose path starts with <code>/api</code> is forwarded to the Hono server. For the browser, the page and the API come from the same address, so no cross-origin (CORS) rules apply and the server needs no CORS setup.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/index.html</code> and <code>web/src/main.tsx</code></h2>
+<p>The HTML page is almost empty. React fills it in.</p>
+<pre data-file="web/index.html" data-lang="html" data-tag="complete file"><code>&lt;!doctype html&gt;
+&lt;html lang="en"&gt;
+  &lt;head&gt;
+    &lt;meta charset="utf-8" /&gt;
+    &lt;meta name="viewport" content="width=device-width, initial-scale=1" /&gt;
+    &lt;title&gt;FastEat Chef&lt;/title&gt;
+  &lt;/head&gt;
+  &lt;body&gt;
+    &lt;div id="root"&gt;&lt;/div&gt;
+    &lt;script type="module" src="/src/main.tsx"&gt;&lt;/script&gt;
+  &lt;/body&gt;
+&lt;/html&gt;</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>&lt;!doctype html&gt;<br>&lt;html lang="en"&gt;</code></td><td>A modern HTML page in English (the language helps screen readers).</td></tr>
+<tr><td>4–5</td><td><code>&lt;meta charset="utf-8" /&gt;<br>&lt;meta name="viewport" ... /&gt;</code></td><td>Text encoding, and the line that makes the page use the real screen width on phones.</td></tr>
+<tr><td>6</td><td><code>&lt;title&gt;FastEat Chef&lt;/title&gt;</code></td><td>The browser tab's title.</td></tr>
+<tr><td>9</td><td><code>&lt;div id="root"&gt;&lt;/div&gt;</code></td><td>The empty box React draws the whole app into.</td></tr>
+<tr><td>10</td><td><code>&lt;script type="module" src="/src/main.tsx"&gt;&lt;/script&gt;</code></td><td>Loads the app's entry file. Browsers cannot run TypeScript; Vite converts <code>main.tsx</code> to JavaScript when the browser asks for it.</td></tr>
+</table></div>
+
+<pre data-file="web/src/main.tsx" data-lang="tsx" data-tag="complete file"><code>import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./styles.css";
+
+createRoot(document.getElementById("root")!).render(
+  &lt;StrictMode&gt;
+    &lt;App /&gt;
+  &lt;/StrictMode&gt;,
+);</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { StrictMode } from "react";</code></td><td>A wrapper that turns on extra checks during development, to catch common mistakes early. It does nothing in a production build.</td></tr>
+<tr><td>2</td><td><code>import { createRoot } from "react-dom/client";</code></td><td>The function that connects React to a real element of the page.</td></tr>
+<tr><td>3</td><td><code>import App from "./App";</code></td><td>The main <a class="term" href="glossary.html#react-component">component</a>. No extension is needed here: Vite (and the <code>"Bundler"</code> setting in <code>web/tsconfig.json</code>) find <code>App.tsx</code>.</td></tr>
+<tr><td>4</td><td><code>import "./styles.css";</code></td><td>Importing a CSS file is a Vite feature: it adds the styles to the page.</td></tr>
+<tr><td>6</td><td><code>createRoot(document.getElementById("root")!).render(</code></td><td>Finds the <code>&lt;div id="root"&gt;</code> from <code>index.html</code> and draws into it. The <code>!</code> says "this element exists", because <code>getElementById</code> could return <code>null</code>.</td></tr>
+<tr><td>7–9</td><td><code>&lt;StrictMode&gt;<br>  &lt;App /&gt;<br>&lt;/StrictMode&gt;,</code></td><td>Draws the <code>App</code> component inside <code>StrictMode</code>. This is JSX, which is why the file ends in <code>.tsx</code>.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/src/sse.ts</code></h2>
+<p>The browser has a built-in reader for Server-Sent Events, <code>EventSource</code>, but it can only send GET requests without a body.
+Our endpoints need a JSON body (the photo is in it), so this file sends a POST with <code>fetch</code> and reads the event stream itself.</p>
+<pre data-file="web/src/sse.ts" data-lang="ts" data-tag="complete file"><code>// POST a JSON body and read the Server-Sent Events that come back.
+// (The browser's EventSource only does GET requests, so we read the stream ourselves.)
+export type AgentEvent =
+  | { event: "ingredients"; data: string }
+  | { event: "token"; data: string }
+  | { event: "tool_call"; data: { id: string; name: string; args: Record&lt;string, unknown&gt; } }
+  | { event: "tool_result"; data: { id: string; name: string; content: string } }
+  | { event: "done"; data: Record&lt;string, never&gt; }
+  | { event: "error"; data: string };
+
+export async function postEvents(url: string, body: unknown, onEvent: (e: AgentEvent) =&gt; void) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) {
+    // A refused photo comes back as { error: "..." }.
+    const problem = await response.json().catch(() =&gt; null) as { error?: string } | null;
+    throw new Error(problem?.error ?? `Server answered ${response.status}`);
+  }
+
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    // Events are separated by a blank line; each has "event: ..." and "data: ..." lines.
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop()!; // the last piece may be incomplete: keep it for the next read
+    for (const block of blocks) {
+      const event = block.match(/^event: (.*)$/m)?.[1];
+      const data = block.match(/^data: (.*)$/m)?.[1];
+      if (event &amp;&amp; data !== undefined) onEvent({ event, data: JSON.parse(data) } as AgentEvent);
+    }
+  }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>// POST a JSON body and read the Server-Sent Events that come back. ...</code></td><td>Says why this file exists instead of using <code>EventSource</code>.</td></tr>
+<tr><td>3–9</td><td><code>export type AgentEvent =<br>  | { event: "ingredients"; data: string }<br>  | { event: "token"; data: string }<br>  | ...</code></td><td>One type that lists the six events the server can send and the shape of each one's data. This kind of type (a "discriminated union") lets TypeScript know, inside <code>case "tool_call":</code>, that <code>data</code> has <code>id</code>, <code>name</code> and <code>args</code>. It must match what <code>server/app.ts</code> sends.</td></tr>
+<tr><td>11</td><td><code>export async function postEvents(url: string, body: unknown, onEvent: (e: AgentEvent) =&gt; void) {</code></td><td>Takes the address, the body to send, and a function to call for every event that arrives. The promise it returns finishes when the stream ends.</td></tr>
+<tr><td>12–16</td><td><code>const response = await fetch(url, {<br>  method: "POST",<br>  headers: { "content-type": "application/json" },<br>  body: JSON.stringify(body),<br>});</code></td><td>Sends the request. The <code>content-type</code> header tells the server the body is JSON.</td></tr>
+<tr><td>17–21</td><td><code>if (!response.ok || !response.body) {<br>  const problem = await response.json().catch(() =&gt; null) as { error?: string } | null;<br>  throw new Error(problem?.error ?? `Server answered ${response.status}`);</code></td><td>If the server answered with an error status, try to read its JSON. A refused photo comes back as <code>{ error: "..." }</code>, and that sentence becomes the error message. If the body is not JSON (<code>.catch(() =&gt; null)</code>), the message is just the status, for example <code>Server answered 502</code>.</td></tr>
+<tr><td>23</td><td><code>const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();</code></td><td>The body arrives as bytes, in pieces. <code>TextDecoderStream</code> turns the bytes into text, and the reader hands out the text pieces one by one.</td></tr>
+<tr><td>24</td><td><code>let buffer = "";</code></td><td>Holds text that has arrived but does not yet form a complete event.</td></tr>
+<tr><td>25–27</td><td><code>for (;;) {<br>  const { value, done } = await reader.read();<br>  if (done) break;</code></td><td>A loop with no condition: read the next piece, and leave the loop when the server closes the stream.</td></tr>
+<tr><td>28</td><td><code>buffer += value;</code></td><td>Adds the new text to whatever was left over.</td></tr>
+<tr><td>30</td><td><code>const blocks = buffer.split(/\r?\n\r?\n/);</code></td><td>Cuts the text at blank lines, the separator between events. <code>\r?</code> also accepts Windows-style line endings.</td></tr>
+<tr><td>31</td><td><code>buffer = blocks.pop()!;</code></td><td>The last piece may be an event cut in half by the network. Keep it for the next read instead of parsing it now.</td></tr>
+<tr><td>32–34</td><td><code>for (const block of blocks) {<br>  const event = block.match(/^event: (.*)$/m)?.[1];<br>  const data = block.match(/^data: (.*)$/m)?.[1];</code></td><td>Reads the event type and the data from their lines. The <code>m</code> flag makes <code>^</code> and <code>$</code> match at the start and end of each line; <code>?.[1]</code> gives <code>undefined</code> if the line is missing.</td></tr>
+<tr><td>35</td><td><code>if (event &amp;&amp; data !== undefined) onEvent({ event, data: JSON.parse(data) } as AgentEvent);</code></td><td>Turns the JSON text back into a value (the ingredient list gets its line breaks back) and hands the event to the app. <code>as AgentEvent</code> trusts that the server sent one of the six known shapes.</td></tr>
+</table></div>
+
+<h2>The web app: <code>web/src/App.tsx</code></h2>
+<p>The whole user interface is one <a class="term" href="glossary.html#react-component">component</a>. Read it in five parts: the helpers
+before the component (lines 4–20), the state (23–31), the event handler <code>handle</code> (37–59), the actions (61–111), and the JSX
+that draws the page (117–179).</p>
+<pre data-file="web/src/App.tsx" data-lang="tsx" data-tag="complete file"><code>import { useRef, useState, type DragEvent, type FormEvent } from "react";
+import { postEvents, type AgentEvent } from "./sse";
+
+type Message = { role: "user" | "assistant"; text: string; image?: string; ingredients?: string };
+type Step = { id: string; name: string; args: Record&lt;string, unknown&gt;; result?: string };
+type Photo = { file: File; preview: string };
+
+// The same rules as the server (server/upload.ts), so mistakes show up before the upload.
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const MAX_BYTES = 5 * 1024 * 1024;
+
+/** The file's bytes as base64 text (what the server expects). */
+function readAsBase64(file: File): Promise&lt;string&gt; {
+  return new Promise((resolve, reject) =&gt; {
+    const reader = new FileReader();
+    reader.onload = () =&gt; resolve(String(reader.result).split(",")[1]); // drop the "data:...;base64," part
+    reader.onerror = () =&gt; reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+export default function App() {
+  const [threadId, setThreadId] = useState(() =&gt; crypto.randomUUID()); // one memory per conversation
+  const [messages, setMessages] = useState&lt;Message[]&gt;([]);
+  const [steps, setSteps] = useState&lt;Step[]&gt;([]);
+  const [photo, setPhoto] = useState&lt;Photo | null&gt;(null);
+  const [problem, setProblem] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const picker = useRef&lt;HTMLInputElement&gt;(null); // the hidden file input behind "Choose a photo"
+
+  // Change only the last message (the answer being written).
+  const updateLast = (change: (m: Message) =&gt; Message) =&gt;
+    setMessages((all) =&gt; [...all.slice(0, -1), change(all[all.length - 1])]);
+
+  function handle(e: AgentEvent) {
+    switch (e.event) {
+      case "ingredients":
+        updateLast((m) =&gt; ({ ...m, ingredients: e.data }));
+        break;
+      case "token":
+        updateLast((m) =&gt; ({ ...m, text: m.text + e.data }));
+        break;
+      case "tool_call": {
+        const call = e.data;
+        setSteps((all) =&gt; (all.some((s) =&gt; s.id === call.id) ? all : [...all, call]));
+        break;
+      }
+      case "tool_result": {
+        const result = e.data;
+        setSteps((all) =&gt; all.map((s) =&gt; (s.id === result.id ? { ...s, result: result.content } : s)));
+        break;
+      }
+      case "error":
+        updateLast((m) =&gt; ({ ...m, text: `${m.text}\n[Error: ${e.data}]` }));
+        break;
+    }
+  }
+
+  async function run(url: string, body: unknown, question: Message) {
+    setBusy(true);
+    setMessages((all) =&gt; [...all, question, { role: "assistant", text: "" }]);
+    try {
+      await postEvents(url, body, handle);
+    } catch (error) {
+      handle({ event: "error", data: (error as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function choose(file: File | undefined) {
+    if (!file) return;
+    if (!IMAGE_TYPES.includes(file.type)) return setProblem("Please choose a photo (PNG, JPEG, WebP or GIF).");
+    if (file.size &gt; MAX_BYTES) return setProblem(`This photo is ${(file.size / 1024 / 1024).toFixed(1)} MB; the limit is 5 MB.`);
+    setProblem("");
+    if (photo) URL.revokeObjectURL(photo.preview);
+    setPhoto({ file, preview: URL.createObjectURL(file) });
+  }
+
+  function drop(event: DragEvent) {
+    event.preventDefault();
+    setDragging(false);
+    choose(event.dataTransfer.files[0]);
+  }
+
+  async function sendPhoto() {
+    if (!photo || busy) return;
+    const data = await readAsBase64(photo.file);
+    void run("/api/photo", { threadId, mimeType: photo.file.type, data }, {
+      role: "user", text: "What can I cook with this?", image: photo.preview,
+    });
+    setPhoto(null); // the preview URL stays alive: the message shows it
+  }
+
+  function send(event: FormEvent) {
+    event.preventDefault();
+    const text = input.trim();
+    if (!text || busy) return;
+    setInput("");
+    void run("/api/chat", { threadId, message: text }, { role: "user", text });
+  }
+
+  function newConversation() {
+    setThreadId(crypto.randomUUID());
+    setMessages([]);
+    setSteps([]);
+    setPhoto(null);
+    setProblem("");
+  }
+
+  // What an answer shows before its first word arrives.
+  const placeholder = (m: Message, isLast: boolean) =&gt;
+    isLast &amp;&amp; busy ? (m.ingredients ? "Looking for a recipe…" : "Looking at your photo…") : "";
+
+  return (
+    &lt;div className="page"&gt;
+      &lt;header&gt;
+        &lt;div&gt;
+          &lt;p className="eyebrow"&gt;FastEat&lt;/p&gt;
+          &lt;h1&gt;What can I cook from my fridge?&lt;/h1&gt;
+        &lt;/div&gt;
+        &lt;button className="ghost" onClick={newConversation} disabled={busy}&gt;New conversation&lt;/button&gt;
+      &lt;/header&gt;
+
+      &lt;main&gt;
+        &lt;section className="chat" aria-label="Conversation"&gt;
+          &lt;div
+            className={`drop ${dragging ? "over" : ""}`}
+            onDragOver={(e) =&gt; { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() =&gt; setDragging(false)}
+            onDrop={drop}
+          &gt;
+            {photo ? (
+              &lt;img className="preview" src={photo.preview} alt="The fridge photo you chose" /&gt;
+            ) : (
+              &lt;p&gt;Drop a photo of your fridge here, or&lt;/p&gt;
+            )}
+            &lt;div className="row"&gt;
+              &lt;button type="button" className="ghost" onClick={() =&gt; picker.current?.click()} disabled={busy}&gt;
+                {photo ? "Choose another" : "Choose a photo"}
+              &lt;/button&gt;
+              &lt;input ref={picker} type="file" accept={IMAGE_TYPES.join(",")} hidden
+                onChange={(e) =&gt; { choose(e.target.files?.[0]); e.target.value = ""; }} /&gt;
+              {photo &amp;&amp; &lt;button onClick={() =&gt; void sendPhoto()} disabled={busy}&gt;Find a recipe&lt;/button&gt;}
+            &lt;/div&gt;
+            {problem &amp;&amp; &lt;p className="problem" role="alert"&gt;{problem}&lt;/p&gt;}
+          &lt;/div&gt;
+
+          {messages.map((m, i) =&gt; (
+            &lt;article key={i} className={`bubble ${m.role}`}&gt;
+              {m.image &amp;&amp; &lt;img className="thumb" src={m.image} alt="Your fridge photo" /&gt;}
+              {m.ingredients &amp;&amp; &lt;p className="seen"&gt;&lt;strong&gt;Seen in the photo:&lt;/strong&gt; {m.ingredients.split("\n").join(", ")}&lt;/p&gt;}
+              &lt;p&gt;{m.text || placeholder(m, i === messages.length - 1)}&lt;/p&gt;
+            &lt;/article&gt;
+          ))}
+
+          &lt;form onSubmit={send}&gt;
+            &lt;input value={input} onChange={(e) =&gt; setInput(e.target.value)} placeholder="Ask the chef a follow-up question" disabled={busy} /&gt;
+            &lt;button disabled={busy || !input.trim()}&gt;Send&lt;/button&gt;
+          &lt;/form&gt;
+        &lt;/section&gt;
+
+        &lt;aside aria-label="What the chef did"&gt;
+          &lt;h2&gt;What the chef did&lt;/h2&gt;
+          {steps.length === 0 &amp;&amp; &lt;p className="muted"&gt;Web searches appear here as they happen.&lt;/p&gt;}
+          &lt;ol&gt;
+            {steps.map((s) =&gt; (
+              &lt;li key={s.id}&gt;
+                &lt;code&gt;{s.name}({JSON.stringify(s.args)})&lt;/code&gt;
+                {s.result !== undefined ? &lt;pre&gt;{s.result}&lt;/pre&gt; : &lt;span className="muted"&gt; running…&lt;/span&gt;}
+              &lt;/li&gt;
+            ))}
+          &lt;/ol&gt;
+        &lt;/aside&gt;
+      &lt;/main&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { useRef, useState, type DragEvent, type FormEvent } from "react";</code></td><td>Two <a class="term" href="glossary.html#react-hook">hooks</a>: <code>useState</code> gives the component memory between redraws, <code>useRef</code> keeps a reference to a page element. <code>DragEvent</code> and <code>FormEvent</code> are the types of a drop and of a form submit.</td></tr>
+<tr><td>2</td><td><code>import { postEvents, type AgentEvent } from "./sse";</code></td><td>The stream reader and the event type from the previous file.</td></tr>
+<tr><td>4</td><td><code>type Message = { role: "user" | "assistant"; text: string; image?: string; ingredients?: string };</code></td><td>One chat bubble: who wrote it and its text, plus two optional fields (<code>?</code>): the photo's preview address for the user's photo message, and the ingredient list for the answer to a photo.</td></tr>
+<tr><td>5</td><td><code>type Step = { id: string; name: string; args: Record&lt;string, unknown&gt;; result?: string };</code></td><td>One line of the "What the chef did" panel: a tool call and, once it has run, its result. <code>Record&lt;string, unknown&gt;</code> means "an object with any keys".</td></tr>
+<tr><td>6</td><td><code>type Photo = { file: File; preview: string };</code></td><td>The photo chosen but not sent yet: the file itself and a local address to show it.</td></tr>
+<tr><td>8–10</td><td><code>const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];<br>const MAX_BYTES = 5 * 1024 * 1024;</code></td><td>The same rules as <code>server/upload.ts</code>. Checking in the browser too gives an instant, friendly message; the server still checks, because a browser can be bypassed.</td></tr>
+<tr><td>12–13</td><td><code>function readAsBase64(file: File): Promise&lt;string&gt; {</code></td><td>Turns the file into base64 text, which is what the server expects.</td></tr>
+<tr><td>14–19</td><td><code>return new Promise((resolve, reject) =&gt; {<br>  const reader = new FileReader();<br>  reader.onload = () =&gt; resolve(String(reader.result).split(",")[1]);<br>  reader.onerror = () =&gt; reject(reader.error);<br>  reader.readAsDataURL(file);</code></td><td><code>FileReader</code> is an older browser API that reports back through callbacks (<code>onload</code>, <code>onerror</code>). Wrapping it in <code>new Promise</code> lets the rest of the code simply <code>await</code> it. <code>readAsDataURL</code> gives <code>data:image/png;base64,...</code>; <code>split(",")[1]</code> keeps only the part after the comma.</td></tr>
+<tr><td>22</td><td><code>export default function App() {</code></td><td>The component. React calls this function every time the state changes, and draws what it returns.</td></tr>
+<tr><td>23</td><td><code>const [threadId, setThreadId] = useState(() =&gt; crypto.randomUUID());</code></td><td>The conversation id, sent with every request so the server's checkpointer finds this conversation's memory. Passing a function means a new id is made only once, on the first draw.</td></tr>
+<tr><td>24–25</td><td><code>const [messages, setMessages] = useState&lt;Message[]&gt;([]);<br>const [steps, setSteps] = useState&lt;Step[]&gt;([]);</code></td><td>The chat bubbles and the tool calls of the side panel. <code>&lt;Message[]&gt;</code> tells TypeScript what the list will hold, since it starts empty.</td></tr>
+<tr><td>26</td><td><code>const [photo, setPhoto] = useState&lt;Photo | null&gt;(null);</code></td><td>The chosen photo, or <code>null</code> when none is waiting to be sent.</td></tr>
+<tr><td>27</td><td><code>const [problem, setProblem] = useState("");</code></td><td>The message shown when a file is refused (wrong type, too big).</td></tr>
+<tr><td>28</td><td><code>const [dragging, setDragging] = useState(false);</code></td><td><code>true</code> while a file is dragged over the drop zone, to highlight it.</td></tr>
+<tr><td>29–30</td><td><code>const [input, setInput] = useState("");<br>const [busy, setBusy] = useState(false);</code></td><td>The text of the follow-up box, and whether a request is running (used to disable the buttons).</td></tr>
+<tr><td>31</td><td><code>const picker = useRef&lt;HTMLInputElement&gt;(null);</code></td><td>A reference to the hidden file input. Changing a ref does not redraw the page; it is just a handle to the element, so the "Choose a photo" button can open its file dialog.</td></tr>
+<tr><td>33–35</td><td><code>const updateLast = (change: (m: Message) =&gt; Message) =&gt;<br>  setMessages((all) =&gt; [...all.slice(0, -1), change(all[all.length - 1])]);</code></td><td>Changes only the last bubble (the answer being written). It builds a new list (all bubbles but the last, plus a changed copy of the last) instead of editing the old one: React notices a change only when it gets a <em>new</em> object. Passing a function to <code>setMessages</code> gives the latest list, which matters because hundreds of token events arrive quickly.</td></tr>
+<tr><td>37–38</td><td><code>function handle(e: AgentEvent) {<br>  switch (e.event) {</code></td><td>Called once per event from the server. The <code>switch</code> picks the code for each event type.</td></tr>
+<tr><td>39–41</td><td><code>case "ingredients":<br>  updateLast((m) =&gt; ({ ...m, ingredients: e.data }));</code></td><td>Stores the vision model's list on the answer bubble, which then shows the "Seen in the photo" box. <code>{ ...m, ingredients: ... }</code> copies the bubble and sets one field.</td></tr>
+<tr><td>42–44</td><td><code>case "token":<br>  updateLast((m) =&gt; ({ ...m, text: m.text + e.data }));</code></td><td>Adds the new piece of text to the answer. This is what makes the recipe appear word by word.</td></tr>
+<tr><td>45–49</td><td><code>case "tool_call": {<br>  const call = e.data;<br>  setSteps((all) =&gt; (all.some((s) =&gt; s.id === call.id) ? all : [...all, call]));</code></td><td>Adds the tool call to the side panel, unless a step with the same id is already listed (a guard against showing one call twice).</td></tr>
+<tr><td>50–54</td><td><code>case "tool_result": {<br>  const result = e.data;<br>  setSteps((all) =&gt; all.map((s) =&gt; (s.id === result.id ? { ...s, result: result.content } : s)));</code></td><td>Finds the step with the same id and attaches the result to it. This is why ids matter: the id pairs each result with its call, even if the chef makes several searches.</td></tr>
+<tr><td>55–57</td><td><code>case "error":<br>  updateLast((m) =&gt; ({ ...m, text: `${m.text}\n[Error: ${e.data}]` }));</code></td><td>Shows the error at the end of the answer. There is no <code>case "done"</code>: the end of the stream is handled by <code>finally</code> on line 68.</td></tr>
+<tr><td>61</td><td><code>async function run(url: string, body: unknown, question: Message) {</code></td><td>Starts one request: a photo or a follow-up. <code>question</code> is the user's bubble to show.</td></tr>
+<tr><td>62–63</td><td><code>setBusy(true);<br>setMessages((all) =&gt; [...all, question, { role: "assistant", text: "" }]);</code></td><td>Disables the inputs, then adds the user's bubble and an empty answer bubble that the events will fill.</td></tr>
+<tr><td>64–67</td><td><code>try {<br>  await postEvents(url, body, handle);<br>} catch (error) {<br>  handle({ event: "error", data: (error as Error).message });</code></td><td>Sends the request and calls <code>handle</code> for each event. If the request itself fails (a refused photo, the server not running), the message is shown like any other error.</td></tr>
+<tr><td>68–70</td><td><code>} finally {<br>  setBusy(false);</code></td><td>Whatever happened, re-enable the inputs.</td></tr>
+<tr><td>73–74</td><td><code>function choose(file: File | undefined) {<br>  if (!file) return;</code></td><td>Called with the file from the dialog or from a drop. No file (the dialog was cancelled) means nothing to do.</td></tr>
+<tr><td>75</td><td><code>if (!IMAGE_TYPES.includes(file.type)) return setProblem("Please choose a photo (PNG, JPEG, WebP or GIF).");</code></td><td>Refuses other file types with a message. <code>return setProblem(...)</code> is a short way to show the message and stop.</td></tr>
+<tr><td>76</td><td><code>if (file.size &gt; MAX_BYTES) return setProblem(`This photo is ${...} MB; the limit is 5 MB.`);</code></td><td>Refuses files over 5 MB and says how big the file is.</td></tr>
+<tr><td>77–79</td><td><code>setProblem("");<br>if (photo) URL.revokeObjectURL(photo.preview);<br>setPhoto({ file, preview: URL.createObjectURL(file) });</code></td><td>Clears any old message and keeps the file. <code>URL.createObjectURL</code> makes a temporary <code>blob:</code> address so an <code>&lt;img&gt;</code> can show the file before anything is uploaded; <code>revokeObjectURL</code> frees the previous one.</td></tr>
+<tr><td>82–86</td><td><code>function drop(event: DragEvent) {<br>  event.preventDefault();<br>  setDragging(false);<br>  choose(event.dataTransfer.files[0]);</code></td><td>Runs when a file is dropped. <code>preventDefault</code> stops the browser's default, which is to open the file in the tab. Only the first dropped file is used.</td></tr>
+<tr><td>88–90</td><td><code>async function sendPhoto() {<br>  if (!photo || busy) return;<br>  const data = await readAsBase64(photo.file);</code></td><td>Runs on <strong>Find a recipe</strong>: reads the photo as base64.</td></tr>
+<tr><td>91–93</td><td><code>void run("/api/photo", { threadId, mimeType: photo.file.type, data }, {<br>  role: "user", text: "What can I cook with this?", image: photo.preview,<br>});</code></td><td>Sends the photo with its type and the thread id. The user's bubble shows a thumbnail and the text "What can I cook with this?". <code>void</code> says "I am not awaiting this on purpose"; errors are handled inside <code>run</code>.</td></tr>
+<tr><td>94</td><td><code>setPhoto(null);</code></td><td>Resets the drop zone. The preview address is not revoked here, because the thumbnail in the chat still uses it.</td></tr>
+<tr><td>97–103</td><td><code>function send(event: FormEvent) {<br>  event.preventDefault();<br>  ...<br>  void run("/api/chat", { threadId, message: text }, { role: "user", text });</code></td><td>The follow-up form (Send button or <kbd>Enter</kbd>). <code>preventDefault</code> stops the browser from reloading the page on submit. Empty questions and double sends are ignored, the box is cleared, and the question goes to <code>/api/chat</code> in the same thread.</td></tr>
+<tr><td>105–111</td><td><code>function newConversation() {<br>  setThreadId(crypto.randomUUID());<br>  ...</code></td><td>A fresh thread id means a fresh memory on the server. The screen is cleared too. The old conversation still exists in the server's memory, but nothing points to it any more.</td></tr>
+<tr><td>113–115</td><td><code>const placeholder = (m: Message, isLast: boolean) =&gt;<br>  isLast &amp;&amp; busy ? (m.ingredients ? "Looking for a recipe…" : "Looking at your photo…") : "";</code></td><td>What the last answer shows before its first word: "Looking at your photo…" until the ingredient list arrives, then "Looking for a recipe…". Two <code>? :</code> (conditional) expressions, one inside the other.</td></tr>
+<tr><td>117–125</td><td><code>return (<br>  &lt;div className="page"&gt;<br>    &lt;header&gt; ... &lt;/header&gt;</code></td><td>The JSX the component draws. In JSX, the HTML attribute <code>class</code> is written <code>className</code>. The header holds the "FastEat" eyebrow, the title and the New conversation button, disabled while busy.</td></tr>
+<tr><td>127–128</td><td><code>&lt;main&gt;<br>  &lt;section className="chat" aria-label="Conversation"&gt;</code></td><td>The chat column. <code>aria-label</code> names the region for screen readers.</td></tr>
+<tr><td>129–134</td><td><code>&lt;div className={`drop ${dragging ? "over" : ""}`}<br>  onDragOver={(e) =&gt; { e.preventDefault(); setDragging(true); }}<br>  onDragLeave={...} onDrop={drop}&gt;</code></td><td>The drop zone. Curly braces put TypeScript inside JSX; here they add the class <code>over</code> while a file is dragged over it. <code>preventDefault</code> in <code>onDragOver</code> is required: without it the browser does not allow a drop here.</td></tr>
+<tr><td>135–139</td><td><code>{photo ? ( &lt;img className="preview" ... /&gt; ) : ( &lt;p&gt;Drop a photo of your fridge here, or&lt;/p&gt; )}</code></td><td>Shows the chosen photo, or the invitation text when none is chosen. <code>alt</code> describes the image for screen readers.</td></tr>
+<tr><td>141–143</td><td><code>&lt;button type="button" className="ghost" onClick={() =&gt; picker.current?.click()} ...&gt;<br>  {photo ? "Choose another" : "Choose a photo"}</code></td><td>A real button that opens the file dialog by clicking the hidden input through the ref. Being a button, it can be reached with <kbd>Tab</kbd> and pressed with <kbd>Enter</kbd>. <code>type="button"</code> keeps it from acting as a submit button.</td></tr>
+<tr><td>144–145</td><td><code>&lt;input ref={picker} type="file" accept={IMAGE_TYPES.join(",")} hidden<br>  onChange={(e) =&gt; { choose(e.target.files?.[0]); e.target.value = ""; }} /&gt;</code></td><td>The hidden file input. <code>accept</code> makes the dialog show images first. After a choice, the value is cleared so choosing the same file again still fires <code>onChange</code>.</td></tr>
+<tr><td>146</td><td><code>{photo &amp;&amp; &lt;button onClick={() =&gt; void sendPhoto()} disabled={busy}&gt;Find a recipe&lt;/button&gt;}</code></td><td><code>condition &amp;&amp; (...)</code> draws the element only when the condition is true: the Find a recipe button exists only once a photo is chosen.</td></tr>
+<tr><td>148</td><td><code>{problem &amp;&amp; &lt;p className="problem" role="alert"&gt;{problem}&lt;/p&gt;}</code></td><td>The refusal message, if any. <code>role="alert"</code> makes screen readers announce it.</td></tr>
+<tr><td>151–157</td><td><code>{messages.map((m, i) =&gt; (<br>  &lt;article key={i} className={`bubble ${m.role}`}&gt; ...</code></td><td>One bubble per message, styled <code>bubble user</code> or <code>bubble assistant</code>. <code>map</code> turns the list of data into a list of elements; <code>key</code> lets React tell them apart. Line 153 shows the thumbnail; line 154 the "Seen in the photo:" box, with the list's lines joined by commas; line 155 the text, or the placeholder.</td></tr>
+<tr><td>159–162</td><td><code>&lt;form onSubmit={send}&gt;<br>  &lt;input value={input} onChange={(e) =&gt; setInput(e.target.value)} ... /&gt;<br>  &lt;button disabled={busy || !input.trim()}&gt;Send&lt;/button&gt;</code></td><td>The follow-up box. It is a "controlled" input: its text comes from state, and every keystroke updates the state. Send is disabled while busy or when the box is empty.</td></tr>
+<tr><td>165–176</td><td><code>&lt;aside aria-label="What the chef did"&gt;<br>  ...<br>  {steps.map((s) =&gt; ( &lt;li key={s.id}&gt; ...</code></td><td>The side panel. With no steps yet it says "Web searches appear here as they happen." Then one list item per tool call, keyed by its id: the call as <code>name({...args})</code>, and the result in a <code>&lt;pre&gt;</code>, or "running…" until it arrives.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="React state flow: server events go into handle, which calls setMessages or setSteps; choosing a file calls choose, which sets photo and problem; React redraws the chat bubbles, the side panel and the drop zone; button clicks call run, which posts to the server">
+  <rect class="box-info" x="20" y="20" width="150" height="46" rx="8"/>
+  <text x="95" y="40" text-anchor="middle">server events</text>
+  <text class="small" x="95" y="56" text-anchor="middle">via postEvents</text>
+  <rect class="box-solid" x="220" y="20" width="130" height="46" rx="8"/>
+  <text class="on-solid mono" x="285" y="48" text-anchor="middle">handle(e)</text>
+  <path class="arrow" d="M170,43 H216"/>
+  <rect class="box" x="400" y="14" width="170" height="30" rx="8"/>
+  <text class="small" x="485" y="34" text-anchor="middle">ingredients, token, error</text>
+  <rect class="box" x="400" y="54" width="170" height="30" rx="8"/>
+  <text class="small" x="485" y="74" text-anchor="middle">tool_call, tool_result</text>
+  <path class="arrow" d="M350,36 L396,30"/>
+  <path class="arrow" d="M350,52 L396,66"/>
+  <rect class="box2" x="590" y="14" width="150" height="30" rx="8"/>
+  <text class="small mono" x="665" y="34" text-anchor="middle">messages</text>
+  <rect class="box2" x="590" y="54" width="150" height="30" rx="8"/>
+  <text class="small mono" x="665" y="74" text-anchor="middle">steps</text>
+  <path class="arrow" d="M570,29 H586"/>
+  <path class="arrow" d="M570,69 H586"/>
+  <rect class="box" x="200" y="100" width="170" height="30" rx="8"/>
+  <text class="small" x="285" y="120" text-anchor="middle">file picked → choose()</text>
+  <rect class="box2" x="590" y="100" width="150" height="30" rx="8"/>
+  <text class="small mono" x="665" y="120" text-anchor="middle">photo, problem</text>
+  <path class="arrow" d="M370,115 H586"/>
+  <text class="small" x="665" y="146" text-anchor="middle">state (useState)</text>
+  <path class="arrow-accent" d="M665,152 V176"/>
+  <text class="small accent" x="677" y="168">React redraws</text>
+  <rect class="box-ok" x="400" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="455" y="204" text-anchor="middle">chat bubbles</text>
+  <rect class="box-ok" x="515" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="570" y="204" text-anchor="middle">side panel</text>
+  <rect class="box-ok" x="630" y="180" width="110" height="40" rx="8"/>
+  <text class="small" x="685" y="204" text-anchor="middle">drop zone</text>
+  <rect class="box-warn" x="20" y="180" width="320" height="40" rx="8"/>
+  <text class="small" x="180" y="204" text-anchor="middle">Find a recipe → sendPhoto(), Send → send()</text>
+  <path class="arrow" d="M396,200 H344"/>
+  <path class="arrow" d="M95,180 V70"/>
+  <text class="small" x="105" y="150">run(url, body)</text>
+  <text class="small" x="105" y="166">POSTs to the server</text>
+  <text class="small" x="20" y="256">The JSX never changes the page directly. It only reads state; events and clicks only change state.</text>
+  <text class="small" x="20" y="274">One loop: event → setter → redraw → click → request → more events.</text>
+</svg>
+<figcaption>Data flows in one direction: events and file choices change state, state decides what is drawn, and clicks start new requests. <strong>To change what the page shows, change the state, never the HTML.</strong></figcaption>
+</figure>
+
+<h2>The web app: <code>web/src/styles.css</code></h2>
+<p>Plain CSS, no framework. You do not need to understand it to follow the app; here is what each group of lines does.</p>
+<pre data-file="web/src/styles.css" data-lang="css" data-tag="complete file"><code>:root {
+  --bg: #f6f5f1; --surface: #ffffff; --text: #1f2321; --muted: #5c6560; --border: #dfe2dc;
+  --accent: #2f7a4b; --accent-text: #ffffff; --user: #e4f2e8; --note: #fff4dc; --danger: #b3261e;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121614; --surface: #1a201d; --text: #e7ece9; --muted: #9eaaa3; --border: #2c3631;
+    --accent: #6cc58e; --accent-text: #0d1410; --user: #1d3326; --note: #2e2816; --danger: #f2948c;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, "Segoe UI", Roboto, sans-serif; }
+.page { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+header { display: flex; justify-content: space-between; align-items: end; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.eyebrow { margin: 0; color: var(--accent); font-weight: 600; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; }
+h1 { margin: 2px 0 0; font-size: 1.6rem; }
+h2 { margin: 0 0 12px; font-size: 1rem; }
+main { display: grid; gap: 20px; grid-template-columns: 1fr; }
+@media (min-width: 860px) { main { grid-template-columns: 3fr 2fr; } }
+.chat, aside { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+.chat { display: flex; flex-direction: column; gap: 12px; }
+.drop { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; border: 2px dashed var(--border); border-radius: 12px; text-align: center; color: var(--muted); }
+.drop.over { border-color: var(--accent); background: var(--user); }
+.drop p { margin: 0; }
+.preview { max-width: 100%; max-height: 220px; border-radius: 8px; object-fit: contain; }
+.problem { color: var(--danger); font-weight: 600; }
+.bubble { max-width: 85%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble p { margin: 0; }
+.bubble.user { align-self: flex-end; background: var(--user); }
+.bubble.assistant { align-self: flex-start; border: 1px solid var(--border); }
+.thumb { display: block; max-width: 160px; max-height: 120px; border-radius: 6px; margin-bottom: 6px; }
+.seen { margin-bottom: 8px !important; padding: 6px 10px; border-radius: 8px; background: var(--note); font-size: 14px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+form { display: flex; gap: 8px; margin-top: auto; }
+input { flex: 1; min-width: 0; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+aside ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; }
+code { font: 13px ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+aside pre { margin: 4px 0 0; padding: 8px; max-height: 160px; overflow: auto; background: var(--bg); border-radius: 6px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.muted { color: var(--muted); font-size: 14px; }</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–5</td><td><code>:root { --bg: ...; --accent: ...; color-scheme: light; }</code></td><td>Colour variables for the light theme. Every rule below uses <code>var(--name)</code>, so the colours are defined in one place. <code>color-scheme</code> tells the browser to draw its own controls (scroll bars, file dialog button) in matching colours.</td></tr>
+<tr><td>6–12</td><td><code>@media (prefers-color-scheme: dark) { :root { ... } }</code></td><td>The same variables with dark colours, used automatically when the computer is in dark mode.</td></tr>
+<tr><td>13–14</td><td><code>* { box-sizing: border-box; }<br>body { ... }</code></td><td>Sizes include padding and borders; page background, text colour and font.</td></tr>
+<tr><td>15–21</td><td><code>.page</code>, <code>header</code>, <code>.eyebrow</code>, <code>h1</code>, <code>h2</code>, <code>main { display: grid; ... }</code></td><td>Layout: a centred page, a header with the button on the right, and a grid that becomes two columns (chat 3 parts, side panel 2 parts) on screens at least 860 px wide. Below that, one column.</td></tr>
+<tr><td>22–23</td><td><code>.chat, aside { ... }</code>, <code>.chat { display: flex; flex-direction: column; ... }</code></td><td>The two cards, and the chat column stacked from top to bottom.</td></tr>
+<tr><td>24–28</td><td><code>.drop</code>, <code>.drop.over</code>, <code>.preview</code>, <code>.problem</code></td><td>The dashed drop zone, its highlighted look while a file is dragged over it, the preview (at most 220 px high) and the red refusal message.</td></tr>
+<tr><td>29–34</td><td><code>.bubble</code>, <code>.bubble.user</code>, <code>.bubble.assistant</code>, <code>.thumb</code>, <code>.seen</code></td><td>Chat bubbles: user on the right, answers on the left. <code>white-space: pre-wrap</code> keeps the line breaks the model writes. The thumbnail in the user's bubble and the "Seen in the photo" box in a note colour.</td></tr>
+<tr><td>35</td><td><code>.row { ... }</code></td><td>The row of buttons under the drop zone.</td></tr>
+<tr><td>36–41</td><td><code>form</code>, <code>input</code>, <code>button</code>, <code>button.ghost</code>, <code>button:disabled</code>, <code>:focus-visible</code></td><td>The follow-up form stays at the bottom of the chat (<code>margin-top: auto</code>); inputs and buttons get the theme colours, a dimmed look when disabled, and a visible outline for keyboard users.</td></tr>
+<tr><td>42–45</td><td><code>aside ol</code>, <code>code</code>, <code>aside pre</code>, <code>.muted</code></td><td>The side panel: the numbered list of tool calls, monospace code, and result boxes that scroll after 160 px.</td></tr>
+</table></div>
+
+<h2>Configuration: <code>web/tsconfig.json</code> and <code>package.json</code></h2>
+<p>The browser code has its own TypeScript settings, because it runs in a different place than the server: it has the DOM (the
+page's elements) instead of Node.js, and Vite, not Node.js, resolves its imports.</p>
+<pre data-file="web/tsconfig.json" data-lang="json" data-tag="complete file"><code>{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "vite.config.ts"]
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3</td><td><code>"target": "ES2023",</code></td><td>Which JavaScript version the type checker assumes. Modern browsers support it.</td></tr>
+<tr><td>4–5</td><td><code>"module": "ESNext",<br>"moduleResolution": "Bundler",</code></td><td>Imports are resolved the way a bundler like Vite does it, which is why <code>./App</code> works without an extension. The server's <code>tsconfig.json</code> uses Node's rules instead, which require the <code>.js</code> extensions you saw in <code>server/</code>.</td></tr>
+<tr><td>6</td><td><code>"jsx": "react-jsx",</code></td><td>Understands JSX in <code>.tsx</code> files, using React's modern JSX transform (no need to import React in every file).</td></tr>
+<tr><td>7</td><td><code>"lib": ["ES2023", "DOM", "DOM.Iterable"],</code></td><td>Makes browser types available: <code>document</code>, <code>fetch</code>, <code>FileReader</code>, <code>TextDecoderStream</code>, <code>crypto.randomUUID</code>.</td></tr>
+<tr><td>8</td><td><code>"types": ["vite/client"],</code></td><td>Vite's own types, for example so that <code>import "./styles.css"</code> type-checks.</td></tr>
+<tr><td>9</td><td><code>"strict": true,</code></td><td>The strict checks, as in the rest of the project. They are why the code needs <code>!</code> after <code>getElementById</code>.</td></tr>
+<tr><td>10</td><td><code>"noEmit": true,</code></td><td>TypeScript only checks; Vite does the converting.</td></tr>
+<tr><td>11</td><td><code>"skipLibCheck": true</code></td><td>Skips checking the type files of installed packages, which is faster and avoids errors you could not fix anyway.</td></tr>
+<tr><td>13</td><td><code>"include": ["src", "vite.config.ts"]</code></td><td>The files to check: the app and the Vite config. <code>pnpm typecheck</code> runs <code>tsc -p web</code> with this file.</td></tr>
+</table></div>
+
+<p>Last, the project's <code>package.json</code>. For this page the scripts and the web packages matter most.</p>
+<pre data-file="package.json" data-lang="json" data-tag="complete file"><code>{
+  "name": "fasteat-agent-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lesson": "tsx scripts/run.ts lesson",
+    "chef": "tsx scripts/run.ts chef",
+    "api": "tsx server/index.ts",
+    "web": "vite web",
+    "build:web": "vite build web",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit &amp;&amp; tsc --noEmit -p web"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.4"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@langchain/core": "1.2.17",
+    "@langchain/langgraph": "1.5.0",
+    "@langchain/ollama": "1.3.0",
+    "@langchain/openai": "1.6.2",
+    "@langchain/tavily": "1.2.0",
+    "dotenv": "18.0.7",
+    "hono": "4.13.13",
+    "langchain": "1.5.16",
+    "zod": "4.6.7"
+  },
+  "engines": {
+    "node": "&gt;=22"
+  }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>5</td><td><code>"type": "module",</code></td><td>Every <code>.ts</code> and <code>.js</code> file in the project is an <a class="term" href="glossary.html#esm">ES module</a> (<code>import</code>/<code>export</code>, top-level <code>await</code>).</td></tr>
+<tr><td>7–8</td><td><code>"lesson": "tsx scripts/run.ts lesson",<br>"chef": "tsx scripts/run.ts chef",</code></td><td>The commands of the earlier steps (<code>pnpm lesson 11 data/fridge.png</code>, <code>pnpm chef data/fridge.png</code>).</td></tr>
+<tr><td>9</td><td><code>"api": "tsx server/index.ts",</code></td><td><code>pnpm api</code>: starts the Hono server on port 8787 with <a class="term" href="glossary.html#tsx">tsx</a>, which runs TypeScript directly without a build step.</td></tr>
+<tr><td>10</td><td><code>"web": "vite web",</code></td><td><code>pnpm web</code>: starts the Vite dev server with <code>web/</code> as its folder.</td></tr>
+<tr><td>11</td><td><code>"build:web": "vite build web",</code></td><td>Builds the app into static files in <code>web/dist</code> for production. Not needed to follow this page.</td></tr>
+<tr><td>12–13</td><td><code>"test": "vitest run",<br>"typecheck": "tsc --noEmit &amp;&amp; tsc --noEmit -p web"</code></td><td>The offline tests (<a class="term" href="glossary.html#vitest">Vitest</a>; they include the server end to end with a fake model, and a 400 for a non-image upload), and the type checks of the Node code and then of the web app. <code>&amp;&amp;</code> runs the second check only if the first passes.</td></tr>
+<tr><td>15–19</td><td><code>"pnpm": { "onlyBuiltDependencies": ["esbuild"] }</code></td><td><a class="term" href="glossary.html#pnpm">pnpm</a> does not run packages' install scripts unless you allow them. <code>esbuild</code> (used by tsx and Vite) needs its script to install its program.</td></tr>
+<tr><td>20–31</td><td><code>"devDependencies": { ... "react": "19.3.0", ... "vite": "8.3.4", ... }</code></td><td>Tools and the front-end packages: React, React DOM, Vite and its React plugin, TypeScript, tsx, Vitest, and type definitions. Exact versions, so your install matches ours.</td></tr>
+<tr><td>32–43</td><td><code>"dependencies": { "@hono/node-server": "2.1.5", ... "hono": "4.13.13", ... }</code></td><td>What the code needs at run time: the LangChain packages, Zod, dotenv, and for this page <code>hono</code> and <code>@hono/node-server</code>.</td></tr>
+<tr><td>44–46</td><td><code>"engines": { "node": "&gt;=22" }</code></td><td>The project needs Node.js 22 or newer (we used 24.15).</td></tr>
+</table></div>
+
+<h2>What you should see</h2>
+<div class="callout ok"><p><strong>What you should see.</strong> These are our real runs with <code>MODEL_PROVIDER=ollama</code> and no Tavily key. The wording of the answers will differ from ours.</p>
+<ul>
+<li><strong>With <code>curl</code></strong> (the photo <code>data/fridge.png</code> posted to <code>/api/photo</code>): an <code>ingredients</code> event with the 12 labelled items, one per line: MILK, EGGS, CHEESE, TOMATOES, SPINACH, CHICKEN, CARROTS, YOGURT, ONIONS, SOY SAUCE, BUTTER, LIME. Then a <code>tool_call</code> for <code>web_search</code> with <code>{"query":"recipe using milk eggs cheese tomatoes spinach chicken carrots yogurt onions soy sauce butter lime"}</code>, a <code>tool_result</code> with the no-key message, 417 <code>token</code> events and <code>done</code>. It took 79 seconds on a small laptop whose memory was nearly full, so do not take that time as typical.</li>
+<li><strong>In Chrome</strong>: the same flow. The "Seen in the photo" box filled first, the side panel showed the <code>web_search</code> call and the no-key message, and the chef (<code>llama3.2</code>) wrote "Chicken and Spinach Stir-Fry with Yogurt Sauce".</li>
+<li><strong>In the <code>pnpm api</code> terminal</strong>: log lines such as <code>... | INFO | decoding the photo...</code>, <code>... | INFO | asking the chef...</code> and <code>... | INFO | searching for ...</code>.</li>
+</ul>
+<p>The answer shows raw Markdown, such as <code>**Ingredients:**</code> with the asterisks. The model writes Markdown, and the app prints text as it is. Turning it into bold text and lists is a "try it yourself" idea below.</p></div>
+
+<div class="callout warn"><p><strong>Common problems.</strong></p>
+<ul>
+<li><strong>Why <code>pnpm api</code> and not <code>pnpm server</code>?</strong> pnpm has a built-in command called <code>server</code>, and
+built-in commands win over scripts with the same name: <code>pnpm server</code> runs pnpm's own command and exits without starting
+anything. Naming the script <code>api</code> avoids the clash.</li>
+<li><strong>Wrong file type or photo too big.</strong> The page checks first: a PDF shows "Please choose a photo (PNG, JPEG, WebP or GIF)." and a large file shows "This photo is … MB; the limit is 5 MB." under the drop zone, and nothing is sent. If something skips the page (a <code>curl</code> command, your own script), the server answers <code>400</code> with <code>{ "error": "..." }</code>, for example <code>Please send a photo (PNG, JPEG, WebP or GIF), not "application/pdf".</code>; in the page that sentence would appear as <code>[Error: ...]</code> in the answer bubble. Fix: send a PNG, JPEG, WebP or GIF under 5 MB (shrink large phone photos first).</li>
+<li><strong>Only <code>pnpm web</code> is running.</strong> The page loads, but every request ends with an error in the answer bubble, and the <code>pnpm web</code> terminal reports a proxy error, because Vite has nowhere to forward <code>/api</code>. Start <code>pnpm api</code> in the other terminal.</li>
+<li><strong>Port already in use.</strong> If <code>pnpm api</code> fails with <code>EADDRINUSE</code>, another program (often a server you
+started earlier and forgot) uses port 8787. Stop it, or start with another port (<code>PORT</code> variable) and change the proxy target in
+<code>web/vite.config.ts</code> to match. If 5173 is busy, Vite picks the next free port and prints it; open that address.</li>
+<li><strong>A model or key is missing.</strong> The server starts without calling any model, so it prints its address even if something is wrong. The problem shows when you send a photo: the answer bubble gets <code>[Error: ...]</code> and the server terminal a <code>WARNING</code> line. With OpenAI and no key, the message starts with <code>Missing credentials</code>; add <code>OPENAI_API_KEY</code> to <code>.env</code> or set <code>MODEL_PROVIDER=ollama</code>. With Ollama, check that it is running and that <code>ollama list</code> shows <code>gemma4</code> and <code>llama3.2</code>. Restart <code>pnpm api</code> after editing <code>.env</code>.</li>
+<li><strong>"Looking at your photo…" for a long time.</strong> On a computer without a strong graphics card, the vision model can take a while, and the chef too (our whole run took 79 seconds). Wait, or use a smaller photo.</li>
+<li><strong>The chef forgot the conversation.</strong> <code>MemorySaver</code> keeps conversations in the server's memory. Restarting <code>pnpm api</code> erases them all. Click New conversation and send the photo again.</li>
+<li><strong>Wrong ingredients.</strong> The sample fridge has printed labels, which makes it easy for a small vision model. A real photo is harder, and the model may miss or invent items. Check the "Seen in the photo" box before trusting the recipe.</li>
+</ul></div>
+
+<h2>Try it yourself</h2>
+<ol>
+<li><strong>Render the Markdown.</strong> Add a Markdown library such as <code>react-markdown</code> (<code>pnpm add react-markdown</code>) and use it for the answer text on line 155 of <code>App.tsx</code>, so <code>**Ingredients:**</code> becomes bold. (We did not add it; check the library's documentation for its current usage.)</li>
+<li><strong>Check memory.</strong> After a recipe, ask "Make it vegetarian, please." in the same conversation. Then click New conversation and ask the same question without a photo. The difference is the thread id.</li>
+<li><strong>Change the decoder's question.</strong> In <code>server/agent.ts</code>, change <code>INGREDIENTS_PROMPT</code> to also ask for quantities ("2 eggs"), restart <code>pnpm api</code>, and compare the "Seen in the photo" box.</li>
+<li><strong>Watch the raw events.</strong> Open the browser's developer tools (<kbd>F12</kbd>), tab Network, send a photo and click the
+<code>photo</code> request. You can see the events arrive one by one.</li>
+<li><strong>Add web search.</strong> Put a <code>TAVILY_API_KEY</code> in <code>.env</code>, restart <code>pnpm api</code>, and look at the side panel: the result box now holds real search results instead of the no-key message.</li>
+</ol>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>The app is two programs: a Hono server that owns the models and the agent (<code>pnpm api</code>, port 8787) and a React app served by Vite
+(<code>pnpm web</code>, port 5173), which forwards <code>/api</code> to the server.</li>
+<li>The browser sends the photo as base64 inside JSON. The page and the server both check type (PNG, JPEG, WebP, GIF) and size (5 MB); the server answers <code>400</code> with <code>{ error }</code> for a bad photo.</li>
+<li>A vision model lists the ingredients first; a text-only chef agent with <code>web_search</code> and <code>MemorySaver</code> turns the list into a recipe and answers follow-ups on the same thread.</li>
+<li>Everything comes back as Server-Sent Events: <code>ingredients</code>, <code>token</code>, <code>tool_call</code>, <code>tool_result</code>, then <code>done</code> or <code>error</code>. <code>sse.ts</code> reads them from a POST with <code>fetch</code>.</li>
+<li><code>App.tsx</code> keeps everything in <code>useState</code>; each event becomes a state change and React redraws the page. Tool calls and results are paired by id.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="19-switch-providers.html"><small>← Previous · Step 19</small>Switch Model Providers</a>
+<a class="next" href="index.html"><small>Done →</small>All steps</a>
+</nav>
+</main>
+</body>
+</html>
