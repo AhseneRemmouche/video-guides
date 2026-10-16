@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>19 · Week 4 Day 4 · Sidekick: a browsing agent with an evaluator loop</title>
+<meta name="description" content="Playwright browser tools, then a worker that browses and an evaluator with structured output that checks the work against your success criteria.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Agentic AI Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 19/30</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 19 of 30 · Week 4 · Day 4 · 5 lectures</div>
+  <h1>Week 4 Day 4 · Sidekick: a browsing agent with an evaluator loop</h1>
+  <p class="lead">Playwright browser tools, then a worker that browses and an evaluator with structured output that checks the work against your success criteria.</p>
+  <span class="video-link extra">Course lectures (Udemy) · code verified against the repo</span>
+</section>
+<h2>What this day builds</h2>
+<p>Two labs in one day. Lab 3 gives the chatbot a real web browser through <a class="term" href="glossary.html#playwright">Playwright</a>. Lab 4 turns it into the first Sidekick: a worker that uses the browser, and an <a class="term" href="glossary.html#evaluator">evaluator</a> that checks each answer against your own success criteria with a <a class="term" href="glossary.html#structured-output">structured output</a>, sending it back until it passes. "It's like we've built our own Operator, the agent from OpenAI." The presenter's mood has changed: "I'm actually becoming a serious fan of LangGraph… I'm suddenly feeling treacherous against OpenAI agents SDK."</p>
+<p data-only="ts">TypeScript: <code>pnpm lab3</code> and <code>pnpm lab4</code>. LangChain JS has no Playwright toolkit, so <code>src/browserTools.ts</code> writes the same seven tools on the <code>playwright</code> npm package. Run <code>pnpm exec playwright install chromium</code> once first.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Lecture</th><th>Length</th><th>What happens</th></tr>
+<tr><td>13 · Playwright</td><td>8:41</td><td>Async LangGraph, <code>nest_asyncio</code>, the seven browser tools.</td></tr>
+<tr><td>14 · A browsing assistant</td><td>8:03</td><td>Calling the tools directly on cnn.com; a chatbot that browses and sends push notifications.</td></tr>
+<tr><td>15 · Evaluator and structured outputs</td><td>9:16</td><td>Lab 4: <code>EvaluatorOutput</code>, a five-field State, <code>with_structured_output</code>, the worker prompt.</td></tr>
+<tr><td>16 · The feedback loop</td><td>10:28</td><td>Router functions, <code>format_conversation</code>, the evaluator node, the graph.</td></tr>
+<tr><td>17 · The Sidekick UI</td><td>8:49</td><td>A Gradio app with success criteria; an exchange-rate run and its trace.</td></tr>
+</table></div>
+
+<h2>Async, and why <code>nest_asyncio</code> (lecture 13)</h2>
+<p>Browser tools are asynchronous, so the graph is run asynchronously too. "Otherwise it's just the same": <code>tool.run(inputs)</code> becomes <code>await tool.arun(inputs)</code>, <code>graph.invoke(state)</code> becomes <code>await graph.ainvoke(state)</code>. In a notebook there is one complication. asyncio runs one event loop, the notebook is already running one, and Playwright needs another inside it. <code>nest_asyncio.apply()</code> patches asyncio to allow "an event loop within an event loop". "When we later put this into Python code, we actually won't need this anymore."</p>
+<div data-only="ts"><p>JavaScript has no such issue: everything is asynchronous already, so there is no sync/async pair of methods and nothing to patch.</p></div>
+<p>Playwright is Microsoft's browser automation, "the next generation of Selenium". It was made for testing, but it is widely used for scraping because it renders the page and runs its JavaScript, unlike a plain HTTP request. It can run <strong>headless</strong> (no window) or <strong>"headful"</strong>; the course runs headful so you can watch the agent work.</p>
+<pre data-lang="bash"><code>uv run playwright install                       # Mac and Windows
+uv run playwright install --with-deps chromium  # Linux and WSL</code></pre>
+<p>(The video's slide reads <code>-with-reps</code>, a typo for <code>--with-deps</code>.)</p>
+<div class="callout warn"><p><strong>Windows and notebooks.</strong> The repo's lab 3 warns that on Windows, Playwright inside a notebook can raise <code>NotImplementedError</code>. Its workaround edits the Jupyter kernel's own code; the simpler way out is Day 5, where the same code runs as plain Python files.</p></div>
+
+<h2>Seven browser tools (lectures 13–14)</h2>
+<p>LangChain's community package offers <code>PlayWrightBrowserToolkit</code>, "a lower level set of tools" with "quite granular control": <code>navigate_browser</code>, <code>extract_text</code>, <code>extract_hyperlinks</code>, <code>get_elements</code>, <code>click_element</code>, <code>current_webpage</code> and <code>previous_webpage</code>.</p>
+<div data-only="py"><pre data-file="3_lab3.ipynb · cell 8" data-lang="py" data-tag="notebook cell"><code># Introducing nest_asyncio
+# Python async code only allows for one "event loop" processing aynchronous events.
+# The `nest_asyncio` library patches this, and is used for special situations, if you need to run a nested event loop.
+
+import nest_asyncio
+nest_asyncio.apply()</code></pre></div>
+<div class="code-tabs"><pre data-file="3_lab3.ipynb · cell 10" data-lang="py" data-tag="notebook cell"><code>from langchain_community.agent_toolkits import PlayWrightBrowserToolkit
+from langchain_community.tools.playwright.utils import create_async_playwright_browser
+
+# If you get a NotImplementedError here or later, see the Heads Up at the top of the notebook
+
+async_browser =  create_async_playwright_browser(headless=False)  # headful mode
+toolkit = PlayWrightBrowserToolkit.from_browser(async_browser=async_browser)
+tools = toolkit.get_tools()</code></pre><pre data-file="src/lab3.ts" data-lang="ts" data-tag="excerpt · lines 13–24"><code>// The browser tools (headful like the course: a Chromium window opens; HEADLESS=true hides it)
+const { tools, browser } = await playwrightTools();
+for (const tool of tools) console.log(`${tool.name}=${tool.description}`);
+
+// Python builds tool_dict with a dict comprehension; Object.fromEntries is the JavaScript idiom
+const tool_dict = Object.fromEntries(tools.map((tool) =&gt; [tool.name, tool]));
+const navigate_tool = tool_dict["navigate_browser"];
+const extract_text_tool = tool_dict["extract_text"];
+
+console.log(await navigate_tool.invoke({ url: process.env.LAB3_URL ?? "https://www.cnn.com" }));
+const text = (await extract_text_tool.invoke({})) as string;
+console.log(text.slice(0, 600), "…"); // Python: print(textwrap.fill(text))</code></pre></div>
+<div data-only="py">
+<pre data-file="3_lab3.ipynb · cell 11" data-lang="py" data-tag="notebook cell"><code>for tool in tools:
+    print(f"{tool.name}={tool}")</code></pre>
+<pre data-file="3_lab3.ipynb · cell 12" data-lang="py" data-tag="notebook cell"><code>tool_dict = {tool.name:tool for tool in tools}
+
+navigate_tool = tool_dict.get("navigate_browser")
+extract_text_tool = tool_dict.get("extract_text")
+
+    
+await navigate_tool.arun({"url": "https://www.cnn.com"})
+text = await extract_text_tool.arun({})</code></pre>
+<p>A Chromium window opens on cnn.com. "This is all about running Microsoft Playwright with the tools that come with LangChain", no LLM involved yet. <code>{tool.name: tool for tool in tools}</code> is a dictionary comprehension that builds a name-to-tool lookup.</p>
+</div>
+<div data-only="ts">
+<p>The seven tools, written for this guide. Each keeps the Python tool's name, description and arguments, so the model sees the same tools as in the course.</p>
+<pre data-file="src/browserTools.ts" data-lang="ts" data-tag="complete file"><code>// Browser tools for the agent, written on the `playwright` npm package.
+// This file replaces Python's PlayWrightBrowserToolkit (langchain_community), which LangChain JS does not have.
+// The seven tools keep the toolkit's names and arguments, so the model sees the same tools as in the course:
+// navigate_browser, extract_text, extract_hyperlinks, get_elements, click_element, current_webpage, previous_webpage.
+import { chromium, type Browser, type Page } from "playwright";
+import { tool, type StructuredToolInterface } from "@langchain/core/tools";
+import { z } from "zod";
+
+/** The page the tools act on: the last open page, or a new one (the toolkit's get_current_page does the same). */
+async function currentPage(browser: Browser): Promise&lt;Page&gt; {
+  const context = browser.contexts().at(-1) ?? (await browser.newContext());
+  return context.pages().at(-1) ?? (await context.newPage());
+}
+
+const MAX_TEXT = 8000; // keep tool results small enough for a small local model's context window
+
+/** Python: PlayWrightBrowserToolkit.from_browser(async_browser=browser).get_tools() */
+export function browserTools(browser: Browser): StructuredToolInterface[] {
+  const navigate_browser = tool(
+    async ({ url }) =&gt; {
+      const page = await currentPage(browser);
+      const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      return `Navigating to ${url} returned status code ${response?.status() ?? "unknown"}`;
+    },
+    { name: "navigate_browser", description: "Navigate a browser to the specified URL", schema: z.object({ url: z.string().describe("url to navigate to") }) },
+  );
+
+  const extract_text = tool(
+    async () =&gt; {
+      const page = await currentPage(browser);
+      const text = (await page.innerText("body")).replace(/\s+/g, " ").trim(); // the Python tool uses BeautifulSoup's get_text
+      return text.slice(0, MAX_TEXT);
+    },
+    { name: "extract_text", description: "Extract all the text on the current webpage", schema: z.object({}) },
+  );
+
+  const extract_hyperlinks = tool(
+    async ({ absolute_urls }) =&gt; {
+      const page = await currentPage(browser);
+      const links = await page.$$eval("a[href]", (as, abs) =&gt; as.map((a) =&gt; (abs ? (a as HTMLAnchorElement).href : a.getAttribute("href") ?? "")), absolute_urls);
+      return JSON.stringify([...new Set(links)].slice(0, 200));
+    },
+    {
+      name: "extract_hyperlinks",
+      description: "Extract all hyperlinks on the current webpage",
+      schema: z.object({ absolute_urls: z.boolean().default(false).describe("Return absolute URLs instead of relative URLs") }),
+    },
+  );
+
+  const get_elements = tool(
+    async ({ selector, attributes }) =&gt; {
+      const page = await currentPage(browser);
+      const elements = await page.$$eval(selector, (els, attrs) =&gt;
+        els.slice(0, 50).map((el) =&gt; Object.fromEntries(attrs.map((a) =&gt; [a, a === "innerText" ? (el as HTMLElement).innerText : el.getAttribute(a)]))),
+        attributes,
+      );
+      return JSON.stringify(elements);
+    },
+    {
+      name: "get_elements",
+      description: "Retrieve elements in the current web page matching the given CSS selector",
+      schema: z.object({
+        selector: z.string().describe("CSS selector, such as '*', 'div', 'p', 'a', #id, .classname"),
+        attributes: z.array(z.string()).default(["innerText"]).describe("Set of attributes to retrieve for each element"),
+      }),
+    },
+  );
+
+  const click_element = tool(
+    async ({ selector }) =&gt; {
+      const page = await currentPage(browser);
+      try {
+        await page.click(selector, { timeout: 5_000 }); // only visible elements, like the toolkit's default
+      } catch {
+        return `Unable to click on element '${selector}'`;
+      }
+      return `Clicked element '${selector}'`;
+    },
+    { name: "click_element", description: "Click on an element with the given CSS selector", schema: z.object({ selector: z.string().describe("CSS selector for the element to click") }) },
+  );
+
+  const current_webpage = tool(async () =&gt; (await currentPage(browser)).url(), {
+    name: "current_webpage",
+    description: "Returns the URL of the current page",
+    schema: z.object({}),
+  });
+
+  const previous_webpage = tool(
+    async () =&gt; {
+      const response = await (await currentPage(browser)).goBack();
+      return response ? `Navigated back to the previous page with URL '${response.url()}'. Status code ${response.status()}` : "Unable to navigate back; no previous page in the history";
+    },
+    { name: "previous_webpage", description: "Navigate back to the previous page in the browser history", schema: z.object({}) },
+  );
+
+  return [click_element, navigate_browser, previous_webpage, extract_text, extract_hyperlinks, get_elements, current_webpage];
+}
+
+/** Python (sidekick_tools.py): playwright_tools() → (tools, browser, playwright). Here the browser object also stops Playwright.
+ *  The course runs headful (headless=False) so you can watch the agent; set HEADLESS=true to hide the window. */
+export async function playwrightTools() {
+  const browser = await chromium.launch({ headless: process.env.HEADLESS === "true" });
+  return { tools: browserTools(browser), browser };
+}</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>10–13</td><td><code>async function currentPage(browser) { … context.pages().at(-1) ?? (await context.newPage()); }</code></td><td>Every tool acts on the last open page, as the Python toolkit does.</td></tr>
+<tr><td>15</td><td><code>const MAX_TEXT = 8000;</code></td><td>Page text is cut to 8,000 characters so a small model's context is not flooded. The Python tool returns everything.</td></tr>
+<tr><td>19–26</td><td><code>const navigate_browser = tool(async ({ url }) =&gt; { … await page.goto(url, …) … }, { name: "navigate_browser", description: "…", schema: z.object({ url: … }) });</code></td><td>A LangChain tool: the function, then its name, description and zod schema.</td></tr>
+<tr><td>28–35</td><td><code>const extract_text = tool(async () =&gt; { … await page.innerText("body") … })</code></td><td>The visible text of the page, whitespace squeezed.</td></tr>
+<tr><td>50–67</td><td><code>const get_elements = tool(async ({ selector, attributes }) =&gt; { … page.$$eval(selector, …) … })</code></td><td>Elements matching a CSS selector, with chosen attributes.</td></tr>
+<tr><td>69–80</td><td><code>const click_element = tool(async ({ selector }) =&gt; { try { await page.click(selector, { timeout: 5_000 }) } catch { return "Unable to click…" } … })</code></td><td>Failures come back as text, so the model can try something else.</td></tr>
+<tr><td>101–104</td><td><code>export async function playwrightTools() { const browser = await chromium.launch({ headless: process.env.HEADLESS === "true" }); … }</code></td><td>Headful by default, like the course; <code>HEADLESS=true</code> hides the window.</td></tr>
+</table></div>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="The seven browser tools around a browser window: navigate, back, current URL, extract text, extract hyperlinks, get elements by CSS selector, click element">
+  <rect x="250" y="40" width="260" height="150" rx="10" class="box-info"/>
+  <rect x="250" y="40" width="260" height="26" rx="10" class="box"/><text x="380" y="58" text-anchor="middle" class="small">Chromium (Playwright)</text>
+  <text x="380" y="120" text-anchor="middle" class="label">the current page</text>
+  <rect x="20" y="40" width="190" height="36" rx="6" class="box"/><text x="115" y="63" text-anchor="middle" class="mono small">navigate_browser</text>
+  <rect x="20" y="96" width="190" height="36" rx="6" class="box"/><text x="115" y="119" text-anchor="middle" class="mono small">previous_webpage</text>
+  <rect x="20" y="152" width="190" height="36" rx="6" class="box"/><text x="115" y="175" text-anchor="middle" class="mono small">current_webpage</text>
+  <rect x="550" y="20" width="190" height="36" rx="6" class="box"/><text x="645" y="43" text-anchor="middle" class="mono small">extract_text</text>
+  <rect x="550" y="70" width="190" height="36" rx="6" class="box"/><text x="645" y="93" text-anchor="middle" class="mono small">extract_hyperlinks</text>
+  <rect x="550" y="120" width="190" height="36" rx="6" class="box"/><text x="645" y="143" text-anchor="middle" class="mono small">get_elements</text>
+  <rect x="550" y="170" width="190" height="36" rx="6" class="box"/><text x="645" y="193" text-anchor="middle" class="mono small">click_element</text>
+  <path class="arrow" d="M212,58 H248"/><path class="arrow" d="M212,114 H248"/><path class="arrow" d="M212,170 H248"/>
+  <path class="arrow" d="M548,38 H512"/><path class="arrow" d="M548,88 H512"/><path class="arrow" d="M548,138 H512"/><path class="arrow" d="M548,188 H512"/>
+  <text x="115" y="215" text-anchor="middle" class="small">move around</text><text x="645" y="225" text-anchor="middle" class="small">read and act</text>
+</svg>
+<figcaption>The toolkit. <strong>Low-level tools the model combines: go to a page, read it, find elements, click.</strong></figcaption>
+</figure>
+
+<h3>A chatbot that browses (lecture 14)</h3>
+<p>Same graph as Day 3, with the seven browser tools plus the push tool. The node is unchanged: "a node is just a function", and <code>bind_tools</code> builds the JSON "for all of these tools".</p>
+<div data-only="py"><pre data-file="3_lab3.ipynb · cell 15" data-lang="py" data-tag="notebook cell"><code>
+llm = ChatOpenAI(model="gpt-4o-mini")
+llm_with_tools = llm.bind_tools(all_tools)
+
+
+def chatbot(state: State):
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}</code></pre></div>
+<div class="code-tabs"><pre data-file="3_lab3.ipynb · cell 16" data-lang="py" data-tag="notebook cell"><code>
+graph_builder = StateGraph(State)
+graph_builder.add_node("chatbot", chatbot)
+graph_builder.add_node("tools", ToolNode(tools=all_tools))
+graph_builder.add_conditional_edges( "chatbot", tools_condition, "tools")
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+
+memory = MemorySaver()
+graph = graph_builder.compile(checkpointer=memory)
+display(Image(graph.get_graph().draw_mermaid_png()))</code></pre><pre data-file="src/lab3.ts" data-lang="ts" data-tag="excerpt · lines 26–43"><code>const all_tools = [...tools, toolPush];
+
+const llm = makeLLM();
+const llm_with_tools = llm.bindTools(all_tools);
+
+async function chatbot(state: typeof State.State) {
+  return { messages: [await llm_with_tools.invoke(state.messages)] };
+}
+
+const memory = new MemorySaver();
+const graph = new StateGraph(State)
+  .addNode("chatbot", chatbot)
+  .addNode("tools", new ToolNode(all_tools))
+  .addConditionalEdges("chatbot", toolsCondition, ["tools", END])
+  .addEdge("tools", "chatbot")
+  .addEdge(START, "chatbot")
+  .compile({ checkpointer: memory });
+console.log(graph.getGraph().drawMermaid());</code></pre></div>
+<div class="code-tabs"><pre data-file="3_lab3.ipynb · cell 17" data-lang="py" data-tag="notebook cell"><code>config = {"configurable": {"thread_id": "10"}}
+
+async def chat(user_input: str, history):
+    result = await graph.ainvoke({"messages": [{"role": "user", "content": user_input}]}, config=config)
+    return result["messages"][-1].content
+
+
+gr.ChatInterface(chat, type="messages").launch()</code></pre><pre data-file="src/lab3.ts" data-lang="ts" data-tag="excerpt · lines 45–61"><code>const config = { configurable: { thread_id: "10" } };
+
+async function chat(user_input: string) {
+  const result = await graph.invoke({ messages: [{ role: "user", content: user_input }] }, config);
+  return result.messages.at(-1)!.content;
+}
+
+// The two requests from the video: a headline as a push notification, then an exchange rate from a web page
+const requests = process.argv.length &gt; 2 ? process.argv.slice(2) : [
+  "Please navigate to https://www.cnn.com, read the page and send me a push notification with the top headline",
+  "Please navigate to https://www.x-rates.com/calculators/USD/GBP and tell me the current USD to GBP exchange rate",
+];
+try {
+  for (const r of requests) console.log(`\nuser: ${r}\nassistant: ${await chat(r)}`);
+} finally {
+  await browser.close(); // the notebook never closes it; a script must, or Node keeps running
+}</code></pre></div>
+<p>Gradio accepts an <code>async</code> callback, and the <code>history</code> argument is ignored "because we're relying on checkpointing for that. But Gradio sends it to us anyway". In the video the agent reads a CNN headline and pushes it to the phone, then fetches USD/GBP from x-rates.com (0.7747). "When you think of the excitement people have around things like Manus… you can now see how this could become an agent that can drive a browser and do work for you." The whole conversation cost "0.8 of a cent".</p>
+<div class="callout"><p><strong>Tool return values matter.</strong> In LangSmith the push tool returned <code>null</code>: "probably a bad thing. I should have it returning like some fake JSON that says success." Day 5's version returns "success"; so does the TypeScript one.</p></div>
+
+<h2>Lab 4: structured outputs for an evaluator (lecture 15)</h2>
+<p>Step one of structured outputs is a schema: a Pydantic object describing the JSON the model must return. This one is for an evaluator, "something which is going to decide whether or not an answer from an LLM is good". On camera he edits "worker's response" to "assistant's response" because "that's going to be more words that it will understand".</p>
+<div data-only="py"><pre data-file="4_lab4.ipynb · cell 4" data-lang="py" data-tag="notebook cell"><code># First define a structured output
+
+class EvaluatorOutput(BaseModel):
+    feedback: str = Field(description="Feedback on the assistant's response")
+    success_criteria_met: bool = Field(description="Whether the success criteria have been met")
+    user_input_needed: bool = Field(description="True if more input is needed from the user, or clarifications, or the assistant is stuck")</code></pre></div>
+<div class="code-tabs"><pre data-file="4_lab4.ipynb · cell 6" data-lang="py" data-tag="notebook cell"><code># The state
+
+class State(TypedDict):
+    messages: Annotated[List[Any], add_messages]
+    success_criteria: str
+    feedback_on_work: Optional[str]
+    success_criteria_met: bool
+    user_input_needed: bool</code></pre><pre data-file="src/lab4.ts" data-lang="ts" data-tag="excerpt · lines 13–28"><code>// For structured outputs, we define a schema — a zod object plays the role of the Pydantic model
+const EvaluatorOutput = z.object({
+  feedback: z.string().describe("Feedback on the assistant's response"),
+  success_criteria_met: z.boolean().describe("Whether the success criteria have been met"),
+  user_input_needed: z.boolean().describe("True if more input is needed from the user, or clarifications, or the assistant is stuck"),
+});
+
+// The state: messages uses the reducer; the other fields have none, so a new value simply overwrites the old one
+const State = Annotation.Root({
+  messages: Annotation&lt;BaseMessage[], BaseMessageLike[]&gt;({ reducer: messagesStateReducer, default: () =&gt; [] }),
+  success_criteria: Annotation&lt;string&gt;(),
+  feedback_on_work: Annotation&lt;string | null&gt;(),
+  success_criteria_met: Annotation&lt;boolean&gt;(),
+  user_input_needed: Annotation&lt;boolean&gt;(),
+});
+type StateT = typeof State.State;</code></pre></div>
+<p>The State now carries real information. Only <code>messages</code> has a reducer, so replies are appended; the other four fields have none, so a returned value simply overwrites the old one "for anything that is downstream of you in the graph". <code>Optional[str]</code> means "if this can be null".</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="The five State fields: messages with an append reducer; success_criteria, feedback_on_work, success_criteria_met and user_input_needed are overwritten by each update">
+  <rect x="20" y="30" width="200" height="140" rx="8" class="box-ok"/><text x="120" y="60" text-anchor="middle" class="mono label">messages</text><text x="120" y="90" text-anchor="middle" class="small">reducer: add_messages</text><text x="120" y="115" text-anchor="middle" class="small">updates are appended</text>
+  <rect x="240" y="30" width="500" height="140" rx="8" class="box"/>
+  <text x="490" y="55" text-anchor="middle" class="small">no reducer: a new value replaces the old one</text>
+  <text x="260" y="85" class="mono small">success_criteria: str</text><text x="510" y="85" class="small">what "done" means (from you)</text>
+  <text x="260" y="110" class="mono small">feedback_on_work: Optional[str]</text><text x="510" y="110" class="small">the evaluator's last verdict</text>
+  <text x="260" y="135" class="mono small">success_criteria_met: bool</text><text x="510" y="135" class="small">passed?</text>
+  <text x="260" y="160" class="mono small">user_input_needed: bool</text><text x="510" y="160" class="small">stuck or has a question?</text>
+</svg>
+<figcaption>What lives in the Sidekick's State. <strong>One list that grows, four values that are replaced.</strong></figcaption>
+</figure>
+
+<div data-only="py"><pre data-file="4_lab4.ipynb · cell 7" data-lang="py" data-tag="notebook cell"><code># Get our async Playwright tools
+# If you get a NotImplementedError here or later, see the Heads Up at the top of the 3_lab3 notebook
+
+
+import nest_asyncio
+nest_asyncio.apply()
+async_browser =  create_async_playwright_browser(headless=False)  # headful mode
+toolkit = PlayWrightBrowserToolkit.from_browser(async_browser=async_browser)
+tools = toolkit.get_tools()</code></pre></div>
+<div class="code-tabs"><pre data-file="4_lab4.ipynb · cell 8" data-lang="py" data-tag="notebook cell"><code># Initialize the LLMs
+
+worker_llm = ChatOpenAI(model="gpt-4o-mini")
+worker_llm_with_tools = worker_llm.bind_tools(tools)
+
+evaluator_llm = ChatOpenAI(model="gpt-4o-mini")
+evaluator_llm_with_output = evaluator_llm.with_structured_output(EvaluatorOutput)</code></pre><pre data-file="src/lab4.ts" data-lang="ts" data-tag="excerpt · lines 30–35"><code>// Get our Playwright tools
+const { tools, browser } = await playwrightTools();
+
+// Initialize the LLMs
+const worker_llm_with_tools = makeLLM().bindTools(tools);
+const evaluator_llm_with_output = makeLLM().withStructuredOutput(EvaluatorOutput); // returns a parsed object, not a message</code></pre></div>
+<p>Two models: the worker is bound to the tools; the evaluator gets <code>with_structured_output(EvaluatorOutput)</code>, so its <code>invoke</code> returns a parsed object instead of a message. "Not all models are set up to support structured output." The fallback is "the old fashioned way": ask for JSON in the prompt with the schema and examples, then parse it yourself, "that's all that is happening behind the scenes".</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Structured output under the hood: the schema is sent with the prompt, the model returns JSON, LangChain parses it into an EvaluatorOutput object whose fields update the state">
+  <rect x="10" y="55" width="130" height="60" rx="8" class="box-info"/><text x="75" y="82" text-anchor="middle" class="small">EvaluatorOutput</text><text x="75" y="100" text-anchor="middle" class="small">schema</text>
+  <path class="arrow" d="M142,85 H168"/>
+  <rect x="170" y="55" width="130" height="60" rx="8" class="box-solid"/><text x="235" y="82" text-anchor="middle" class="small on-solid">model call</text><text x="235" y="100" text-anchor="middle" class="small on-solid">prompt + schema</text>
+  <path class="arrow" d="M302,85 H328"/>
+  <rect x="330" y="55" width="150" height="60" rx="8" class="box"/><text x="405" y="82" text-anchor="middle" class="mono small">{"feedback": …,</text><text x="405" y="100" text-anchor="middle" class="mono small">"…_met": true}</text>
+  <path class="arrow" d="M482,85 H508"/>
+  <rect x="510" y="55" width="110" height="60" rx="8" class="box-warn"/><text x="565" y="90" text-anchor="middle" class="small">parse</text>
+  <path class="arrow" d="M622,85 H648"/>
+  <rect x="650" y="55" width="100" height="60" rx="8" class="box-ok"/><text x="700" y="82" text-anchor="middle" class="small">object →</text><text x="700" y="100" text-anchor="middle" class="small">state fields</text>
+  <text x="380" y="150" text-anchor="middle" class="small">in LangSmith this shows up as a model call followed by a parser</text>
+</svg>
+<figcaption>Structured output. <strong>JSON in a known shape, parsed into an object your code can trust.</strong></figcaption>
+</figure>
+
+<h3>The worker (lecture 15, 05:39–09:16)</h3>
+<p>The worker's system prompt took "the last couple of hours". The line "simply reply with the answer" is there because "these models love to reply with things like can I help you with anything else? And that then might confuse our evaluator." When the evaluator has rejected an attempt, its feedback is added. Swapping the system message in is "a little bit hokey… worth doing some testing".</p>
+<div class="code-tabs"><pre data-file="4_lab4.ipynb · cell 9" data-lang="py" data-tag="notebook cell"><code># The worker node
+
+def worker(state: State) -&gt; Dict[str, Any]:
+    system_message = f"""You are a helpful assistant that can use tools to complete tasks.
+You keep working on a task until either you have a question or clarification for the user, or the success criteria is met.
+This is the success criteria:
+{state['success_criteria']}
+You should reply either with a question for the user about this assignment, or with your final response.
+If you have a question for the user, you need to reply by clearly stating your question. An example might be:
+
+Question: please clarify whether you want a summary or a detailed answer
+
+If you've finished, reply with the final answer, and don't ask a question; simply reply with the answer.
+"""
+    
+    if state.get("feedback_on_work"):
+        system_message += f"""
+Previously you thought you completed the assignment, but your reply was rejected because the success criteria was not met.
+Here is the feedback on why this was rejected:
+{state['feedback_on_work']}
+With this feedback, please continue the assignment, ensuring that you meet the success criteria or have a question for the user."""
+    
+    # Add in the system message
+
+    found_system_message = False
+    messages = state["messages"]
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            message.content = system_message
+            found_system_message = True
+    
+    if not found_system_message:
+        messages = [SystemMessage(content=system_message)] + messages
+    
+    # Invoke the LLM with tools
+    response = worker_llm_with_tools.invoke(messages)
+    
+    # Return updated state
+    return {
+        "messages": [response],
+    }</code></pre><pre data-file="src/lab4.ts" data-lang="ts" data-tag="excerpt · lines 37–68"><code>// The worker node
+async function worker(state: StateT) {
+  let system_message = `You are a helpful assistant that can use tools to complete tasks.
+You keep working on a task until either you have a question or clarification for the user, or the success criteria is met.
+This is the success criteria:
+${state.success_criteria}
+You should reply either with a question for the user about this assignment, or with your final response.
+If you have a question for the user, you need to reply by clearly stating your question. An example might be:
+
+Question: please clarify whether you want a summary or a detailed answer
+
+If you've finished, reply with the final answer, and don't ask a question; simply reply with the answer.
+`;
+  if (state.feedback_on_work) {
+    system_message += `
+Previously you thought you completed the assignment, but your reply was rejected because the success criteria was not met.
+Here is the feedback on why this was rejected:
+${state.feedback_on_work}
+With this feedback, please continue the assignment, ensuring that you meet the success criteria or have a question for the user.`;
+  }
+
+  // Add in the system message: replace an old one if there is one, otherwise put it first
+  // (Python edits message.content in place; here we build a new list, which is the safer JavaScript habit)
+  const found_system_message = state.messages.some((m) =&gt; SystemMessage.isInstance(m));
+  const messages = found_system_message
+    ? state.messages.map((m) =&gt; (SystemMessage.isInstance(m) ? new SystemMessage(system_message) : m))
+    : [new SystemMessage(system_message), ...state.messages];
+
+  // Invoke the LLM with tools
+  const response = await worker_llm_with_tools.invoke(messages);
+  return { messages: [response] };
+}</code></pre></div>
+<div data-only="ts"><p>Lines 60–63: Python edits an existing system message in place; the TypeScript version builds a new list instead, the safer habit when state must stay immutable.</p></div>
+
+<h2>Routers, the evaluator and the graph (lecture 16)</h2>
+<p>A router is a plain function used in a conditional edge: tool calls go to <code>"tools"</code>, anything else to <code>"evaluator"</code>. <code>format_conversation</code> turns the message objects into "User: … / Assistant: …" text for the evaluator, with "[Tools use]" for tool-only turns.</p>
+<div class="code-tabs"><pre data-file="4_lab4.ipynb · cell 10" data-lang="py" data-tag="notebook cell"><code>def worker_router(state: State) -&gt; str:
+    last_message = state["messages"][-1]
+    
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return "tools"
+    else:
+        return "evaluator"</code></pre><pre data-file="src/lab4.ts" data-lang="ts" data-tag="excerpt · lines 70–82"><code>function worker_router(state: StateT): "tools" | "evaluator" {
+  const last_message = state.messages.at(-1);
+  return AIMessage.isInstance(last_message) &amp;&amp; last_message.tool_calls?.length ? "tools" : "evaluator";
+}
+
+function format_conversation(messages: BaseMessage[]): string {
+  let conversation = "Conversation history:\n\n";
+  for (const message of messages) {
+    if (HumanMessage.isInstance(message)) conversation += `User: ${message.content}\n`;
+    else if (AIMessage.isInstance(message)) conversation += `Assistant: ${message.content || "[Tools use]"}\n`;
+  }
+  return conversation;
+}</code></pre></div>
+<div data-only="py"><pre data-file="4_lab4.ipynb · cell 11" data-lang="py" data-tag="notebook cell"><code>def format_conversation(messages: List[Any]) -&gt; str:
+    conversation = "Conversation history:\n\n"
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            conversation += f"User: {message.content}\n"
+        elif isinstance(message, AIMessage):
+            text = message.content or "[Tools use]"
+            conversation += f"Assistant: {text}\n"
+    return conversation</code></pre></div>
+<p>The evaluator is told to judge the last answer against the criteria, and to decide whether the user must step in. Two prompting lessons: "there's never a harm in being repetitious with prompting. Be clear. Be instructive. Repeat yourself." And the anti-loop sentence ("If you're seeing the Assistant repeating the same mistakes…") exists "because I was testing this and it kept messing up by the evaluator sending back the same problem again and again… it's research and development."</p>
+<div class="code-tabs"><pre data-file="4_lab4.ipynb · cell 12" data-lang="py" data-tag="notebook cell"><code>def evaluator(state: State) -&gt; State:
+    last_response = state["messages"][-1].content
+
+    system_message = """You are an evaluator that determines if a task has been completed successfully by an Assistant.
+Assess the Assistant's last response based on the given criteria. Respond with your feedback, and with your decision on whether the success criteria has been met,
+and whether more input is needed from the user."""
+    
+    user_message = f"""You are evaluating a conversation between the User and Assistant. You decide what action to take based on the last response from the Assistant.
+
+The entire conversation with the assistant, with the user's original request and all replies, is:
+{format_conversation(state['messages'])}
+
+The success criteria for this assignment is:
+{state['success_criteria']}
+
+And the final response from the Assistant that you are evaluating is:
+{last_response}
+
+Respond with your feedback, and decide if the success criteria is met by this response.
+Also, decide if more user input is required, either because the assistant has a question, needs clarification, or seems to be stuck and unable to answer without help.
+"""
+    if state["feedback_on_work"]:
+        user_message += f"Also, note that in a prior attempt from the Assistant, you provided this feedback: {state['feedback_on_work']}\n"
+        user_message += "If you're seeing the Assistant repeating the same mistakes, then consider responding that user input is required."
+    
+    evaluator_messages = [SystemMessage(content=system_message), HumanMessage(content=user_message)]
+
+    eval_result = evaluator_llm_with_output.invoke(evaluator_messages)
+    new_state = {
+        "messages": [{"role": "assistant", "content": f"Evaluator Feedback on this answer: {eval_result.feedback}"}],
+        "feedback_on_work": eval_result.feedback,
+        "success_criteria_met": eval_result.success_criteria_met,
+        "user_input_needed": eval_result.user_input_needed
+    }
+    return new_state</code></pre><pre data-file="src/lab4.ts" data-lang="ts" data-tag="excerpt · lines 84–121"><code>async function evaluator(state: StateT): Promise&lt;typeof State.Update&gt; {
+  const last_response = state.messages.at(-1)!.content;
+
+  const system_message = `You are an evaluator that determines if a task has been completed successfully by an Assistant.
+Assess the Assistant's last response based on the given criteria. Respond with your feedback, and with your decision on whether the success criteria has been met,
+and whether more input is needed from the user.`;
+
+  let user_message = `You are evaluating a conversation between the User and Assistant. You decide what action to take based on the last response from the Assistant.
+
+The entire conversation with the assistant, with the user's original request and all replies, is:
+${format_conversation(state.messages)}
+
+The success criteria for this assignment is:
+${state.success_criteria}
+
+And the final response from the Assistant that you are evaluating is:
+${last_response}
+
+Respond with your feedback, and decide if the success criteria is met by this response.
+Also, decide if more user input is required, either because the assistant has a question, needs clarification, or seems to be stuck and unable to answer without help.
+`;
+  if (state.feedback_on_work) {
+    user_message += `Also, note that in a prior attempt from the Assistant, you provided this feedback: ${state.feedback_on_work}\n`;
+    user_message += "If you're seeing the Assistant repeating the same mistakes, then consider responding that user input is required.";
+  }
+
+  const eval_result = await evaluator_llm_with_output.invoke([new SystemMessage(system_message), new HumanMessage(user_message)]);
+  return {
+    messages: [{ role: "assistant", content: `Evaluator Feedback on this answer: ${eval_result.feedback}` }],
+    feedback_on_work: eval_result.feedback,
+    success_criteria_met: eval_result.success_criteria_met,
+    user_input_needed: eval_result.user_input_needed,
+  };
+}
+
+function route_based_on_evaluation(state: StateT): "worker" | "END" {
+  return state.success_criteria_met || state.user_input_needed ? "END" : "worker";
+}</code></pre></div>
+<div data-only="py"><pre data-file="4_lab4.ipynb · cell 13" data-lang="py" data-tag="notebook cell"><code>def route_based_on_evaluation(state: State) -&gt; str:
+    if state["success_criteria_met"] or state["user_input_needed"]:
+        return "END"
+    else:
+        return "worker"</code></pre></div>
+<div class="table-wrap"><table class="lines"><tr><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td><code>evaluator_messages = [SystemMessage(content=system_message), HumanMessage(content=user_message)]</code></td><td>The "human" message is manufactured: "that's just really how you go about building system and user prompts using LangChain's constructs."</td></tr>
+<tr><td><code>"messages": [{"role": "assistant", "content": f"Evaluator Feedback on this answer: …"}]</code></td><td>The feedback joins the conversation, so the worker sees it on the next try and the chat window shows it.</td></tr>
+<tr><td><code>"feedback_on_work": eval_result.feedback, "success_criteria_met": …, "user_input_needed": …</code></td><td>Overwrite the three plain fields.</td></tr>
+<tr><td><code>if state["success_criteria_met"] or state["user_input_needed"]: return "END"</code></td><td>Stop when the work passes or when the user must help: "either we've done great or we've done horribly". Otherwise back to the worker.</td></tr>
+</table></div>
+<div class="code-tabs"><pre data-file="4_lab4.ipynb · cell 14" data-lang="py" data-tag="notebook cell"><code># Set up Graph Builder with State
+graph_builder = StateGraph(State)
+
+# Add nodes
+graph_builder.add_node("worker", worker)
+graph_builder.add_node("tools", ToolNode(tools=tools))
+graph_builder.add_node("evaluator", evaluator)
+
+# Add edges
+graph_builder.add_conditional_edges("worker", worker_router, {"tools": "tools", "evaluator": "evaluator"})
+graph_builder.add_edge("tools", "worker")
+graph_builder.add_conditional_edges("evaluator", route_based_on_evaluation, {"worker": "worker", "END": END})
+graph_builder.add_edge(START, "worker")
+
+# Compile the graph
+memory = MemorySaver()
+graph = graph_builder.compile(checkpointer=memory)</code></pre><pre data-file="src/lab4.ts" data-lang="ts" data-tag="excerpt · lines 123–134"><code>// Set up Graph Builder with State, add nodes, add edges, compile
+const memory = new MemorySaver();
+const graph = new StateGraph(State)
+  .addNode("worker", worker)
+  .addNode("tools", new ToolNode(tools))
+  .addNode("evaluator", evaluator)
+  .addConditionalEdges("worker", worker_router, { tools: "tools", evaluator: "evaluator" })
+  .addEdge("tools", "worker")
+  .addConditionalEdges("evaluator", route_based_on_evaluation, { worker: "worker", END: END })
+  .addEdge(START, "worker")
+  .compile({ checkpointer: memory });
+console.log(graph.getGraph().drawMermaid());</code></pre></div>
+<p>The third argument of <code>add_conditional_edges</code> is now a dict from router results to node names (the string <code>"END"</code> maps to the constant <code>END</code>). The edge from tools back to the worker must still be added by hand: "That's kind of hokey… You think it would sort of be done automatically for you." It is Anthropic's evaluator-optimizer pattern "loud and clear", but with "like an infinite loop in it… a true agent pattern".</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Worker and evaluator loop: start goes to worker; worker_router sends tool calls to tools, which return to worker, and final answers to evaluator; route_based_on_evaluation ends when criteria are met or user input is needed, otherwise sends the work back to worker with feedback">
+  <rect x="20" y="105" width="110" height="46" rx="23" class="box"/><text x="75" y="133" text-anchor="middle" class="mono small">__start__</text>
+  <path class="arrow" d="M132,128 H218"/>
+  <rect x="220" y="100" width="140" height="56" rx="8" class="box-solid"/><text x="290" y="124" text-anchor="middle" class="label on-solid">worker</text><text x="290" y="143" text-anchor="middle" class="small on-solid">browser tools</text>
+  <path class="arrow dashed" d="M290,98 V60"/><rect x="220" y="14" width="140" height="44" rx="8" class="box-warn"/><text x="290" y="41" text-anchor="middle" class="mono small">tools</text>
+  <path class="arrow" d="M362,36 C400,36 400,110 362,112"/><text x="430" y="60" class="small">back to worker</text>
+  <path class="arrow dashed" d="M362,128 H498"/><text x="430" y="120" text-anchor="middle" class="small">final answer</text>
+  <rect x="500" y="100" width="150" height="56" rx="8" class="box-solid"/><text x="575" y="124" text-anchor="middle" class="label on-solid">evaluator</text><text x="575" y="143" text-anchor="middle" class="small on-solid">EvaluatorOutput</text>
+  <path class="arrow dashed" d="M575,158 C575,230 290,230 290,158"/><text x="432" y="245" text-anchor="middle" class="small">not met → back with feedback</text>
+  <path class="arrow-ok dashed" d="M652,128 H700"/><text x="720" y="122" text-anchor="middle" class="small">END</text>
+  <text x="680" y="160" text-anchor="middle" class="small">met, or user</text><text x="680" y="176" text-anchor="middle" class="small">input needed</text>
+</svg>
+<figcaption>The Sidekick graph. <strong>The worker loops with its tools; the evaluator loops with the worker until the work passes or a human is needed.</strong></figcaption>
+</figure>
+
+<h2>The Sidekick UI (lecture 17)</h2>
+<p>Each UI session gets its own thread ID from <code>uuid4</code>, so "we could actually… have multiple different people that come on and use the interface and each have different conversations." <code>process_message</code> starts one super-step and returns the worker's answer (<code>messages[-2]</code>) and the evaluator's feedback (<code>messages[-1]</code>). Mixing Gradio's history with LangGraph's memory is "a little bit of a confusion", "so I thought, keep it simple".</p>
+<div class="code-tabs"><pre data-file="4_lab4.ipynb · cell 17" data-lang="py" data-tag="notebook cell"><code>def make_thread_id() -&gt; str:
+    return str(uuid.uuid4())
+
+
+async def process_message(message, success_criteria, history, thread):
+
+    config = {"configurable": {"thread_id": thread}}
+
+    state = {
+        "messages": message,
+        "success_criteria": success_criteria,
+        "feedback_on_work": None,
+        "success_criteria_met": False,
+        "user_input_needed": False
+    }
+    result = await graph.ainvoke(state, config=config)
+    user = {"role": "user", "content": message}
+    reply = {"role": "assistant", "content": result["messages"][-2].content}
+    feedback = {"role": "assistant", "content": result["messages"][-1].content}
+    return history + [user, reply, feedback]
+
+async def reset():
+    return "", "", None, make_thread_id()</code></pre><pre data-file="src/lab4.ts" data-lang="ts" data-tag="excerpt · lines 136–158"><code>// Next comes the callback to kick off a super-step (the Gradio process_message)
+type ChatMessage = { role: "user" | "assistant"; content: string };
+const make_thread_id = () =&gt; randomUUID();
+
+async function process_message(message: string, success_criteria: string, history: ChatMessage[], thread: string) {
+  const config = { configurable: { thread_id: thread } };
+  const state = { messages: [{ role: "user", content: message }], success_criteria, feedback_on_work: null, success_criteria_met: false, user_input_needed: false };
+  const result = await graph.invoke(state, config); // stops with GraphRecursionError after 25 steps (LangGraph's default)
+  const user: ChatMessage = { role: "user", content: message };
+  const reply: ChatMessage = { role: "assistant", content: String(result.messages.at(-2)!.content) }; // the worker's answer
+  const feedback: ChatMessage = { role: "assistant", content: String(result.messages.at(-1)!.content) }; // the evaluator's verdict
+  return [...history, user, reply, feedback];
+}
+
+// "And now launch our Sidekick UI" — the React app comes on Day 5; here we run one request from the console
+const message = process.argv[2] ?? "What is the current USD to GBP exchange rate? Use https://www.x-rates.com/calculators/USD/GBP";
+const criteria = process.argv[3] ?? "An accurate answer with the rate as a number";
+try {
+  const history = await process_message(message, criteria, [], make_thread_id());
+  for (const m of history) console.log(`\n[${m.role}] ${m.content}`);
+} finally {
+  await browser.close();
+}</code></pre></div>
+<div data-only="py"><pre data-file="4_lab4.ipynb · cell 19" data-lang="py" data-tag="notebook cell"><code>
+with gr.Blocks(theme=gr.themes.Default(primary_hue="emerald")) as demo:
+    gr.Markdown("## Sidekick Personal Co-worker")
+    thread = gr.State(make_thread_id())
+    
+    with gr.Row():
+        chatbot = gr.Chatbot(label="Sidekick", height=300, type="messages")
+    with gr.Group():
+        with gr.Row():
+            message = gr.Textbox(show_label=False, placeholder="Your request to your sidekick")
+        with gr.Row():
+            success_criteria = gr.Textbox(show_label=False, placeholder="What are your success critiera?")
+    with gr.Row():
+        reset_button = gr.Button("Reset", variant="stop")
+        go_button = gr.Button("Go!", variant="primary")
+    message.submit(process_message, [message, success_criteria, chatbot, thread], [chatbot])
+    success_criteria.submit(process_message, [message, success_criteria, chatbot, thread], [chatbot])
+    go_button.click(process_message, [message, success_criteria, chatbot, thread], [chatbot])
+    reset_button.click(reset, [], [message, success_criteria, chatbot, thread])
+
+    
+demo.launch()</code></pre>
+<p><code>gr.State(make_thread_id())</code> runs once, when the cell runs, so in this notebook version every browser tab starts with the same thread ID until someone presses Reset. Day 5 fixes the deeper version of this problem.</p></div>
+<div data-only="ts"><p>The React Sidekick comes on Day 5. Here one request runs from the command line: <code>pnpm lab4 "your request" "your success criteria"</code>. Line 143 notes LangGraph's safety net: after 25 steps a run stops with a <code>GraphRecursionError</code>.</p></div>
+
+<div class="callout ok"><p><strong>What you should see.</strong> Request "What is the current USD/GBP exchange rate", criteria "An accurate answer". Chromium opens xe.com (which defaulted to USD→EUR: "That's not a good sign"), yet the agent finds the table and answers "approximately 0.77463". The evaluator is fussy, saying it "should ideally note that this information may change", but marks it met. LangSmith shows worker → navigate → worker → extract_text → worker → get_elements → worker → evaluator: 19,429 tokens, "0.2 of a cent". During testing he saw "like 25 different messages between the agent and the evaluator, particularly on some harder tasks."</p></div>
+<!-- W4-LAB34-RUN -->
+
+<div class="callout"><p><strong>Video vs repo.</strong> Lectures 15–17 use <code>4_lab4.ipynb</code>. On screen, an earlier draft of the evaluator returned <code>messages</code> as a dict and had a stray backslash; it was fixed off camera. Lab 4 imports <code>tools_condition</code> in the video (unused) and not in the repo. The repo adds the Windows <code>NotImplementedError</code> notes and points to <code>setup/SETUP-node.md</code> for installing Playwright.</p></div>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>Playwright not installed:</strong> the Python package and the npm package each need <code>playwright install</code> to download their own Chromium.</li>
+<li><strong>Running async tools synchronously:</strong> in Python, use <code>arun</code> and <code>ainvoke</code> (and <code>nest_asyncio</code> in a notebook).</li>
+<li><strong>Tools that return nothing:</strong> the model sees <code>null</code>; return a short success message.</li>
+<li><strong>A model without structured-output support:</strong> <code>with_structured_output</code> fails; ask for JSON in the prompt and parse it yourself.</li>
+<li><strong>Endless worker–evaluator loops:</strong> keep the anti-loop sentence and the "user input needed" exit, and expect long loops on hard tasks.</li>
+<li><strong>Leaving the browser open:</strong> a script must close it (<code>browser.close()</code>), or the program never exits.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Playwright gives an agent a real browser; seven low-level tools let the model navigate, read and click.</li>
+<li>Async in Python means <code>arun</code>/<code>ainvoke</code>, plus <code>nest_asyncio</code> inside notebooks; JavaScript is async already.</li>
+<li>Structured output: a schema (Pydantic or zod) plus <code>with_structured_output</code> gives a parsed object.</li>
+<li>The Sidekick is a worker that uses tools and an evaluator that judges against success criteria, joined by router functions.</li>
+<li>The loop ends when the criteria are met or the user is needed.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="18-w4d3.html"><small>← Previous · Step 18</small>Week 4 Day 3 · Tools, conditional edges and checkpointing</a>
+<a class="next" href="20-w4d5.html"><small>Next · Step 20 →</small>Week 4 Day 5 · Sidekick as an app: more tools and per-user sessions</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>13 · Week 3 Day 3 · Stock picker: structured outputs and custom tools</title>
+<meta name="description" content="Pydantic outputs on tasks, a custom push-notification tool, and a hierarchical crew where a manager agent delegates the work.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Agentic AI Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 13/30</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 13 of 30 · Week 3 · Day 3 · 3 lectures</div>
+  <h1>Week 3 Day 3 · Stock picker: structured outputs and custom tools</h1>
+  <p class="lead">Pydantic outputs on tasks, a custom push-notification tool, and a hierarchical crew where a manager agent delegates the work.</p>
+  <span class="video-link extra">Course lectures (Udemy) · code verified against the repo</span>
+</section>
+<h2>What this day builds</h2>
+<p>A stock picker: one agent finds companies trending in the news for a sector, another researches them, a third picks the best one, sends you a push notification and explains its choice. "Purely for our own investigatory purposes and you should not use this to make any trading decisions, please." Three ideas are new this day: <a class="term" href="glossary.html#structured-output">structured outputs</a> in CrewAI (a task's answer as a typed object), a <strong>custom tool</strong> you write yourself, and the <a class="term" href="glossary.html#hierarchical-process">hierarchical process</a>, where a manager agent decides which agent does what. "As you'll see, we'll have a bit of an adventure with that."</p>
+<p data-only="ts">TypeScript: <code>pnpm stocks</code> (or <code>pnpm stocks "Healthcare"</code>) in <code>week3-ts</code>. The schemas become zod objects in <code>src/stockpicker.ts</code>, the push tool is in <code>src/tools.ts</code>, and the manager is <code>runHierarchical</code> in <code>src/minicrew.ts</code>.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Lecture</th><th>Length</th><th>What happens</th></tr>
+<tr><td>10 · The stock picker crew</td><td>7:10</td><td>Four agents (one is the manager) and three tasks in YAML; consistent vocabulary as a "pro tip".</td></tr>
+<tr><td>11 · Pydantic outputs</td><td>8:39</td><td>Pydantic schemas, <code>output_pydantic</code>, which agent gets which tool, the manager agent and <code>Process.hierarchical</code>.</td></tr>
+<tr><td>12 · A custom tool</td><td>8:49</td><td>First run picks Anthropic; a Pushover tool built on <code>BaseTool</code>; second run picks Circle.</td></tr>
+</table></div>
+
+<h2>The agents and tasks (lecture 10)</h2>
+<p>"When defining tasks the trick is to be very clear, very simple" (04:12). And a pro tip (06:23): use the same words everywhere. "In previous versions, when I was iterating on this, I had inconsistent language between agents and tasks and it definitely causes less stability." So "trending companies" appears in the agents, the tasks and the class names alike. Each task names an agent, a <code>context</code> and an output file; the first two files end in <code>.json</code> because their output will be structured.</p>
+<pre data-file="stock_picker/src/stock_picker/config/agents.yaml" data-lang="yaml" data-tag="complete file · also week3-ts/crews/stock_picker/agents.yaml"><code>trending_company_finder:
+  role: &gt;
+    Financial News Analyst that finds trending companies in {sector}
+  goal: &gt;
+    You read the latest news, then find 2-3 companies that are trending in the news for further research.
+    Always pick new companies. Don't pick the same company twice.
+  backstory: &gt;
+    You are a market expert with a knack for picking out the most interesting companies based on latest news.
+    You spot multiple companies that are trending in the news.
+  llm: openai/gpt-4o-mini
+
+financial_researcher:
+  role: &gt;
+    Senior Financial Researcher
+  goal: &gt;
+    Given details of trending companies in the news, you provide comprehensive analysis of each in a report.
+  backstory: &gt;
+    You are a financial expert with a proven track record of deeply analyzing hot companies and building comprehensive reports.
+  llm: openai/gpt-4o-mini
+
+stock_picker:
+  role: &gt;
+    Stock Picker from Research
+  goal: &gt;
+    Given a list of researched companies with investment potential, you select the best one for investment,
+    notifying the user and then providing a detailed report. Don't pick the same company twice.
+  backstory: &gt;
+    You're a meticulous, skilled financial analyst with a proven track record of equity selection.
+    You have a talent for synthesizing research and picking the best company for investment.
+  llm: openai/gpt-4o-mini
+
+manager:
+  role: &gt;
+    Manager
+  goal: &gt;
+    You are a skilled project manager who can delegate tasks in order to achieve your goal, which is to pick the best company for investment.
+  backstory: &gt;
+    You are an experienced and highly effective project manager who can delegate tasks to the right people.
+  llm: openai/gpt-4o</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–10</td><td><code>trending_company_finder: … find 2-3 companies that are trending in the news … Always pick new companies. Don't pick the same company twice.</code></td><td>The news scanner. "Don't pick the same company twice" only means something once the crew has memory (Day 4).</td></tr>
+<tr><td>12–19</td><td><code>financial_researcher: … Given details of trending companies in the news, you provide comprehensive analysis of each in a report.</code></td><td>The analyst who digs into each company.</td></tr>
+<tr><td>21–30</td><td><code>stock_picker: … you select the best one for investment, notifying the user and then providing a detailed report.</code></td><td>The decision-maker; "notifying the user" anticipates the push tool.</td></tr>
+<tr><td>32–39</td><td><code>manager: role: &gt; Manager … delegate tasks in order to achieve your goal … llm: openai/gpt-4o</code></td><td>The fourth agent, used differently (below). It runs on the bigger <code>gpt-4o</code>: "I found that that helped it stay more coherent with the mission at hand."</td></tr>
+</table></div>
+<pre data-file="stock_picker/src/stock_picker/config/tasks.yaml" data-lang="yaml" data-tag="complete file · also week3-ts/crews/stock_picker/tasks.yaml"><code>find_trending_companies:
+  description: &gt;
+    Find the top trending companies in the news in {sector} by searching the latest news. Find new companies that you've not found before.
+  expected_output: &gt;
+    A list of trending companies in {sector}
+  agent: trending_company_finder
+  output_file: output/trending_companies.json
+
+research_trending_companies:
+  description: &gt;
+    Given a list of trending companies, provide detailed analysis of each company in a report by searching online
+  expected_output: &gt;
+    A report containing detailed analysis of each company
+  agent: financial_researcher
+  context:
+    - find_trending_companies
+  output_file: output/research_report.json
+
+pick_best_company:
+  description: &gt;
+    Analyze the research findings and pick the best company for investment.
+    Send a push notification to the user with the decision and 1 sentence rationale.
+    Then respond with a detailed report on why you chose this company, and which companies were not selected.
+  expected_output: &gt;
+    The chosen company and why it was chosen; the companies that were not selected and why they were not selected.
+  agent: stock_picker
+  context:
+    - research_trending_companies
+  output_file: output/decision.md</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–6</td><td><code>find_trending_companies: … agent: trending_company_finder · output_file: output/trending_companies.json</code></td><td>Step 1, writing JSON.</td></tr>
+<tr><td>8–16</td><td><code>research_trending_companies: … context: - find_trending_companies · output_file: output/research_report.json</code></td><td>Step 2 gets step 1's list.</td></tr>
+<tr><td>18–29</td><td><code>pick_best_company: description: &gt; … Send a push notification to the user with the decision and 1 sentence rationale. Then respond with a detailed report …</code></td><td>Step 3: a tool call and a report, written to <code>output/decision.md</code>.</td></tr>
+</table></div>
+
+<h2>Structured outputs in CrewAI (lecture 11)</h2>
+<p>The idea is the same as Week 2: describe the shape you want as Pydantic classes, and "by giving the fields with that name and with that description, we are going to force the agent to produce that information in its response". A wrapper class holding a list "is a way to organize it so that one task can result in a bunch of trending companies". In CrewAI the switch is one argument on the task, <code>output_pydantic=</code>: "this is the way that you do structured outputs in crew".</p>
+<div class="code-tabs"><pre data-file="stock_picker/src/stock_picker/crew.py" data-lang="py" data-tag="excerpt · lines 11–30" data-start="11"><code>class TrendingCompany(BaseModel):
+    """ A company that is in the news and attracting attention """
+    name: str = Field(description="Company name")
+    ticker: str = Field(description="Stock ticker symbol")
+    reason: str = Field(description="Reason this company is trending in the news")
+
+class TrendingCompanyList(BaseModel):
+    """ List of multiple trending companies that are in the news """
+    companies: List[TrendingCompany] = Field(description="List of companies trending in the news")
+
+class TrendingCompanyResearch(BaseModel):
+    """ Detailed research on a company """
+    name: str = Field(description="Company name")
+    market_position: str = Field(description="Current market position and competitive analysis")
+    future_outlook: str = Field(description="Future outlook and growth prospects")
+    investment_potential: str = Field(description="Investment potential and suitability for investment")
+
+class TrendingCompanyResearchList(BaseModel):
+    """ A list of detailed research on all the companies """
+    research_list: List[TrendingCompanyResearch] = Field(description="Comprehensive research on all trending companies")</code></pre><pre data-file="src/stockpicker.ts" data-lang="ts" data-tag="complete file"><code>// Week 3 Days 3–4 — the stock picker crew (TypeScript version of 3_crew/stock_picker)
+// Structured outputs (CrewAI's output_pydantic) become zod schemas; the crew runs hierarchically: a manager agent
+// delegates every task to the three workers. Day 4's memory is a JSON file read into two agents' prompts (memory.ts).
+import { z } from "zod";
+import { consoleEvents, loadCrew, runHierarchical } from "./minicrew.js";
+import { pushTool, searchTool } from "./tools.js";
+import { memoryPrompt, recall, remember } from "./memory.js";
+
+const TrendingCompany = z.object({
+  name: z.string().describe("Company name"),
+  ticker: z.string().describe("Stock ticker symbol"),
+  reason: z.string().describe("Reason this company is trending in the news"),
+});
+const TrendingCompanyList = z.object({
+  companies: z.array(TrendingCompany).describe("List of companies trending in the news"),
+});
+const TrendingCompanyResearch = z.object({
+  name: z.string().describe("Company name"),
+  market_position: z.string().describe("Current market position and competitive analysis"),
+  future_outlook: z.string().describe("Future outlook and growth prospects"),
+  investment_potential: z.string().describe("Investment potential and suitability for investment"),
+});
+const TrendingCompanyResearchList = z.object({
+  research_list: z.array(TrendingCompanyResearch).describe("Comprehensive research on all trending companies"),
+});
+
+const inputs = { sector: process.argv[2] ?? "Technology", current_date: new Date().toISOString() };
+const crew = await loadCrew("crews/stock_picker", inputs);
+
+// Day 4: the finder and the picker remember; the researcher does not ("we want it to go and do research every time").
+const MEMORY_FILE = "memory/stock_picker.json";
+const past = await recall(MEMORY_FILE);
+for (const name of ["trending_company_finder", "stock_picker"]) crew.agents[name]!.backstory += memoryPrompt(past);
+
+const outputs = await runHierarchical(crew, "manager", {
+  tools: { trending_company_finder: [searchTool], financial_researcher: [searchTool], stock_picker: [pushTool] },
+  outputTypes: { find_trending_companies: TrendingCompanyList, research_trending_companies: TrendingCompanyResearchList },
+  outputDir: "output/stock_picker",
+  onEvent: consoleEvents,
+});
+const date = new Date().toISOString();
+await remember(MEMORY_FILE, [
+  { date, task: "find_trending_companies", output: outputs.find_trending_companies ?? "" },
+  { date, task: "pick_best_company", output: outputs.pick_best_company ?? "" },
+]);
+console.log("\n\n=== FINAL DECISION ===\n\n" + outputs.pick_best_company);</code></pre></div>
+<div data-only="py">
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>11–15</td><td><code>class TrendingCompany(BaseModel): name … ticker … reason …</code></td><td>One company. Each <code>Field(description=…)</code> tells the model what to put there.</td></tr>
+<tr><td>17–19</td><td><code>class TrendingCompanyList(BaseModel): companies: List[TrendingCompany]</code></td><td>The task's output: a list of those.</td></tr>
+<tr><td>21–26</td><td><code>class TrendingCompanyResearch(BaseModel): name, market_position, future_outlook, investment_potential</code></td><td>The research on one company, with the four headings the picker needs.</td></tr>
+<tr><td>28–30</td><td><code>class TrendingCompanyResearchList(BaseModel): research_list: List[…]</code></td><td>The research task's output.</td></tr>
+</table></div>
+<p>The tasks then attach them (lines 55–73):</p>
+<pre data-file="stock_picker/src/stock_picker/crew.py" data-lang="py" data-tag="excerpt · lines 55–67" data-start="55"><code>    @task
+    def find_trending_companies(self) -&gt; Task:
+        return Task(
+            config=self.tasks_config['find_trending_companies'],
+            output_pydantic=TrendingCompanyList,
+        )
+
+    @task
+    def research_trending_companies(self) -&gt; Task:
+        return Task(
+            config=self.tasks_config['research_trending_companies'],
+            output_pydantic=TrendingCompanyResearchList,
+        )</code></pre>
+<p>The third task, <code>pick_best_company</code>, has no schema: its output is a written report.</p>
+</div>
+<div data-only="ts">
+<h3>Line by line (src/stockpicker.ts)</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>9–25</td><td><code>const TrendingCompany = z.object({ name: z.string().describe("Company name"), … }); …</code></td><td>The four Pydantic classes as zod schemas, same field names and descriptions.</td></tr>
+<tr><td>27</td><td><code>const inputs = { sector: process.argv[2] ?? "Technology", current_date: new Date().toISOString() };</code></td><td>Same inputs as the repo's <code>main.py</code>.</td></tr>
+<tr><td>30–33</td><td><code>const past = await recall(MEMORY_FILE); …</code></td><td>Day 4's memory; skip it for now (next page).</td></tr>
+<tr><td>35</td><td><code>const outputs = await runHierarchical(crew, "manager", {</code></td><td>Hierarchical: the agent named <code>manager</code> in the YAML runs the show.</td></tr>
+<tr><td>36</td><td><code>tools: { trending_company_finder: [searchTool], financial_researcher: [searchTool], stock_picker: [pushTool] },</code></td><td>The same tools per agent as the Python crew.</td></tr>
+<tr><td>37</td><td><code>outputTypes: { find_trending_companies: TrendingCompanyList, research_trending_companies: TrendingCompanyResearchList },</code></td><td>The equivalent of <code>output_pydantic</code>, per task name.</td></tr>
+</table></div>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Schema tree: TrendingCompanyList contains a list of TrendingCompany with name, ticker and reason; TrendingCompanyResearchList contains a list of TrendingCompanyResearch with name, market position, future outlook and investment potential">
+  <rect x="20" y="20" width="330" height="190" rx="8" class="box"/>
+  <text x="185" y="45" text-anchor="middle" class="title">TrendingCompanyList</text>
+  <text x="40" y="72" class="mono small">companies: [</text>
+  <rect x="60" y="82" width="270" height="90" rx="8" class="box-info"/>
+  <text x="195" y="104" text-anchor="middle" class="label">TrendingCompany</text>
+  <text x="80" y="126" class="mono small">name · ticker · reason</text>
+  <text x="80" y="150" class="small">"why it is in the news"</text>
+  <text x="40" y="195" class="mono small">]  → output/trending_companies.json</text>
+  <rect x="410" y="20" width="330" height="190" rx="8" class="box"/>
+  <text x="575" y="45" text-anchor="middle" class="title">TrendingCompanyResearchList</text>
+  <text x="430" y="72" class="mono small">research_list: [</text>
+  <rect x="450" y="82" width="270" height="90" rx="8" class="box-info"/>
+  <text x="585" y="104" text-anchor="middle" class="label">TrendingCompanyResearch</text>
+  <text x="470" y="126" class="mono small">name · market_position</text>
+  <text x="470" y="146" class="mono small">future_outlook</text>
+  <text x="470" y="166" class="mono small">investment_potential</text>
+  <text x="430" y="195" class="mono small">]  → output/research_report.json</text>
+  <path class="arrow-accent" d="M352,115 H408"/>
+</svg>
+<figcaption>The two task outputs as schemas. <strong>The list wrapper lets one task return several companies.</strong></figcaption>
+</figure>
+
+<h2>The manager and the hierarchical process (lecture 11, 06:02–08:39)</h2>
+<p>Only three methods have <code>@agent</code>. "Did we have a fourth agent? Yes, we did, but that fourth agent is a bit different. It's the manager, and we don't want that to be in the list of the general agents." So it is built as a local variable inside <code>crew()</code>, with <code>allow_delegation=True</code>, "telling crew that we want it to be able to delegate to other agents. That would be the equivalent of the handoff in the OpenAI Agents SDK". <code>process=Process.hierarchical</code> "means that we are going to assign an LLM to figure out which agent does what task". You can pass a whole agent (<code>manager_agent=</code>) or just a model (<code>manager_llm=</code>); "I found it perform slightly better if I get the opportunity to describe the role of the manager. But both did work. But as you'll see, neither works perfectly. Haha. It's an adventure."</p>
+<pre data-file="stock_picker/src/stock_picker/crew.py" data-lang="py" data-tag="excerpt · lines 78–92 (the Day 3 part; Day 4 adds memory below line 92)" data-start="78"><code>    @crew
+    def crew(self) -&gt; Crew:
+        """Creates the StockPicker crew"""
+
+        manager = Agent(
+            config=self.agents_config['manager'],
+            allow_delegation=True
+        )
+
+        return Crew(
+            agents=self.agents,
+            tasks=self.tasks,
+            process=Process.hierarchical,
+            verbose=True,
+            manager_agent=manager,</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>82–85</td><td><code>manager = Agent(config=self.agents_config['manager'], allow_delegation=True)</code></td><td>No <code>@agent</code>, so it is not in <code>self.agents</code>. Delegation gives it CrewAI's built-in "Delegate work to coworker" and "Ask question to coworker" tools.</td></tr>
+<tr><td>87–89</td><td><code>return Crew(agents=self.agents, tasks=self.tasks,</code></td><td>The three workers and the three tasks.</td></tr>
+<tr><td>90</td><td><code>process=Process.hierarchical,</code></td><td>The manager receives each task and chooses whom to delegate it to (and may delegate several times).</td></tr>
+<tr><td>92</td><td><code>manager_agent=manager,</code></td><td>The agent that manages. Alternative: <code>manager_llm="gpt-4o"</code>.</td></tr>
+</table></div>
+<div data-only="ts">
+<p>In the TypeScript runner the manager gets one tool per worker, made with Week 2's <code>asTool</code>; the description tells it to give full context, because a delegated agent knows nothing else.</p>
+<pre data-file="src/minicrew.ts" data-lang="ts" data-tag="excerpt · lines 122–152"><code>/** Process.hierarchical: a manager agent receives every task and delegates to the workers, which are its tools. */
+export async function runHierarchical(crew: Awaited&lt;ReturnType&lt;typeof loadCrew&gt;&gt;, managerName: string, opts: CrewOptions = {}) {
+  const managerCfg = crew.agents[managerName];
+  if (!managerCfg) throw new Error(`No manager agent ${managerName} in agents.yaml`);
+  const outputs: Record&lt;string, string&gt; = {};
+  const workers = Object.entries(crew.agents).filter(([n]) =&gt; n !== managerName);
+  // CrewAI gives the manager "Delegate work to coworker" and "Ask question to coworker" tools; here each worker is
+  // one tool (agent as a tool, as in Week 2).
+  const coworkerTools = workers.map(([n, cfg]) =&gt;
+    makeAgent(n, cfg, opts).asTool({ toolName: n, toolDescription: `Delegate work to ${cfg.role.trim()}. Give full context: they know nothing else.` }),
+  );
+  const makeManager = (outputType?: z.ZodTypeAny) =&gt;
+    new Agent({
+      name: managerName,
+      instructions: instructionsFor(managerCfg),
+      model: modelFor(managerCfg.llm),
+      tools: coworkerTools,
+      ...(outputType ? { outputType } : {}),
+    });
+  for (const [taskName, t] of Object.entries(crew.tasks)) {
+    const context = (t.context ?? Object.keys(outputs)).map((n) =&gt; outputs[n] ?? "").filter(Boolean).join("\n\n----------\n\n");
+    opts.onEvent?.({ type: "task_start", task: taskName, agent: managerCfg.role.trim() });
+    const agent = makeManager(opts.outputTypes?.[taskName]);
+    const result = await run(agent, taskPrompt(t, context), { maxTurns: 20 });
+    const output = asText(result.finalOutput);
+    outputs[taskName] = output;
+    await saveOutput(t, output, opts);
+    opts.onEvent?.({ type: "task_end", task: taskName, agent: managerCfg.role.trim(), output });
+  }
+  return outputs;
+}</code></pre>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>127</td><td><code>const workers = Object.entries(crew.agents).filter(([n]) =&gt; n !== managerName);</code></td><td>Every agent except the manager is a worker.</td></tr>
+<tr><td>130–132</td><td><code>const coworkerTools = workers.map(([n, cfg]) =&gt; makeAgent(n, cfg, opts).asTool({ toolName: n, toolDescription: `Delegate work to ${cfg.role.trim()}. …` }));</code></td><td>Each worker, with its own tools, wrapped as a tool for the manager. This is Week 2's "agents as tools", the closest Agents-SDK match to CrewAI's delegation.</td></tr>
+<tr><td>133–140</td><td><code>const makeManager = (outputType?) =&gt; new Agent({ name: managerName, instructions: instructionsFor(managerCfg), model: modelFor(managerCfg.llm), tools: coworkerTools, … })</code></td><td>The manager, built with CrewAI's role/backstory/goal template, optionally with a structured output for the current task.</td></tr>
+<tr><td>141–150</td><td><code>for (const [taskName, t] of Object.entries(crew.tasks)) { … const result = await run(agent, taskPrompt(t, context), { maxTurns: 20 }); … }</code></td><td>Each task goes to the manager, not to the agent named in the YAML; the manager decides. A cap of 20 turns guards against endless delegation.</td></tr>
+</table></div>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Sequential versus hierarchical: in sequential, tasks run in a fixed order on their named agents; in hierarchical, every task goes to a manager agent on gpt-4o which delegates to the finder, researcher or picker as it sees fit">
+  <text x="190" y="25" text-anchor="middle" class="title">sequential (Days 1–2)</text>
+  <rect x="30" y="45" width="100" height="40" rx="8" class="box"/><text x="80" y="70" text-anchor="middle" class="small">task 1 → agent A</text>
+  <path class="arrow" d="M132,65 H148"/>
+  <rect x="150" y="45" width="100" height="40" rx="8" class="box"/><text x="200" y="70" text-anchor="middle" class="small">task 2 → agent B</text>
+  <path class="arrow" d="M252,65 H268"/>
+  <rect x="270" y="45" width="100" height="40" rx="8" class="box"/><text x="320" y="70" text-anchor="middle" class="small">task 3 → agent C</text>
+  <text x="200" y="110" text-anchor="middle" class="small">order and assignment fixed in YAML</text>
+  <path class="line dashed" d="M390,15 V235"/>
+  <text x="575" y="25" text-anchor="middle" class="title">hierarchical (Day 3)</text>
+  <rect x="490" y="45" width="170" height="50" rx="8" class="box-solid"/><text x="575" y="66" text-anchor="middle" class="label on-solid">manager · gpt-4o</text><text x="575" y="84" text-anchor="middle" class="small on-solid">receives every task</text>
+  <path class="arrow-accent" d="M520,97 V150"/><path class="arrow-accent" d="M575,97 V150"/><path class="arrow-accent" d="M630,97 V150"/>
+  <text x="680" y="130" class="small accent">delegate work to coworker</text>
+  <rect x="410" y="152" width="105" height="44" rx="8" class="box"/><text x="462" y="172" text-anchor="middle" class="small">finder</text><text x="462" y="188" text-anchor="middle" class="small">+ search</text>
+  <rect x="523" y="152" width="105" height="44" rx="8" class="box"/><text x="575" y="172" text-anchor="middle" class="small">researcher</text><text x="575" y="188" text-anchor="middle" class="small">+ search</text>
+  <rect x="636" y="152" width="105" height="44" rx="8" class="box"/><text x="688" y="172" text-anchor="middle" class="small">picker</text><text x="688" y="188" text-anchor="middle" class="small">+ push</text>
+  <text x="575" y="225" text-anchor="middle" class="small">the manager decides who does what, and how often</text>
+</svg>
+<figcaption>Two ways to run a crew. <strong>Hierarchical adds a decision-maker on top, with all the autonomy and unpredictability that brings.</strong></figcaption>
+</figure>
+
+<h3>First run (lecture 12, 00:30)</h3>
+<p><code>main.py</code> sets <code>inputs = {'sector': 'Technology'}</code> (the repo also passes <code>current_date</code>, which the YAML never uses) and prints "=== FINAL DECISION ===" and the result. "The crew process is, by its very nature, a little bit less predictable than we might want. It is autonomous… it can sometimes go back to do some news and analysis… and it can take quite a while." The log shows "Agent: Manager" and "🔧 Using Delegate work to coworker (1)", and the finder receiving the manager's own paraphrase of the task. The result: "The chosen company for investment is Anthropic… with a valuation of approximately $61.5 billion", with Peregrine Technologies and Circle not selected. <code>trending_companies.json</code> began <code>{"companies":[{"name":"Anthropic","ticker":"N/A",…</code>: "in the JSON format that conforms to our schema". He found Anthropic "interesting because it was OpenAI that was doing this processing".</p>
+<div class="callout warn"><p><strong>Spot the invention.</strong> That first decision ended: "A detailed push notification with the decision and rationale has been prepared." The picker had no push tool yet. The task asked for a notification, so the model claimed one. Models describe actions they cannot take; check the trace for a real tool call before believing it.</p></div>
+
+<h2>A custom tool (lecture 12, 02:52–06:33)</h2>
+<p>The generated project already has <code>tools/custom_tool.py</code> "that has a kind of typical layout for these sorts of tools"; he renames it <code>push_tool.py</code>. "When you set up a custom tool you have to first describe using a Pydantic object the schema of what will be passed in to your custom tool. And then you end up writing an <code>_run</code> method, which is going to take that schema as its parameters." The body is the Pushover code from Week 1, "exactly the same code".</p>
+<div class="code-tabs"><pre data-file="stock_picker/src/stock_picker/tools/push_tool.py" data-lang="py" data-tag="complete file"><code>from crewai.tools import BaseTool
+from typing import Type
+from pydantic import BaseModel, Field
+import os
+import requests
+
+
+class PushNotification(BaseModel):
+    """A message to be sent to the user"""
+    message: str = Field(..., description="The message to be sent to the user.")
+
+class PushNotificationTool(BaseTool):
+    
+
+    name: str = "Send a Push Notification"
+    description: str = (
+        "This tool is used to send a push notification to the user."
+    )
+    args_schema: Type[BaseModel] = PushNotification
+
+    def _run(self, message: str) -&gt; str:
+        pushover_user = os.getenv("PUSHOVER_USER")
+        pushover_token = os.getenv("PUSHOVER_TOKEN")
+        pushover_url = "https://api.pushover.net/1/messages.json"
+
+        print(f"Push: {message}")
+        payload = {"user": pushover_user, "token": pushover_token, "message": message}
+        requests.post(pushover_url, data=payload)
+        return '{"notification": "ok"}'</code></pre><pre data-file="src/tools.ts" data-lang="ts" data-tag="excerpt · lines 34–47" data-start="34"><code>/** Push notification through Pushover (prints only when the keys are missing). */
+export const pushTool = tool({
+  name: "send_push_notification",
+  description: "This tool is used to send a push notification to the user.",
+  parameters: z.object({ message: z.string().describe("The message to be sent to the user.") }),
+  execute: async ({ message }) =&gt; {
+    console.log(`Push: ${message}`);
+    const user = process.env.PUSHOVER_USER, token = process.env.PUSHOVER_TOKEN;
+    if (user &amp;&amp; token) {
+      await fetch("https://api.pushover.net/1/messages.json", { method: "POST", body: new URLSearchParams({ user, token, message }) });
+    }
+    return '{"notification": "ok"}';
+  },
+});</code></pre></div>
+<div data-only="py">
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>from crewai.tools import BaseTool</code></td><td>The base class every custom CrewAI tool extends.</td></tr>
+<tr><td>8–10</td><td><code>class PushNotification(BaseModel): """A message to be sent to the user""" message: str = Field(..., description="The message to be sent to the user.")</code></td><td>The input schema: one required string. <code>...</code> in <code>Field</code> means "required". (The video called this class <code>PushNotificationInput</code>.)</td></tr>
+<tr><td>12–19</td><td><code>class PushNotificationTool(BaseTool): name: str = "Send a Push Notification" · description: str = (…) · args_schema: Type[BaseModel] = PushNotification</code></td><td>What the LLM sees: a name, a description, and the argument schema. The name is what appears in the log as "Using Send a Push Notification".</td></tr>
+<tr><td>21</td><td><code>def _run(self, message: str) -&gt; str:</code></td><td>The code CrewAI calls; its parameters match the schema's fields.</td></tr>
+<tr><td>22–28</td><td><code>pushover_user = os.getenv("PUSHOVER_USER") … requests.post(pushover_url, data=payload)</code></td><td>Week 1's Pushover call, keys from <code>.env</code>.</td></tr>
+<tr><td>29</td><td><code>return '{"notification": "ok"}'</code></td><td>The observation the agent reads after calling the tool. It does not check Pushover's response, so it reports "ok" even if the keys are wrong.</td></tr>
+</table></div>
+<p>Then the picker gets it: <code>from .tools.push_tool import PushNotificationTool</code> and <code>tools=[PushNotificationTool()]</code> on the <code>stock_picker</code> agent. Only the finder and the researcher get <code>SerperDevTool</code>: "we don't need to have the SerperDevTool in there, because the stock picker has been given all of its information" (lecture 11, 04:01).</p>
+</div>
+<div data-only="ts">
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>35–38</td><td><code>export const pushTool = tool({ name: "send_push_notification", description: "…", parameters: z.object({ message: z.string().describe("…") }),</code></td><td>Name, description and argument schema: the same three things as <code>BaseTool</code>'s <code>name</code>, <code>description</code> and <code>args_schema</code>.</td></tr>
+<tr><td>39–45</td><td><code>execute: async ({ message }) =&gt; { console.log(`Push: ${message}`); … if (user &amp;&amp; token) { await fetch(…) } return '{"notification": "ok"}'; }</code></td><td><code>_run</code>'s twin. Without keys it only prints, so the crew runs anywhere.</td></tr>
+</table></div>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Anatomy of a CrewAI custom tool: a Pydantic args schema, the tool's name and description, and a _run method that posts to Pushover and returns a JSON string to the agent">
+  <rect x="20" y="30" width="200" height="140" rx="8" class="box-info"/>
+  <text x="120" y="55" text-anchor="middle" class="title">args_schema</text>
+  <text x="40" y="82" class="mono small">class PushNotification</text>
+  <text x="50" y="102" class="mono small">(BaseModel):</text>
+  <text x="50" y="125" class="mono small">message: str</text>
+  <text x="40" y="155" class="small">what the LLM must provide</text>
+  <path class="arrow" d="M222,100 H268"/>
+  <rect x="270" y="30" width="230" height="140" rx="8" class="box-solid"/>
+  <text x="385" y="55" text-anchor="middle" class="title on-solid">PushNotificationTool(BaseTool)</text>
+  <text x="290" y="82" class="small on-solid">name: "Send a Push Notification"</text>
+  <text x="290" y="102" class="small on-solid">description: when to use it</text>
+  <text x="290" y="122" class="small on-solid">args_schema = PushNotification</text>
+  <text x="290" y="150" class="mono small on-solid">_run(self, message)</text>
+  <path class="arrow" d="M502,100 H548"/>
+  <rect x="550" y="30" width="190" height="60" rx="8" class="box"/><text x="645" y="56" text-anchor="middle" class="small">requests.post →</text><text x="645" y="74" text-anchor="middle" class="small">api.pushover.net</text>
+  <rect x="550" y="110" width="190" height="60" rx="8" class="box-ok"/><text x="645" y="136" text-anchor="middle" class="mono small">'{"notification": "ok"}'</text><text x="645" y="154" text-anchor="middle" class="small">back to the agent</text>
+</svg>
+<figcaption>A custom tool in CrewAI. <strong>A schema for the inputs, a name and description for the model, and <code>_run</code> for your code.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Which agent has which tool in the stock picker: the finder and researcher have Serper search, the picker has the push tool, the manager has only delegation">
+  <rect x="20" y="40" width="170" height="120" rx="8" class="box"/><text x="105" y="70" text-anchor="middle" class="title">finder</text><text x="105" y="100" text-anchor="middle" class="small">SerperDevTool</text><text x="105" y="125" text-anchor="middle" class="small">memory (Day 4)</text>
+  <rect x="200" y="40" width="170" height="120" rx="8" class="box"/><text x="285" y="70" text-anchor="middle" class="title">researcher</text><text x="285" y="100" text-anchor="middle" class="small">SerperDevTool</text><text x="285" y="125" text-anchor="middle" class="small">no memory</text>
+  <rect x="380" y="40" width="170" height="120" rx="8" class="box"/><text x="465" y="70" text-anchor="middle" class="title">picker</text><text x="465" y="100" text-anchor="middle" class="small">PushNotificationTool</text><text x="465" y="125" text-anchor="middle" class="small">memory (Day 4)</text>
+  <rect x="560" y="40" width="180" height="120" rx="8" class="box-solid"/><text x="650" y="70" text-anchor="middle" class="title on-solid">manager</text><text x="650" y="100" text-anchor="middle" class="small on-solid">delegate / ask coworker</text><text x="650" y="125" text-anchor="middle" class="small on-solid">gpt-4o</text>
+  <text x="380" y="195" text-anchor="middle" class="small">give each agent only the tools its job needs</text>
+</svg>
+<figcaption>Tools per agent. <strong>The picker does not search: it has everything it needs from the research.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><p><strong>What you should see.</strong> The second run in the video (with the push tool) chose Circle, "one of the runners up last time", for its stablecoin position and planned IPO, with Emovid and Portal Space Systems not selected; the presenter says the push notification arrived on his phone. "Despite my misgivings about the autonomous framework it actually performed really well." The repo's committed outputs are from a later run and pick LumeCube.</p>
+<!-- W3-STOCK-RUN --></div>
+
+<div class="callout"><p><strong>Video vs repo.</strong> On screen the tool's input class is <code>PushNotificationInput</code> and its name "Send a push notification"; the repo has <code>PushNotification</code> and "Send a Push Notification". The repo's <code>main.py</code> adds <code>current_date</code> to the inputs. The repo's <code>crew.py</code> already contains Day 4's memory: <code>memory=True</code> on two agents and the memory objects in <code>Crew(...)</code>. The repo also carries stray files from earlier experiments (<code>stock_picker/report.md</code>, <code>output/research</code>) that the current code does not produce.</p></div>
+
+<div class="callout warn"><p><strong>Common mistakes</strong></p>
+<ul>
+<li><strong>The manager in <code>self.agents</code>:</strong> if you decorate it with <code>@agent</code>, it becomes a worker too and may delegate to itself. Build it inside <code>crew()</code>.</li>
+<li><strong>Inconsistent vocabulary:</strong> calling them "newsworthy companies" in one place and "trending companies" in another made the presenter's early versions unstable.</li>
+<li><strong>Hierarchical runs that wander:</strong> the manager may re-delegate, rephrase tasks and take a long time. Use a strong model for the manager.</li>
+<li><strong>Believing claimed actions:</strong> "a push notification has been prepared" without a tool means nothing happened.</li>
+<li><strong><code>ticker: "N/A"</code> everywhere:</strong> the schema forces the field to exist, not to be right. Schemas guarantee shape, not truth.</li>
+<li><strong>Pushover silently failing:</strong> the tool ignores the HTTP response; if no notification arrives, check the keys.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>Structured outputs in CrewAI: Pydantic classes plus <code>output_pydantic=</code> on the task; in TypeScript, zod schemas as the agent's <code>outputType</code>.</li>
+<li>A custom tool is a <code>BaseTool</code> subclass with <code>name</code>, <code>description</code>, <code>args_schema</code> and <code>_run</code>.</li>
+<li><code>Process.hierarchical</code> with a <code>manager_agent</code> (built outside <code>@agent</code>, <code>allow_delegation=True</code>) lets an LLM assign the tasks.</li>
+<li>Give a manager a stronger model, keep the vocabulary consistent, and expect autonomy to be less predictable.</li>
+<li>Check traces for real tool calls; models will claim actions they cannot perform.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="12-w3d2.html"><small>← Previous · Step 12</small>Week 3 Day 2 · Financial researcher with web search</a>
+<a class="next" href="14-w3d4.html"><small>Next · Step 14 →</small>Week 3 Day 4 · Memory, and agents that write and run code</a>
+</nav>
+</main>
+</body>
+</html>
