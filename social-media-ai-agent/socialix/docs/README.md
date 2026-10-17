@@ -10,6 +10,7 @@ holds your connected social accounts.
 | [2. Daily start and stop](02-start-and-stop.md) | Every time you want to use the app |
 | [3. User guide](03-user-guide.md) | Learning the pages and the everyday workflow |
 | [4. Troubleshooting](04-troubleshooting.md) | Something does not work |
+| [5. Install on a new Linux server](05-linux-server.md) | Moving Socialix and the autopilot to an Ubuntu server with HTTPS |
 
 ## How the pieces fit together
 
