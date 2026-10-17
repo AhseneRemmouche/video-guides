@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5. Install on a new Linux server · Socialix docs</title>
+<style>
+:root { --bg:#ffffff; --fg:#1f2328; --muted:#59636e; --line:#d1d9e0; --soft:#f6f8fa; --accent:#4f46e5; --note:#fff8c5; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --line:#3d444d; --soft:#161b22; --accent:#8b8cf8; --note:#2d2a12; }
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+nav { position:sticky; top:0; z-index:1; display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center;
+      padding:10px 16px; background:var(--soft); border-bottom:1px solid var(--line); font-size:14px; }
+nav strong { margin-right:8px; }
+nav a { color:var(--muted); text-decoration:none; }
+nav a.here { color:var(--accent); font-weight:600; }
+main { max-width:900px; margin:0 auto; padding:24px 16px 64px; }
+h1 { font-size:2em; margin-top:.4em; } h2 { border-bottom:1px solid var(--line); padding-bottom:.3em; margin-top:1.8em; }
+a { color:var(--accent); }
+code { font:0.88em ui-monospace, SFMono-Regular, Consolas, monospace; background:var(--soft); padding:.15em .35em; border-radius:5px; }
+pre { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:14px; overflow-x:auto; line-height:1.45; }
+pre code { background:none; padding:0; font-size:0.85em; }
+table { border-collapse:collapse; width:100%; display:block; overflow-x:auto; margin:1em 0; }
+th, td { border:1px solid var(--line); padding:6px 12px; text-align:left; vertical-align:top; }
+th { background:var(--soft); }
+blockquote { margin:1em 0; padding:10px 16px; background:var(--note); border-left:4px solid var(--accent); border-radius:6px; }
+blockquote p { margin:.3em 0; }
+img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:8px; }
+li > input[type=checkbox] { margin-right:6px; }
+.pager { display:flex; justify-content:space-between; gap:12px; margin-top:48px; padding-top:16px; border-top:1px solid var(--line); }
+.pager a { text-decoration:none; }
+</style>
+</head>
+<body>
+<nav><strong>Socialix docs</strong><a href="index.html">Overview</a><a href="01-setup.html">1. Setup</a><a href="02-start-and-stop.html">2. Start and stop</a><a href="03-user-guide.html">3. User guide</a><a href="04-troubleshooting.html">4. Troubleshooting</a><a href="05-linux-server.html" class=here>5. Linux server</a></nav>
+<main>
+<h1>5. Install on a new Linux server</h1>
+<p>This guide puts Socialix and the WordPress Social Autopilot on one fresh <strong>Ubuntu 24.04</strong> server, reachable over
+HTTPS, starting by themselves after a reboot. It takes about an hour. Commands are run on the server over SSH
+unless a step says "on your Windows PC".</p>
+<h2>What you end up with</h2>
+<pre><code>                 Internet (HTTPS only, ports 80/443)
+                              │
+                         nginx + Let's Encrypt
+                 ┌────────────┴─────────────┐
+   socialix.example.com            autopilot.example.com
+         │                                  │
+   Socialix (systemd)              Autopilot web (Docker)
+   127.0.0.1:3100                  127.0.0.1:3000
+         │      spawns                      │
+         │   MCP server (stdio)             │
+         └──────────────┬───────────────────┘
+                 Postgres (Docker) 127.0.0.1:5433
+                        │
+                 Autopilot worker (Docker) ──► LinkedIn, X, Instagram, Facebook…
+</code></pre>
+<ul>
+<li><strong>Postgres, the autopilot web app and the worker</strong> run with the autopilot's own <code>docker-compose.yml</code>.</li>
+<li><strong>Socialix</strong> runs directly with Node, as a systemd service, because it reads the autopilot's <code>.env</code> file in place
+  and starts its MCP server as a child process.</li>
+<li>Only nginx is reachable from the internet. Everything else listens on <code>127.0.0.1</code>.</li>
+</ul>
+<p>Replace <code>socialix.example.com</code> and <code>autopilot.example.com</code> with your own (sub)domains everywhere below.</p>
+<h2>0. Before you start</h2>
+<table>
+<thead>
+<tr>
+<th>You need</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>An Ubuntu 24.04 server</td>
+<td>2 vCPU and <strong>4 GB RAM</strong> recommended (<code>next build</code> needs about 2 GB). With 2 GB RAM, add swap (step 2). 20 GB disk.</td>
+</tr>
+<tr>
+<td>SSH access as a user with <code>sudo</code></td>
+<td></td>
+</tr>
+<tr>
+<td>Two DNS records</td>
+<td><code>socialix.example.com</code> and <code>autopilot.example.com</code>, both <strong>A records pointing to the server's IP</strong>. Create them first: HTTPS certificates need them.</td>
+</tr>
+<tr>
+<td>The autopilot's <code>.env</code> from your PC</td>
+<td><code>C:\MLSCampus\wordpress-social-autopilot\.env</code>. Copy it over SSH only (never by email or chat).</td>
+</tr>
+<tr>
+<td>Your social app settings</td>
+<td>You will add the new HTTPS callback URLs in each platform's developer console (step 6).</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Secrets.</strong> The autopilot's <code>.env</code> holds the Anthropic key, the database password and the token encryption key.
+Keep the <strong>same <code>TOKEN_ENCRYPTION_KEY</code></strong> if you move your existing data: the social tokens in the database are
+encrypted with it and cannot be read with a different key.</p>
+</blockquote>
+<h2>1. Update the server and create the folders</h2>
+<pre><code class="language-bash">sudo apt update &amp;&amp; sudo apt -y upgrade
+sudo apt -y install git curl ca-certificates rsync
+sudo timedatectl set-timezone UTC          # the apps store times in UTC; this keeps logs consistent
+</code></pre>
+<p>Create a system user that will own and run Socialix, and the two app folders:</p>
+<pre><code class="language-bash">sudo adduser --system --group --home /opt/social-media-ai-agent socialix
+sudo mkdir -p /opt/wordpress-social-autopilot
+sudo chown $USER:$USER /opt/wordpress-social-autopilot
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Word</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--system --group</code></td>
+<td>a service account with its own group and no password; nobody logs in as it</td>
+</tr>
+<tr>
+<td><code>--home /opt/social-media-ai-agent</code></td>
+<td>its home folder is the app folder</td>
+</tr>
+</tbody>
+</table>
+<h2>2. (Small servers) Add swap</h2>
+<p>Skip this if the server has 4 GB RAM or more (<code>free -h</code>).</p>
+<pre><code class="language-bash">sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile &amp;&amp; sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+</code></pre>
+<h2>3. Firewall</h2>
+<pre><code class="language-bash">sudo ufw allow OpenSSH
+sudo ufw enable
+sudo ufw status
+</code></pre>
+<p>HTTP and HTTPS are opened in step 9, once nginx is installed.</p>
+<blockquote>
+<p><strong>Docker bypasses ufw.</strong> A port that Docker publishes as <code>5433:5432</code> is open to the whole internet even when ufw
+blocks it. That is why step 5 publishes the database and the autopilot web app on <code>127.0.0.1</code> only.</p>
+</blockquote>
+<h2>4. Install Docker, Node.js 22 and pnpm</h2>
+<p><strong>Docker</strong> (official repository):</p>
+<pre><code class="language-bash">sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+echo &quot;deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release &amp;&amp; echo $VERSION_CODENAME) stable&quot; | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt update
+sudo apt -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER      # log out and back in so this takes effect
+</code></pre>
+<p><strong>Node.js 22</strong> (NodeSource) and <strong>pnpm</strong> (through Corepack, which ships with Node):</p>
+<pre><code class="language-bash">curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt -y install nodejs
+sudo corepack enable
+node --version        # v22.x
+pnpm --version        # Corepack downloads pnpm the first time
+</code></pre>
+<h2>5. Install the WordPress Social Autopilot (database, web app, worker)</h2>
+<p>Copy the autopilot project to the server. <strong>On your Windows PC</strong>, in PowerShell:</p>
+<pre><code class="language-powershell">cd C:\MLSCampus
+tar --exclude=node_modules --exclude=.next --exclude=coverage -czf autopilot.tgz wordpress-social-autopilot
+scp autopilot.tgz you@SERVER_IP:/tmp/
+</code></pre>
+<p>The archive includes the <code>.env</code> file. <code>scp</code> encrypts the transfer. Delete <code>autopilot.tgz</code> from your PC afterwards.</p>
+<p>Back on the server:</p>
+<pre><code class="language-bash">tar -xzf /tmp/autopilot.tgz -C /opt &amp;&amp; rm /tmp/autopilot.tgz
+cd /opt/wordpress-social-autopilot
+chmod 640 .env
+nano .env
+</code></pre>
+<p>Change these lines in the autopilot's <code>.env</code> (the other values stay as they are):</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>New value</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>APP_BASE_URL</code></td>
+<td><code>https://autopilot.example.com</code></td>
+<td>OAuth callbacks and links now use the public HTTPS address</td>
+</tr>
+<tr>
+<td><code>NEXTAUTH_URL</code></td>
+<td><code>https://autopilot.example.com</code></td>
+<td>the autopilot dashboard's sign-in</td>
+</tr>
+<tr>
+<td><code>POSTGRES_USER</code> / <code>POSTGRES_PASSWORD</code></td>
+<td>a user name and a <strong>long random password</strong>, letters and digits only so it fits in a URL: <code>openssl rand -hex 24</code> (add the lines; without them Docker uses <code>wsa</code>/<code>wsa</code>)</td>
+<td>the database login. Postgres sets it only when the database is first created, so choose it before the first <code>docker compose up</code></td>
+</tr>
+<tr>
+<td><code>POSTGRES_PORT</code></td>
+<td><code>127.0.0.1:5433</code></td>
+<td>publish the database <strong>on localhost only</strong> (add the line if missing)</td>
+</tr>
+<tr>
+<td><code>WEB_PORT</code></td>
+<td><code>127.0.0.1:3000</code></td>
+<td>publish the autopilot web app on localhost only; nginx serves it (add the line if missing)</td>
+</tr>
+<tr>
+<td><code>DATABASE_URL</code></td>
+<td><code>postgresql://USER:PASSWORD@localhost:5433/wordpress_social_autopilot?schema=public</code></td>
+<td>the address <strong>from the server itself</strong>; Socialix uses this line. USER and PASSWORD are the <code>POSTGRES_USER</code> and <code>POSTGRES_PASSWORD</code> values above</td>
+</tr>
+</tbody>
+</table>
+<p>Inside Docker the web app and the worker do not use <code>DATABASE_URL</code> from the file: <code>docker-compose.yml</code> builds their
+own address from the <code>POSTGRES_*</code> values.</p>
+<p>Start the stack:</p>
+<pre><code class="language-bash">docker compose up -d --build
+docker compose ps        # postgres &quot;healthy&quot;, web and worker &quot;running&quot;
+docker compose logs -f worker     # Ctrl+C to stop following
+</code></pre>
+<p>The <code>web</code> and <code>worker</code> containers apply the database migrations on start. The worker is what publishes approved
+posts; <code>restart: unless-stopped</code> brings it back after a crash or reboot.</p>
+<blockquote>
+<p><strong>Run only one worker per database.</strong> Once the server worker runs, stop <code>npm run worker</code> on your PC.</p>
+</blockquote>
+<h3>5b. (Optional) Move your existing data from the PC</h3>
+<p>Skip this for a fresh start (you will connect the social accounts again in the autopilot).</p>
+<p><strong>On your Windows PC</strong> (the database container is <code>wsa-pg</code>; USER is the user from your <code>DATABASE_URL</code>):</p>
+<pre><code class="language-powershell">docker exec wsa-pg pg_dump -U USER -Fc wordpress_social_autopilot &gt; autopilot.dump
+docker exec wsa-pg pg_dump -U USER -Fc social_media_ai_agent &gt; socialix.dump
+scp autopilot.dump socialix.dump you@SERVER_IP:/tmp/
+</code></pre>
+<p>On the server, after step 5 has started the stack once:</p>
+<pre><code class="language-bash">cd /opt/wordpress-social-autopilot
+docker compose stop web worker
+docker compose exec -T postgres pg_restore -U USER -d wordpress_social_autopilot --clean --if-exists &lt; /tmp/autopilot.dump
+docker compose exec -T postgres createdb -U USER social_media_ai_agent
+docker compose exec -T postgres pg_restore -U USER -d social_media_ai_agent --no-owner &lt; /tmp/socialix.dump
+docker compose start web worker
+rm /tmp/*.dump
+</code></pre>
+<p><code>pnpm db:setup</code> in step 7 is still safe after a restore: it only creates what is missing.</p>
+<h2>6. Point the social apps at the new address</h2>
+<p>The autopilot's OAuth callbacks are <code>{APP_BASE_URL}/api/oauth/&lt;slug&gt;/callback</code>. In each platform's developer console,
+add the new URL <strong>exactly</strong> (keep the old one until everything works):</p>
+<ul>
+<li><code>https://autopilot.example.com/api/oauth/linkedin/callback</code></li>
+<li><code>https://autopilot.example.com/api/oauth/facebook/callback</code> and <code>.../instagram/callback</code> (same Meta app)</li>
+<li><code>https://autopilot.example.com/api/oauth/x/callback</code></li>
+<li><code>https://autopilot.example.com/api/oauth/tiktok/callback</code></li>
+<li><code>https://autopilot.example.com/api/oauth/youtube/callback</code></li>
+<li>the GitHub sign-in callback: <code>https://autopilot.example.com/api/auth/callback/github</code></li>
+</ul>
+<p>The full list of scopes and settings is in the autopilot's <code>docs/deployment.md</code>. If you moved the data with the same
+<code>TOKEN_ENCRYPTION_KEY</code>, connected accounts keep working; reconnect any account that shows "token expired".</p>
+<h2>7. Install Socialix</h2>
+<p><strong>On your Windows PC:</strong></p>
+<pre><code class="language-powershell">cd C:\MLSCampus
+tar --exclude=node_modules --exclude=.next --exclude=.env -czf socialix.tgz social-media-ai-agent
+scp socialix.tgz you@SERVER_IP:/tmp/
+</code></pre>
+<p>This archive leaves out <code>.env</code>: the server gets its own login and session secret.</p>
+<p>On the server:</p>
+<pre><code class="language-bash">sudo tar -xzf /tmp/socialix.tgz -C /opt &amp;&amp; rm /tmp/socialix.tgz
+sudo chown -R socialix:socialix /opt/social-media-ai-agent
+
+# Socialix reads the autopilot's .env in place: let its group read that one file
+sudo chgrp socialix /opt/wordpress-social-autopilot/.env
+sudo chmod 640 /opt/wordpress-social-autopilot/.env
+</code></pre>
+<p>Create Socialix's settings file and install the packages, as the <code>socialix</code> user:</p>
+<pre><code class="language-bash">cd /opt/social-media-ai-agent
+sudo -u socialix cp .env.example .env
+sudo -u socialix nano .env
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Value on the server</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AUTOPILOT_DIR</code></td>
+<td><code>/opt/wordpress-social-autopilot</code></td>
+</tr>
+<tr>
+<td><code>APP_DATABASE_NAME</code></td>
+<td><code>social_media_ai_agent</code></td>
+</tr>
+<tr>
+<td><code>APP_LOGIN_EMAIL</code></td>
+<td>your email</td>
+</tr>
+<tr>
+<td><code>APP_LOGIN_PASSWORD</code></td>
+<td>leave empty to generate one, or set a long password</td>
+</tr>
+<tr>
+<td><code>SESSION_SECRET</code></td>
+<td>leave empty (generated)</td>
+</tr>
+</tbody>
+</table>
+<p>Then:</p>
+<pre><code class="language-bash">sudo -u socialix -H bash -c 'cd /opt/social-media-ai-agent &amp;&amp; pnpm install --frozen-lockfile'
+sudo -u socialix -H bash -c 'cd /opt/social-media-ai-agent &amp;&amp; pnpm db:setup'
+sudo -u socialix -H bash -c 'cd /opt/social-media-ai-agent &amp;&amp; pnpm mcp:check'
+sudo -u socialix -H bash -c 'cd /opt/social-media-ai-agent &amp;&amp; pnpm build'
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pnpm install --frozen-lockfile</code></td>
+<td>installs exactly the versions in <code>pnpm-lock.yaml</code>. Keep the dev dependencies: Socialix starts its MCP server with <code>tsx</code> at run time.</td>
+</tr>
+<tr>
+<td><code>pnpm db:setup</code></td>
+<td>creates the <code>social_media_ai_agent</code> database and tables next to the autopilot's, and writes the login into <code>.env</code> (never printed)</td>
+</tr>
+<tr>
+<td><code>pnpm mcp:check</code></td>
+<td>lists your social accounts through the MCP server. Posts nothing.</td>
+</tr>
+<tr>
+<td><code>pnpm build</code></td>
+<td>the production build (<code>.next/</code>)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>No <code>NODE_OPTIONS=--use-system-ca</code> here: that was only needed on the Windows PC because of Norton.</p>
+</blockquote>
+<p>Optional: one cheap Claude call to test the key and the models:</p>
+<pre><code class="language-bash">sudo -u socialix -H bash -c 'cd /opt/social-media-ai-agent &amp;&amp; pnpm exec tsx scripts/agent-check.ts analytics'
+</code></pre>
+<h2>8. Run Socialix as a service</h2>
+<p>Create <code>/etc/systemd/system/socialix.service</code>:</p>
+<pre><code class="language-bash">sudo nano /etc/systemd/system/socialix.service
+</code></pre>
+<pre><code class="language-ini">[Unit]
+Description=Socialix - AI social media team
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=socialix
+Group=socialix
+WorkingDirectory=/opt/social-media-ai-agent
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+ExecStart=/usr/bin/node node_modules/next/dist/bin/next start -p 3100 -H 127.0.0.1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Line</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>WorkingDirectory</code></td>
+<td>Socialix reads <code>.env</code> and starts <code>mcp/social-publisher/server.ts</code> relative to this folder</td>
+</tr>
+<tr>
+<td><code>NODE_ENV=production</code></td>
+<td>also makes the login cookie <code>Secure</code>, so it only travels over HTTPS (step 9)</td>
+</tr>
+<tr>
+<td><code>-H 127.0.0.1</code></td>
+<td>listen on localhost only; nginx is the only way in</td>
+</tr>
+<tr>
+<td><code>Restart=always</code></td>
+<td>start again after a crash</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-bash">sudo systemctl daemon-reload
+sudo systemctl enable --now socialix
+systemctl status socialix
+curl -I http://127.0.0.1:3100/signin      # HTTP/1.1 200 OK
+journalctl -u socialix -f                  # live logs; Ctrl+C to stop
+</code></pre>
+<h2>9. nginx and HTTPS</h2>
+<pre><code class="language-bash">sudo apt -y install nginx certbot python3-certbot-nginx
+sudo ufw allow 'Nginx Full'
+sudo nano /etc/nginx/sites-available/socialix
+</code></pre>
+<pre><code class="language-nginx">limit_req_zone $binary_remote_addr zone=socialix_login:10m rate=10r/m;
+
+server {
+    listen 80;
+    server_name socialix.example.com;
+
+    # slow down password guessing on the sign-in page
+    location = /signin {
+        limit_req zone=socialix_login burst=5 nodelay;
+        proxy_pass http://127.0.0.1:3100;
+        include /etc/nginx/proxy_params;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3100;
+        include /etc/nginx/proxy_params;
+        proxy_read_timeout 120s;
+    }
+}
+
+server {
+    listen 80;
+    server_name autopilot.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        include /etc/nginx/proxy_params;
+        proxy_read_timeout 120s;
+    }
+}
+</code></pre>
+<p><code>proxy_params</code> (shipped with nginx on Ubuntu) passes the original host, client IP and protocol to the apps.</p>
+<pre><code class="language-bash">sudo ln -s /etc/nginx/sites-available/socialix /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t &amp;&amp; sudo systemctl reload nginx
+sudo certbot --nginx -d socialix.example.com -d autopilot.example.com
+</code></pre>
+<p>Certbot gets the certificates, adds the HTTPS server blocks, redirects HTTP to HTTPS and renews automatically
+(<code>systemctl list-timers | grep certbot</code>).</p>
+<p>Open <strong>https://socialix.example.com</strong>, sign in with the email and password from
+<code>/opt/social-media-ai-agent/.env</code> (<code>sudo grep APP_LOGIN /opt/social-media-ai-agent/.env</code>; never paste it anywhere).</p>
+<blockquote>
+<p><strong>Sign-in loops back to the sign-in page?</strong> You opened the site over plain HTTP. The cookie is <code>Secure</code> in
+production, so the browser drops it without HTTPS. Use the <code>https://</code> address.</p>
+</blockquote>
+<h2>10. Check everything</h2>
+<ul>
+<li><input type="checkbox" disabled><code>https://socialix.example.com</code> signs in; the Accounts page lists your networks.</li>
+<li><input type="checkbox" disabled><code>https://autopilot.example.com</code> opens the autopilot dashboard.</li>
+<li><input type="checkbox" disabled><code>docker compose ps</code> (in <code>/opt/wordpress-social-autopilot</code>): postgres healthy, web and worker running.</li>
+<li><input type="checkbox" disabled>Brief the Analytics Agent ("Give me a status report") on the AI Agent page: it answers.</li>
+<li><input type="checkbox" disabled>From another computer, <code>nc -zv SERVER_IP 5433</code> and <code>nc -zv SERVER_IP 3100</code> <strong>fail</strong> (closed).</li>
+<li><input type="checkbox" disabled><code>sudo reboot</code>, wait a minute: both sites come back by themselves.</li>
+</ul>
+<h2>11. Backups</h2>
+<p>Both databases live in the Docker volume. A nightly dump, kept 14 days:</p>
+<pre><code class="language-bash">sudo mkdir -p /var/backups/socialix
+sudo nano /etc/cron.daily/socialix-backup
+</code></pre>
+<pre><code class="language-bash">#!/bin/sh
+set -e
+cd /opt/wordpress-social-autopilot
+D=$(date +%F)
+for DB in wordpress_social_autopilot social_media_ai_agent; do
+  docker compose exec -T postgres pg_dump -U USER -Fc &quot;$DB&quot; &gt; /var/backups/socialix/$DB-$D.dump
+done
+find /var/backups/socialix -name '*.dump' -mtime +14 -delete
+</code></pre>
+<pre><code class="language-bash">sudo chmod 700 /etc/cron.daily/socialix-backup
+sudo /etc/cron.daily/socialix-backup &amp;&amp; ls -lh /var/backups/socialix
+</code></pre>
+<p>Replace USER with your <code>POSTGRES_USER</code>. Also keep a copy of both <code>.env</code> files somewhere safe (a password manager):
+without <code>TOKEN_ENCRYPTION_KEY</code> a database backup cannot decrypt the social tokens. Copy the dumps off the server
+regularly.</p>
+<h2>12. Updating</h2>
+<p><strong>Socialix</strong> (after changing the code on your PC):</p>
+<pre><code class="language-powershell"># on your PC
+cd C:\MLSCampus
+tar --exclude=node_modules --exclude=.next --exclude=.env -czf socialix.tgz social-media-ai-agent
+scp socialix.tgz you@SERVER_IP:/tmp/
+</code></pre>
+<pre><code class="language-bash"># on the server
+sudo tar -xzf /tmp/socialix.tgz -C /opt &amp;&amp; rm /tmp/socialix.tgz      # .env on the server is kept
+sudo chown -R socialix:socialix /opt/social-media-ai-agent
+sudo -u socialix -H bash -c 'cd /opt/social-media-ai-agent &amp;&amp; pnpm install --frozen-lockfile &amp;&amp; pnpm db:setup &amp;&amp; pnpm build'
+sudo systemctl restart socialix
+</code></pre>
+<p><strong>Autopilot:</strong> copy the new code the same way (keep its server <code>.env</code>), then
+<code>docker compose up -d --build</code> in <code>/opt/wordpress-social-autopilot</code>.</p>
+<h2>13. Troubleshooting on the server</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>systemctl status socialix</code> shows "failed"</td>
+<td><code>journalctl -u socialix -n 50</code>. "Missing ANTHROPIC_API_KEY (expected in …/.env)": wrong <code>AUTOPILOT_DIR</code>, or the <code>socialix</code> user cannot read the autopilot's <code>.env</code> (step 7 <code>chgrp</code>/<code>chmod</code>).</td>
+</tr>
+<tr>
+<td><code>ECONNREFUSED 127.0.0.1:5433</code></td>
+<td>the database container is down: <code>docker compose ps</code>, <code>docker compose up -d</code>. Check <code>POSTGRES_PORT=127.0.0.1:5433</code> and the port in <code>DATABASE_URL</code>.</td>
+</tr>
+<tr>
+<td><code>pnpm build</code> killed / "JavaScript heap out of memory"</td>
+<td>not enough RAM: add swap (step 2), stop other services during the build.</td>
+</tr>
+<tr>
+<td>502 Bad Gateway in the browser</td>
+<td>Socialix or the autopilot web app is not running on its port: <code>curl -I http://127.0.0.1:3100/signin</code>, <code>docker compose ps</code>.</td>
+</tr>
+<tr>
+<td>Approved posts stay "Queued"</td>
+<td>the worker: <code>docker compose logs --tail 100 worker</code>.</td>
+</tr>
+<tr>
+<td>A post fails with a token error</td>
+<td>reconnect the account in the autopilot (step 6 callbacks must be registered).</td>
+</tr>
+<tr>
+<td>Agents answer "credit balance is too low" or 401</td>
+<td>the Anthropic key in the autopilot's <code>.env</code>. After editing it: <code>sudo systemctl restart socialix</code>.</td>
+</tr>
+<tr>
+<td>Changed <code>.env</code> but nothing happens</td>
+<td>Socialix reads <code>.env</code> at start: <code>sudo systemctl restart socialix</code>.</td>
+</tr>
+</tbody>
+</table>
+<div class="pager"><a href="04-troubleshooting.html">&larr; 4. Troubleshooting</a><span></span></div>
+</main>
+</body>
+</html>

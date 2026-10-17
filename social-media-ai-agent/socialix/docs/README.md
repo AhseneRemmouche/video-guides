@@ -12,6 +12,9 @@ holds your connected social accounts.
 | [4. Troubleshooting](04-troubleshooting.md) | Something does not work |
 | [5. Install on a new Linux server](05-linux-server.md) | Moving Socialix and the autopilot to an Ubuntu server with HTTPS |
 
+These pages also exist as HTML: open `docs/html/index.html` in a browser. After editing a `.md` file, run
+`python scripts/docs-html.py` to regenerate them (needs `pip install markdown`).
+
 ## How the pieces fit together
 
 ```
