@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15 · Fingerprinting a server and finding known CVEs</title>
+<meta name="description" content="Reading response headers to guess the tech stack, then looking it up in the NVD database.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Python for Cybersecurity</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 15/26</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 15 of 26 · 02:00:10</div>
+  <h1>Fingerprinting a server and finding known CVEs</h1>
+  <p class="lead">Reading response headers to guess the tech stack, then looking it up in the NVD database.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=V1wmohBt0AE&amp;t=7210s" target="_blank" rel="noopener">▶ Watch this part (02:00:10)</a>
+</section>
+<p class="lead">A server often tells you what it is running without being asked. In this step we read two response headers to guess the technology behind our lab, then take that guess to the <a class="term" href="glossary.html#nvd">National Vulnerability Database (NVD)</a> to ask a simple question: are there published vulnerabilities for this version? Both halves are everyday blue-team work — knowing your own software's exposure is the first step to patching it.</p>
+
+<div class="callout warn"><strong>Authorized testing only.</strong> Reading headers and looking up CVEs for a system is reconnaissance. Do it only against software you own or are explicitly authorized to test — here, the local practice lab on <code>127.0.0.1</code>. See <a href="ethics-and-authorization.html">Rules of engagement</a>.</div>
+
+<h2>What this step does</h2>
+<p>Two short scripts, run against the lab you started in the previous step:</p>
+<ul>
+<li><strong>Fingerprint the server.</strong> We send a few requests, print each <a class="term" href="glossary.html#status-code">status code</a> with a plain-English meaning, then read the <code>Server</code> and <code>X-Powered-By</code> <a class="term" href="glossary.html#header">headers</a> to see what the lab admits to running.</li>
+<li><strong>Look up known CVEs.</strong> We take a product and version and query the NVD JSON API for matching <a class="term" href="glossary.html#cve">CVE</a> records, printing each id with its <a class="term" href="glossary.html#cvss">CVSS</a> severity.</li>
+</ul>
+
+<details class="primer"><summary>New to fingerprinting? What it is and why it matters</summary>
+<p><a class="term" href="glossary.html#fingerprinting">Fingerprinting</a> means working out what software a server runs by looking at clues it leaks — response headers, error-page wording, default files, timing. A defender fingerprints their own estate to build an inventory: you cannot patch what you do not know you are running. An attacker fingerprints to find a version with a known weakness. The technique is identical; only the authorization differs.</p>
+</details>
+
+<h2>Concepts the presenter explains</h2>
+<p>The course frames this as the natural next move after you can send a request: once a tool can read a response, it can read the <em>metadata</em> of that response too. A status code is the server's one-number summary of what happened, and a handful of headers often name the web server and application framework outright. The presenter then connects that to vulnerability research — a product plus a version string is exactly what a CVE database is indexed by.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="A request returns a response whose Server and X-Powered-By headers reveal the technology">
+  <rect class="box" x="24" y="80" width="150" height="48" rx="8"/>
+  <text class="title" x="99" y="100" text-anchor="middle">Your script</text>
+  <text class="small" x="99" y="118" text-anchor="middle">requests.get("/")</text>
+  <path class="arrow" d="M 176,104 H 304"/>
+  <text class="small" x="240" y="96" text-anchor="middle">GET request</text>
+  <rect class="box-solid" x="306" y="80" width="150" height="48" rx="8"/>
+  <text class="on-solid title" x="381" y="100" text-anchor="middle">Lab server</text>
+  <text class="on-solid small" x="381" y="118" text-anchor="middle">127.0.0.1:8099</text>
+  <path class="arrow-accent" d="M 458,104 H 586"/>
+  <text class="small" x="522" y="96" text-anchor="middle">response + headers</text>
+  <rect class="box-info" x="588" y="56" width="150" height="96" rx="8"/>
+  <text class="title" x="663" y="80" text-anchor="middle">Headers</text>
+  <text class="mono small" x="663" y="104" text-anchor="middle">Server:</text>
+  <text class="mono small" x="663" y="120" text-anchor="middle">LabServer/1.0</text>
+  <text class="mono small" x="663" y="140" text-anchor="middle">X-Powered-By: ...</text>
+</svg>
+<figcaption>Every response carries headers alongside its body. <strong>Two of them, <code>Server</code> and <code>X-Powered-By</code>, often name the software outright.</strong></figcaption>
+</figure>
+
+<h2>Before you run</h2>
+<ol class="steps">
+<li>Open a terminal in the <code>code/requests/</code> folder and start the lab in it: <code>python lab_server.py</code>. Leave it running.</li>
+<li>Open a <strong>second</strong> terminal in the same folder for the scripts below.</li>
+</ol>
+
+<h2>Part 1 — Fingerprinting the server</h2>
+<p>This is the same file you met when learning status codes; here we focus on its <code>fingerprint()</code> function, which reads the two giveaway headers.</p>
+
+<pre data-file="11_status_and_fingerprint.py" data-lang="py" data-tag="complete file"><code>"""HTTP status codes and simple server fingerprinting.
+
+Status codes are the server's one-number summary of what happened. Fingerprinting
+means reading response headers to guess the technology behind a site - useful for
+an analyst mapping an authorized target. Start lab_server.py first.
+"""
+import requests
+
+BASE = "http://127.0.0.1:8099"
+
+# A short map so a tool can print human-friendly meanings.
+MEANING = {
+    200: "OK - the request succeeded",
+    401: "Unauthorized - credentials needed or wrong",
+    403: "Forbidden - the server refuses, even with credentials",
+    404: "Not Found - no such resource",
+    500: "Server Error - the app crashed handling the request",
+}
+
+
+def describe(path):
+    resp = requests.get(BASE + path)
+    code = resp.status_code
+    print(f"{path:12} -&gt; {code}  {MEANING.get(code, 'other')}")
+    return resp
+
+
+def fingerprint(resp):
+    print("\nTechnology clues from headers:")
+    for header in ("Server", "X-Powered-By"):
+        value = resp.headers.get(header)
+        if value:
+            print(f"  {header}: {value}")
+
+
+if __name__ == "__main__":
+    describe("/")             # 200
+    describe("/admin")        # 200 (a 'secret' path that exists)
+    describe("/missing")      # 404
+    home = describe("/product?id=1'")  # 500 from the fake SQL error
+    fingerprint(home)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>7</td><td><code>import requests</code></td><td>Loads the <a class="term" href="glossary.html#requests-library">requests</a> library so we can send HTTP calls. Without it the <code>requests.get</code> calls below fail with a <code>NameError</code>.</td></tr>
+<tr><td>9</td><td><code>BASE = "http://127.0.0.1:8099"</code></td><td>The lab's address, written once. Every request is built from it, so pointing the script somewhere else is a one-line change.</td></tr>
+<tr><td>12–18</td><td><code>MEANING = {200: "OK ...", ...}</code></td><td>A small lookup table mapping the status codes we expect to a human-friendly phrase. It turns a bare number into something a beginner can read.</td></tr>
+<tr><td>21–22</td><td><code>def describe(path):</code> / <code>resp = requests.get(BASE + path)</code></td><td>Defines a helper and sends a GET to <code>BASE + path</code>. The returned <a class="term" href="glossary.html#response">response</a> object holds the status, headers and body.</td></tr>
+<tr><td>23–24</td><td><code>code = resp.status_code</code> / <code>print(f"{path:12} -&gt; {code}  ...")</code></td><td>Reads the numeric status and prints the path, the code, and its meaning from the table. <code>{path:12}</code> pads the path to 12 characters so the arrows line up.</td></tr>
+<tr><td>25</td><td><code>return resp</code></td><td>Hands the whole response back so the caller can inspect it further — we reuse it for fingerprinting.</td></tr>
+<tr><td>28–29</td><td><code>def fingerprint(resp):</code></td><td>The focus of this part. It takes a response we already have and prints the technology clues from its headers.</td></tr>
+<tr><td>30</td><td><code>for header in ("Server", "X-Powered-By"):</code></td><td>Loops over the two headers most likely to name the software. <code>Server</code> is standard; <code>X-Powered-By</code> is a common framework giveaway.</td></tr>
+<tr><td>31</td><td><code>value = resp.headers.get(header)</code></td><td>Reads that header. <code>resp.headers</code> is case-insensitive, and <code>.get</code> returns <code>None</code> rather than raising if the header is absent.</td></tr>
+<tr><td>32–33</td><td><code>if value:</code> / <code>print(f"  {header}: {value}")</code></td><td>Only prints a header that is actually present. A real server might hide these; our lab sends both on purpose.</td></tr>
+<tr><td>36–41</td><td><code>if __name__ == "__main__":</code> …</td><td>Runs four probes — home, a secret <code>/admin</code> path, a missing path, and a crafted <code>/product?id=1'</code> that triggers a 500 — then fingerprints the home response. The comments note the status each returns.</td></tr>
+</table></div>
+
+<details class="primer"><summary>Why read headers instead of just the body?</summary>
+<p>The body is the page a human sees; the <a class="term" href="glossary.html#header">headers</a> are the envelope around it — metadata the browser and server exchange. Headers carry the status, content type, cookies, caching rules and, often, the server's own name and version. For an analyst they are a compact, machine-readable summary, which is why fingerprinting starts there rather than scraping the HTML.</p>
+</details>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>Running <code>python 11_status_and_fingerprint.py</code> prints the four probes and then the two header clues:</p>
+<pre data-lang="text" data-tag="actual output"><code>/            -&gt; 200  OK - the request succeeded
+/admin       -&gt; 200  OK - the request succeeded
+/missing     -&gt; 404  Not Found - no such resource
+/product?id=1' -&gt; 500  Server Error - the app crashed handling the request
+
+Technology clues from headers:
+  Server: LabServer/1.0
+  X-Powered-By: DemoApp/0.1</code></pre>
+<p>The lab reports itself as <code>LabServer/1.0</code> powered by <code>DemoApp/0.1</code>. On a real target this is where you would read, say, <code>Apache/2.4.49</code> — the exact string the next part needs.</p>
+</div>
+
+<h2>Part 2 — From a version to known vulnerabilities</h2>
+<p>Suppose the fingerprint told us the target runs <strong>Apache 2.4.49</strong>. The next question is whether that version has published flaws. We ask the NVD, the U.S. government's free catalogue of known vulnerabilities, through its JSON API.</p>
+
+<details class="primer"><summary>New to CVEs and the NVD? What they are</summary>
+<p>A <a class="term" href="glossary.html#cve">CVE</a> (Common Vulnerabilities and Exposures) is a unique id for one publicly known security flaw, like <code>CVE-2021-41773</code>. The <a class="term" href="glossary.html#nvd">NVD</a> (National Vulnerability Database) is a public database that enriches every CVE with a description and a severity score, and offers a free API to search them. Defenders use it to check whether the software they run has known holes that need patching.</p>
+</details>
+
+<details class="primer"><summary>What does the severity (CVSS) mean?</summary>
+<p><a class="term" href="glossary.html#cvss">CVSS</a> (Common Vulnerability Scoring System) turns how bad a flaw is into a number from 0.0 to 10.0, with a word band: <strong>Low</strong>, <strong>Medium</strong>, <strong>High</strong>, <strong>Critical</strong>. It helps you triage — patch the Criticals first. The score reflects how easy the flaw is to exploit and how much damage it allows, not how likely you personally are to be attacked.</p>
+</details>
+
+<pre data-file="14_cve_lookup.py" data-lang="py" data-tag="complete file"><code>"""Looking up known vulnerabilities (CVEs) for a product version.
+
+Once fingerprinting tells you a target runs, say, "Apache 2.4.49", the next
+question is: are there published vulnerabilities for that version? The U.S.
+National Vulnerability Database (NVD) has a free JSON API for exactly this.
+
+This builds the request the way the NVD API expects, then prints each CVE id and
+its severity. To keep the lesson reproducible offline, if the live request fails
+it falls back to a bundled sample response (sample_nvd.json) captured earlier.
+"""
+import json
+import os
+import requests
+
+NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+SAMPLE = os.path.join(os.path.dirname(__file__), "sample_nvd.json")
+
+
+def fetch(keyword: str) -&gt; dict:
+    try:
+        # keywordSearch finds CVEs mentioning the term; resultsPerPage caps the list.
+        resp = requests.get(
+            NVD_API,
+            params={"keywordSearch": keyword, "resultsPerPage": 5},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:                       # no network / rate limited
+        print(f"[live request unavailable: {exc}] using bundled sample\n")
+        with open(SAMPLE, encoding="utf-8") as f:
+            return json.load(f)
+
+
+def summarise(data: dict):
+    vulns = data.get("vulnerabilities", [])
+    print(f"{len(vulns)} CVE record(s):\n")
+    for item in vulns:
+        cve = item["cve"]
+        cid = cve["id"]
+        desc = cve["descriptions"][0]["value"][:90]
+        # Severity lives under metrics; the key differs by CVSS version.
+        sev = "unknown"
+        metrics = cve.get("metrics", {})
+        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            if metrics.get(key):
+                sev = metrics[key][0]["cvssData"]["baseSeverity"] if key != "cvssMetricV2" \
+                    else metrics[key][0].get("baseSeverity", "unknown")
+                break
+        print(f"  {cid}  [{sev}]  {desc}...")
+
+
+if __name__ == "__main__":
+    data = fetch("Apache 2.4.49")
+    summarise(data)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>11–13</td><td><code>import json</code> / <code>import os</code> / <code>import requests</code></td><td><code>json</code> reads the bundled sample file, <code>os</code> builds a path to it, and <code>requests</code> makes the live call. Each is used below; dropping one breaks that feature.</td></tr>
+<tr><td>15</td><td><code>NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"</code></td><td>The NVD API endpoint. Note the <a class="term" href="glossary.html#https">HTTPS</a> address — the live call needs a working TLS connection, which matters below.</td></tr>
+<tr><td>16</td><td><code>SAMPLE = os.path.join(os.path.dirname(__file__), "sample_nvd.json")</code></td><td>Builds the full path to the bundled sample that sits next to this script. <code>os.path.dirname(__file__)</code> makes it work no matter which folder you run from.</td></tr>
+<tr><td>19–20</td><td><code>def fetch(keyword: str) -&gt; dict:</code> / <code>try:</code></td><td>Defines the fetcher and opens a <code>try</code> block so a network failure can be caught and handled instead of crashing the lesson.</td></tr>
+<tr><td>22–26</td><td><code>resp = requests.get(NVD_API, params={"keywordSearch": keyword, "resultsPerPage": 5}, timeout=10)</code></td><td>Sends the request. <code>keywordSearch</code> is the NVD parameter that finds CVEs mentioning our term; <code>resultsPerPage</code> caps the list; <code>timeout=10</code> stops the script hanging forever if the server never answers.</td></tr>
+<tr><td>27</td><td><code>resp.raise_for_status()</code></td><td>Turns an HTTP error code (like 403 or 500) into a Python exception, so a bad response is treated as a failure and triggers the fallback.</td></tr>
+<tr><td>28</td><td><code>return resp.json()</code></td><td>Parses the response body as JSON into a Python dict and returns it. This line only runs if the live call fully succeeded.</td></tr>
+<tr><td>29–30</td><td><code>except Exception as exc:</code> / <code>print(f"[live request unavailable: {exc}] ...")</code></td><td>Catches <em>any</em> failure — no network, a timeout, an error code, or a TLS problem — and prints an honest note explaining we are switching to the sample.</td></tr>
+<tr><td>31–32</td><td><code>with open(SAMPLE, encoding="utf-8") as f:</code> / <code>return json.load(f)</code></td><td>Opens the bundled <code>sample_nvd.json</code> and parses it into the same dict shape the live API would return, so the rest of the code does not care which source it got.</td></tr>
+<tr><td>35–37</td><td><code>def summarise(data: dict):</code> / <code>vulns = data.get("vulnerabilities", [])</code> / <code>print(...)</code></td><td>Reads the list of vulnerability records from the response (an empty list if the key is missing) and prints how many there are.</td></tr>
+<tr><td>38–41</td><td><code>for item in vulns:</code> … <code>desc = cve["descriptions"][0]["value"][:90]</code></td><td>Walks each record, pulling out the CVE id and the first 90 characters of its English description so the output stays on one line.</td></tr>
+<tr><td>43–49</td><td><code>sev = "unknown"</code> … <code>for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):</code></td><td>Severity lives under <code>metrics</code>, but the key name depends on the CVSS version. This tries the newest first and stops at the first one present, reading <code>baseSeverity</code> from it.</td></tr>
+<tr><td>50</td><td><code>print(f"  {cid}  [{sev}]  {desc}...")</code></td><td>Prints one tidy line per CVE: the id, its severity in brackets, and the truncated description.</td></tr>
+<tr><td>53–55</td><td><code>if __name__ == "__main__":</code> / <code>data = fetch("Apache 2.4.49")</code> / <code>summarise(data)</code></td><td>Looks up our fingerprinted version and summarises what comes back. Swapping the keyword is all it takes to research a different product.</td></tr>
+</table></div>
+
+<h2>The bundled sample response</h2>
+<p>So the lesson works even with no internet, the script falls back to this captured NVD response. It is real NVD-shaped JSON for the two Apache 2.4.49 path-traversal flaws.</p>
+
+<pre data-file="sample_nvd.json" data-lang="json" data-tag="complete file"><code>{
+  "resultsPerPage": 2,
+  "totalResults": 2,
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2021-41773",
+        "descriptions": [
+          {"lang": "en", "value": "A flaw in Apache HTTP Server 2.4.49 allowed path traversal to map URLs to files outside the document root, and could leak source or allow remote code execution if mod_cgi was enabled."}
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {"cvssData": {"baseScore": 7.5, "baseSeverity": "HIGH"}}
+          ]
+        }
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2021-42013",
+        "descriptions": [
+          {"lang": "en", "value": "The fix for CVE-2021-41773 in Apache HTTP Server 2.4.50 was incomplete; a crafted encoded path could still traverse outside the document root."}
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {"cvssData": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}}
+          ]
+        }
+      }
+    }
+  ]
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2–3</td><td><code>"resultsPerPage": 2,</code> / <code>"totalResults": 2,</code></td><td>NVD's paging summary — how many records this page holds and how many matched in total. Our code ignores these and reads the list directly.</td></tr>
+<tr><td>4</td><td><code>"vulnerabilities": [</code></td><td>The array <code>summarise()</code> loops over. Each element is one CVE wrapped in a <code>"cve"</code> object.</td></tr>
+<tr><td>6–10</td><td><code>"id": "CVE-2021-41773"</code> / <code>"descriptions": [...]</code></td><td>The first record: its id and a one-line English description of the Apache path-traversal flaw.</td></tr>
+<tr><td>11–15</td><td><code>"metrics": { "cvssMetricV31": [ { "cvssData": { "baseScore": 7.5, "baseSeverity": "HIGH" } } ] }</code></td><td>The severity block the code reads. Score 7.5 lands in the <strong>HIGH</strong> band.</td></tr>
+<tr><td>18–30</td><td><code>"id": "CVE-2021-42013"</code> … <code>"baseSeverity": "CRITICAL"</code></td><td>The second record — the incomplete fix for the first flaw — scoring 9.8, which is <strong>CRITICAL</strong>.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Pipeline from a fingerprinted version to a list of CVEs with severities">
+  <rect class="box" x="20" y="64" width="150" height="52" rx="8"/>
+  <text class="title" x="95" y="86" text-anchor="middle">Version</text>
+  <text class="mono small" x="95" y="104" text-anchor="middle">Apache 2.4.49</text>
+  <path class="arrow" d="M 172,90 H 268"/>
+  <rect class="box-info" x="270" y="64" width="170" height="52" rx="8"/>
+  <text class="title" x="355" y="86" text-anchor="middle">NVD API</text>
+  <text class="small" x="355" y="104" text-anchor="middle">keywordSearch</text>
+  <path class="arrow-accent" d="M 442,90 H 538"/>
+  <rect class="box-bad" x="540" y="40" width="200" height="104" rx="8"/>
+  <text class="title bad" x="640" y="64" text-anchor="middle">Known CVEs</text>
+  <text class="mono small" x="640" y="88" text-anchor="middle">CVE-2021-41773 HIGH</text>
+  <text class="mono small" x="640" y="108" text-anchor="middle">CVE-2021-42013</text>
+  <text class="mono small bad" x="640" y="124" text-anchor="middle">CRITICAL</text>
+</svg>
+<figcaption>Reconnaissance to research in three hops. <strong>A product and a version string are all a CVE database needs to tell you what is already known to be broken.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Sequence: the live NVD call fails behind TLS interception and the script falls back to the bundled sample">
+  <text class="title" x="110" y="24" text-anchor="middle">Script</text>
+  <text class="title" x="400" y="24" text-anchor="middle">NVD over HTTPS</text>
+  <text class="title" x="670" y="24" text-anchor="middle">sample_nvd.json</text>
+  <line class="line" x1="110" y1="34" x2="110" y2="230"/>
+  <line class="line" x1="400" y1="34" x2="400" y2="230"/>
+  <line class="line" x1="670" y1="34" x2="670" y2="230"/>
+  <path class="arrow" d="M 112,64 H 398"/>
+  <text class="small" x="255" y="56" text-anchor="middle">1. GET keywordSearch=Apache 2.4.49</text>
+  <path class="arrow-bad dashed" d="M 398,104 H 112"/>
+  <text class="small bad" x="255" y="96" text-anchor="middle">2. TLS verify fails (no local issuer cert)</text>
+  <rect class="box-warn" x="40" y="120" width="140" height="44" rx="8"/>
+  <text class="small" x="110" y="140" text-anchor="middle">3. except catches</text>
+  <text class="small" x="110" y="156" text-anchor="middle">the error</text>
+  <path class="arrow" d="M 112,194 H 668"/>
+  <text class="small" x="390" y="186" text-anchor="middle">4. open the bundled sample instead</text>
+  <path class="arrow-ok" d="M 668,220 H 112"/>
+  <text class="small ok" x="390" y="214" text-anchor="middle">5. same JSON shape, lesson continues</text>
+</svg>
+<figcaption>When the live call cannot be trusted, the <code>except</code> block quietly swaps in a captured response. <strong>The fallback returns the same shape, so the rest of the code never knows the difference.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>On the machine where this guide was built, the live call did <strong>not</strong> succeed — and that is worth seeing honestly. Running <code>python 14_cve_lookup.py</code> printed:</p>
+<pre data-lang="text" data-tag="actual output"><code>[live request unavailable: HTTPSConnectionPool(host='services.nvd.nist.gov', port=443): Max retries exceeded with url: /rest/json/cves/2.0?keywordSearch=Apache+2.4.49&amp;resultsPerPage=5 (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)')))] using bundled sample
+
+2 CVE record(s):
+
+  CVE-2021-41773  [HIGH]  A flaw in Apache HTTP Server 2.4.49 allowed path traversal to map URLs to files outside th...
+  CVE-2021-42013  [CRITICAL]  The fix for CVE-2021-41773 in Apache HTTP Server 2.4.50 was incomplete; a crafted encoded ...</code></pre>
+<p>The long error is the point of the <code>try/except</code>. Here the <a class="term" href="glossary.html#tls">TLS</a> handshake to NVD could not be verified — on this network a security appliance intercepts HTTPS and presents a certificate Python does not recognise (<code>unable to get local issuer certificate</code>). Rather than crash, the script printed the reason and loaded the bundled sample, so you still get the two CVEs: <code>CVE-2021-41773</code> rated <strong>HIGH</strong> and <code>CVE-2021-42013</code> rated <strong>CRITICAL</strong>.</p>
+</div>
+
+<details class="primer"><summary>Why did the live request fail? TLS interception explained</summary>
+<p>Many corporate and some home networks run a device that sits in the middle of every HTTPS connection to inspect it. It decrypts your traffic and re-encrypts it with its <em>own</em> certificate. Browsers are configured to trust that certificate, but a fresh Python install is not — so <code>requests</code> correctly refuses to trust the connection and raises <code>CERTIFICATE_VERIFY_FAILED</code>. This is Python being safe, not broken. On an unfiltered network the same script would reach NVD and print the live results. We do not disable certificate verification to force it through — turning off TLS checks is exactly the habit that gets people compromised.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 140" role="img" aria-label="CVSS severity ladder from none to critical with the two sample CVEs placed on it">
+  <rect class="box" x="24" y="40" width="130" height="40" rx="8"/>
+  <text class="small" x="89" y="64" text-anchor="middle">None 0.0</text>
+  <rect class="box-ok" x="160" y="40" width="130" height="40" rx="8"/>
+  <text class="small" x="225" y="64" text-anchor="middle">Low 0.1–3.9</text>
+  <rect class="box-info" x="296" y="40" width="130" height="40" rx="8"/>
+  <text class="small" x="361" y="64" text-anchor="middle">Medium 4.0–6.9</text>
+  <rect class="box-warn" x="432" y="40" width="140" height="40" rx="8"/>
+  <text class="small" x="502" y="58" text-anchor="middle">High 7.0–8.9</text>
+  <text class="mono small" x="502" y="74" text-anchor="middle">41773 = 7.5</text>
+  <rect class="box-bad" x="578" y="40" width="158" height="40" rx="8"/>
+  <text class="small" x="657" y="58" text-anchor="middle">Critical 9.0–10</text>
+  <text class="mono small" x="657" y="74" text-anchor="middle">42013 = 9.8</text>
+  <text class="small" x="380" y="112" text-anchor="middle">Higher score, patch sooner</text>
+</svg>
+<figcaption>CVSS bands turn a 0–10 score into a priority. <strong>A 9.8 Critical like CVE-2021-42013 jumps the patch queue ahead of a 7.5 High.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+<li><strong>Forgetting to start the lab.</strong> Part 1 talks to <code>lab_server.py</code>; if it is not running you get a <code>ConnectionError</code>. The CVE script in Part 2 does not need the lab.</li>
+<li><strong>"Fixing" the TLS error by turning off verification.</strong> Passing <code>verify=False</code> would silence the warning and defeat the whole point of HTTPS. Leave verification on; the fallback already keeps the lesson working.</li>
+<li><strong>Trusting a version string blindly.</strong> Servers can be told to lie in their <code>Server</code> header, and a version may be patched without the number changing. A CVE hit is a lead to confirm, not proof the box is vulnerable.</li>
+<li><strong>Hammering the NVD API.</strong> The public endpoint is rate-limited. Add delays and request an API key if you query it for real; our lesson makes a single call.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A status code plus the <code>Server</code> and <code>X-Powered-By</code> headers often reveal what a server runs — the lab admits to <code>LabServer/1.0</code> and <code>DemoApp/0.1</code>.</li>
+<li>A product and version string is the key into the NVD, which returns CVE ids and CVSS severities.</li>
+<li>Our live NVD call failed TLS verification behind an intercepting proxy, so the script honestly reported it and fell back to the bundled sample.</li>
+<li>The sample yields <code>CVE-2021-41773</code> (HIGH) and <code>CVE-2021-42013</code> (CRITICAL) — the classic Apache 2.4.49 path-traversal pair.</li>
+<li>Never disable certificate verification to force a request through; fix the trust store instead.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="14-status-codes.html"><small>← Previous · Step 14</small>HTTP status codes and what they tell an analyst</a>
+<a class="next" href="16-discovery-and-headers.html"><small>Next · Step 16 →</small>Content discovery and auditing security headers</a>
+</nav>
+</main>
+</body>
+</html>

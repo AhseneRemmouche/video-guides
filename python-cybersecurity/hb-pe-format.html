@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ch. 4 · The PE format, in more depth</title>
+<meta name="description" content="Headers, sections, imports/exports, entropy and packing explained.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Python for Cybersecurity</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Handbook 4/6</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Handbook · Chapter 4 of 6</div>
+  <h1>The PE format, in more depth</h1>
+  <p class="lead">Headers, sections, imports/exports, entropy and packing explained.</p>
+</section>
+<p class="lead">Module 3 opens Windows executables and reads them without running them. To make sense of what <code>pefile</code> prints, you need a mental model of the file format it is parsing. This chapter is that model: the layout of a <a class="term" href="glossary.html#pe-file">PE file</a> from its ancient DOS stub to its modern headers, what <a class="term" href="glossary.html#section">sections</a> hold, how the <a class="term" href="glossary.html#import-table">import table</a> betrays behaviour, and what <a class="term" href="glossary.html#entropy">entropy</a>, timestamps and <a class="term" href="glossary.html#packing">packing</a> can tell an analyst.</p>
+
+<div class="callout"><strong>Why this matters for your project.</strong> Reading a file's structure is the heart of <a class="term" href="glossary.html#static-analysis">static analysis</a> - learning about a program without executing it, which is safe to do on your own machine. Every number the triage classifier in <a href="21-malware-classifier.html">step 21</a> uses comes from the fields described here.</div>
+
+<h2>What "PE" means</h2>
+<p>PE stands for <em>Portable Executable</em>, the format Windows uses for <code>.exe</code> and <code>.dll</code> files. It is a container with a strict layout: a series of headers that describe the file, followed by the sections that hold the actual code and data. Because the layout is predictable, a library like pefile can walk it field by field and hand you structured information.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Top-to-bottom layout of a PE file: DOS header, PE header, section headers, then the section bodies">
+  <rect class="box-warn" x="280" y="20" width="200" height="40" rx="8"/>
+  <text class="small" x="380" y="38" text-anchor="middle">DOS / MZ header + stub</text>
+  <text class="small" x="380" y="54" text-anchor="middle">starts with "MZ"</text>
+  <path class="arrow" d="M 380,60 V 74"/>
+  <rect class="box-info" x="280" y="76" width="200" height="44" rx="8"/>
+  <text class="small" x="380" y="96" text-anchor="middle">PE header</text>
+  <text class="small" x="380" y="112" text-anchor="middle">machine, timestamp, entry</text>
+  <path class="arrow" d="M 380,120 V 134"/>
+  <rect class="box" x="280" y="136" width="200" height="40" rx="8"/>
+  <text class="small" x="380" y="160" text-anchor="middle">section headers (the table)</text>
+  <path class="arrow" d="M 380,176 V 190"/>
+  <rect class="box-ok" x="150" y="192" width="140" height="40" rx="8"/>
+  <text class="small" x="220" y="212" text-anchor="middle">.text (code)</text>
+  <rect class="box-ok" x="310" y="192" width="140" height="40" rx="8"/>
+  <text class="small" x="380" y="212" text-anchor="middle">.data</text>
+  <rect class="box-ok" x="470" y="192" width="140" height="40" rx="8"/>
+  <text class="small" x="540" y="212" text-anchor="middle">.rsrc</text>
+  <text class="small" x="380" y="260" text-anchor="middle">headers describe the file; sections carry its code and data</text>
+  <text class="small" x="380" y="284" text-anchor="middle">pefile reads top to bottom, never running a single instruction</text>
+</svg>
+<figcaption>A PE file is headers first, then section bodies. <strong>Everything static analysis knows comes from reading this structure, not from execution.</strong></figcaption>
+</figure>
+
+<h2>The DOS (MZ) header</h2>
+<p>Every PE file still begins with a tiny MS-DOS header, a relic kept for backward compatibility. Its first two bytes are the letters <code>MZ</code> (the initials of a DOS architect), which is the classic "magic number" that identifies the file type. It is followed by a small DOS stub program whose only job, if you somehow ran the file under DOS, is to print "This program cannot be run in DOS mode". Tucked inside this header is a pointer (<code>e_lfanew</code>) to where the real PE header begins.</p>
+
+<pre data-lang="py" data-tag="illustrative"><code>import pefile
+pe = pefile.PE("sample_app.exe")
+print(pe.DOS_HEADER.e_magic)   # the MZ signature
+print(pe.DOS_HEADER.e_lfanew)  # offset to the PE header</code></pre>
+
+<details class="primer"><summary>New to "magic numbers"? What they are and why they matter</summary>
+<p>A magic number is a fixed sequence of bytes at a known position that identifies a file's type regardless of its name. <code>MZ</code> marks a DOS/PE file; <code>PK</code> marks a ZIP; <code>%PDF</code> marks a PDF. Analysts trust magic bytes over file extensions, because a <code>.jpg</code> can easily be a renamed executable - the bytes do not lie.</p>
+</details>
+
+<h2>The PE header</h2>
+<p>Follow <code>e_lfanew</code> and you reach the signature <code>PE\0\0</code>, then the headers that actually matter. They split into the <strong>file header</strong> (how many sections, which machine, a timestamp) and the <strong>optional header</strong> (which, despite the name, is always present and holds the entry point and image base). The key fields pefile exposes:</p>
+<div class="table-wrap"><table>
+<tr><th>Field</th><th>What it tells you</th></tr>
+<tr><td>Machine</td><td>Target CPU - e.g. x64 (64-bit) or x86 (32-bit)</td></tr>
+<tr><td>TimeDateStamp</td><td>Claimed build time of the file</td></tr>
+<tr><td>NumberOfSections</td><td>How many sections follow</td></tr>
+<tr><td>AddressOfEntryPoint</td><td>Where execution would start, as an offset</td></tr>
+<tr><td>ImageBase</td><td>Preferred address to load the file at in memory</td></tr>
+</table></div>
+<p>On the benign sample used in <a href="18-pe-with-pefile.html">step 18</a>, these read as machine <strong>x64 (64-bit)</strong>, build timestamp <strong>2022-08-06T06:41:05+00:00</strong>, and <strong>6 sections</strong> - the exact numbers you will see printed when you run it.</p>
+
+<h3>Entry point and image base</h3>
+<p>The <strong>entry point</strong> is the offset of the first instruction Windows would run. The <strong>image base</strong> is the address the file would like to be loaded at; the entry point is given relative to it. You read these fields statically, but together they are where a dynamic analyst would set their first breakpoint. For our purposes they are just two more fields that help describe - and later fingerprint - a sample.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Image base is where the file loads in memory; the entry point is an offset into it where execution starts">
+  <rect class="box" x="60" y="40" width="200" height="80" rx="8"/>
+  <text class="small" x="160" y="34" text-anchor="middle">loaded in memory</text>
+  <text class="mono small" x="160" y="68" text-anchor="middle">ImageBase</text>
+  <text class="small" x="160" y="86" text-anchor="middle">= load address</text>
+  <path class="arrow-accent" d="M 260,80 H 470"/>
+  <text class="small accent" x="365" y="72" text-anchor="middle">+ AddressOfEntryPoint</text>
+  <rect class="box-ok" x="470" y="40" width="230" height="80" rx="8"/>
+  <text class="small" x="585" y="68" text-anchor="middle">first instruction runs here</text>
+  <text class="small" x="585" y="90" text-anchor="middle">(the entry point)</text>
+</svg>
+<figcaption>Load address plus entry-point offset gives the first instruction's real address. <strong>Static analysis only reads these numbers; it never jumps to them.</strong></figcaption>
+</figure>
+
+<h2>Sections</h2>
+<p>After the headers come the sections - named blocks that hold the file's real contents, each with permissions (readable, writable, executable). Common ones carry conventional names:</p>
+<div class="table-wrap"><table>
+<tr><th>Section</th><th>Usually holds</th></tr>
+<tr><td><code>.text</code></td><td>Executable code - the program's instructions</td></tr>
+<tr><td><code>.rdata</code></td><td>Read-only data, including imports/exports info</td></tr>
+<tr><td><code>.data</code></td><td>Writable global variables</td></tr>
+<tr><td><code>.rsrc</code></td><td>Resources - icons, menus, version info</td></tr>
+<tr><td><code>.reloc</code></td><td>Relocation fixups if loaded away from ImageBase</td></tr>
+</table></div>
+<p>The benign sample has the tidy set <code>.text .rdata .data .pdata .rsrc .reloc</code> - exactly what you would expect from a normally compiled program. Odd or non-standard section names, a section that is both writable and executable, or a <code>.text</code> that holds almost no readable code, are the kinds of anomalies that make an analyst look closer.</p>
+
+<h2>Imports and exports</h2>
+<p>A program rarely does everything itself; it borrows functions from the operating system's libraries - the <a class="term" href="glossary.html#dll">DLLs</a>. The <strong>import table</strong> lists which DLLs a file needs and which functions it pulls from each. This is one of the most revealing things in static analysis, because the imports hint at what the program can <em>do</em> before it does anything at all. <strong>Exports</strong> are the reverse: functions a DLL offers to others.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The import table links an executable to functions it borrows from system DLLs, which hint at its capabilities">
+  <rect class="box-info" x="60" y="80" width="170" height="50" rx="8"/>
+  <text class="title" x="145" y="104" text-anchor="middle">sample_app.exe</text>
+  <text class="small" x="145" y="120" text-anchor="middle">import table</text>
+  <path class="arrow" d="M 230,95 H 330"/>
+  <path class="arrow" d="M 230,115 H 330"/>
+  <rect class="box" x="330" y="40" width="200" height="40" rx="8"/>
+  <text class="small" x="430" y="60" text-anchor="middle">KERNEL32.dll</text>
+  <text class="small" x="430" y="76" text-anchor="middle">files, memory, processes</text>
+  <rect class="box" x="330" y="130" width="200" height="40" rx="8"/>
+  <text class="small" x="430" y="150" text-anchor="middle">SHLWAPI.dll</text>
+  <text class="small" x="430" y="166" text-anchor="middle">path helpers</text>
+  <rect class="box-bad" x="560" y="85" width="180" height="46" rx="8"/>
+  <text class="small" x="650" y="105" text-anchor="middle">watch-list APIs</text>
+  <text class="small" x="650" y="121" text-anchor="middle">e.g. network, crypto</text>
+  <path class="line dashed" d="M 530,108 H 560"/>
+</svg>
+<figcaption>Imports connect a file to the OS functions it will call. <strong>The set of imported APIs is a cheap, powerful clue to behaviour - our benign sample imports only ordinary file and path functions.</strong></figcaption>
+</figure>
+
+<p>On the clean sample, pefile shows imports from just <strong>KERNEL32.dll (83 functions)</strong> and <strong>SHLWAPI.dll (3 functions)</strong>, with <em>no</em> suspicious APIs - a deliberately dull contrast to real malware. <a href="19-imports-and-functions.html">Step 19</a> builds a small watch-list: imports around networking, process injection, or cryptography are not proof of malice, but they tell you where to look.</p>
+
+<div class="callout warn"><strong>Imports are clues, not verdicts.</strong> Plenty of legitimate software uses networking or encryption. A suspicious import raises a question; it does not answer it. The classifier in <a href="21-malware-classifier.html">step 21</a> always ends with "a human analyst should confirm" for exactly this reason.</div>
+
+<h2>Entropy and packing</h2>
+<p><strong>Entropy</strong> is a measure of randomness, scored roughly 0 to 8 per section. Ordinary code and text sit in a middle range; data that is compressed or encrypted looks almost perfectly random and pushes toward 8. <strong>Packing</strong> is when a program is compressed or encrypted and wrapped in a small stub that unpacks it in memory at runtime - a legitimate technique for shrinking files that malware also loves, because it hides code from static analysis.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Low to high entropy scale: normal code sits mid-range, packed or encrypted data sits near the top">
+  <rect class="box" x="60" y="60" width="640" height="34" rx="8"/>
+  <text class="small" x="90" y="48" text-anchor="middle">0</text>
+  <text class="small" x="680" y="48" text-anchor="middle">8</text>
+  <rect class="box-ok" x="300" y="60" width="120" height="34" rx="8"/>
+  <text class="small" x="360" y="82" text-anchor="middle">normal code ~6.4</text>
+  <rect class="box-bad" x="600" y="60" width="96" height="34" rx="8"/>
+  <text class="small" x="648" y="82" text-anchor="middle">packed ~7.9</text>
+  <text class="small" x="380" y="128" text-anchor="middle">our sample's .text entropy is about 6.39 - normal, unpacked code</text>
+  <text class="small warn" x="380" y="150" text-anchor="middle">a section near 8 suggests compression or encryption - possible packing</text>
+</svg>
+<figcaption>Entropy turns "does this look like random data?" into a number. <strong>A high-entropy executable section is a flag to check for packing - though compressed resources can be high too.</strong></figcaption>
+</figure>
+
+<p>The benign sample's <code>.text</code> scores about <strong>6.39</strong> - comfortably in the normal range, consistent with ordinary unpacked code. A packed sample would show one or more sections near 8, few readable strings, and a tiny import table (because the real imports are hidden until unpacking). High entropy alone is not proof of malware, but combined with other signals it is a strong hint.</p>
+
+<h2>Timestamps</h2>
+<p>The <code>TimeDateStamp</code> claims when the file was built. It is useful context - our sample reports <strong>2022-08-06T06:41:05+00:00</strong> - but treat it with suspicion: it is trivially faked, sometimes zeroed, and occasionally set to absurd past or future dates on purpose. Use it as one weak signal among many, never as fact.</p>
+
+<div class="callout warn"><strong>Common misconceptions.</strong> "A suspicious import means it is malware" - no, it means look closer. "High entropy proves packing" - compressed resources raise entropy too. "The timestamp shows when it was made" - only if nobody forged it. "Static analysis is risky" - reading a file never runs it; that is the whole point.</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A PE file is headers (DOS/MZ, then PE) followed by sections; pefile reads this layout without running the file.</li>
+<li>The DOS header's <code>MZ</code> magic bytes identify the type; a pointer leads to the real PE header.</li>
+<li>The PE header holds machine, timestamp, section count, entry point and image base.</li>
+<li>Sections like <code>.text</code>, <code>.data</code> and <code>.rsrc</code> carry code and data with their own permissions.</li>
+<li>The import table lists borrowed DLL functions - a powerful, early clue to behaviour, but not a verdict.</li>
+<li>High section entropy suggests packing; timestamps are useful but easily faked.</li>
+</ul>
+</div>
+
+<div class="callout"><strong>Learn more.</strong> Official references only: Microsoft's <a href="https://learn.microsoft.com/en-us/windows/win32/debug/pe-format">PE Format specification</a> and the <a href="https://github.com/erocarrera/pefile">pefile project</a>. The format is stable, but confirm field names against current docs.</div>
+
+<nav class="pager">
+<a class="prev" href="hb-http-deep-dive.html"><small>← Chapter 3</small>HTTP, in more depth</a>
+<a class="next" href="hb-legal.html"><small>Chapter 5 →</small>Law, disclosure and staying out of trouble</a>
+</nav>
+</main>
+</body>
+</html>

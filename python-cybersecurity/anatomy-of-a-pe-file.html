@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anatomy of a Windows PE file</title>
+<meta name="description" content="What is inside an .exe: the MZ/PE headers, sections, the import table and strings - what pefile reads.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Python for Cybersecurity</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Concept</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Primer</div>
+  <h1>Anatomy of a Windows PE file</h1>
+  <p class="lead">What is inside an .exe: the MZ/PE headers, sections, the import table and strings - what pefile reads.</p>
+</section>
+<p class="lead">Module 3 reads Windows programs without running them. To make sense of what the tools report, it helps to know what is actually inside an executable. This primer is a tour of the <a class="term" href="glossary.html#pe-file">PE</a> (Portable Executable) format: the headers at the front, the <a class="term" href="glossary.html#section">sections</a> that follow, the idea of <a class="term" href="glossary.html#entropy">entropy</a>, the <a class="term" href="glossary.html#import-table">import table</a>, and the readable strings scattered through it. It is lighter than a step; read it once and the hands-on steps will click.</p>
+
+<h2>What a PE file is</h2>
+<p>Every Windows <code>.exe</code> and <code>.dll</code> is stored in the PE format: a fixed, documented layout that tells Windows how to load and run the file. Because the layout is predictable, a library like <code>pefile</code> can read each part reliably. For a defender that is a gift: <a class="term" href="glossary.html#static-analysis">static analysis</a> means reading all of this structure without ever executing the file, so you can learn a great deal in complete safety.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="A PE file laid out top to bottom: MZ header, PE header, optional header, section table, then the sections themselves">
+  <rect class="box-info" x="230" y="20" width="300" height="34" rx="8"/>
+  <text class="title" x="380" y="42" text-anchor="middle">MZ (DOS) header</text>
+  <rect class="box-info" x="230" y="58" width="300" height="34" rx="8"/>
+  <text class="title" x="380" y="80" text-anchor="middle">PE header (machine, time, sections)</text>
+  <rect class="box-info" x="230" y="96" width="300" height="34" rx="8"/>
+  <text class="title" x="380" y="118" text-anchor="middle">Optional header (entry point, base)</text>
+  <rect class="box" x="230" y="134" width="300" height="30" rx="8"/>
+  <text class="small" x="380" y="153" text-anchor="middle">section table (names &amp; sizes)</text>
+  <rect class="box-solid" x="230" y="170" width="300" height="42" rx="8"/>
+  <text class="on-solid" x="380" y="188" text-anchor="middle">sections: code, data, resources</text>
+  <text class="on-solid small" x="380" y="204" text-anchor="middle">the actual bytes</text>
+  <text class="small" x="150" y="40" text-anchor="end">front</text>
+  <path class="arrow" d="M 380,54 V 56"/>
+  <text class="small" x="150" y="192" text-anchor="end">body</text>
+  <text class="small label" x="595" y="80" text-anchor="start">describes the file</text>
+  <text class="small label" x="595" y="192" text-anchor="start">contains the file</text>
+</svg>
+<figcaption>A PE is headers that <em>describe</em> the program followed by sections that <em>contain</em> it. <strong>Everything in Module 3 is reading one of these parts.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>Why does an <code>.exe</code> still start with "MZ"?</summary>
+<p>The first two bytes of every PE are the letters <code>MZ</code>, the initials of a Microsoft engineer from the MS-DOS era, followed by the famous "This program cannot be run in DOS mode" message. It is a historical stub kept for compatibility. In practice it is a quick signature: if a file starts with <code>MZ</code>, a tool treats it as a Windows executable.</p></details>
+
+<h2>The headers: what the file says about itself</h2>
+<p>The PE and optional headers hold the facts you record first about any sample: the <strong>machine</strong> (which processor it targets, such as x64), the <strong>build timestamp</strong> (when the linker made it, a clue that can be forged), the <strong>entry point</strong> (where code would begin if run), and the <strong>image base</strong> (its preferred load address). None of this requires running the file; it is all written down in the headers.</p>
+
+<h2>Sections: where code and data live</h2>
+<p>After the headers come the sections, each a named region with its own job. You will meet the same handful again and again:</p>
+<div class="table-wrap"><table>
+<tr><th>Section</th><th>What it holds</th></tr>
+<tr><td><code>.text</code></td><td>The executable code, the program's instructions.</td></tr>
+<tr><td><code>.rdata</code></td><td>Read-only data: constants, string literals, and import/export information.</td></tr>
+<tr><td><code>.data</code></td><td>Variables the program can read and change while running.</td></tr>
+<tr><td><code>.rsrc</code></td><td>Resources such as icons, menus and version information.</td></tr>
+<tr><td><code>.reloc</code></td><td>Relocation fix-ups used if the file loads at a different address.</td></tr>
+</table></div>
+<p>Each section header records how big the region is in memory (virtual size) and on disk (raw size). When those two numbers disagree sharply, or when a section has an odd name, it is worth a closer look.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Five common PE sections shown as blocks with their purposes">
+  <rect class="box-solid" x="20" y="50" width="150" height="60" rx="8"/>
+  <text class="on-solid mono" x="95" y="76" text-anchor="middle">.text</text>
+  <text class="on-solid small" x="95" y="96" text-anchor="middle">code</text>
+  <rect class="box" x="180" y="50" width="140" height="60" rx="8"/>
+  <text class="mono" x="250" y="76" text-anchor="middle">.rdata</text>
+  <text class="small" x="250" y="96" text-anchor="middle">read-only data</text>
+  <rect class="box" x="330" y="50" width="130" height="60" rx="8"/>
+  <text class="mono" x="395" y="76" text-anchor="middle">.data</text>
+  <text class="small" x="395" y="96" text-anchor="middle">variables</text>
+  <rect class="box" x="470" y="50" width="130" height="60" rx="8"/>
+  <text class="mono" x="535" y="76" text-anchor="middle">.rsrc</text>
+  <text class="small" x="535" y="96" text-anchor="middle">resources</text>
+  <rect class="box" x="610" y="50" width="130" height="60" rx="8"/>
+  <text class="mono" x="675" y="76" text-anchor="middle">.reloc</text>
+  <text class="small" x="675" y="96" text-anchor="middle">relocations</text>
+  <text class="small" x="380" y="30" text-anchor="middle">a typical executable's sections, left to right</text>
+  <text class="small" x="380" y="140" text-anchor="middle">each has a virtual size (in memory) and a raw size (on disk)</text>
+</svg>
+<figcaption>The usual cast of sections. <strong>Code lives in <code>.text</code>; the rest is data and resources the code uses.</strong></figcaption>
+</figure>
+
+<h2>Entropy and packing</h2>
+<p>Entropy measures how random a chunk of bytes looks, from 0 (very regular) to 8 (indistinguishable from random). Ordinary code and text sit in the middle, roughly 4 to 6.5. Compressed or encrypted data sits near 8. Malware authors often <a class="term" href="glossary.html#packing">pack</a> their code, compressing or encrypting it so that scanners and analysts cannot read it directly; the packed code only unpacks in memory when the program runs. The tell-tale sign in static analysis is a code section with entropy close to 8, which is why the PE step prints an entropy column.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="Entropy scale showing normal code in the middle and packed code near eight">
+  <rect class="box" x="30" y="60" width="700" height="30" rx="8"/>
+  <text class="small" x="30" y="112" text-anchor="start">0 · very regular</text>
+  <text class="small" x="380" y="112" text-anchor="middle">~4 to 6.5 · normal code</text>
+  <text class="small" x="730" y="112" text-anchor="end">8 · random-looking</text>
+  <circle class="dot-ok" cx="500" cy="75" r="6"/>
+  <text class="ok small" x="500" y="48" text-anchor="middle">normal</text>
+  <circle class="dot-bad" cx="690" cy="75" r="6"/>
+  <text class="bad small" x="690" y="48" text-anchor="middle">packed</text>
+  <text class="title" x="380" y="30" text-anchor="middle">Byte entropy (0 to 8)</text>
+</svg>
+<figcaption>Illustrative scale. <strong>A code section near 8 suggests the real code is hidden by packing, worth investigating.</strong></figcaption>
+</figure>
+
+<h2>The import table: borrowed behaviour</h2>
+<p>Programs lean on the operating system for real work, calling functions that live in system libraries (<a class="term" href="glossary.html#dll">DLLs</a>) such as <code>KERNEL32.dll</code>. To let Windows wire those calls up, the PE lists the functions it needs, grouped by DLL. That list, the import table, is a behaviour preview you can read without running anything: a file importing download, process-injection or encryption functions is announcing what it can do. A benign utility, by contrast, imports a short, unremarkable set.</p>
+
+<h2>Strings: text hidden in the bytes</h2>
+<p>Finally, compiled files are full of readable text: URLs, file paths, error messages, registry keys. Pulling these strings out is often the single fastest way to grasp a sample's purpose, and the ones that look like URLs, IP addresses or crypto wallets become indicators you can search for elsewhere. Headers, sections, entropy, imports and strings together give you a rounded picture of a file, all gathered safely, without ever letting it run.</p>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A PE file is headers that describe the program followed by sections that contain it.</li>
+<li>The headers give machine type, build time, entry point and image base; sections such as <code>.text</code> and <code>.rsrc</code> hold code, data and resources.</li>
+<li>Entropy near 8 in a code section hints at packing; the import table previews behaviour; strings reveal purpose and indicators.</li>
+<li>All of this is readable statically, without running the file, which is why it is safe to learn.</li>
+</ul>
+</div>
+
+<p>Ready to do it for real? Head to <a href="18-pe-with-pefile.html">Step 18: Inspecting a Windows PE file with pefile</a>, or return to the <a href="index.html">guide index</a>.</p>
+
+<nav class="pager"><a class="prev" href="18-pe-with-pefile.html"><small>← Related</small>Module 3</a><a class="next" href="glossary.html"><small>Related →</small>Glossary</a></nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>26 · Detecting XSS and SQLi with a headless browser (authorized)</title>
+<meta name="description" content="Confirming that injected input becomes live DOM, and watching for database errors, on your lab target.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Python for Cybersecurity</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 26/26</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 26 of 26 · 05:35:03</div>
+  <h1>Detecting XSS and SQLi with a headless browser (authorized)</h1>
+  <p class="lead">Confirming that injected input becomes live DOM, and watching for database errors, on your lab target.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=V1wmohBt0AE&amp;t=20103s" target="_blank" rel="noopener">▶ Watch this part (05:35:03)</a>
+</section>
+<p>The final chapters of the course (<a class="video-link" href="https://www.youtube.com/watch?v=V1wmohBt0AE&amp;t=20103s" target="_blank" rel="noopener">5:35:03</a>) use a real browser to confirm <a class="term" href="glossary.html#xss">XSS</a> and watch for <a class="term" href="glossary.html#sql-injection">SQL injection</a>. Step 13 detected these with <code>requests</code> by reading raw HTML; here we go one level deeper. A browser does not just receive HTML — it builds a live <a class="term" href="glossary.html#dom">DOM</a> and runs scripts. That lets us confirm whether injected input actually <em>becomes</em> a working element, which is stronger evidence than a text match.</p>
+
+<div class="callout warn"><strong>Authorized testing only.</strong> This runs against the local lab (<code>lab_server.py</code> on <code>127.0.0.1</code>). It confirms findings and gives fixes; it does not exploit anything or target third parties. See <a href="ethics-and-authorization.html">Rules of engagement</a>.</div>
+
+<h2>Why confirm in the DOM, not just the text</h2>
+<p>With <code>requests</code>, "my marker appeared in the response" is a strong hint of reflected XSS, but the input might sit somewhere the browser treats as plain text. The decisive question is: did the browser turn my input into a real element? If we send <code>&lt;b id=...&gt;</code> and the browser then reports a live element with that id, the HTML was injected, not escaped — a <a class="term" href="glossary.html#reflected-xss">reflected-XSS</a> sink, confirmed. We still use a harmless <code>&lt;b&gt;</code> tag, never a script.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="requests sees text; the browser builds a DOM and reveals whether input became an element">
+  <rect class="box" x="20" y="60" width="200" height="54" rx="8"/>
+  <text class="title" x="120" y="84" text-anchor="middle">requests</text>
+  <text class="small" x="120" y="103" text-anchor="middle">marker in text? (hint)</text>
+  <rect class="box-info" x="290" y="60" width="200" height="54" rx="8"/>
+  <text class="title" x="390" y="84" text-anchor="middle">browser builds DOM</text>
+  <text class="small" x="390" y="103" text-anchor="middle">input parsed as HTML</text>
+  <rect class="box-bad" x="560" y="60" width="180" height="54" rx="8"/>
+  <text class="small bad" x="650" y="84" text-anchor="middle">live element with</text>
+  <text class="small bad" x="650" y="101" text-anchor="middle">our id = confirmed</text>
+  <path class="arrow" d="M 220,87 H 288"/>
+  <path class="arrow-bad" d="M 490,87 H 558"/>
+</svg>
+<figcaption>A browser answers a question raw HTML cannot: did the input become part of the page's structure? <strong>A real DOM node with our id is confirmation, not just suspicion.</strong></figcaption>
+</figure>
+
+<h2>The confirmation script</h2>
+<p>It uses a marker built from an <a class="term" href="glossary.html#md5">MD5</a> <a class="term" href="glossary.html#hash">hash</a> so the id is unique and cannot clash with text already on the page. Then it asks the browser whether an element with that id exists (XSS) and whether a database error reached the rendered page (SQLi).</p>
+
+<pre data-file="24_dom_xss_sqli.py" data-lang="py" data-tag="complete file"><code>"""Authorized testing: confirming reflected XSS and SQL errors in a real browser.
+
+requests shows the raw HTML; a browser shows what actually renders and runs. For
+XSS, the question is not just "did my text come back?" but "did it become a live
+DOM element?". Playwright lets us check the rendered DOM. For SQL injection we
+watch the page/response for the tell-tale database error. Lab target only.
+Start lab_server.py first.
+"""
+import hashlib
+from playwright.sync_api import sync_playwright
+
+BASE = "http://127.0.0.1:8099"
+
+# A unique marker derived from a hash, so we can be sure any match is ours and not
+# some coincidental text already on the page.
+MARKER = "x" + hashlib.md5(b"guide-marker").hexdigest()[:10]
+
+
+def test_reflected_xss(page):
+    # Put the marker inside a tag so, IF unescaped, it becomes a real &lt;b&gt; element.
+    payload = f"&lt;b id={MARKER}&gt;hi&lt;/b&gt;"
+    page.goto(f"{BASE}/search?q={payload}")
+    # Did a real element with our id appear in the DOM? That means the HTML was
+    # injected, not escaped - a confirmed reflected-XSS sink.
+    injected = page.locator(f"#{MARKER}").count() &gt; 0
+    print("Reflected XSS on /search:",
+          "CONFIRMED - our tag became a live DOM node" if injected
+          else "not reflected as HTML (safe)")
+
+
+def test_sql_error(page):
+    page.goto(f"{BASE}/product?id=10'")
+    body = page.locator("body").inner_text()
+    leaked = "SQL" in body
+    print("SQL error on /product:",
+          "CONFIRMED - database error leaked to the page" if leaked
+          else "no error leaked")
+
+
+if __name__ == "__main__":
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        test_reflected_xss(page)
+        test_sql_error(page)
+        browser.close()
+    print("\nConfirmed findings go in a report with remediation advice"
+          " (output-encode user input; use parameterised SQL queries).")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>16</td><td><code>MARKER = "x" + hashlib.md5(b"guide-marker").hexdigest()[:10]</code></td><td>Builds a unique, harmless id from a hash, so when we look for it later any match is definitely ours. MD5 is fine here because it is only an identifier, not a security check.</td></tr>
+<tr><td>20–22</td><td><code>payload = f"&lt;b id={MARKER}&gt;hi&lt;/b&gt;"</code></td><td>Sends a harmless bold tag carrying our id through the <code>q</code> parameter. If the app escapes input, this stays text; if not, it becomes a real element.</td></tr>
+<tr><td>25</td><td><code>injected = page.locator(f"#{MARKER}").count() &gt; 0</code></td><td>Asks the browser's live DOM whether an element with our id exists. A count above zero means our HTML was injected — confirmed reflected XSS.</td></tr>
+<tr><td>26–28</td><td><code>print("Reflected XSS on /search:", ...)</code></td><td>Reports a clear CONFIRMED / safe result based on that check.</td></tr>
+<tr><td>31–34</td><td><code>body = page.locator("body").inner_text()</code></td><td>For the SQL test, loads <code>/product?id=10'</code> and reads the rendered page text, then checks whether a database error leaked into it.</td></tr>
+<tr><td>40–46</td><td><code>with sync_playwright() as p:</code></td><td>Launches a headless browser, runs both checks on one page, and closes it. One browser, two confirmations.</td></tr>
+</table></div>
+
+<details class="primer"><summary>What is the DOM, exactly?</summary>
+<p>When a browser loads a page it parses the HTML into a tree of objects called the <a class="term" href="glossary.html#dom">Document Object Model</a>. Scripts and tools query that tree ("is there an element with id X?"). Checking the DOM tells you what the page actually <em>became</em>, not just what bytes arrived — which is why it confirms XSS more reliably than a text search.</p></details>
+
+<div class="callout ok"><strong>What you should see.</strong> Against the lab, both checks confirm, and the script ends with the remediation reminder:
+<pre data-lang="text" data-tag="verified output"><code>Reflected XSS on /search: CONFIRMED - our tag became a live DOM node
+SQL error on /product: CONFIRMED - database error leaked to the page
+
+Confirmed findings go in a report with remediation advice (output-encode user input; use parameterised SQL queries).</code></pre></div>
+
+<div class="callout warn"><strong>Common mistakes.</strong> Forgetting to start the lab, or forgetting <code>playwright install chromium</code> (Step 22). Reading "CONFIRMED" as permission to do more — confirmation is where testing stops and reporting begins. Using a real <code>&lt;script&gt;</code> payload instead of the harmless <code>&lt;b&gt;</code> marker: unnecessary and reckless, even on your own lab.</div>
+
+<h2>Closing the loop: the fixes</h2>
+<p>Both findings have well-known remedies. For XSS, <a class="term" href="glossary.html#output-encoding">output-encode</a> every piece of user input before placing it in a page (and add a <a class="term" href="glossary.html#csp">Content-Security-Policy</a> as defence in depth). For SQL injection, use <a class="term" href="glossary.html#parameterized-query">parameterised queries</a> everywhere and never show raw database errors to users. A confirmed finding plus a clear fix is the deliverable that makes you useful to a team — and it is where this guide ends.</p>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A real browser confirms XSS by showing whether input became a live DOM element.</li>
+<li>A hash-based marker guarantees any match is yours.</li>
+<li>The same run watches for a leaked SQL error on the rendered page.</li>
+<li>Finish every finding with its fix: output encoding and a CSP for XSS, parameterised queries for SQLi.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="25-login-security.html"><small>← Previous · Step 25</small>Login security: the brute-force threat and its defences</a>
+<a class="next" href="index.html"><small>Done →</small>All steps</a>
+</nav>
+</main>
+</body>
+</html>
