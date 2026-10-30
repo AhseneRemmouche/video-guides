@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>32 · Week 6 · Day 2 — Build Your Own MCP Server</title>
+<meta name="description" content="Write an MCP server from scratch, wire your own business logic (an accounts system) into it, and write client code that an agent uses to call it.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Agentic AI Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 32/36</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 32 of 36 · Week 6 · Day 2 · 4 lessons</div>
+  <h1>Week 6 · Day 2 — Build Your Own MCP Server</h1>
+  <p class="lead">Write an MCP server from scratch, wire your own business logic (an accounts system) into it, and write client code that an agent uses to call it.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python (+ TypeScript/React where it fits) · code from the course repo</span>
+</section>
+<p>Yesterday we <em>used</em> other people's <a class="term" href="glossary.html#mcp-server">MCP servers</a>. Today we build our own. We take a plain
+Python module of business logic — an <code>Account</code> class that can buy and sell shares, track a balance
+and report profit or loss — and wrap it as an MCP server so any agent can use it. Then we write client
+code that talks to that server directly, so you can see the plumbing the <a class="term" href="glossary.html#agents-sdk">OpenAI Agents SDK</a> normally
+hides.</p>
+
+<div class="callout">
+<strong>When should you build a server at all?</strong> Only when you want to <em>share</em> a tool so other
+people's agents can use it (or to keep your own stack uniformly MCP). If a tool is just for your own
+agent, do <strong>not</strong> build a server — decorate the function with <a class="term" href="glossary.html#function-tool">function-tool</a> and pass it in
+<code>tools=[...]</code>. That runs in your own process with no extra plumbing. MCP adds a separate process and
+a protocol; that cost only pays off when the tool is shared.
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Decision: build an MCP server only to share a tool">
+  <text x="380" y="24" class="title" text-anchor="middle">Build a server, or just a function tool?</text>
+  <rect x="290" y="40" width="180" height="40" rx="8" class="box-info"/>
+  <text x="380" y="64" text-anchor="middle" class="small">Will others reuse this tool?</text>
+  <rect x="60" y="118" width="230" height="44" rx="8" class="box-ok"/>
+  <text x="175" y="138" text-anchor="middle" class="small">Yes → wrap it as an</text>
+  <text x="175" y="154" text-anchor="middle" class="small">MCP server to share it</text>
+  <rect x="470" y="118" width="250" height="44" rx="8" class="box2"/>
+  <text x="595" y="138" text-anchor="middle" class="small">No → just @function_tool,</text>
+  <text x="595" y="154" text-anchor="middle" class="small">pass it in tools=[...]</text>
+  <path class="arrow-ok" d="M 350,80 L 200,116"/>
+  <path class="arrow" d="M 410,80 L 580,116"/>
+</svg>
+<figcaption>MCP is about sharing. <strong>For a private tool, a function tool is simpler and faster.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="File tree highlighting the three new files this day">
+  <text x="380" y="24" class="title" text-anchor="middle">The files we work with today</text>
+  <rect x="220" y="40" width="320" height="130" rx="8" class="zone"/>
+  <text x="240" y="66" class="mono small">6_mcp/</text>
+  <text x="270" y="90" class="mono small">accounts.py</text>
+  <text x="470" y="90" class="small label">business logic</text>
+  <rect x="262" y="100" width="240" height="22" rx="6" class="box-ok"/>
+  <text x="275" y="116" class="mono small">accounts_server.py</text>
+  <text x="520" y="116" class="small label">the server</text>
+  <rect x="262" y="128" width="240" height="22" rx="6" class="box-ok"/>
+  <text x="275" y="144" class="mono small">accounts_client.py</text>
+  <text x="520" y="144" class="small label">the client</text>
+</svg>
+<figcaption>Three files: existing logic, a server that wraps it, and a client that talks to it.
+<strong>The highlighted two are what we write today.</strong></figcaption>
+</figure>
+
+<h2>The business logic: the Account class</h2>
+
+<p>The starting point is <code>accounts.py</code>. Fun fact from the video: this module was <em>written by the
+CrewAI engineering team of agents</em> back in week 3 — the instructor only added a small change to save
+accounts in a database. It manages a cash balance, holdings, transactions and a strategy, using
+<a class="term" href="glossary.html#pydantic">Pydantic</a> models for clean data.</p>
+
+<pre data-file="accounts.py" data-lang="py" data-tag="complete file"><code>from pydantic import BaseModel
+import json
+from dotenv import load_dotenv
+from datetime import datetime
+from market import get_share_price
+from database import write_account, read_account, write_log
+
+load_dotenv(override=True)
+
+INITIAL_BALANCE = 10_000.0
+SPREAD = 0.002
+
+
+class Transaction(BaseModel):
+    symbol: str
+    quantity: int
+    price: float
+    timestamp: str
+    rationale: str
+
+    def total(self) -&gt; float:
+        return self.quantity * self.price
+    
+    def __repr__(self):
+        return f"{abs(self.quantity)} shares of {self.symbol} at {self.price} each."
+
+
+class Account(BaseModel):
+    name: str
+    balance: float
+    strategy: str
+    holdings: dict[str, int]
+    transactions: list[Transaction]
+    portfolio_value_time_series: list[tuple[str, float]]
+
+    @classmethod
+    def get(cls, name: str):
+        fields = read_account(name.lower())
+        if not fields:
+            fields = {
+                "name": name.lower(),
+                "balance": INITIAL_BALANCE,
+                "strategy": "",
+                "holdings": {},
+                "transactions": [],
+                "portfolio_value_time_series": []
+            }
+            write_account(name, fields)
+        return cls(**fields)
+    
+    
+    def save(self):
+        write_account(self.name.lower(), self.model_dump())
+
+    def reset(self, strategy: str):
+        self.balance = INITIAL_BALANCE
+        self.strategy = strategy
+        self.holdings = {}
+        self.transactions = []
+        self.portfolio_value_time_series = []
+        self.save()
+
+    def deposit(self, amount: float):
+        """ Deposit funds into the account. """
+        if amount &lt;= 0:
+            raise ValueError("Deposit amount must be positive.")
+        self.balance += amount
+        print(f"Deposited ${amount}. New balance: ${self.balance}")
+        self.save()
+
+    def withdraw(self, amount: float):
+        """ Withdraw funds from the account, ensuring it doesn't go negative. """
+        if amount &gt; self.balance:
+            raise ValueError("Insufficient funds for withdrawal.")
+        self.balance -= amount
+        print(f"Withdrew ${amount}. New balance: ${self.balance}")
+        self.save()
+
+    def buy_shares(self, symbol: str, quantity: int, rationale: str) -&gt; str:
+        """ Buy shares of a stock if sufficient funds are available. """
+        price = get_share_price(symbol)
+        buy_price = price * (1 + SPREAD)
+        total_cost = buy_price * quantity
+        
+        if total_cost &gt; self.balance:
+            raise ValueError("Insufficient funds to buy shares.")
+        elif price==0:
+            raise ValueError(f"Unrecognized symbol {symbol}")
+        
+        # Update holdings
+        self.holdings[symbol] = self.holdings.get(symbol, 0) + quantity
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Record transaction
+        transaction = Transaction(symbol=symbol, quantity=quantity, price=buy_price, timestamp=timestamp, rationale=rationale)
+        self.transactions.append(transaction)
+        
+        # Update balance
+        self.balance -= total_cost
+        self.save()
+        write_log(self.name, "account", f"Bought {quantity} of {symbol}")
+        return "Completed. Latest details:\n" + self.report()
+
+    def sell_shares(self, symbol: str, quantity: int, rationale: str) -&gt; str:
+        """ Sell shares of a stock if the user has enough shares. """
+        if self.holdings.get(symbol, 0) &lt; quantity:
+            raise ValueError(f"Cannot sell {quantity} shares of {symbol}. Not enough shares held.")
+        
+        price = get_share_price(symbol)
+        sell_price = price * (1 - SPREAD)
+        total_proceeds = sell_price * quantity
+        
+        # Update holdings
+        self.holdings[symbol] -= quantity
+        
+        # If shares are completely sold, remove from holdings
+        if self.holdings[symbol] == 0:
+            del self.holdings[symbol]
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Record transaction
+        transaction = Transaction(symbol=symbol, quantity=-quantity, price=sell_price, timestamp=timestamp, rationale=rationale)  # negative quantity for sell
+        self.transactions.append(transaction)
+
+        # Update balance
+        self.balance += total_proceeds
+        self.save()
+        write_log(self.name, "account", f"Sold {quantity} of {symbol}")
+        return "Completed. Latest details:\n" + self.report()
+
+    def calculate_portfolio_value(self):
+        """ Calculate the total value of the user's portfolio. """
+        total_value = self.balance
+        for symbol, quantity in self.holdings.items():
+            total_value += get_share_price(symbol) * quantity
+        return total_value
+
+    def calculate_profit_loss(self, portfolio_value: float):
+        """ Calculate profit or loss from the initial spend. """
+        initial_spend = sum(transaction.total() for transaction in self.transactions)
+        return portfolio_value - initial_spend - self.balance
+
+    def get_holdings(self):
+        """ Report the current holdings of the user. """
+        return self.holdings
+
+    def get_profit_loss(self):
+        """ Report the user's profit or loss at any point in time. """
+        return self.calculate_profit_loss()
+
+    def list_transactions(self):
+        """ List all transactions made by the user. """
+        return [transaction.model_dump() for transaction in self.transactions]
+    
+    def report(self) -&gt; str:
+        """ Return a json string representing the account.  """
+        portfolio_value = self.calculate_portfolio_value()
+        self.portfolio_value_time_series.append((datetime.now().strftime("%Y-%m-%d %H:%M:%S"), portfolio_value))
+        self.save()
+        pnl = self.calculate_profit_loss(portfolio_value)
+        data = self.model_dump()
+        data["total_portfolio_value"] = portfolio_value
+        data["total_profit_loss"] = pnl
+        write_log(self.name, "account", f"Retrieved account details")
+        return json.dumps(data)
+    
+    def get_strategy(self) -&gt; str:
+        """ Return the strategy of the account """
+        write_log(self.name, "account", f"Retrieved strategy")
+        return self.strategy
+    
+    def change_strategy(self, strategy: str) -&gt; str:
+        """ At your discretion, if you choose to, call this to change your investment strategy for the future """
+        self.strategy = strategy
+        self.save()
+        write_log(self.name, "account", f"Changed strategy")
+        return "Changed strategy"
+
+# Example of usage:
+if __name__ == "__main__":
+    account = Account("John Doe")
+    account.deposit(1000)
+    account.buy_shares("AAPL", 5)
+    account.sell_shares("AAPL", 2)
+    print(f"Current Holdings: {account.get_holdings()}")
+    print(f"Total Portfolio Value: {account.calculate_portfolio_value()}")
+    print(f"Profit/Loss: {account.get_profit_loss()}")
+    print(f"Transactions: {account.list_transactions()}")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–6</td><td><code>from pydantic import BaseModel<br>...<br>from market import get_share_price<br>from database import write_account, read_account, write_log</code></td><td>Imports. <code>BaseModel</code> gives validated data classes. <code>get_share_price</code> (from the market module) prices a trade. The <code>database</code> helpers persist accounts and write logs to SQLite — the instructor's one addition so accounts survive between runs.</td></tr>
+<tr><td>10–11</td><td><code>INITIAL_BALANCE = 10_000.0<br>SPREAD = 0.002</code></td><td>Constants: every account starts with $10,000, and <code>SPREAD</code> is the 0.2% gap between buy and sell price that mimics a real market's bid/ask — you buy slightly above and sell slightly below the quoted price.</td></tr>
+<tr><td>14–25</td><td><code>class Transaction(BaseModel):<br>  symbol: str ... rationale: str<br>  def total(self) -&gt; float: ...</code></td><td>One trade record: which symbol, how many shares, the price, a timestamp and a <code>rationale</code> (the reason the trader gives). <code>total()</code> is quantity times price.</td></tr>
+<tr><td>28–34</td><td><code>class Account(BaseModel):<br>  name: str ... holdings: dict[str, int] ...</code></td><td>The account itself: a name, cash balance, a text strategy, a holdings map (symbol → quantity), a list of transactions, and a time series of portfolio values for the chart later.</td></tr>
+<tr><td>36–49</td><td><code>@classmethod<br>def get(cls, name: str): ...</code></td><td>Loads an account from the database by name (lower-cased). If it does not exist yet, it creates a fresh one with the starting balance and saves it. This is why <code>Account.get("Ed")</code> always returns a usable account.</td></tr>
+<tr><td>52–61</td><td><code>def save(self): ...<br>def reset(self, strategy): ...</code></td><td><code>save</code> writes the account back to the database as JSON. <code>reset</code> wipes it back to the starting balance with a new strategy — used to start a trader fresh.</td></tr>
+<tr><td>79–101</td><td><code>def buy_shares(self, symbol, quantity, rationale) -&gt; str: ...</code></td><td>Buys shares. It prices them at <code>price * (1 + SPREAD)</code>, refuses if you cannot afford it or the symbol is unknown, updates holdings and balance, records the transaction and writes a log. It returns the fresh report. The "insufficient funds" error here matters later — it is what stops a trader agent overspending.</td></tr>
+<tr><td>103–127</td><td><code>def sell_shares(self, symbol, quantity, rationale) -&gt; str: ...</code></td><td>The mirror image: refuses if you do not hold enough, prices at <code>price * (1 - SPREAD)</code>, records a transaction with a <em>negative</em> quantity, and adds the proceeds to your balance.</td></tr>
+<tr><td>129–163</td><td><code>def calculate_portfolio_value(self): ...<br>def report(self) -&gt; str: ...</code></td><td>Valuation helpers. <code>calculate_portfolio_value</code> is cash plus the current value of every holding. <code>report</code> returns the whole account as a JSON string with total value and profit/loss added — this JSON is exactly what gets shoved into a trader's prompt later.</td></tr>
+<tr><td>165–175</td><td><code>def get_strategy(self) -&gt; str: ...<br>def change_strategy(self, strategy) -&gt; str: ...</code></td><td>Read and update the strategy text. <code>change_strategy</code> is what gives a trader autonomy to evolve its own approach over time.</td></tr>
+<tr><td>178–186</td><td><code>if __name__ == "__main__": ...</code></td><td>A small self-test that runs only if you execute this file directly. It is not used when the module is imported by the server.</td></tr>
+</table></div>
+
+<h2>Wrapping it as an MCP server with FastMCP</h2>
+
+<p>Now the server. It is mostly boilerplate: import <a class="term" href="glossary.html#fastmcp">FastMCP</a> (Anthropic's helper), create a server,
+and decorate each function you want to expose. The functions just delegate to the <code>Account</code> business
+logic.</p>
+
+<details class="primer">
+<summary>New to this? What FastMCP, @mcp.tool and @mcp.resource do</summary>
+<ul>
+<li><code>FastMCP("name")</code> creates a server object. The name is just a label.</li>
+<li><code>@mcp.tool()</code> on a function turns it into an <a class="term" href="glossary.html#mcp-tool">MCP tool</a> the agent can call. The function's
+<em>docstring</em> and type hints become the description and argument schema the model reads — so good
+docstrings really matter.</li>
+<li><code>@mcp.resource("some://uri/{name}")</code> exposes read-only context as an <a class="term" href="glossary.html#mcp-resource">MCP resource</a>, addressed by a
+URI. Resources are not called like tools; they are <em>read</em> to pull text into a prompt.</li>
+<li><code>mcp.run(transport='stdio')</code> at the bottom starts the server over <a class="term" href="glossary.html#stdio-transport">stdio</a> when the file is run.</li>
+</ul>
+</details>
+
+<pre data-file="accounts_server.py" data-lang="py" data-tag="complete file"><code>from mcp.server.fastmcp import FastMCP
+from accounts import Account
+
+mcp = FastMCP("accounts_server")
+
+@mcp.tool()
+async def get_balance(name: str) -&gt; float:
+    """Get the cash balance of the given account name.
+
+    Args:
+        name: The name of the account holder
+    """
+    return Account.get(name).balance
+
+@mcp.tool()
+async def get_holdings(name: str) -&gt; dict[str, int]:
+    """Get the holdings of the given account name.
+
+    Args:
+        name: The name of the account holder
+    """
+    return Account.get(name).holdings
+
+@mcp.tool()
+async def buy_shares(name: str, symbol: str, quantity: int, rationale: str) -&gt; float:
+    """Buy shares of a stock.
+
+    Args:
+        name: The name of the account holder
+        symbol: The symbol of the stock
+        quantity: The quantity of shares to buy
+        rationale: The rationale for the purchase and fit with the account's strategy
+    """
+    return Account.get(name).buy_shares(symbol, quantity, rationale)
+
+
+@mcp.tool()
+async def sell_shares(name: str, symbol: str, quantity: int, rationale: str) -&gt; float:
+    """Sell shares of a stock.
+
+    Args:
+        name: The name of the account holder
+        symbol: The symbol of the stock
+        quantity: The quantity of shares to sell
+        rationale: The rationale for the sale and fit with the account's strategy
+    """
+    return Account.get(name).sell_shares(symbol, quantity, rationale)
+
+@mcp.tool()
+async def change_strategy(name: str, strategy: str) -&gt; str:
+    """At your discretion, if you choose to, call this to change your investment strategy for the future.
+
+    Args:
+        name: The name of the account holder
+        strategy: The new strategy for the account
+    """
+    return Account.get(name).change_strategy(strategy)
+
+@mcp.resource("accounts://accounts_server/{name}")
+async def read_account_resource(name: str) -&gt; str:
+    account = Account.get(name.lower())
+    return account.report()
+
+@mcp.resource("accounts://strategy/{name}")
+async def read_strategy_resource(name: str) -&gt; str:
+    account = Account.get(name.lower())
+    return account.get_strategy()
+
+if __name__ == "__main__":
+    mcp.run(transport='stdio')</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–2</td><td><code>from mcp.server.fastmcp import FastMCP<br>from accounts import Account</code></td><td>Import FastMCP (the server helper from Anthropic's <code>mcp</code> package) and our own business logic. The server will simply call into <code>Account</code>.</td></tr>
+<tr><td>4</td><td><code>mcp = FastMCP("accounts_server")</code></td><td>Creates the server object named <code>accounts_server</code>. Everything else attaches to this.</td></tr>
+<tr><td>6–13</td><td><code>@mcp.tool()<br>async def get_balance(name: str) -&gt; float:<br>  """Get the cash balance..."""<br>  return Account.get(name).balance</code></td><td>The first tool. The decorator registers it; the docstring and the <code>name: str</code> hint tell the model what it does and what to pass. The body just delegates to the business logic. This is the whole pattern, repeated.</td></tr>
+<tr><td>15–22</td><td><code>@mcp.tool()<br>async def get_holdings(name: str) -&gt; dict[str, int]: ...</code></td><td>Returns the holdings map for an account. Same shape: decorate, document, delegate.</td></tr>
+<tr><td>24–34</td><td><code>@mcp.tool()<br>async def buy_shares(name, symbol, quantity, rationale) -&gt; float: ...</code></td><td>Exposes buying. Note the <code>rationale</code> argument is documented as "the rationale for the purchase and fit with the account's strategy" — so the model is prompted to justify every trade.</td></tr>
+<tr><td>37–47</td><td><code>@mcp.tool()<br>async def sell_shares(...) -&gt; float: ...</code></td><td>The selling tool, delegating to <code>Account.sell_shares</code>.</td></tr>
+<tr><td>49–57</td><td><code>@mcp.tool()<br>async def change_strategy(name, strategy) -&gt; str: ...</code></td><td>Lets an agent rewrite its own strategy — the hook for autonomy later in the week.</td></tr>
+<tr><td>59–62</td><td><code>@mcp.resource("accounts://accounts_server/{name}")<br>async def read_account_resource(name): ...</code></td><td>A resource, not a tool. Reading the URI <code>accounts://accounts_server/Ed</code> returns that account's JSON report. The <code>{name}</code> part of the URI is filled in and passed to the function.</td></tr>
+<tr><td>64–67</td><td><code>@mcp.resource("accounts://strategy/{name}")<br>async def read_strategy_resource(name): ...</code></td><td>A second resource that returns just the strategy text for an account.</td></tr>
+<tr><td>69–70</td><td><code>if __name__ == "__main__":<br>  mcp.run(transport='stdio')</code></td><td>When this file is run as a program, start the server and talk over stdio. This is exactly what <code>uv run accounts_server.py</code> triggers.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Structure of the accounts server wrapping the Account business logic">
+  <text x="380" y="24" class="title" text-anchor="middle">The server is a thin wrapper</text>
+  <rect x="40" y="48" width="220" height="140" rx="8" class="zone"/>
+  <text x="150" y="68" text-anchor="middle" class="label">accounts_server.py</text>
+  <rect x="60" y="80" width="180" height="22" rx="8" class="box"/><text x="150" y="95" text-anchor="middle" class="small">@mcp.tool get_balance</text>
+  <rect x="60" y="106" width="180" height="22" rx="8" class="box"/><text x="150" y="121" text-anchor="middle" class="small">@mcp.tool buy_shares</text>
+  <rect x="60" y="132" width="180" height="22" rx="8" class="box"/><text x="150" y="147" text-anchor="middle" class="small">@mcp.tool sell_shares</text>
+  <rect x="60" y="158" width="180" height="22" rx="8" class="box-info"/><text x="150" y="173" text-anchor="middle" class="small">@mcp.resource report</text>
+  <rect x="330" y="92" width="180" height="60" rx="8" class="box2"/>
+  <text x="420" y="118" text-anchor="middle" class="small">accounts.py</text>
+  <text x="420" y="136" text-anchor="middle" class="small">Account class</text>
+  <rect x="580" y="92" width="150" height="60" rx="8" class="box"/>
+  <text x="655" y="118" text-anchor="middle" class="small">database.py</text>
+  <text x="655" y="136" text-anchor="middle" class="small">SQLite</text>
+  <path class="arrow" d="M 260,122 H 328"/>
+  <path class="arrow" d="M 510,122 H 578"/>
+</svg>
+<figcaption>Each tool just calls a method on <code>Account</code>, which saves to SQLite.
+<strong>The server adds no logic of its own — it only exposes what already works.</strong></figcaption>
+</figure>
+
+<h2>Using the server from the lab</h2>
+
+<p>Lab 2 first drives the <code>Account</code> class directly (buying Amazon shares), then spawns the server and
+hands its tools to an agent — exactly the <code>MCPServerStdio</code> pattern from Day 1, but pointed at
+<em>our own</em> server.</p>
+
+<pre data-file="2_lab2.py" data-lang="py" data-tag="complete file"><code>from dotenv import load_dotenv
+from agents import Agent, Runner, trace
+from agents.mcp import MCPServerStdio
+from IPython.display import display, Markdown
+
+load_dotenv(override=True)
+
+from accounts import Account
+
+account = Account.get("Ed")
+account
+
+account.buy_shares("AMZN", 3, "Because this bookstore website looks promising")
+
+account.report()
+
+account.list_transactions()
+
+# Now let's use our accounts server as an MCP server
+
+params = {"command": "uv", "args": ["run", "accounts_server.py"]}
+async with MCPServerStdio(params=params, client_session_timeout_seconds=30) as server:
+    mcp_tools = await server.list_tools()
+
+
+mcp_tools
+
+instructions = "You are able to manage an account for a client, and answer questions about the account."
+request = "My name is Ed and my account is under the name Ed. What's my balance and my holdings?"
+model = "gpt-4.1-mini"
+
+
+async with MCPServerStdio(params=params, client_session_timeout_seconds=30) as mcp_server:
+    agent = Agent(name="account_manager", instructions=instructions, model=model, mcp_servers=[mcp_server])
+    with trace("account_manager"):
+        result = await Runner.run(agent, request)
+    display(Markdown(result.final_output))
+
+
+from accounts_client import get_accounts_tools_openai, read_accounts_resource, list_accounts_tools
+
+mcp_tools = await list_accounts_tools()
+print(mcp_tools)
+openai_tools = await get_accounts_tools_openai()
+print(openai_tools)
+
+request = "My name is Ed and my account is under the name Ed. What's my balance?"
+
+with trace("account_mcp_client"):
+    agent = Agent(name="account_manager", instructions=instructions, model=model, tools=openai_tools)
+    result = await Runner.run(agent, request)
+    display(Markdown(result.final_output))
+
+context = await read_accounts_resource("ed")
+print(context)
+
+from accounts import Account
+Account.get("ed").report()</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–6</td><td><code>from agents import Agent, Runner, trace<br>from agents.mcp import MCPServerStdio<br>...<br>load_dotenv(override=True)</code></td><td>The familiar imports plus the notebook display helpers, and loading secrets.</td></tr>
+<tr><td>8–11</td><td><code>from accounts import Account<br>account = Account.get("Ed")<br>account</code></td><td>Imports the business logic and loads Ed's account directly (no MCP yet). Displaying it shows a balance and any existing holdings.</td></tr>
+<tr><td>13</td><td><code>account.buy_shares("AMZN", 3, "Because this bookstore website looks promising")</code></td><td>Buys three Amazon shares with a rationale. This calls the Python method directly — proof the logic works before we wrap it.</td></tr>
+<tr><td>15–17</td><td><code>account.report()<br>account.list_transactions()</code></td><td>Shows the account report and the list of transactions so far.</td></tr>
+<tr><td>21–26</td><td><code>params = {"command": "uv", "args": ["run", "accounts_server.py"]}<br>async with MCPServerStdio(params=params, client_session_timeout_seconds=30) as server:<br>  mcp_tools = await server.list_tools()<br>mcp_tools</code></td><td>Now MCP. The params say "run <code>accounts_server.py</code> with uv". <a class="term" href="glossary.html#mcp-server-stdio">MCPServerStdio</a> spawns it, and <code>list_tools()</code> returns the five functions we decorated — <code>get_balance</code>, <code>get_holdings</code>, <code>buy_shares</code>, <code>sell_shares</code>, <code>change_strategy</code>.</td></tr>
+<tr><td>28–30</td><td><code>instructions = "You are able to manage an account..."<br>request = "My name is Ed... What's my balance and my holdings?"<br>model = "gpt-4.1-mini"</code></td><td>Sets up a simple account-manager agent and a natural-language question for it.</td></tr>
+<tr><td>33–37</td><td><code>async with MCPServerStdio(params=params, ...) as mcp_server:<br>  agent = Agent(..., mcp_servers=[mcp_server])<br>  with trace("account_manager"):<br>    result = await Runner.run(agent, request)</code></td><td>Builds the agent with our server attached and runs it. The agent reads the question, decides to call <code>get_balance</code> and <code>get_holdings</code>, and answers in plain English — "your balance is ..., you hold six Amazon shares". Our own server drove it.</td></tr>
+<tr><td>40–45</td><td><code>from accounts_client import get_accounts_tools_openai, read_accounts_resource, list_accounts_tools<br>mcp_tools = await list_accounts_tools()<br>openai_tools = await get_accounts_tools_openai()</code></td><td>Switches to the hand-written client (below). <code>list_accounts_tools</code> returns the tools in MCP's own format; <code>get_accounts_tools_openai</code> converts them into Agents SDK <code>FunctionTool</code> objects.</td></tr>
+<tr><td>49–52</td><td><code>with trace("account_mcp_client"):<br>  agent = Agent(..., tools=openai_tools)<br>  result = await Runner.run(agent, request)</code></td><td>Here the tools are passed the <em>old</em> way, as <code>tools=...</code> rather than <code>mcp_servers=...</code>. This is how you had to do it before the SDK supported MCP natively. It still works — the converted tools call back into our client and server.</td></tr>
+<tr><td>54–58</td><td><code>context = await read_accounts_resource("ed")<br>print(context)<br>Account.get("ed").report()</code></td><td>Reads the account <em>resource</em> through the client and prints it, then shows that calling the business logic directly gives the same text. Resources still need a client, which is why the hand-written client is worth seeing.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Sequence of the account manager agent answering a balance question">
+  <text x="380" y="22" class="title" text-anchor="middle">Answering "What's my balance?"</text>
+  <text x="110" y="48" text-anchor="middle" class="label">account_manager</text>
+  <text x="380" y="48" text-anchor="middle" class="label">accounts server</text>
+  <text x="650" y="48" text-anchor="middle" class="label">Account logic</text>
+  <line class="line dashed" x1="110" y1="58" x2="110" y2="160"/>
+  <line class="line dashed" x1="380" y1="58" x2="380" y2="160"/>
+  <line class="line dashed" x1="650" y1="58" x2="650" y2="160"/>
+  <path class="arrow" d="M 112,80 H 378"/>
+  <text x="245" y="74" text-anchor="middle" class="small">1. call get_balance("Ed")</text>
+  <path class="arrow" d="M 382,108 H 648"/>
+  <text x="515" y="102" text-anchor="middle" class="small">2. Account.get("Ed")</text>
+  <path class="arrow" d="M 648,136 H 112"/>
+  <text x="360" y="130" text-anchor="middle" class="small">3. balance flows back to the answer</text>
+</svg>
+<figcaption>The model picks the tool; the server delegates to the business logic and the number returns.
+<strong>Plain English in, a tool call out, plain English back.</strong></figcaption>
+</figure>
+
+<h2>Writing an MCP client (the plumbing)</h2>
+
+<p>You rarely need to write a client — the instructor notes the Agents SDK added native MCP support the
+very day he finished writing this one, making it optional. But it is a great way to see what the SDK does
+for you, and you still need a client to read <em>resources</em>.</p>
+
+<pre data-file="accounts_client.py" data-lang="py" data-tag="complete file"><code>import mcp
+from mcp.client.stdio import stdio_client
+from mcp import StdioServerParameters
+from agents import FunctionTool
+import json
+
+params = StdioServerParameters(command="uv", args=["run", "accounts_server.py"], env=None)
+
+
+async def list_accounts_tools():
+    async with stdio_client(params) as streams:
+        async with mcp.ClientSession(*streams) as session:
+            await session.initialize()
+            tools_result = await session.list_tools()
+            return tools_result.tools
+        
+async def call_accounts_tool(tool_name, tool_args):
+    async with stdio_client(params) as streams:
+        async with mcp.ClientSession(*streams) as session:
+            await session.initialize()
+            result = await session.call_tool(tool_name, tool_args)
+            return result
+            
+async def read_accounts_resource(name):
+    async with stdio_client(params) as streams:
+        async with mcp.ClientSession(*streams) as session:
+            await session.initialize()
+            result = await session.read_resource(f"accounts://accounts_server/{name}")
+            return result.contents[0].text
+        
+async def read_strategy_resource(name):
+    async with stdio_client(params) as streams:
+        async with mcp.ClientSession(*streams) as session:
+            await session.initialize()
+            result = await session.read_resource(f"accounts://strategy/{name}")
+            return result.contents[0].text
+
+async def get_accounts_tools_openai():
+    openai_tools = []
+    for tool in await list_accounts_tools():
+        schema = {**tool.inputSchema, "additionalProperties": False}
+        openai_tool = FunctionTool(
+            name=tool.name,
+            description=tool.description,
+            params_json_schema=schema,
+            on_invoke_tool=lambda ctx, args, toolname=tool.name: call_accounts_tool(toolname, json.loads(args))
+                
+        )
+        openai_tools.append(openai_tool)
+    return openai_tools</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–5</td><td><code>import mcp<br>from mcp.client.stdio import stdio_client<br>from mcp import StdioServerParameters<br>from agents import FunctionTool</code></td><td>The lower-level MCP client pieces: <code>stdio_client</code> opens a stdio connection, <code>StdioServerParameters</code> describes the server, and <code>FunctionTool</code> is the Agents SDK tool type we will convert into.</td></tr>
+<tr><td>7</td><td><code>params = StdioServerParameters(command="uv", args=["run", "accounts_server.py"], env=None)</code></td><td>The same launch command as before, in the typed form this lower-level client expects.</td></tr>
+<tr><td>10–15</td><td><code>async def list_accounts_tools():<br>  async with stdio_client(params) as streams:<br>    async with mcp.ClientSession(*streams) as session:<br>      await session.initialize()<br>      ...return tools</code></td><td>Opens a connection, starts a session, initialises it, and asks for the tool list. This is the handshake the SDK normally hides: connect → initialise → list.</td></tr>
+<tr><td>17–22</td><td><code>async def call_accounts_tool(tool_name, tool_args): ...session.call_tool(...)</code></td><td>Runs one tool by name with arguments. Same open/initialise dance, then <code>call_tool</code>.</td></tr>
+<tr><td>24–36</td><td><code>async def read_accounts_resource(name): ...session.read_resource(f"accounts://accounts_server/{name}")</code></td><td>Reads a resource by its URI and returns the text. This is the part that does <em>not</em> come free with the SDK, so a client is still useful for resources.</td></tr>
+<tr><td>38–50</td><td><code>async def get_accounts_tools_openai():<br>  for tool in await list_accounts_tools():<br>    schema = {**tool.inputSchema, "additionalProperties": False}<br>    openai_tool = FunctionTool(...)</code></td><td>Converts each MCP tool into a <code>FunctionTool</code> the Agents SDK understands. MCP's tool format is close to the standard <a class="term" href="glossary.html#json-schema">JSON schema</a> used when calling models, but not identical, so this bridges the two. The <code>on_invoke_tool</code> lambda routes a call back through <code>call_accounts_tool</code>. All of this is what the SDK now does for you automatically.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Full round trip from agent through client and server to business logic">
+  <text x="380" y="22" class="title" text-anchor="middle">The full round trip of one tool call</text>
+  <rect x="20" y="70" width="120" height="50" rx="8" class="box-solid"/>
+  <text x="80" y="100" text-anchor="middle" class="on-solid small">agent (LLM)</text>
+  <rect x="170" y="70" width="120" height="50" rx="8" class="box"/>
+  <text x="230" y="92" text-anchor="middle" class="small">MCP client</text>
+  <text x="230" y="108" text-anchor="middle" class="small">(in the host)</text>
+  <rect x="320" y="70" width="130" height="50" rx="8" class="box2"/>
+  <text x="385" y="92" text-anchor="middle" class="small">MCP server</text>
+  <text x="385" y="108" text-anchor="middle" class="small">accounts_server</text>
+  <rect x="480" y="70" width="130" height="50" rx="8" class="box-info"/>
+  <text x="545" y="92" text-anchor="middle" class="small">Account class</text>
+  <text x="545" y="108" text-anchor="middle" class="small">business logic</text>
+  <rect x="640" y="70" width="100" height="50" rx="8" class="box"/>
+  <text x="690" y="100" text-anchor="middle" class="small">SQLite</text>
+  <path class="arrow" d="M 140,95 H 168"/>
+  <path class="arrow" d="M 290,95 H 318"/>
+  <path class="arrow" d="M 450,95 H 478"/>
+  <path class="arrow" d="M 610,95 H 638"/>
+  <text x="380" y="150" text-anchor="middle" class="small">The model never sees the database — it only calls a named tool.</text>
+</svg>
+<figcaption>A tool call flows agent → client → server → business logic → database, and the result
+flows back. <strong>The Agents SDK builds the client half for you.</strong></figcaption>
+</figure>
+
+<div class="callout ok">
+<strong>What you should see.</strong> Listing tools prints the five functions you decorated. The agent, asked
+about Ed's balance and holdings, answers in plain English after calling your tools. Reading the resource
+prints the same JSON report you get from <code>Account.get("ed").report()</code> — proof the resource path
+and the direct path agree.
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes.</strong>
+<ul>
+<li><strong>Weak docstrings.</strong> The docstring and type hints <em>are</em> the tool's description to the model. Vague docstrings lead to the model misusing or skipping the tool.</li>
+<li><strong>Forgetting the timeout.</strong> The default 5-second client session timeout often fails; pass 30 or 60.</li>
+<li><strong>Running the server wrong.</strong> The params must actually launch the server (<code>uv run accounts_server.py</code>) from the right folder, or the spawn fails.</li>
+<li><strong>Building a server you did not need.</strong> If the tool is only for your own agent, skip all this and use a function tool.</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Try the exercise.</strong> The instructor suggests building your own tiny server — for example one
+that returns the current date — and optionally a matching client. (He also notes a date tool is not
+actually useful, since it is better to put the date straight in the prompt; a small calculator is a more
+interesting exercise.)
+</div>
+
+<div class="callout">
+<strong>Honesty note.</strong> This day is verified locally for the guide: the accounts MCP server is built
+and an agent calls its tools (<code>get_balance</code>, <code>buy_shares</code> and friends) over stdio, with the model
+served by <a class="term" href="glossary.html#ollama">Ollama</a> so no paid key is needed. The course's runs use a hosted model; the mechanics are
+identical.
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Build an MCP server only to <em>share</em> a tool; for a private tool, a function tool is simpler.</li>
+<li><code>FastMCP("name")</code> plus <code>@mcp.tool()</code> on each function, whose docstring and type hints become the model-facing description, makes a server; <code>mcp.run(transport='stdio')</code> starts it.</li>
+<li><code>@mcp.resource("uri/{name}")</code> exposes read-only context, addressed by a URI and <em>read</em> rather than called.</li>
+<li>Our server just delegates to the <code>Account</code> business logic, which persists to SQLite.</li>
+<li>You rarely write a client — the SDK builds one when you pass <code>mcp_servers=[...]</code> — but a client is still needed to read resources.</li>
+<li>MCP's tool format is close to standard JSON schema; the client converts between them.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="31-w6d1.html"><small>← Previous · Step 31</small>Week 6 · Day 1 — MCP: the USB-C of Agentic AI</a>
+<a class="next" href="33-w6d3.html"><small>Next · Step 33 →</small>Week 6 · Day 3 — Market Data and Agent Memory</a>
+</nav>
+</main>
+</body>
+</html>

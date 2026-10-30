@@ -1,0 +1,1123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>22 · Week 4 · Day 4 — The Sidekick: Browser Automation and an Evaluator</title>
+<meta name="description" content="Build a &quot;Sidekick&quot; that browses the web with Playwright and a worker/evaluator feedback loop that checks its own work against success criteria. Python and TypeScript.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Agentic AI Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 22/36</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 22 of 36 · Week 4 · Day 4 · 5 lessons</div>
+  <h1>Week 4 · Day 4 — The Sidekick: Browser Automation and an Evaluator</h1>
+  <p class="lead">Build a &quot;Sidekick&quot; that browses the web with Playwright and a worker/evaluator feedback loop that checks its own work against success criteria. Python and TypeScript.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python (+ TypeScript/React where it fits) · code from the course repo</span>
+</section>
+<p>Today we start the week's project: the <strong>Sidekick</strong>, a personal co-worker that can browse the web,
+run tools, and keep trying until the job is actually done. The engine behind it is a
+<a class="term" href="glossary.html#worker-evaluator">worker/evaluator</a> loop — two LLM roles that
+cooperate inside one <a class="term" href="glossary.html#langgraph">LangGraph</a>. A <strong>worker</strong> does
+the task (and may call tools); an <strong>evaluator</strong> judges the worker's answer against the user's success
+criteria and decides whether to finish or send it back for another try. The evaluator answers with a
+<a class="term" href="glossary.html#structured-output">structured output</a>, and
+<a class="term" href="glossary.html#conditional-edge">conditional edges</a> do the routing.</p>
+
+<p>We build it twice: first as the lab4 notebook so the loop is clear, then as the real app's
+<code>Sidekick</code> class, where the same graph is packaged so each user session gets its own tools, graph and
+memory.</p>
+
+<div class="callout">
+<strong>This is a true agent, not a fixed workflow.</strong> Because the evaluator can keep bouncing work back to
+the worker, the loop can run many times. That open-ended quality is what makes it an agent rather than a straight
+pipeline.
+</div>
+
+<h2>The worker/evaluator loop</h2>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="The Sidekick graph: worker routes to tools or evaluator; evaluator ends or loops back to the worker">
+  <text x="380" y="24" class="title" text-anchor="middle">The Sidekick's worker/evaluator graph</text>
+  <rect x="40" y="100" width="90" height="40" rx="8" class="box-info"/>
+  <text x="85" y="124" text-anchor="middle" class="mono">START</text>
+  <rect x="200" y="98" width="130" height="44" rx="8" class="box2"/>
+  <text x="265" y="124" text-anchor="middle">worker</text>
+  <rect x="200" y="28" width="130" height="40" rx="8" class="box"/>
+  <text x="265" y="52" text-anchor="middle" class="small">tools (ToolNode)</text>
+  <rect x="430" y="98" width="130" height="44" rx="8" class="box-info"/>
+  <text x="495" y="124" text-anchor="middle">evaluator</text>
+  <rect x="650" y="98" width="90" height="44" rx="8" class="box-info"/>
+  <text x="695" y="124" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M 130,120 H 198"/>
+  <path class="arrow-accent" d="M 245,98 V 70"/>
+  <text x="150" y="86" text-anchor="middle" class="small">tool call</text>
+  <path class="arrow" d="M 290,68 V 96"/>
+  <text x="360" y="60" text-anchor="middle" class="small">result back</text>
+  <path class="arrow" d="M 330,120 H 428"/>
+  <text x="380" y="112" text-anchor="middle" class="small">no tool</text>
+  <path class="arrow-ok" d="M 560,120 H 648"/>
+  <text x="605" y="112" text-anchor="middle" class="small">done</text>
+  <path class="arrow-bad" d="M 495,142 C 430,200 330,200 265,144"/>
+  <text x="380" y="200" text-anchor="middle" class="small">not yet: back to worker with feedback</text>
+</svg>
+<figcaption>Two conditional edges. <strong>The worker loops through tools until it has a plain answer, the evaluator
+judges it, and either ends or sends feedback back to the worker.</strong></figcaption>
+</figure>
+
+<p>There are two decision points. After the worker speaks, a router asks "did it call a tool?" — if yes, run
+the tools and loop back; if no, the answer is ready, so go to the evaluator. After the evaluator speaks, a second
+router asks "are we done?" — done means either the success criteria are met or the worker needs the user, in
+which case the graph ends; otherwise it loops back to the worker with the evaluator's feedback.</p>
+
+<h2>The evaluator's structured output</h2>
+<p>The evaluator must return a precise verdict, not prose. We define a
+<a class="term" href="glossary.html#pydantic">Pydantic</a> schema called <code>EvaluatorOutput</code> with three
+fields, and tell the evaluator model to fill exactly that shape.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="EvaluatorOutput has three fields: feedback, success_criteria_met, user_input_needed">
+  <text x="380" y="24" class="title" text-anchor="middle">EvaluatorOutput: three fields</text>
+  <rect x="60" y="50" width="200" height="90" rx="8" class="box-info"/>
+  <text x="160" y="80" text-anchor="middle" class="mono small">feedback</text>
+  <text x="160" y="104" text-anchor="middle" class="small">what was good or</text>
+  <text x="160" y="120" text-anchor="middle" class="small">wrong (text)</text>
+  <rect x="280" y="50" width="200" height="90" rx="8" class="box-ok"/>
+  <text x="380" y="80" text-anchor="middle" class="mono small">success_criteria_met</text>
+  <text x="380" y="104" text-anchor="middle" class="small">true / false</text>
+  <text x="380" y="120" text-anchor="middle" class="small">is the job done?</text>
+  <rect x="500" y="50" width="200" height="90" rx="8" class="box-warn"/>
+  <text x="600" y="80" text-anchor="middle" class="mono small">user_input_needed</text>
+  <text x="600" y="104" text-anchor="middle" class="small">true / false</text>
+  <text x="600" y="120" text-anchor="middle" class="small">stuck or needs a human?</text>
+</svg>
+<figcaption>The two booleans drive the routing. <strong>If either is true the graph ends and hands back to the user;
+otherwise the worker tries again using the feedback.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to this? Structured output in LangGraph</summary>
+<p>Instead of <code>bind_tools</code>, the evaluator model is wrapped with <code>with_structured_output(EvaluatorOutput)</code>.
+That tells the model "your reply must match this schema", turns the schema into JSON rules behind the scenes, and
+parses the model's JSON back into a filled <code>EvaluatorOutput</code> object. If a model cannot do structured
+output, the fallback is the old way: ask for JSON in the prompt and parse it yourself. Here it is one line.</p>
+</details>
+
+<h2>A meatier state</h2>
+<p>Until now the State held only <code>messages</code>. The Sidekick's state carries five fields, because the
+worker and evaluator need to pass information to each other across the loop.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>messages</code></td><td>The running conversation. Uses the <a class="term" href="glossary.html#add-messages">add_messages</a> <a class="term" href="glossary.html#reducer">reducer</a>, so new messages are appended.</td></tr>
+<tr><td><code>success_criteria</code></td><td>What "done" means for this task. Set once by the user and read by both the worker and evaluator.</td></tr>
+<tr><td><code>feedback_on_work</code></td><td>The evaluator's latest feedback. When present, the worker knows a previous attempt was rejected and why.</td></tr>
+<tr><td><code>success_criteria_met</code></td><td>The evaluator's verdict: is the criteria satisfied?</td></tr>
+<tr><td><code>user_input_needed</code></td><td>The evaluator's other verdict: does the worker need the human?</td></tr>
+</table></div>
+
+<p>Only <code>messages</code> has a reducer. The other four are plain values, so when a node returns a new value it
+simply overwrites the old one for everything downstream — exactly what we want for a verdict.</p>
+
+<h2>Lab 4: the notebook version</h2>
+<p>Here is the lab in both languages. Python gives the worker the real Playwright browser tools and runs behind a
+<a class="term" href="glossary.html#gradio">Gradio</a> UI; the TypeScript port gives it one safe calculator tool so
+it runs with no browser.</p>
+
+<div class="code-tabs"><pre data-file="4_lab4 — worker + evaluator" data-lang="py" data-tag="complete file"><code>from typing import Annotated, TypedDict, List, Dict, Any, Optional
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langchain_community.agent_toolkits import PlayWrightBrowserToolkit
+from langchain_community.tools.playwright.utils import create_async_playwright_browser
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode
+from langgraph.graph.message import add_messages
+from pydantic import BaseModel, Field
+from IPython.display import Image, display
+import gradio as gr
+import uuid
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+# First define a structured output
+
+class EvaluatorOutput(BaseModel):
+    feedback: str = Field(description="Feedback on the assistant's response")
+    success_criteria_met: bool = Field(description="Whether the success criteria have been met")
+    user_input_needed: bool = Field(description="True if more input is needed from the user, or clarifications, or the assistant is stuck")
+
+
+# The state
+
+class State(TypedDict):
+    messages: Annotated[List[Any], add_messages]
+    success_criteria: str
+    feedback_on_work: Optional[str]
+    success_criteria_met: bool
+    user_input_needed: bool
+
+# Get our async Playwright tools
+# If you get a NotImplementedError here or later, see the Heads Up at the top of the 3_lab3 notebook
+
+
+import nest_asyncio
+nest_asyncio.apply()
+async_browser =  create_async_playwright_browser(headless=False)  # headful mode
+toolkit = PlayWrightBrowserToolkit.from_browser(async_browser=async_browser)
+tools = toolkit.get_tools()
+
+# Initialize the LLMs
+
+worker_llm = ChatOpenAI(model="gpt-4o-mini")
+worker_llm_with_tools = worker_llm.bind_tools(tools)
+
+evaluator_llm = ChatOpenAI(model="gpt-4o-mini")
+evaluator_llm_with_output = evaluator_llm.with_structured_output(EvaluatorOutput)
+
+# The worker node
+
+def worker(state: State) -&gt; Dict[str, Any]:
+    system_message = f"""You are a helpful assistant that can use tools to complete tasks.
+You keep working on a task until either you have a question or clarification for the user, or the success criteria is met.
+This is the success criteria:
+{state['success_criteria']}
+You should reply either with a question for the user about this assignment, or with your final response.
+If you have a question for the user, you need to reply by clearly stating your question. An example might be:
+
+Question: please clarify whether you want a summary or a detailed answer
+
+If you've finished, reply with the final answer, and don't ask a question; simply reply with the answer.
+"""
+    
+    if state.get("feedback_on_work"):
+        system_message += f"""
+Previously you thought you completed the assignment, but your reply was rejected because the success criteria was not met.
+Here is the feedback on why this was rejected:
+{state['feedback_on_work']}
+With this feedback, please continue the assignment, ensuring that you meet the success criteria or have a question for the user."""
+    
+    # Add in the system message
+
+    found_system_message = False
+    messages = state["messages"]
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            message.content = system_message
+            found_system_message = True
+    
+    if not found_system_message:
+        messages = [SystemMessage(content=system_message)] + messages
+    
+    # Invoke the LLM with tools
+    response = worker_llm_with_tools.invoke(messages)
+    
+    # Return updated state
+    return {
+        "messages": [response],
+    }
+
+def worker_router(state: State) -&gt; str:
+    last_message = state["messages"][-1]
+    
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return "tools"
+    else:
+        return "evaluator"
+
+def format_conversation(messages: List[Any]) -&gt; str:
+    conversation = "Conversation history:\n\n"
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            conversation += f"User: {message.content}\n"
+        elif isinstance(message, AIMessage):
+            text = message.content or "[Tools use]"
+            conversation += f"Assistant: {text}\n"
+    return conversation
+
+def evaluator(state: State) -&gt; State:
+    last_response = state["messages"][-1].content
+
+    system_message = """You are an evaluator that determines if a task has been completed successfully by an Assistant.
+Assess the Assistant's last response based on the given criteria. Respond with your feedback, and with your decision on whether the success criteria has been met,
+and whether more input is needed from the user."""
+    
+    user_message = f"""You are evaluating a conversation between the User and Assistant. You decide what action to take based on the last response from the Assistant.
+
+The entire conversation with the assistant, with the user's original request and all replies, is:
+{format_conversation(state['messages'])}
+
+The success criteria for this assignment is:
+{state['success_criteria']}
+
+And the final response from the Assistant that you are evaluating is:
+{last_response}
+
+Respond with your feedback, and decide if the success criteria is met by this response.
+Also, decide if more user input is required, either because the assistant has a question, needs clarification, or seems to be stuck and unable to answer without help.
+"""
+    if state["feedback_on_work"]:
+        user_message += f"Also, note that in a prior attempt from the Assistant, you provided this feedback: {state['feedback_on_work']}\n"
+        user_message += "If you're seeing the Assistant repeating the same mistakes, then consider responding that user input is required."
+    
+    evaluator_messages = [SystemMessage(content=system_message), HumanMessage(content=user_message)]
+
+    eval_result = evaluator_llm_with_output.invoke(evaluator_messages)
+    new_state = {
+        "messages": [{"role": "assistant", "content": f"Evaluator Feedback on this answer: {eval_result.feedback}"}],
+        "feedback_on_work": eval_result.feedback,
+        "success_criteria_met": eval_result.success_criteria_met,
+        "user_input_needed": eval_result.user_input_needed
+    }
+    return new_state
+
+def route_based_on_evaluation(state: State) -&gt; str:
+    if state["success_criteria_met"] or state["user_input_needed"]:
+        return "END"
+    else:
+        return "worker"
+
+# Set up Graph Builder with State
+graph_builder = StateGraph(State)
+
+# Add nodes
+graph_builder.add_node("worker", worker)
+graph_builder.add_node("tools", ToolNode(tools=tools))
+graph_builder.add_node("evaluator", evaluator)
+
+# Add edges
+graph_builder.add_conditional_edges("worker", worker_router, {"tools": "tools", "evaluator": "evaluator"})
+graph_builder.add_edge("tools", "worker")
+graph_builder.add_conditional_edges("evaluator", route_based_on_evaluation, {"worker": "worker", "END": END})
+graph_builder.add_edge(START, "worker")
+
+# Compile the graph
+memory = MemorySaver()
+graph = graph_builder.compile(checkpointer=memory)
+
+display(Image(graph.get_graph().draw_mermaid_png()))
+
+def make_thread_id() -&gt; str:
+    return str(uuid.uuid4())
+
+
+async def process_message(message, success_criteria, history, thread):
+
+    config = {"configurable": {"thread_id": thread}}
+
+    state = {
+        "messages": message,
+        "success_criteria": success_criteria,
+        "feedback_on_work": None,
+        "success_criteria_met": False,
+        "user_input_needed": False
+    }
+    result = await graph.ainvoke(state, config=config)
+    user = {"role": "user", "content": message}
+    reply = {"role": "assistant", "content": result["messages"][-2].content}
+    feedback = {"role": "assistant", "content": result["messages"][-1].content}
+    return history + [user, reply, feedback]
+
+async def reset():
+    return "", "", None, make_thread_id()
+
+
+
+
+with gr.Blocks(theme=gr.themes.Default(primary_hue="emerald")) as demo:
+    gr.Markdown("## Sidekick Personal Co-worker")
+    thread = gr.State(make_thread_id())
+    
+    with gr.Row():
+        chatbot = gr.Chatbot(label="Sidekick", height=300, type="messages")
+    with gr.Group():
+        with gr.Row():
+            message = gr.Textbox(show_label=False, placeholder="Your request to your sidekick")
+        with gr.Row():
+            success_criteria = gr.Textbox(show_label=False, placeholder="What are your success critiera?")
+    with gr.Row():
+        reset_button = gr.Button("Reset", variant="stop")
+        go_button = gr.Button("Go!", variant="primary")
+    message.submit(process_message, [message, success_criteria, chatbot, thread], [chatbot])
+    success_criteria.submit(process_message, [message, success_criteria, chatbot, thread], [chatbot])
+    go_button.click(process_message, [message, success_criteria, chatbot, thread], [chatbot])
+    reset_button.click(reset, [], [message, success_criteria, chatbot, thread])
+
+    
+demo.launch()</code></pre><pre data-file="day4.ts" data-lang="ts" data-tag="complete file"><code>// Week 4 - Day 4: the Sidekick's worker/evaluator loop (LangGraph.js port of 4_lab4.py).
+//
+// This is the heart of the Sidekick. Two LLM "roles" cooperate in a graph:
+//   * worker    - does the task, and may call tools. When it thinks it is done it
+//                 produces a plain answer (no tool call).
+//   * evaluator - judges that answer against the user's success criteria, using
+//                 STRUCTURED OUTPUT (a zod schema -&gt; a typed object), and decides
+//                 whether we are done or the worker should try again.
+//
+// The graph routes:
+//   worker --(tool call?)--&gt; tools --&gt; worker
+//   worker --(no tool)-----&gt; evaluator --(met OR needs user)--&gt; END
+//                                       --(not yet)-----------&gt; worker
+//
+// The course gives the worker Playwright browser tools; here it gets one safe local
+// calculator tool so the file runs with no browser.
+import {
+  StateGraph,
+  Annotation,
+  messagesStateReducer,
+  START,
+  END,
+  MemorySaver,
+} from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { tool } from "@langchain/core/tools";
+import {
+  AIMessage,
+  HumanMessage,
+  SystemMessage,
+  type BaseMessage,
+} from "@langchain/core/messages";
+import { z } from "zod";
+import { makeLlm } from "./model.js";
+
+// --- Structured output for the evaluator (same fields as the course) --------
+const EvaluatorOutput = z.object({
+  feedback: z.string().describe("Feedback on the assistant's response"),
+  success_criteria_met: z.boolean().describe("Whether the success criteria have been met"),
+  user_input_needed: z
+    .boolean()
+    .describe("True if more input is needed from the user, or the assistant is stuck"),
+});
+
+// --- Graph state: messages (appended) plus the Sidekick's extra fields ------
+const StateAnnotation = Annotation.Root({
+  messages: Annotation&lt;BaseMessage[]&gt;({ reducer: messagesStateReducer, default: () =&gt; [] }),
+  success_criteria: Annotation&lt;string&gt;,
+  feedback_on_work: Annotation&lt;string | null&gt;,
+  success_criteria_met: Annotation&lt;boolean&gt;,
+  user_input_needed: Annotation&lt;boolean&gt;,
+});
+type State = typeof StateAnnotation.State;
+
+// --- One safe local tool ----------------------------------------------------
+const calculator = tool(
+  async ({ expression }) =&gt; {
+    if (!/^[0-9+\-*/(). ]+$/.test(expression)) return "Error: invalid characters.";
+    try {
+      return String(Function(`"use strict"; return (${expression});`)());
+    } catch (err) {
+      return `Error: ${String(err)}`;
+    }
+  },
+  {
+    name: "calculator",
+    description: "Evaluate a basic arithmetic expression, e.g. '120 * 0.15'.",
+    schema: z.object({ expression: z.string() }),
+  },
+);
+const tools = [calculator];
+
+const workerLlmWithTools = makeLlm().bindTools(tools);
+const evaluatorLlm = makeLlm().withStructuredOutput(EvaluatorOutput);
+
+// The worker node.
+async function worker(state: State) {
+  let systemMessage = `You are a helpful assistant that can use tools to complete tasks.
+You keep working until either you have a question for the user, or the success criteria is met.
+This is the success criteria:
+${state.success_criteria}
+Reply either with a question for the user (start it with "Question:") or with your final answer.`;
+
+  if (state.feedback_on_work) {
+    systemMessage += `
+Previously your reply was rejected because the success criteria was not met. Feedback:
+${state.feedback_on_work}
+Continue the assignment, making sure you meet the success criteria or ask the user a question.`;
+  }
+
+  // Replace any existing system message, else prepend one.
+  const messages = [...state.messages];
+  const idx = messages.findIndex((m) =&gt; m instanceof SystemMessage);
+  if (idx &gt;= 0) messages[idx] = new SystemMessage(systemMessage);
+  else messages.unshift(new SystemMessage(systemMessage));
+
+  const response = await workerLlmWithTools.invoke(messages);
+  return { messages: [response] };
+}
+
+// Router after the worker: tool call -&gt; tools, otherwise -&gt; evaluator.
+function workerRouter(state: State): "tools" | "evaluator" {
+  const last = state.messages.at(-1) as AIMessage | undefined;
+  return last?.tool_calls &amp;&amp; last.tool_calls.length &gt; 0 ? "tools" : "evaluator";
+}
+
+function formatConversation(messages: BaseMessage[]): string {
+  let out = "Conversation history:\n\n";
+  for (const m of messages) {
+    if (m instanceof HumanMessage) out += `User: ${String(m.content)}\n`;
+    else if (m instanceof AIMessage) out += `Assistant: ${String(m.content) || "[Tool use]"}\n`;
+  }
+  return out;
+}
+
+// The evaluator node: judges the worker's last answer (structured output).
+async function evaluator(state: State) {
+  const lastResponse = String(state.messages.at(-1)?.content ?? "");
+  const systemMessage =
+    "You are an evaluator that decides if a task was completed successfully by an Assistant. " +
+    "Assess the last response against the criteria, give feedback, and decide whether the " +
+    "success criteria are met and whether more user input is needed.";
+  let userMessage = `You are evaluating a conversation between the User and Assistant.
+
+${formatConversation(state.messages)}
+
+The success criteria is:
+${state.success_criteria}
+
+The Assistant's final response you are evaluating is:
+${lastResponse}
+
+Decide if the success criteria are met, and if more user input is required (a question, a clarification, or the assistant is stuck).`;
+  if (state.feedback_on_work) {
+    userMessage += `\nPrior feedback you gave: ${state.feedback_on_work}\nIf the Assistant repeats mistakes, consider requiring user input.`;
+  }
+
+  const result = await evaluatorLlm.invoke([
+    new SystemMessage(systemMessage),
+    new HumanMessage(userMessage),
+  ]);
+  return {
+    messages: [new AIMessage(`Evaluator Feedback: ${result.feedback}`)],
+    feedback_on_work: result.feedback,
+    success_criteria_met: result.success_criteria_met,
+    user_input_needed: result.user_input_needed,
+  };
+}
+
+// Router after the evaluator: done -&gt; END, otherwise loop back to worker.
+function routeBasedOnEvaluation(state: State): "worker" | typeof END {
+  return state.success_criteria_met || state.user_input_needed ? END : "worker";
+}
+
+const graph = new StateGraph(StateAnnotation)
+  .addNode("worker", worker)
+  .addNode("tools", new ToolNode(tools))
+  .addNode("evaluator", evaluator)
+  .addEdge(START, "worker")
+  .addConditionalEdges("worker", workerRouter, { tools: "tools", evaluator: "evaluator" })
+  .addEdge("tools", "worker")
+  .addConditionalEdges("evaluator", routeBasedOnEvaluation, { worker: "worker", [END]: END })
+  .compile({ checkpointer: new MemorySaver() });
+
+async function main() {
+  console.log(await graph.getGraphAsync().then((g) =&gt; g.drawMermaid()));
+
+  const result = await graph.invoke(
+    {
+      messages: [
+        new HumanMessage(
+          "Use the calculator to work out a 15% tip on a $120 bill, then state the tip amount.",
+        ),
+      ],
+      success_criteria: "The reply states the tip amount in dollars for a 15% tip on $120.",
+      feedback_on_work: null,
+      success_criteria_met: false,
+      user_input_needed: false,
+    },
+    { configurable: { thread_id: "day4-demo" } },
+  );
+
+  console.log("Worker answer :", result.messages.at(-2)?.content);
+  console.log("Evaluator      :", result.messages.at(-1)?.content);
+  console.log("Criteria met   :", result.success_criteria_met);
+}
+
+main().catch((err) =&gt; {
+  console.error(err);
+  process.exitCode = 1;
+});</code></pre></div>
+
+<div data-only="py">
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–16</td><td><code>from langchain_core.messages import AIMessage, HumanMessage, SystemMessage<br>…<br>from pydantic import BaseModel, Field<br>…<br>load_dotenv(override=True)</code></td><td>Imports and key loading. New names: the message classes we build by hand, <code>Field</code> for describing schema fields, <code>uuid</code> for unique thread ids, and the Playwright toolkit.</td></tr>
+<tr><td>20–23</td><td><code>class EvaluatorOutput(BaseModel):<br>  feedback: str = Field(description="…")<br>  success_criteria_met: bool = Field(…)<br>  user_input_needed: bool = Field(…)</code></td><td>The structured-output schema. The <code>description</code> on each field is shown to the model so it fills them correctly.</td></tr>
+<tr><td>28–33</td><td><code>class State(TypedDict):<br>  messages: Annotated[List[Any], add_messages]<br>  success_criteria: str<br>  feedback_on_work: Optional[str]<br>  success_criteria_met: bool<br>  user_input_needed: bool</code></td><td>The five-field state. Only <code>messages</code> has the reducer; the rest overwrite on each return.</td></tr>
+<tr><td>39–43</td><td><code>nest_asyncio.apply()<br>async_browser = create_async_playwright_browser(headless=False)<br>toolkit = PlayWrightBrowserToolkit.from_browser(…)<br>tools = toolkit.get_tools()</code></td><td>The same Playwright setup as day 3: patch the event loop, launch Chromium, build the browser tools.</td></tr>
+<tr><td>47–51</td><td><code>worker_llm_with_tools = worker_llm.bind_tools(tools)<br>evaluator_llm_with_output = evaluator_llm.with_structured_output(EvaluatorOutput)</code></td><td>Two models. The worker gets the tools via <code>bind_tools</code>; the evaluator gets the schema via <code>with_structured_output</code>. Different jobs, different wrappers.</td></tr>
+<tr><td>55–93</td><td><code>def worker(state):<br>  system_message = f"""You are a helpful assistant … success criteria: {state['success_criteria']} …"""<br>  if state.get("feedback_on_work"): system_message += …<br>  …<br>  response = worker_llm_with_tools.invoke(messages)<br>  return {"messages": [response]}</code></td><td>The worker node. It builds a long system prompt that includes the success criteria and, if there is feedback from a prior rejection, appends it so the worker can improve. The middle block finds any existing system message and replaces it, else prepends a new one. Then it invokes the tool-aware model and returns the reply.</td></tr>
+<tr><td>95–101</td><td><code>def worker_router(state):<br>  last_message = state["messages"][-1]<br>  if hasattr(last_message, "tool_calls") and last_message.tool_calls:<br>    return "tools"<br>  else: return "evaluator"</code></td><td>The first router. If the worker's last message contains tool calls, go to the tools node; otherwise the answer is ready, so go to the evaluator.</td></tr>
+<tr><td>103–111</td><td><code>def format_conversation(messages):<br>  …<br>  conversation += f"User: {message.content}" / f"Assistant: {text}"</code></td><td>A helper that turns the message objects into a plain "User: … Assistant: …" transcript, so the evaluator reads the whole exchange easily. Tool-only turns show as <code>[Tools use]</code>.</td></tr>
+<tr><td>113–147</td><td><code>def evaluator(state):<br>  last_response = state["messages"][-1].content<br>  …<br>  eval_result = evaluator_llm_with_output.invoke(evaluator_messages)<br>  return {"messages": […], "feedback_on_work": eval_result.feedback, "success_criteria_met": …, "user_input_needed": …}</code></td><td>The evaluator node. It builds system and user prompts describing the task, the success criteria and the answer to judge, invokes the structured-output model, and writes the verdict back into the state fields. The <code>if state["feedback_on_work"]</code> block adds a note so a repeating mistake makes it ask for the user.</td></tr>
+<tr><td>149–153</td><td><code>def route_based_on_evaluation(state):<br>  if state["success_criteria_met"] or state["user_input_needed"]:<br>    return "END"<br>  else: return "worker"</code></td><td>The second router. Done (criteria met) or stuck (needs the user) both end the run; otherwise loop back to the worker to try again.</td></tr>
+<tr><td>156–167</td><td><code>graph_builder.add_node("worker", worker)<br>graph_builder.add_node("tools", ToolNode(tools=tools))<br>graph_builder.add_node("evaluator", evaluator)<br>graph_builder.add_conditional_edges("worker", worker_router, {"tools": "tools", "evaluator": "evaluator"})<br>graph_builder.add_edge("tools", "worker")<br>graph_builder.add_conditional_edges("evaluator", route_based_on_evaluation, {"worker": "worker", "END": END})<br>graph_builder.add_edge(START, "worker")</code></td><td>The whole graph. Three nodes, then the two conditional edges (each mapping a router's return value to a node) plus the plain tools&#8594;worker and START&#8594;worker edges. This is the picture from the top of the page.</td></tr>
+<tr><td>170–173</td><td><code>memory = MemorySaver()<br>graph = graph_builder.compile(checkpointer=memory)</code></td><td>Compile with a checkpointer so the loop's state persists across supersteps.</td></tr>
+<tr><td>175–194</td><td><code>def make_thread_id(): return str(uuid.uuid4())<br>async def process_message(message, success_criteria, history, thread):<br>  config = {"configurable": {"thread_id": thread}}<br>  state = {"messages": message, "success_criteria": success_criteria, "feedback_on_work": None, …}<br>  result = await graph.ainvoke(state, config=config)<br>  …</code></td><td>Each Gradio session gets a random <code>thread_id</code> so conversations stay separate. <code>process_message</code> builds the initial state (criteria set, verdicts false), runs the graph, and packs the user message, the worker's answer, and the evaluator's feedback into the chat history.</td></tr>
+<tr><td>196–222</td><td><code>with gr.Blocks(…) as demo:<br>  …<br>  go_button.click(process_message, […], [chatbot])<br>demo.launch()</code></td><td>The Gradio UI: a chat area, a message box, a success-criteria box, and Go/Reset buttons wired to the callbacks. This is the first look at the Sidekick interface.</td></tr>
+</table></div>
+</div>
+
+<div data-only="ts">
+<h3>Line by line</h3>
+<p>The TypeScript port mirrors the loop exactly, using a <code>zod</code> schema for the structured output and one
+safe calculator tool. It runs a single demo request from the command line.</p>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–34</td><td><code>// Week 4 - Day 4 …<br>import { StateGraph, Annotation, messagesStateReducer, START, END, MemorySaver } from "@langchain/langgraph";<br>…<br>import { z } from "zod";</code></td><td>The comment draws the routing in ASCII; the imports bring in <code>Annotation</code> and <code>messagesStateReducer</code> (to build a custom multi-field state), the message classes, and <code>zod</code>.</td></tr>
+<tr><td>36–43</td><td><code>const EvaluatorOutput = z.object({ feedback: z.string()…, success_criteria_met: z.boolean()…, user_input_needed: z.boolean()… });</code></td><td>The structured-output schema as a zod object — the same three fields as the Python <code>EvaluatorOutput</code>.</td></tr>
+<tr><td>45–53</td><td><code>const StateAnnotation = Annotation.Root({<br>  messages: Annotation&lt;BaseMessage[]&gt;({ reducer: messagesStateReducer, default: () =&gt; [] }),<br>  success_criteria: Annotation&lt;string&gt;, …<br>});</code></td><td>The five-field state. Only <code>messages</code> gets a reducer (append); the rest are plain channels that overwrite. This is the TypeScript way to build the richer state Python wrote as a <code>TypedDict</code>.</td></tr>
+<tr><td>55–71</td><td><code>const calculator = tool(async ({ expression }) =&gt; {…}, { name: "calculator", … });<br>const tools = [calculator];</code></td><td>One safe calculator tool stands in for the course's Playwright tools, so the file runs with no browser.</td></tr>
+<tr><td>73–74</td><td><code>const workerLlmWithTools = makeLlm().bindTools(tools);<br>const evaluatorLlm = makeLlm().withStructuredOutput(EvaluatorOutput);</code></td><td>The two models: worker with tools, evaluator with the schema — the TypeScript spellings of <code>bind_tools</code> and <code>with_structured_output</code>.</td></tr>
+<tr><td>77–99</td><td><code>async function worker(state) {<br>  let systemMessage = `You are a helpful assistant … ${state.success_criteria} …`;<br>  if (state.feedback_on_work) { systemMessage += … }<br>  …<br>  return { messages: [await workerLlmWithTools.invoke(messages)] };<br>}</code></td><td>The worker node, same logic as Python: build the system prompt with the criteria, add any prior feedback, replace or prepend the system message, then invoke the tool-aware model.</td></tr>
+<tr><td>101–105</td><td><code>function workerRouter(state): "tools" | "evaluator" {<br>  const last = state.messages.at(-1) as AIMessage | undefined;<br>  return last?.tool_calls &amp;&amp; last.tool_calls.length &gt; 0 ? "tools" : "evaluator";<br>}</code></td><td>The first router. A tool call routes to tools; otherwise to the evaluator. The return type is spelled out so TypeScript checks the node names.</td></tr>
+<tr><td>107–114</td><td><code>function formatConversation(messages) { … }</code></td><td>The same transcript helper as Python, turning messages into "User: … Assistant: …" text for the evaluator.</td></tr>
+<tr><td>116–148</td><td><code>async function evaluator(state) {<br>  …<br>  const result = await evaluatorLlm.invoke([new SystemMessage(…), new HumanMessage(userMessage)]);<br>  return { messages: [new AIMessage(`Evaluator Feedback: ${result.feedback}`)], feedback_on_work: result.feedback, success_criteria_met: …, user_input_needed: … };<br>}</code></td><td>The evaluator node. It builds the prompts, invokes the structured-output model, and writes the verdict into the state fields — identical in shape to Python.</td></tr>
+<tr><td>150–163</td><td><code>function routeBasedOnEvaluation(state): "worker" | typeof END {<br>  return state.success_criteria_met || state.user_input_needed ? END : "worker";<br>}<br>const graph = new StateGraph(StateAnnotation).addNode("worker", worker)….compile({ checkpointer: new MemorySaver() });</code></td><td>The second router and the graph wiring: three nodes, two conditional edges, the tools&#8594;worker and START&#8594;worker edges, compiled with a checkpointer.</td></tr>
+<tr><td>165–191</td><td><code>const result = await graph.invoke({ messages: [new HumanMessage("Use the calculator to work out a 15% tip …")], success_criteria: "…", … }, { configurable: { thread_id: "day4-demo" } });<br>console.log("Worker answer :", result.messages.at(-2)?.content);<br>console.log("Evaluator :", result.messages.at(-1)?.content);</code></td><td>A single demo: ask for a 15% tip, with a clear success criterion, on a fixed thread. It prints the worker's answer (second-to-last message) and the evaluator's verdict (last message).</td></tr>
+</table></div>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="After the evaluator, the run ends if the criteria are met or the user is needed, otherwise it loops back to the worker">
+  <text x="380" y="24" class="title" text-anchor="middle">route_based_on_evaluation</text>
+  <rect x="300" y="42" width="160" height="44" rx="8" class="box-info"/>
+  <text x="380" y="62" text-anchor="middle" class="small">evaluator verdict</text>
+  <text x="380" y="78" text-anchor="middle" class="small">met? needs user?</text>
+  <path class="arrow-ok" d="M 340,86 L 200,118"/>
+  <text x="235" y="108" text-anchor="middle" class="small">either true</text>
+  <path class="arrow-bad" d="M 420,86 L 560,118"/>
+  <text x="525" y="108" text-anchor="middle" class="small">both false</text>
+  <rect x="100" y="120" width="200" height="34" rx="8" class="box-ok"/>
+  <text x="200" y="142" text-anchor="middle" class="small">END &#8594; hand back to user</text>
+  <rect x="460" y="120" width="200" height="34" rx="8" class="box2"/>
+  <text x="560" y="142" text-anchor="middle" class="small">back to worker with feedback</text>
+</svg>
+<figcaption>Both "extremes" end the run. <strong>Done or stuck both need the human; anything in between means try
+again.</strong></figcaption>
+</figure>
+
+<h2>The real app: the <code>Sidekick</code> class</h2>
+<p>The app moves the exact same graph into a class so the plumbing is reusable. The important change is
+<em>per-session isolation</em>: each <code>Sidekick</code> instance has its own unique id, which doubles as its
+<a class="term" href="glossary.html#thread-id">thread_id</a>, so different users never share memory. Because
+building the browser tools is async, the real work happens in an <code>async setup()</code> method rather than the
+constructor.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="A Sidekick instance holds its own id, tools, graph and memory, built in setup">
+  <text x="380" y="24" class="title" text-anchor="middle">One Sidekick per session</text>
+  <rect x="220" y="44" width="320" height="110" rx="8" class="zone"/>
+  <text x="380" y="66" text-anchor="middle" class="label">Sidekick instance</text>
+  <rect x="245" y="80" width="130" height="28" rx="8" class="box-info"/><text x="310" y="98" text-anchor="middle" class="small">id = thread_id</text>
+  <rect x="385" y="80" width="130" height="28" rx="8" class="box"/><text x="450" y="98" text-anchor="middle" class="small">own tools</text>
+  <rect x="245" y="116" width="130" height="28" rx="8" class="box2"/><text x="310" y="134" text-anchor="middle" class="small">own graph</text>
+  <rect x="385" y="116" width="130" height="28" rx="8" class="box-ok"/><text x="450" y="134" text-anchor="middle" class="small">own memory</text>
+</svg>
+<figcaption>Build it all in <code>setup()</code>. <strong>Because each session has its own id and memory, many people
+can use the Sidekick at once without mixing conversations.</strong></figcaption>
+</figure>
+
+<div class="code-tabs"><pre data-file="sidekick.py" data-lang="py" data-tag="complete file"><code>from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from dotenv import load_dotenv
+from langgraph.prebuilt import ToolNode
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from typing import List, Any, Optional, Dict
+from pydantic import BaseModel, Field
+from sidekick_tools import playwright_tools, other_tools
+import uuid
+import asyncio
+from datetime import datetime
+
+load_dotenv(override=True)
+
+
+class State(TypedDict):
+    messages: Annotated[List[Any], add_messages]
+    success_criteria: str
+    feedback_on_work: Optional[str]
+    success_criteria_met: bool
+    user_input_needed: bool
+
+
+class EvaluatorOutput(BaseModel):
+    feedback: str = Field(description="Feedback on the assistant's response")
+    success_criteria_met: bool = Field(description="Whether the success criteria have been met")
+    user_input_needed: bool = Field(
+        description="True if more input is needed from the user, or clarifications, or the assistant is stuck"
+    )
+
+
+class Sidekick:
+    def __init__(self):
+        self.worker_llm_with_tools = None
+        self.evaluator_llm_with_output = None
+        self.tools = None
+        self.llm_with_tools = None
+        self.graph = None
+        self.sidekick_id = str(uuid.uuid4())
+        self.memory = MemorySaver()
+        self.browser = None
+        self.playwright = None
+
+    async def setup(self):
+        self.tools, self.browser, self.playwright = await playwright_tools()
+        self.tools += await other_tools()
+        worker_llm = ChatOpenAI(model="gpt-4o-mini")
+        self.worker_llm_with_tools = worker_llm.bind_tools(self.tools)
+        evaluator_llm = ChatOpenAI(model="gpt-4o-mini")
+        self.evaluator_llm_with_output = evaluator_llm.with_structured_output(EvaluatorOutput)
+        await self.build_graph()
+
+    def worker(self, state: State) -&gt; Dict[str, Any]:
+        system_message = f"""You are a helpful assistant that can use tools to complete tasks.
+    You keep working on a task until either you have a question or clarification for the user, or the success criteria is met.
+    You have many tools to help you, including tools to browse the internet, navigating and retrieving web pages.
+    You have a tool to run python code, but note that you would need to include a print() statement if you wanted to receive output.
+    The current date and time is {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    This is the success criteria:
+    {state["success_criteria"]}
+    You should reply either with a question for the user about this assignment, or with your final response.
+    If you have a question for the user, you need to reply by clearly stating your question. An example might be:
+
+    Question: please clarify whether you want a summary or a detailed answer
+
+    If you've finished, reply with the final answer, and don't ask a question; simply reply with the answer.
+    """
+
+        if state.get("feedback_on_work"):
+            system_message += f"""
+    Previously you thought you completed the assignment, but your reply was rejected because the success criteria was not met.
+    Here is the feedback on why this was rejected:
+    {state["feedback_on_work"]}
+    With this feedback, please continue the assignment, ensuring that you meet the success criteria or have a question for the user."""
+
+        # Add in the system message
+
+        found_system_message = False
+        messages = state["messages"]
+        for message in messages:
+            if isinstance(message, SystemMessage):
+                message.content = system_message
+                found_system_message = True
+
+        if not found_system_message:
+            messages = [SystemMessage(content=system_message)] + messages
+
+        # Invoke the LLM with tools
+        response = self.worker_llm_with_tools.invoke(messages)
+
+        # Return updated state
+        return {
+            "messages": [response],
+        }
+
+    def worker_router(self, state: State) -&gt; str:
+        last_message = state["messages"][-1]
+
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            return "tools"
+        else:
+            return "evaluator"
+
+    def format_conversation(self, messages: List[Any]) -&gt; str:
+        conversation = "Conversation history:\n\n"
+        for message in messages:
+            if isinstance(message, HumanMessage):
+                conversation += f"User: {message.content}\n"
+            elif isinstance(message, AIMessage):
+                text = message.content or "[Tools use]"
+                conversation += f"Assistant: {text}\n"
+        return conversation
+
+    def evaluator(self, state: State) -&gt; State:
+        last_response = state["messages"][-1].content
+
+        system_message = """You are an evaluator that determines if a task has been completed successfully by an Assistant.
+    Assess the Assistant's last response based on the given criteria. Respond with your feedback, and with your decision on whether the success criteria has been met,
+    and whether more input is needed from the user."""
+
+        user_message = f"""You are evaluating a conversation between the User and Assistant. You decide what action to take based on the last response from the Assistant.
+
+    The entire conversation with the assistant, with the user's original request and all replies, is:
+    {self.format_conversation(state["messages"])}
+
+    The success criteria for this assignment is:
+    {state["success_criteria"]}
+
+    And the final response from the Assistant that you are evaluating is:
+    {last_response}
+
+    Respond with your feedback, and decide if the success criteria is met by this response.
+    Also, decide if more user input is required, either because the assistant has a question, needs clarification, or seems to be stuck and unable to answer without help.
+
+    The Assistant has access to a tool to write files. If the Assistant says they have written a file, then you can assume they have done so.
+    Overall you should give the Assistant the benefit of the doubt if they say they've done something. But you should reject if you feel that more work should go into this.
+
+    """
+        if state["feedback_on_work"]:
+            user_message += f"Also, note that in a prior attempt from the Assistant, you provided this feedback: {state['feedback_on_work']}\n"
+            user_message += "If you're seeing the Assistant repeating the same mistakes, then consider responding that user input is required."
+
+        evaluator_messages = [
+            SystemMessage(content=system_message),
+            HumanMessage(content=user_message),
+        ]
+
+        eval_result = self.evaluator_llm_with_output.invoke(evaluator_messages)
+        new_state = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": f"Evaluator Feedback on this answer: {eval_result.feedback}",
+                }
+            ],
+            "feedback_on_work": eval_result.feedback,
+            "success_criteria_met": eval_result.success_criteria_met,
+            "user_input_needed": eval_result.user_input_needed,
+        }
+        return new_state
+
+    def route_based_on_evaluation(self, state: State) -&gt; str:
+        if state["success_criteria_met"] or state["user_input_needed"]:
+            return "END"
+        else:
+            return "worker"
+
+    async def build_graph(self):
+        # Set up Graph Builder with State
+        graph_builder = StateGraph(State)
+
+        # Add nodes
+        graph_builder.add_node("worker", self.worker)
+        graph_builder.add_node("tools", ToolNode(tools=self.tools))
+        graph_builder.add_node("evaluator", self.evaluator)
+
+        # Add edges
+        graph_builder.add_conditional_edges(
+            "worker", self.worker_router, {"tools": "tools", "evaluator": "evaluator"}
+        )
+        graph_builder.add_edge("tools", "worker")
+        graph_builder.add_conditional_edges(
+            "evaluator", self.route_based_on_evaluation, {"worker": "worker", "END": END}
+        )
+        graph_builder.add_edge(START, "worker")
+
+        # Compile the graph
+        self.graph = graph_builder.compile(checkpointer=self.memory)
+
+    async def run_superstep(self, message, success_criteria, history):
+        config = {"configurable": {"thread_id": self.sidekick_id}}
+
+        state = {
+            "messages": message,
+            "success_criteria": success_criteria or "The answer should be clear and accurate",
+            "feedback_on_work": None,
+            "success_criteria_met": False,
+            "user_input_needed": False,
+        }
+        result = await self.graph.ainvoke(state, config=config)
+        user = {"role": "user", "content": message}
+        reply = {"role": "assistant", "content": result["messages"][-2].content}
+        feedback = {"role": "assistant", "content": result["messages"][-1].content}
+        return history + [user, reply, feedback]
+
+    def cleanup(self):
+        if self.browser:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.browser.close())
+                if self.playwright:
+                    loop.create_task(self.playwright.stop())
+            except RuntimeError:
+                # If no loop is running, do a direct run
+                asyncio.run(self.browser.close())
+                if self.playwright:
+                    asyncio.run(self.playwright.stop())</code></pre><pre data-file="sidekick.ts" data-lang="ts" data-tag="complete file"><code>// Week 4 - the Sidekick graph builder (LangGraph.js port of sidekick.py).
+//
+// Same worker/evaluator graph as day 4, packaged as a class so each user session gets
+// its own graph, its own tools, and its own thread id (its own memory). The worker uses
+// the full tool set from sidekick-tools.ts; the evaluator uses structured output.
+//
+//   START -&gt; worker -&gt; (tool call?) -&gt; tools -&gt; worker
+//                    -&gt; (no tool)   -&gt; evaluator -&gt; (done | needs user) -&gt; END
+//                                                -&gt; (not yet)            -&gt; worker
+import {
+  StateGraph,
+  Annotation,
+  messagesStateReducer,
+  START,
+  END,
+  MemorySaver,
+} from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+import {
+  AIMessage,
+  HumanMessage,
+  SystemMessage,
+  type BaseMessage,
+} from "@langchain/core/messages";
+import type { StructuredToolInterface } from "@langchain/core/tools";
+import { z } from "zod";
+import { randomUUID } from "node:crypto";
+import { makeLlm } from "./model.js";
+import { sidekickTools } from "./sidekick-tools.js";
+
+// Structured output the evaluator must produce (same fields as the course).
+const EvaluatorOutput = z.object({
+  feedback: z.string().describe("Feedback on the assistant's response"),
+  success_criteria_met: z.boolean().describe("Whether the success criteria have been met"),
+  user_input_needed: z
+    .boolean()
+    .describe("True if more input is needed from the user, or the assistant is stuck"),
+});
+
+// The graph state: the conversation plus the Sidekick's bookkeeping fields.
+const StateAnnotation = Annotation.Root({
+  messages: Annotation&lt;BaseMessage[]&gt;({ reducer: messagesStateReducer, default: () =&gt; [] }),
+  success_criteria: Annotation&lt;string&gt;,
+  feedback_on_work: Annotation&lt;string | null&gt;,
+  success_criteria_met: Annotation&lt;boolean&gt;,
+  user_input_needed: Annotation&lt;boolean&gt;,
+});
+type State = typeof StateAnnotation.State;
+
+/** The result of one "superstep": the worker's answer and the evaluator's verdict. */
+export interface SidekickResult {
+  answer: string;
+  feedback: string;
+  success_criteria_met: boolean;
+  user_input_needed: boolean;
+}
+
+export class Sidekick {
+  readonly id = randomUUID(); // doubles as the conversation thread id
+  private tools: StructuredToolInterface[] = [];
+  private graph!: ReturnType&lt;Sidekick["buildGraph"]&gt;;
+  private readonly memory = new MemorySaver();
+
+  /** Build the tools and compile the graph. Call once before run(). */
+  async setup(): Promise&lt;void&gt; {
+    this.tools = await sidekickTools();
+    this.graph = this.buildGraph();
+  }
+
+  private worker = async (state: State) =&gt; {
+    const llm = makeLlm().bindTools(this.tools);
+    let systemMessage = `You are a helpful assistant that can use tools to complete tasks.
+You keep working until either you have a question for the user, or the success criteria is met.
+You have tools: a calculator, web search, file read/write/list, a JavaScript runner and a push notification.
+The current date and time is ${new Date().toISOString()}
+
+This is the success criteria:
+${state.success_criteria}
+Reply either with a question for the user (start it with "Question:") or with your final answer.`;
+
+    if (state.feedback_on_work) {
+      systemMessage += `
+Previously your reply was rejected because the success criteria was not met. Feedback:
+${state.feedback_on_work}
+Continue, making sure you meet the success criteria or ask the user a question.`;
+    }
+
+    const messages = [...state.messages];
+    const idx = messages.findIndex((m) =&gt; m instanceof SystemMessage);
+    if (idx &gt;= 0) messages[idx] = new SystemMessage(systemMessage);
+    else messages.unshift(new SystemMessage(systemMessage));
+
+    return { messages: [await llm.invoke(messages)] };
+  };
+
+  private workerRouter = (state: State): "tools" | "evaluator" =&gt; {
+    const last = state.messages.at(-1) as AIMessage | undefined;
+    return last?.tool_calls &amp;&amp; last.tool_calls.length &gt; 0 ? "tools" : "evaluator";
+  };
+
+  private formatConversation(messages: BaseMessage[]): string {
+    let out = "Conversation history:\n\n";
+    for (const m of messages) {
+      if (m instanceof HumanMessage) out += `User: ${String(m.content)}\n`;
+      else if (m instanceof AIMessage) out += `Assistant: ${String(m.content) || "[Tool use]"}\n`;
+    }
+    return out;
+  }
+
+  private evaluator = async (state: State) =&gt; {
+    const lastResponse = String(state.messages.at(-1)?.content ?? "");
+    const systemMessage =
+      "You are an evaluator that decides if a task was completed successfully by an Assistant. " +
+      "Assess the last response against the criteria, give feedback, and decide whether the " +
+      "success criteria are met and whether more user input is needed.";
+    let userMessage = `You are evaluating a conversation between the User and Assistant.
+
+${this.formatConversation(state.messages)}
+
+The success criteria is:
+${state.success_criteria}
+
+The Assistant's final response you are evaluating is:
+${lastResponse}
+
+Decide if the success criteria are met, and if more user input is required.
+If the Assistant says it wrote a file, you may assume it did.`;
+    if (state.feedback_on_work) {
+      userMessage += `\nPrior feedback you gave: ${state.feedback_on_work}\nIf the Assistant repeats mistakes, consider requiring user input.`;
+    }
+
+    const llm = makeLlm().withStructuredOutput(EvaluatorOutput);
+    const result = await llm.invoke([
+      new SystemMessage(systemMessage),
+      new HumanMessage(userMessage),
+    ]);
+    return {
+      messages: [new AIMessage(`Evaluator Feedback: ${result.feedback}`)],
+      feedback_on_work: result.feedback,
+      success_criteria_met: result.success_criteria_met,
+      user_input_needed: result.user_input_needed,
+    };
+  };
+
+  private routeBasedOnEvaluation = (state: State): "worker" | typeof END =&gt;
+    state.success_criteria_met || state.user_input_needed ? END : "worker";
+
+  private buildGraph() {
+    return new StateGraph(StateAnnotation)
+      .addNode("worker", this.worker)
+      .addNode("tools", new ToolNode(this.tools))
+      .addNode("evaluator", this.evaluator)
+      .addEdge(START, "worker")
+      .addConditionalEdges("worker", this.workerRouter, { tools: "tools", evaluator: "evaluator" })
+      .addEdge("tools", "worker")
+      .addConditionalEdges("evaluator", this.routeBasedOnEvaluation, {
+        worker: "worker",
+        [END]: END,
+      })
+      .compile({ checkpointer: this.memory });
+  }
+
+  /** Run one request through the graph. Reuses this session's thread id for memory. */
+  async run(message: string, successCriteria: string): Promise&lt;SidekickResult&gt; {
+    const result = await this.graph.invoke(
+      {
+        messages: [new HumanMessage(message)],
+        success_criteria: successCriteria || "The answer should be clear and accurate",
+        feedback_on_work: null,
+        success_criteria_met: false,
+        user_input_needed: false,
+      },
+      { configurable: { thread_id: this.id } },
+    );
+    return {
+      answer: String(result.messages.at(-2)?.content ?? ""),
+      feedback: String(result.messages.at(-1)?.content ?? ""),
+      success_criteria_met: Boolean(result.success_criteria_met),
+      user_input_needed: Boolean(result.user_input_needed),
+    };
+  }
+
+  /** The graph's structure as Mermaid text (handy for the UI / docs). */
+  async mermaid(): Promise&lt;string&gt; {
+    const g = await this.graph.getGraphAsync();
+    return g.drawMermaid();
+  }
+}</code></pre></div>
+
+<div data-only="py">
+<h3>Line by line</h3>
+<p>The nodes (<code>worker</code>, <code>worker_router</code>, <code>evaluator</code>,
+<code>route_based_on_evaluation</code>) are the same code as lab 4, now methods on the class, so the table
+highlights what the class adds around them.</p>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–17</td><td><code>from sidekick_tools import playwright_tools, other_tools<br>import uuid<br>…<br>load_dotenv(override=True)</code></td><td>Imports. The tools now live in a separate module (day 5); <code>uuid</code> gives each session its id; <code>datetime</code> lets the worker prompt include the current date and time.</td></tr>
+<tr><td>20–33</td><td><code>class State(TypedDict): …<br>class EvaluatorOutput(BaseModel): …</code></td><td>The same five-field state and three-field evaluator schema as lab 4.</td></tr>
+<tr><td>36–46</td><td><code>class Sidekick:<br>  def __init__(self):<br>    self.sidekick_id = str(uuid.uuid4())<br>    self.memory = MemorySaver()<br>    …</code></td><td>The constructor only sets up bookkeeping: a unique <code>sidekick_id</code> (the thread id), an empty memory, and placeholders. It is deliberately not async; the heavy work waits for <code>setup</code>.</td></tr>
+<tr><td>48–55</td><td><code>async def setup(self):<br>  self.tools, self.browser, self.playwright = await playwright_tools()<br>  self.tools += await other_tools()<br>  self.worker_llm_with_tools = ….bind_tools(self.tools)<br>  self.evaluator_llm_with_output = ….with_structured_output(EvaluatorOutput)<br>  await self.build_graph()</code></td><td>The async setup. It starts the browser and gathers all the tools, binds them to the worker model and the schema to the evaluator model, then builds the graph. Everything expensive happens here, once, per session.</td></tr>
+<tr><td>57–99</td><td><code>def worker(self, state): …</code></td><td>The worker node as a method. The system prompt is richer than lab 4 — it mentions the browser, the Python tool (with a reminder to <code>print()</code>), and the current date and time — all lessons from the instructor's experiments.</td></tr>
+<tr><td>101–171</td><td><code>def worker_router(self, state): …<br>def format_conversation(self, messages): …<br>def evaluator(self, state): …<br>def route_based_on_evaluation(self, state): …</code></td><td>The same two routers, the transcript helper, and the evaluator — unchanged in logic from lab 4. The evaluator prompt adds "if the assistant says it wrote a file, assume it did", a tweak the instructor found necessary.</td></tr>
+<tr><td>173–193</td><td><code>async def build_graph(self):<br>  graph_builder = StateGraph(State)<br>  graph_builder.add_node("worker", self.worker)<br>  …<br>  self.graph = graph_builder.compile(checkpointer=self.memory)</code></td><td>The same five-step build as lab 4, but using the instance's methods and its own <code>self.memory</code>. The compiled graph is stored on the instance.</td></tr>
+<tr><td>195–209</td><td><code>async def run_superstep(self, message, success_criteria, history):<br>  config = {"configurable": {"thread_id": self.sidekick_id}}<br>  state = {…}<br>  result = await self.graph.ainvoke(state, config=config)<br>  …</code></td><td>Runs one superstep using this session's own thread id, so memory is private to the session. It returns the user message, the worker's answer and the evaluator's feedback for the UI.</td></tr>
+<tr><td>211–223</td><td><code>def cleanup(self):<br>  if self.browser: … loop.create_task(self.browser.close()) …</code></td><td>Closes the browser and Playwright when the session ends, so headless Chromium windows do not pile up. The instructor notes this cleanup is a work in progress.</td></tr>
+</table></div>
+</div>
+
+<div data-only="ts">
+<h3>Line by line</h3>
+<p>The TypeScript <code>Sidekick</code> class is the same structure: a per-session id used as the thread id, an
+async <code>setup</code>, the worker/evaluator methods, and a <code>run</code> that invokes the graph.</p>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–29</td><td><code>// Week 4 - the Sidekick graph builder …<br>import { randomUUID } from "node:crypto";<br>import { sidekickTools } from "./sidekick-tools.js";</code></td><td>The comment restates the graph; the imports pull in <code>randomUUID</code> for the session id and the tools module (day 5).</td></tr>
+<tr><td>31–48</td><td><code>const EvaluatorOutput = z.object({ … });<br>const StateAnnotation = Annotation.Root({ … });</code></td><td>The same evaluator schema and five-field state as day 4.</td></tr>
+<tr><td>50–56</td><td><code>export interface SidekickResult { answer: string; feedback: string; success_criteria_met: boolean; user_input_needed: boolean; }</code></td><td>A typed shape for one run's result, so callers (the API, the CLI) get clear fields back.</td></tr>
+<tr><td>58–68</td><td><code>export class Sidekick {<br>  readonly id = randomUUID();<br>  private readonly memory = new MemorySaver();<br>  async setup() { this.tools = await sidekickTools(); this.graph = this.buildGraph(); }<br>}</code></td><td>The class. <code>id</code> is the per-session thread id; <code>memory</code> is this session's checkpointer. <code>setup</code> builds the tools and compiles the graph — the async work the constructor avoids.</td></tr>
+<tr><td>70–108</td><td><code>private worker = async (state) =&gt; { … };<br>private workerRouter = (state) =&gt; …;<br>private formatConversation(messages) { … }</code></td><td>The worker (building a tool-aware model each call, with a system prompt listing its tools and the current time), the first router, and the transcript helper — same logic as day 4.</td></tr>
+<tr><td>110–146</td><td><code>private evaluator = async (state) =&gt; { … const llm = makeLlm().withStructuredOutput(EvaluatorOutput); … };<br>private routeBasedOnEvaluation = (state) =&gt; state.success_criteria_met || state.user_input_needed ? END : "worker";</code></td><td>The evaluator with structured output and the second router, matching Python.</td></tr>
+<tr><td>148–161</td><td><code>private buildGraph() {<br>  return new StateGraph(StateAnnotation).addNode("worker", this.worker)….compile({ checkpointer: this.memory });<br>}</code></td><td>The five-step build using the instance's methods and its own memory, returning the compiled graph.</td></tr>
+<tr><td>163–188</td><td><code>async run(message, successCriteria): Promise&lt;SidekickResult&gt; {<br>  const result = await this.graph.invoke({ … }, { configurable: { thread_id: this.id } });<br>  return { answer: …, feedback: …, success_criteria_met: …, user_input_needed: … };<br>}<br>async mermaid() { … }</code></td><td>Runs one request on this session's own thread id and returns the typed result. <code>mermaid()</code> returns the graph's shape as text, handy for the UI and these docs.</td></tr>
+</table></div>
+</div>
+
+<div class="callout ok">
+<strong>What you should see.</strong> Give the Sidekick a task and a success criterion (for example "what is the
+USD to GBP rate?" with criterion "an accurate answer"). The worker drives the browser, finds the rate, and the
+evaluator judges it. In <a class="term" href="glossary.html#langsmith">LangSmith</a> you can watch the worker call
+its browser tools, then the evaluator return clean JSON matching <code>EvaluatorOutput</code>, then the route to
+END.
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes.</strong>
+<ul>
+<li><strong>Running <code>setup</code> in the constructor.</strong> Building the browser is async; do it in <code>await setup()</code>, not <code>__init__</code>.</li>
+<li><strong>Giving every field a reducer.</strong> Only <code>messages</code> should append. The verdict fields must overwrite, or old verdicts would pile up.</li>
+<li><strong>Loose success criteria.</strong> A vague criterion makes the evaluator loop forever. Be specific about what "done" means.</li>
+<li><strong>An evaluator that is too harsh.</strong> Early runs rejected good answers endlessly; the prompt tweaks ("give the benefit of the doubt", "if it says it wrote a file, assume it did") are there to calm it.</li>
+<li><strong>Dropping the tools&#8594;worker edge.</strong> As before, tool results must return to the worker, or the loop breaks.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>The Sidekick is a worker/evaluator loop: the worker does the task (using tools), the evaluator judges the answer against the success criteria.</li>
+<li>The evaluator returns a structured output (<code>EvaluatorOutput</code>) with <code>feedback</code>, <code>success_criteria_met</code> and <code>user_input_needed</code>.</li>
+<li>Two conditional edges route the graph: worker&#8594;tools or worker&#8594;evaluator, and evaluator&#8594;END or evaluator&#8594;worker.</li>
+<li>The state carries five fields; only <code>messages</code> has a reducer, so verdicts overwrite cleanly.</li>
+<li>The real app packages the graph as a <code>Sidekick</code> class with an async <code>setup</code> and a per-session id used as the <code>thread_id</code>, so sessions stay isolated.</li>
+<li>Because the loop can repeat, this is a genuine agent, not a fixed workflow.</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Honesty note.</strong> Playwright browsing and the paid model are shown as in the course and were not re-run
+live for this guide. The worker/evaluator graph — its nodes, conditional edges, structured-output verdict and
+checkpointed memory — was verified locally against <a class="term" href="glossary.html#ollama">Ollama</a>, and
+the TypeScript port type-checks and builds with <code>vite</code>.
+</div>
+
+<nav class="pager">
+<a class="prev" href="21-w4d3.html"><small>← Previous · Step 21</small>Week 4 · Day 3 — Tools, Conditional Edges and Memory</a>
+<a class="next" href="23-w4d5.html"><small>Next · Step 23 →</small>Week 4 · Day 5 — Finishing the Sidekick</a>
+</nav>
+</main>
+</body>
+</html>

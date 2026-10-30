@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>28 · Week 5 · Day 4 — Distributed Agents</title>
+<meta name="description" content="AutoGen Core&#x27;s distributed runtime: run agents across processes that talk over a gRPC host. The architecture and a cross-process example.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Agentic AI Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 28/36</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 28 of 36 · Week 5 · Day 4 · 3 lessons</div>
+  <h1>Week 5 · Day 4 — Distributed Agents</h1>
+  <p class="lead">AutoGen Core&#x27;s distributed runtime: run agents across processes that talk over a gRPC host. The architecture and a cross-process example.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python (+ TypeScript/React where it fits) · code from the course repo</span>
+</section>
+<p>Day 4 takes <a class="term" href="glossary.html#autogen-core">AutoGen Core</a> from one machine to many. The
+standalone runtime you met yesterday ran everything in a single process. Today's
+<a class="term" href="glossary.html#distributed-agents">distributed runtime</a> lets agents live in different
+processes — in principle on different computers, even written in different languages — and still message each
+other as if they were in the same file. The instructor keeps it high-level and honest: this layer is powerful
+but still experimental.</p>
+
+<div class="callout warn">
+<strong>Experimental, straight from Microsoft.</strong> Microsoft labels the distributed runtime
+experimental and warns its APIs may change. It is an architecture and a glimpse of the future, not a
+production system. Treat this day as a flavour, exactly as the course does.
+</div>
+
+<h2>Two pieces: a host and workers</h2>
+<p>The distributed runtime splits into two components. The <strong>host</strong>
+(<code>GrpcWorkerAgentRuntimeHost</code>) is the meeting point: it accepts connections from workers, knows
+which agents each one has, and manages delivering direct messages between them. The <strong>worker</strong>
+(<code>GrpcWorkerAgentRuntime</code>) is what you treat like yesterday's runtime — you register agents with
+it and it runs their code. One host can serve many workers.</p>
+
+<details class="primer">
+<summary>New to this? What gRPC is</summary>
+<p><a class="term" href="glossary.html#grpc">gRPC</a> is a way for one program to call a function in another
+program, even across a network or a different language. Think of it like a REST HTTP call, but instead of
+hitting a URL you call a function directly and get its return value back. It is used widely wherever programs
+need to talk across process boundaries. Here it is the wiring the host uses to carry messages between
+workers — but you never write gRPC yourself; AutoGen hides it.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="A host connects several worker runtimes over gRPC">
+  <text x="380" y="24" class="title" text-anchor="middle">Host and workers, wired by gRPC</text>
+  <rect x="270" y="44" width="220" height="56" rx="8" class="box-solid"/>
+  <text x="380" y="68" class="on-solid small" text-anchor="middle">GrpcWorkerAgentRuntimeHost</text>
+  <text x="380" y="86" class="on-solid small" text-anchor="middle">localhost:50051 · delivery + sessions</text>
+  <rect x="40" y="150" width="200" height="56" rx="8" class="box2"/>
+  <text x="140" y="174" text-anchor="middle" class="small">worker runtime</text>
+  <text x="140" y="192" text-anchor="middle" class="small">has: player1</text>
+  <rect x="280" y="150" width="200" height="56" rx="8" class="box2"/>
+  <text x="380" y="174" text-anchor="middle" class="small">worker runtime</text>
+  <text x="380" y="192" text-anchor="middle" class="small">has: player2</text>
+  <rect x="520" y="150" width="200" height="56" rx="8" class="box2"/>
+  <text x="620" y="174" text-anchor="middle" class="small">worker runtime</text>
+  <text x="620" y="192" text-anchor="middle" class="small">has: judge</text>
+  <path class="line" d="M 300,100 L 150,148"/>
+  <path class="line" d="M 380,100 V 148"/>
+  <path class="line" d="M 460,100 L 610,148"/>
+  <text x="380" y="128" text-anchor="middle" class="small">workers advertise their agents to the host and send messages through it (gRPC)</text>
+</svg>
+<figcaption>Workers connect to one host; the host routes messages between them.
+<strong>Each worker is like a standalone runtime, but now they can reach each other.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="gRPC is like a REST call but function to function across processes">
+  <text x="380" y="24" class="title" text-anchor="middle">What gRPC gives you</text>
+  <rect x="40" y="56" width="300" height="74" rx="8" class="box"/>
+  <text x="190" y="82" text-anchor="middle" class="small">looks like a normal call in your code</text>
+  <text x="190" y="102" text-anchor="middle" class="mono small">await self.send_message(msg, id)</text>
+  <text x="190" y="120" text-anchor="middle" class="small">no sockets, no URLs</text>
+  <rect x="420" y="56" width="300" height="74" rx="8" class="box-info"/>
+  <text x="570" y="82" text-anchor="middle" class="small">actually crosses a process boundary</text>
+  <text x="570" y="102" text-anchor="middle" class="small">maybe another machine or language</text>
+  <text x="570" y="120" text-anchor="middle" class="small">gRPC carries the call and the reply</text>
+  <path class="arrow" d="M 340,93 H 418"/>
+</svg>
+<figcaption>Your code calls a function; gRPC quietly ships it elsewhere and brings the answer back.
+<strong>The remote call looks exactly like a local one.</strong></figcaption>
+</figure>
+
+<h2>The example: should we use AutoGen?</h2>
+<p>Rather than a toy game, Day 4 poses a small business decision: should a project adopt AutoGen? Two research
+agents go to work — <code>player1</code> gathers the pros, <code>player2</code> gathers the cons — each using
+a web-search tool borrowed from LangChain. A <code>Judge</code> agent messages both, collects their findings,
+and makes a recommendation based only on their research. The structure mirrors yesterday's referee, which is
+the point: the agent code barely changed.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Judge agent gathers pros and cons from two research agents and decides">
+  <text x="380" y="22" class="title" text-anchor="middle">Pros, cons, decision</text>
+  <rect x="300" y="42" width="160" height="50" rx="8" class="box-info"/>
+  <text x="380" y="64" text-anchor="middle" class="small">Judge</text>
+  <text x="380" y="82" text-anchor="middle" class="small">gpt-4o-mini</text>
+  <rect x="70" y="140" width="200" height="54" rx="8" class="box-ok"/>
+  <text x="170" y="164" text-anchor="middle" class="small">player1 → pros</text>
+  <text x="170" y="182" text-anchor="middle" class="small">web search</text>
+  <rect x="490" y="140" width="200" height="54" rx="8" class="box-bad"/>
+  <text x="590" y="164" text-anchor="middle" class="small">player2 → cons</text>
+  <text x="590" y="182" text-anchor="middle" class="small">web search</text>
+  <path class="arrow" d="M 330,92 L 185,138"/>
+  <text x="225" y="112" text-anchor="middle" class="small">instruction1</text>
+  <path class="arrow" d="M 430,92 L 575,138"/>
+  <text x="540" y="112" text-anchor="middle" class="small">instruction2</text>
+  <path class="arrow-ok" d="M 190,138 L 350,94"/>
+  <path class="arrow-bad" d="M 580,138 L 410,94"/>
+  <text x="380" y="124" text-anchor="middle" class="small">Judge weighs both and recommends a decision</text>
+</svg>
+<figcaption>Two researchers, one judge, all over gRPC. <strong>The instructor's runs ended with a
+recommendation to use AutoGen.</strong></figcaption>
+</figure>
+
+<h2>One worker or three — same code</h2>
+<p>The lab runs the same agents in two layouts, chosen by a flag <code>ALL_IN_ONE_WORKER</code>. When
+<code>True</code>, all three agents register with a single worker. When <code>False</code>, three separate
+workers each host one agent, all connected to the same host. Nothing in the agent classes changes — only how
+many workers you start and where you register each agent. That is the headline: your code does not know, or
+care, how it is distributed.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Two deployment layouts for the same three agents">
+  <text x="380" y="24" class="title" text-anchor="middle">Same agents, two layouts</text>
+  <rect x="30" y="44" width="340" height="150" rx="8" class="zone"/>
+  <text x="200" y="66" text-anchor="middle" class="label">ALL_IN_ONE_WORKER = True</text>
+  <rect x="70" y="82" width="260" height="60" rx="8" class="box2"/>
+  <text x="200" y="106" text-anchor="middle" class="small">one worker</text>
+  <text x="200" y="124" text-anchor="middle" class="small">player1 · player2 · judge</text>
+  <text x="200" y="170" text-anchor="middle" class="small">everything in one process</text>
+  <rect x="390" y="44" width="340" height="150" rx="8" class="zone"/>
+  <text x="560" y="66" text-anchor="middle" class="label">ALL_IN_ONE_WORKER = False</text>
+  <rect x="410" y="82" width="95" height="44" rx="8" class="box2"/>
+  <text x="457" y="108" text-anchor="middle" class="small">worker1</text>
+  <rect x="512" y="82" width="95" height="44" rx="8" class="box2"/>
+  <text x="559" y="108" text-anchor="middle" class="small">worker2</text>
+  <rect x="614" y="82" width="95" height="44" rx="8" class="box2"/>
+  <text x="661" y="108" text-anchor="middle" class="small">worker</text>
+  <text x="560" y="150" text-anchor="middle" class="small">player1 · player2 · judge</text>
+  <text x="560" y="170" text-anchor="middle" class="small">one agent per worker</text>
+</svg>
+<figcaption>Flip one flag to change the deployment. <strong>The agent classes are identical in both — the
+runtime absorbs the difference.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="The same agent code runs on the standalone or distributed runtime">
+  <text x="380" y="24" class="title" text-anchor="middle">Your agent code does not change</text>
+  <rect x="250" y="50" width="260" height="48" rx="8" class="box-solid"/>
+  <text x="380" y="72" class="on-solid small" text-anchor="middle">your RoutedAgent classes</text>
+  <text x="380" y="90" class="on-solid small" text-anchor="middle">self.send_message(msg, id)</text>
+  <rect x="60" y="120" width="300" height="30" rx="8" class="box"/>
+  <text x="210" y="140" text-anchor="middle" class="small">SingleThreadedAgentRuntime (Day 3)</text>
+  <rect x="400" y="120" width="300" height="30" rx="8" class="box-info"/>
+  <text x="550" y="140" text-anchor="middle" class="small">GrpcWorkerAgentRuntime (Day 4)</text>
+  <path class="arrow" d="M 330,98 L 230,118"/>
+  <path class="arrow" d="M 430,98 L 530,118"/>
+</svg>
+<figcaption>The same classes plug into either runtime. <strong>Local or distributed is a deployment choice,
+not a code change.</strong></figcaption>
+</figure>
+
+<h2>The full lab</h2>
+<p>Here is the complete file. The flag near the top switches between the two layouts.</p>
+
+<pre data-file="5_autogen/4_lab4_autogen_distributed.py" data-lang="py" data-tag="complete file"><code>from dataclasses import dataclass
+from autogen_core import AgentId, MessageContext, RoutedAgent, message_handler
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.messages import TextMessage
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_ext.tools.langchain import LangChainToolAdapter
+from langchain_community.utilities import GoogleSerperAPIWrapper
+from langchain.agents import Tool
+from IPython.display import display, Markdown
+
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+ALL_IN_ONE_WORKER = False
+
+
+@dataclass
+class Message:
+    content: str
+
+from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntimeHost
+
+host = GrpcWorkerAgentRuntimeHost(address="localhost:50051")
+host.start() 
+
+serper = GoogleSerperAPIWrapper()
+langchain_serper =Tool(name="internet_search", func=serper.run, description="Useful for when you need to search the internet")
+autogen_serper = LangChainToolAdapter(langchain_serper)
+
+instruction1 = "To help with a decision on whether to use AutoGen in a new AI Agent project, \
+please research and briefly respond with reasons in favor of choosing AutoGen; the pros of AutoGen."
+
+instruction2 = "To help with a decision on whether to use AutoGen in a new AI Agent project, \
+please research and briefly respond with reasons against choosing AutoGen; the cons of Autogen."
+
+judge = "You must make a decision on whether to use AutoGen for a project. \
+Your research team has come up with the following reasons for and against. \
+Based purely on the research from your team, please respond with your decision and brief rationale."
+
+class Player1Agent(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OpenAIChatCompletionClient(model="gpt-4o-mini")
+        self._delegate = AssistantAgent(name, model_client=model_client, tools=[autogen_serper], reflect_on_tool_use=True)
+
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        text_message = TextMessage(content=message.content, source="user")
+        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)
+        return Message(content=response.chat_message.content)
+    
+class Player2Agent(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OpenAIChatCompletionClient(model="gpt-4o-mini")
+        self._delegate = AssistantAgent(name, model_client=model_client, tools=[autogen_serper], reflect_on_tool_use=True)
+
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        text_message = TextMessage(content=message.content, source="user")
+        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)
+        return Message(content=response.chat_message.content)
+    
+class Judge(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OpenAIChatCompletionClient(model="gpt-4o-mini")
+        self._delegate = AssistantAgent(name, model_client=model_client)
+        
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        message1 = Message(content=instruction1)
+        message2 = Message(content=instruction2)
+        inner_1 = AgentId("player1", "default")
+        inner_2 = AgentId("player2", "default")
+        response1 = await self.send_message(message1, inner_1)
+        response2 = await self.send_message(message2, inner_2)
+        result = f"## Pros of AutoGen:\n{response1.content}\n\n## Cons of AutoGen:\n{response2.content}\n\n"
+        judgement = f"{judge}\n{result}Respond with your decision and brief explanation"
+        message = TextMessage(content=judgement, source="user")
+        response = await self._delegate.on_messages([message], ctx.cancellation_token)
+        return Message(content=result + "\n\n## Decision:\n\n" + response.chat_message.content)
+
+
+from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntime
+
+if ALL_IN_ONE_WORKER:
+
+    worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker.start()
+
+    await Player1Agent.register(worker, "player1", lambda: Player1Agent("player1"))
+    await Player2Agent.register(worker, "player2", lambda: Player2Agent("player2"))
+    await Judge.register(worker, "judge", lambda: Judge("judge"))
+
+    agent_id = AgentId("judge", "default")
+
+else:
+
+    worker1 = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker1.start()
+    await Player1Agent.register(worker1, "player1", lambda: Player1Agent("player1"))
+
+    worker2 = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker2.start()
+    await Player2Agent.register(worker2, "player2", lambda: Player2Agent("player2"))
+
+    worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker.start()
+    await Judge.register(worker, "judge", lambda: Judge("judge"))
+    agent_id = AgentId("judge", "default")
+
+
+
+
+response = await worker.send_message(Message(content="Go!"), agent_id)
+
+display(Markdown(response.content))
+
+await worker.stop()
+if not ALL_IN_ONE_WORKER:
+    await worker1.stop()
+    await worker2.stop()
+
+await host.stop()</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–13</td><td><code>from autogen_core import AgentId, MessageContext, RoutedAgent, message_handler<br>from autogen_agentchat.agents import AssistantAgent<br>from autogen_ext.tools.langchain import LangChainToolAdapter<br>from langchain_community.utilities import GoogleSerperAPIWrapper<br>…<br>load_dotenv(override=True)</code></td><td>The same Core and AgentChat imports as Day 3, plus the LangChain adapter and Serper search wrapper from Day 2. Everything the example needs: agents, a search tool, and the environment keys.</td></tr>
+<tr><td>15</td><td><code>ALL_IN_ONE_WORKER = False</code></td><td>The switch that chooses the layout. <code>True</code> runs all agents in one worker; <code>False</code> (the default here) spreads them across three. You run the lab once each way to feel the difference.</td></tr>
+<tr><td>18–20</td><td><code>@dataclass<br>class Message:<br>    content: str</code></td><td>Our message type again — one string of content. Distributed agents pass these just like local ones did.</td></tr>
+<tr><td>22–25</td><td><code>from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntimeHost<br>host = GrpcWorkerAgentRuntimeHost(address="localhost:50051")<br>host.start()</code></td><td>Creates and starts the host service, listening on port 50051 of your machine. This is the meeting point workers will connect to. It must be running before any worker starts.</td></tr>
+<tr><td>27–29</td><td><code>serper = GoogleSerperAPIWrapper()<br>langchain_serper = Tool(name="internet_search", func=serper.run, description="Useful for when you need to search the internet")<br>autogen_serper = LangChainToolAdapter(langchain_serper)</code></td><td>Rebuilds the web-search tool from Day 2: a LangChain Serper tool wrapped by <code>LangChainToolAdapter</code> into an AutoGen tool. The research agents will use it to find real pros and cons.</td></tr>
+<tr><td>31–39</td><td><code>instruction1 = "…please research and briefly respond with reasons in favor of choosing AutoGen…"<br>instruction2 = "…reasons against choosing AutoGen…"<br>judge = "You must make a decision on whether to use AutoGen…"</code></td><td>The three prompts. <code>instruction1</code> asks for the pros, <code>instruction2</code> for the cons, and <code>judge</code> frames the final decision. The trailing backslashes just continue each string across lines.</td></tr>
+<tr><td>41–63</td><td><code>class Player1Agent(RoutedAgent):<br>    …<br>        self._delegate = AssistantAgent(name, model_client=model_client, tools=[autogen_serper], reflect_on_tool_use=True)<br>    @message_handler<br>    async def handle_my_message_type(self, message, ctx):<br>        text_message = TextMessage(content=message.content, source="user")<br>        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)<br>        return Message(content=response.chat_message.content)<br>class Player2Agent(RoutedAgent):<br>    … (identical)</code></td><td>Two research agents, both backed by <code>gpt-4o-mini</code> and armed with the search tool. Their handlers are the familiar pattern: wrap the message as a <code>TextMessage</code>, delegate to the AgentChat agent, return a <code>Message</code>. They are identical on purpose — the instructor notes you could give one a different model if you wanted.</td></tr>
+<tr><td>65–83</td><td><code>class Judge(RoutedAgent):<br>    …<br>    async def handle_my_message_type(self, message, ctx):<br>        inner_1 = AgentId("player1", "default")<br>        inner_2 = AgentId("player2", "default")<br>        response1 = await self.send_message(message1, inner_1)<br>        response2 = await self.send_message(message2, inner_2)<br>        result = f"## Pros of AutoGen:\n{response1.content}\n\n## Cons of AutoGen:\n{response2.content}\n\n"<br>        …<br>        return Message(content=result + "\n\n## Decision:\n\n" + response.chat_message.content)</code></td><td>The judge. It sends <code>instruction1</code> to player 1 and <code>instruction2</code> to player 2 via <code>self.send_message</code>, assembles their answers into a Markdown block, asks its own model for a verdict, and returns pros, cons and decision together. This is <strong>exactly</strong> the Day 3 referee pattern — yet these calls may now cross processes.</td></tr>
+<tr><td>86</td><td><code>from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntime</code></td><td>Imports the worker runtime — the distributed cousin of yesterday's <code>SingleThreadedAgentRuntime</code>.</td></tr>
+<tr><td>88–97</td><td><code>if ALL_IN_ONE_WORKER:<br>    worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")<br>    await worker.start()<br>    await Player1Agent.register(worker, "player1", lambda: Player1Agent("player1"))<br>    await Player2Agent.register(worker, "player2", lambda: Player2Agent("player2"))<br>    await Judge.register(worker, "judge", lambda: Judge("judge"))<br>    agent_id = AgentId("judge", "default")</code></td><td>Layout one: a single worker connects to the host and all three agents register with it. Registration looks just like Day 3, except the runtime is a gRPC worker pointed at the host. Everything runs in one process, but still through the host.</td></tr>
+<tr><td>99–112</td><td><code>else:<br>    worker1 = GrpcWorkerAgentRuntime(host_address="localhost:50051")<br>    await worker1.start()<br>    await Player1Agent.register(worker1, "player1", …)<br>    worker2 = … register player2 …<br>    worker = … register judge …<br>    agent_id = AgentId("judge", "default")</code></td><td>Layout two: three separate workers, each connected to the same host, each hosting one agent. Now the judge in one worker really does message players in other workers, across process boundaries, over gRPC. The agent classes did not change at all — only where they are registered.</td></tr>
+<tr><td>117–119</td><td><code>response = await worker.send_message(Message(content="Go!"), agent_id)<br>display(Markdown(response.content))</code></td><td>Sends a single "Go!" to the judge and shows its Markdown answer. One message kicks off the whole pros/cons/decision cascade, whichever layout is active.</td></tr>
+<tr><td>121–126</td><td><code>await worker.stop()<br>if not ALL_IN_ONE_WORKER:<br>    await worker1.stop()<br>    await worker2.stop()<br>await host.stop()</code></td><td>Shuts everything down: stop the worker(s), and in the three-worker layout stop the extra workers too, then stop the host. Clean shutdown matters even more here because there are several connected pieces.</td></tr>
+</table></div>
+
+<div class="callout ok">
+<strong>What you should see.</strong> After "Go!" the two researchers search the web and return reasons for
+and against; the judge prints a Markdown document with "Pros of AutoGen", "Cons of AutoGen" and a "Decision"
+section. In the instructor's runs — in both layouts — the recommendation was to proceed with AutoGen. You may
+see harmless warnings about threads or gRPC during start-up; they did not stop the run.
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes.</strong>
+<ul>
+<li><strong>No host running.</strong> Start the <code>GrpcWorkerAgentRuntimeHost</code> before any worker, or the workers have nothing to connect to.</li>
+<li><strong>Port already in use.</strong> If 50051 is taken (an earlier run you did not stop), the host fails to start. Stop the old one or pick another port.</li>
+<li><strong>Not awaiting worker start.</strong> <code>GrpcWorkerAgentRuntime</code> must be started with <code>await worker.start()</code>; the host uses a plain <code>host.start()</code>. Mixing these up is a common slip.</li>
+<li><strong>Forgetting the Serper key.</strong> The research agents search the web; without <code>SERPER_API_KEY</code> they cannot gather pros and cons.</li>
+<li><strong>Leaving runtimes running.</strong> Stop all workers and the host at the end, especially in the three-worker layout, or the next run clashes on the port.</li>
+</ul>
+</div>
+
+<h2>In TypeScript</h2>
+<p>The distributed runtime, the gRPC host and worker, and the whole Core API are Python (with a separate .NET
+implementation). There is no JavaScript version, so none of this appears in the Week 5 React demo, which is
+only a chat-style UI. If you want distributed agents, you write them in Python.</p>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>The distributed runtime has two parts: a <strong>host</strong> (<code>GrpcWorkerAgentRuntimeHost</code>) that connects workers and routes messages, and <strong>workers</strong> (<code>GrpcWorkerAgentRuntime</code>) that register and run agents.</li>
+<li><strong>gRPC</strong> carries calls across process (and machine, and language) boundaries, so a remote <code>send_message</code> looks exactly like a local one.</li>
+<li>The example has two research agents (pros and cons, with web search) and a judge that decides — the same referee pattern as Day 3.</li>
+<li>The <code>ALL_IN_ONE_WORKER</code> flag runs the same agents in one worker or across three; the agent classes never change.</li>
+<li>Local versus distributed is a deployment choice. Your <code>RoutedAgent</code> code plugs into either runtime unchanged.</li>
+<li>Microsoft calls the distributed runtime experimental; treat it as an exciting preview, not production.</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Honesty note.</strong> The distributed gRPC runtime is shown exactly as in the course and was not
+re-run live for this guide: it calls <code>gpt-4o-mini</code>, reaches the Serper web API, and is labelled
+experimental by Microsoft. What we verified locally against Ollama is the AgentChat conversational examples
+and a single-machine Core message-passing example. The distributed pieces here are presented faithfully but
+not independently reproduced.
+</div>
+
+<nav class="pager">
+<a class="prev" href="27-w5d3.html"><small>← Previous · Step 27</small>Week 5 · Day 3 — AutoGen Core: Message Passing</a>
+<a class="next" href="29-w5d5.html"><small>Next · Step 29 →</small>Week 5 · Day 5 — Agents That Create Agents</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>21 · Week 4 · Day 3 — Tools, Conditional Edges and Memory</title>
+<meta name="description" content="Add tools with a ToolNode and conditional edges, trace with LangSmith, and keep memory between turns with SQLite checkpointing. Python and TypeScript.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Agentic AI Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 21/36</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 21 of 36 · Week 4 · Day 3 · 5 lessons</div>
+  <h1>Week 4 · Day 3 — Tools, Conditional Edges and Memory</h1>
+  <p class="lead">Add tools with a ToolNode and conditional edges, trace with LangSmith, and keep memory between turns with SQLite checkpointing. Python and TypeScript.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python (+ TypeScript/React where it fits) · code from the course repo</span>
+</section>
+<p>This is the day <a class="term" href="glossary.html#langgraph">LangGraph</a> starts to pay off. We add three
+things to our chatbot graph: <a class="term" href="glossary.html#tool">tools</a> (so the model can act on the
+world), a <a class="term" href="glossary.html#conditional-edge">conditional edge</a> (so the graph can branch and
+loop), and <a class="term" href="glossary.html#checkpointing">checkpointing</a> (so the graph finally
+<em>remembers</em> between turns). Along the way we switch on
+<a class="term" href="glossary.html#langsmith">LangSmith</a> so we can watch every call happen. The Python lab
+wires its tools to <a class="term" href="glossary.html#playwright">Playwright</a>, a real browser the agent can
+drive; the TypeScript port uses two safe local tools so it runs anywhere.</p>
+
+<div class="callout">
+<strong>The big three today.</strong> Conditional edges, tool nodes, and checkpointing. Each is a small amount of
+code that LangGraph handles elegantly — the ideas matter more than the typing.
+</div>
+
+<h2>Tools touch the code in two places</h2>
+<p>Whenever an agent uses tools there are always two jobs. First, <em>before</em> calling the model, you describe
+the tools to it so it knows what it can ask for. Second, <em>after</em> the model replies, you check whether it
+asked for a tool and, if so, run it. LangGraph gives you a one-liner for each.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="bind_tools describes tools to the model; a ToolNode runs the tool the model asks for">
+  <text x="380" y="24" class="title" text-anchor="middle">The two places tools appear</text>
+  <rect x="30" y="50" width="330" height="140" rx="8" class="zone"/>
+  <text x="195" y="72" text-anchor="middle" class="label">1. Request side</text>
+  <rect x="55" y="88" width="280" height="30" rx="8" class="box-info"/>
+  <text x="195" y="108" text-anchor="middle" class="mono small">llm.bind_tools(tools)</text>
+  <text x="195" y="140" text-anchor="middle" class="small">builds the tool JSON so the model</text>
+  <text x="195" y="156" text-anchor="middle" class="small">knows what it can ask for</text>
+  <rect x="400" y="50" width="330" height="140" rx="8" class="zone"/>
+  <text x="565" y="72" text-anchor="middle" class="label">2. Response side</text>
+  <rect x="425" y="88" width="280" height="30" rx="8" class="box-ok"/>
+  <text x="565" y="108" text-anchor="middle" class="mono small">ToolNode(tools=tools)</text>
+  <text x="565" y="140" text-anchor="middle" class="small">when the model asks for a tool,</text>
+  <text x="565" y="156" text-anchor="middle" class="small">this node runs it and returns the result</text>
+</svg>
+<figcaption>In week 1 we hand-wrote both jobs. <strong>Now <code>bind_tools</code> handles the request side and a
+<a class="term" href="glossary.html#tool-node">ToolNode</a> handles the response side.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to this? What <code>bind_tools</code> does</summary>
+<p>A model cannot run your Python functions; it can only <em>ask</em> for them by name. For it to ask, it must
+first be told each tool's name, description and inputs, formatted as JSON. <code>bind_tools</code> builds that JSON
+for every tool and attaches it to the model, giving you a new "model with tools". Whenever you invoke that version,
+the tool descriptions ride along automatically. It is the same JSON we wrote by hand in week 1, now generated for
+us.</p>
+</details>
+
+<h2>Conditional edges: the graph's "if"</h2>
+<p>A plain edge always goes to the same next node. A <strong>conditional edge</strong> runs a small function that
+looks at the state and <em>decides</em> which node is next. Here the decision is "did the model ask for a tool?".
+LangGraph ships a ready-made decider called <code>tools_condition</code> that answers exactly that question.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="The graph loops: chatbot to tools and back, or chatbot to END">
+  <text x="380" y="24" class="title" text-anchor="middle">The tool-calling loop</text>
+  <rect x="40" y="90" width="110" height="44" rx="8" class="box-info"/>
+  <text x="95" y="117" text-anchor="middle" class="mono">START</text>
+  <rect x="300" y="90" width="150" height="44" rx="8" class="box2"/>
+  <text x="375" y="117" text-anchor="middle">chatbot</text>
+  <rect x="300" y="24" width="150" height="40" rx="8" class="box"/>
+  <text x="375" y="48" text-anchor="middle" class="small">tools (ToolNode)</text>
+  <rect x="620" y="90" width="110" height="44" rx="8" class="box-info"/>
+  <text x="675" y="117" text-anchor="middle" class="mono">END</text>
+  <path class="arrow" d="M 150,112 H 298"/>
+  <path class="arrow-accent" d="M 350,90 V 66"/>
+  <text x="235" y="80" text-anchor="middle" class="small">tool call? &#8594; tools</text>
+  <path class="arrow" d="M 400,64 V 88"/>
+  <text x="500" y="56" text-anchor="middle" class="small">result back to chatbot</text>
+  <path class="arrow line dashed" d="M 450,112 H 618"/>
+  <text x="540" y="104" text-anchor="middle" class="small">no tool call? &#8594; END</text>
+</svg>
+<figcaption>The solid arrow up is "the model wants a tool"; the dashed arrow right is "it is done".
+<strong>The tools node always loops back to the chatbot so the model can use the result.</strong></figcaption>
+</figure>
+
+<p>Two subtle wiring details matter. The edge from <code>chatbot</code> is conditional, so after each reply the
+graph either jumps to the tools node or finishes. But the edge from <code>tools</code> back to <code>chatbot</code>
+is a plain edge: once a tool runs, its output must always return to the model. Forget that return edge and the
+agent breaks in confusing ways. LangGraph automatically adds an END for the "no tool" branch.</p>
+
+<h2>LangSmith: watch it happen</h2>
+<p>Before running, the instructor turns on <a class="term" href="glossary.html#langsmith">LangSmith</a>. You create
+a free account, generate an API key, paste a few variables into your <code>.env</code>, and reload. From then on
+every graph run shows up in a dashboard with its inputs, outputs, latency, token counts, and — eye-opening
+for beginners worried about cost — the price of each call, often a tiny fraction of a cent. When a tool-using
+run misbehaves, LangSmith is where you see each step: the search, the navigation, the tool results, the final
+answer.</p>
+
+<details class="primer">
+<summary>New to this? Why a tracing dashboard helps</summary>
+<p>An agent makes many hidden calls: it may search, read a page, call another tool, then answer. When something
+goes wrong you cannot see any of that from the final reply alone. LangSmith records the whole chain so you can open
+a run and read exactly what the model was sent, what it asked for, what each tool returned, and where it failed. It
+is the single most useful debugging tool for agent work, and the free tier is generous.</p>
+</details>
+
+<h2>Memory at last: checkpointing and <code>thread_id</code></h2>
+<p>Recall from day 2 that each <code>invoke</code> is a full run of the graph — a <strong>superstep</strong>
+— and state does not survive between supersteps on its own. <strong>Checkpointing</strong> fixes that: after
+every superstep LangGraph saves a snapshot of the state, and the next superstep restores it. You switch it on by
+compiling with a checkpointer, and you tell LangGraph <em>which</em> conversation a run belongs to with a
+<a class="term" href="glossary.html#thread-id">thread_id</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Checkpointing saves a snapshot after each superstep so the next run can restore it">
+  <text x="380" y="22" class="title" text-anchor="middle">A checkpoint after every superstep</text>
+  <rect x="30" y="70" width="150" height="50" rx="8" class="box2"/>
+  <text x="105" y="92" text-anchor="middle" class="small">superstep 1</text>
+  <text x="105" y="108" text-anchor="middle" class="small">invoke #1</text>
+  <rect x="300" y="70" width="150" height="50" rx="8" class="box2"/>
+  <text x="375" y="92" text-anchor="middle" class="small">superstep 2</text>
+  <text x="375" y="108" text-anchor="middle" class="small">invoke #2</text>
+  <rect x="570" y="70" width="150" height="50" rx="8" class="box2"/>
+  <text x="645" y="92" text-anchor="middle" class="small">superstep 3</text>
+  <text x="645" y="108" text-anchor="middle" class="small">invoke #3</text>
+  <path class="arrow" d="M 180,95 H 298"/>
+  <path class="arrow" d="M 450,95 H 568"/>
+  <path class="arrow-accent" d="M 105,120 V 150"/>
+  <path class="arrow-accent" d="M 375,120 V 150"/>
+  <path class="arrow-accent" d="M 645,120 V 150"/>
+  <text x="105" y="166" text-anchor="middle" class="small">checkpoint</text>
+  <text x="375" y="166" text-anchor="middle" class="small">checkpoint</text>
+  <text x="645" y="166" text-anchor="middle" class="small">checkpoint</text>
+</svg>
+<figcaption>The accent arrows are saved snapshots. <strong>Each superstep restores the previous checkpoint, so the
+conversation carries forward.</strong> You can even rewind to an old checkpoint ("time travel").</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="thread_id keeps conversations separate: thread 1 remembers Ed, thread 2 does not">
+  <text x="380" y="22" class="title" text-anchor="middle">thread_id keeps conversations apart</text>
+  <rect x="40" y="45" width="320" height="110" rx="8" class="zone"/>
+  <text x="200" y="66" text-anchor="middle" class="label">thread_id = "1"</text>
+  <rect x="60" y="80" width="280" height="24" rx="8" class="box"/><text x="200" y="96" text-anchor="middle" class="small">"My name is Ed"</text>
+  <rect x="60" y="110" width="280" height="24" rx="8" class="box-ok"/><text x="200" y="126" text-anchor="middle" class="small">later: "Your name is Ed"</text>
+  <rect x="400" y="45" width="320" height="110" rx="8" class="zone"/>
+  <text x="560" y="66" text-anchor="middle" class="label">thread_id = "2"</text>
+  <rect x="420" y="80" width="280" height="24" rx="8" class="box"/><text x="560" y="96" text-anchor="middle" class="small">"What's my name?"</text>
+  <rect x="420" y="110" width="280" height="24" rx="8" class="box-bad"/><text x="560" y="126" text-anchor="middle" class="small">"I don't know"</text>
+</svg>
+<figcaption>Same graph, same checkpointer, two threads. <strong>The thread_id is the key that selects which
+conversation's memory to use.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to this? <code>MemorySaver</code> vs SQLite</summary>
+<p><code>MemorySaver</code> stores checkpoints in RAM. It is great for a demo but forgets everything when the
+program stops. Swap it for <code>SqliteSaver</code> and the exact same memory is written to a database file on
+disk, so a conversation survives a restart. The remarkable thing is how little changes: the only difference is
+which checkpointer object you pass to <code>compile()</code>. The graph, nodes and edges stay identical.</p>
+</details>
+
+<h2>Playwright: a browser as a tool</h2>
+<p>The Python lab hands the agent <a class="term" href="glossary.html#playwright">Playwright</a>, Microsoft's
+browser-automation tool. LangChain's Playwright toolkit turns a real Chromium browser into a set of tools —
+navigate to a page, extract text, click, read links — that the agent can call. We only skim it today; day 4
+builds a full browsing agent on it.</p>
+
+<p>Here is the complete lab in both languages. Python drives Playwright and uses
+<code>MemorySaver</code>; the TypeScript port swaps in two safe local tools (a calculator and a fake price lookup)
+so it needs no browser and no key, and it demonstrates thread isolation.</p>
+
+<div class="code-tabs"><pre data-file="3_lab3 — tools + memory" data-lang="py" data-tag="complete file"><code>from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+from dotenv import load_dotenv
+from IPython.display import Image, display
+import gradio as gr
+from langgraph.prebuilt import ToolNode, tools_condition
+import requests
+import os
+from langchain.agents import Tool
+
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
+
+load_dotenv(override=True)
+
+class State(TypedDict):
+    
+    messages: Annotated[list, add_messages]
+
+
+graph_builder = StateGraph(State)
+
+pushover_token = os.getenv("PUSHOVER_TOKEN")
+pushover_user = os.getenv("PUSHOVER_USER")
+pushover_url = "https://api.pushover.net/1/messages.json"
+
+def push(text: str):
+    """Send a push notification to the user"""
+    requests.post(pushover_url, data = {"token": pushover_token, "user": pushover_user, "message": text})
+
+tool_push = Tool(
+        name="send_push_notification",
+        func=push,
+        description="useful for when you want to send a push notification"
+    )
+
+# Introducing nest_asyncio
+# Python async code only allows for one "event loop" processing aynchronous events.
+# The `nest_asyncio` library patches this, and is used for special situations, if you need to run a nested event loop.
+
+import nest_asyncio
+nest_asyncio.apply()
+
+from langchain_community.agent_toolkits import PlayWrightBrowserToolkit
+from langchain_community.tools.playwright.utils import create_async_playwright_browser
+
+# If you get a NotImplementedError here or later, see the Heads Up at the top of the notebook
+
+async_browser =  create_async_playwright_browser(headless=False)  # headful mode
+toolkit = PlayWrightBrowserToolkit.from_browser(async_browser=async_browser)
+tools = toolkit.get_tools()
+
+for tool in tools:
+    print(f"{tool.name}={tool}")
+
+tool_dict = {tool.name:tool for tool in tools}
+
+navigate_tool = tool_dict.get("navigate_browser")
+extract_text_tool = tool_dict.get("extract_text")
+
+    
+await navigate_tool.arun({"url": "https://www.cnn.com"})
+text = await extract_text_tool.arun({})
+
+import textwrap
+print(textwrap.fill(text))
+
+all_tools = tools + [tool_push]
+
+
+llm = ChatOpenAI(model="gpt-4o-mini")
+llm_with_tools = llm.bind_tools(all_tools)
+
+
+def chatbot(state: State):
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+
+
+
+graph_builder = StateGraph(State)
+graph_builder.add_node("chatbot", chatbot)
+graph_builder.add_node("tools", ToolNode(tools=all_tools))
+graph_builder.add_conditional_edges( "chatbot", tools_condition, "tools")
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+
+memory = MemorySaver()
+graph = graph_builder.compile(checkpointer=memory)
+display(Image(graph.get_graph().draw_mermaid_png()))
+
+config = {"configurable": {"thread_id": "10"}}
+
+async def chat(user_input: str, history):
+    result = await graph.ainvoke({"messages": [{"role": "user", "content": user_input}]}, config=config)
+    return result["messages"][-1].content
+
+
+gr.ChatInterface(chat, type="messages").launch()</code></pre><pre data-file="day3.ts" data-lang="ts" data-tag="complete file"><code>// Week 4 - Day 3: tools + conditional edges + memory (LangGraph.js port of 3_lab3.py).
+//
+// Three new ideas:
+//   * bindTools      - tell the LLM which tools exist so it can ask to call one.
+//   * ToolNode + toolsCondition - a prebuilt node that runs whatever tool the LLM
+//     asked for, and a prebuilt router that sends the graph to "tools" when there is
+//     a tool call, or to END when there is not.
+//   * a checkpointer (MemorySaver) + a thread_id - so the graph REMEMBERS the
+//     conversation between separate invoke() calls. Same thread_id = same memory.
+//
+// The course uses Playwright browser tools; here we use two safe local tools (a
+// calculator and a fake price lookup) so the file needs no browser and no API key.
+import { StateGraph, MessagesAnnotation, START, MemorySaver } from "@langchain/langgraph";
+import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
+import { makeLlm } from "./model.js";
+
+// --- Tools -----------------------------------------------------------------
+// tool() wraps a function with a name, description and a zod schema for its input.
+// The description is how the model decides when to call the tool.
+const calculator = tool(
+  async ({ expression }) =&gt; {
+    if (!/^[0-9+\-*/(). ]+$/.test(expression)) {
+      return "Error: only numbers and + - * / ( ) are allowed.";
+    }
+    try {
+      // Function(...) evaluates the arithmetic; the regex above restricts the input.
+      const value = Function(`"use strict"; return (${expression});`)();
+      return String(value);
+    } catch (err) {
+      return `Error: ${String(err)}`;
+    }
+  },
+  {
+    name: "calculator",
+    description: "Evaluate a basic arithmetic expression, e.g. '23 * 19' or '(2+3)/4'.",
+    schema: z.object({ expression: z.string().describe("the arithmetic to evaluate") }),
+  },
+);
+
+const getPrice = tool(
+  async ({ symbol }) =&gt; {
+    const prices: Record&lt;string, number&gt; = { AAPL: 231.4, MSFT: 418.2, GOOG: 165.7, NVDA: 142.9 };
+    const price = prices[symbol.toUpperCase()];
+    return price === undefined
+      ? `No price on file for ${symbol}. Known: ${Object.keys(prices).join(", ")}.`
+      : `${symbol.toUpperCase()} is trading at $${price.toFixed(2)}.`;
+  },
+  {
+    name: "get_price",
+    description: "Return the current price for a stock ticker symbol (FAKE demo data).",
+    schema: z.object({ symbol: z.string().describe("a ticker symbol like AAPL") }),
+  },
+);
+
+const tools = [calculator, getPrice];
+
+// The LLM, told about the tools so it can request them.
+const llmWithTools = makeLlm().bindTools(tools);
+
+async function chatbot(state: typeof MessagesAnnotation.State) {
+  return { messages: [await llmWithTools.invoke(state.messages)] };
+}
+
+// Build the graph: chatbot &lt;-&gt; tools loop. toolsCondition routes chatbot -&gt; tools when
+// the last message has tool calls, otherwise chatbot -&gt; END. After tools run, go back
+// to the chatbot so it can use the results.
+const graph = new StateGraph(MessagesAnnotation)
+  .addNode("chatbot", chatbot)
+  .addNode("tools", new ToolNode(tools))
+  .addEdge(START, "chatbot")
+  .addConditionalEdges("chatbot", toolsCondition)
+  .addEdge("tools", "chatbot")
+  // The checkpointer persists state per thread_id, so the graph remembers turns.
+  .compile({ checkpointer: new MemorySaver() });
+
+/** Send one message on a given conversation thread and return the reply text. */
+export async function send(userInput: string, threadId: string): Promise&lt;string&gt; {
+  const result = await graph.invoke(
+    { messages: [{ role: "user", content: userInput }] },
+    { configurable: { thread_id: threadId } },
+  );
+  return String(result.messages.at(-1)?.content ?? "");
+}
+
+async function main() {
+  console.log(await graph.getGraphAsync().then((g) =&gt; g.drawMermaid()));
+
+  const thread = "demo-thread-1";
+
+  // Turn 1: give a fact AND ask for a tool.
+  const q1 = "My name is Ada. Please use the calculator to compute 23 * 19.";
+  console.log(`\n[thread=${thread}] User: ${q1}`);
+  console.log(`Assistant: ${await send(q1, thread)}`);
+
+  // Turn 2: SAME thread_id. If memory works, the model recalls the name from turn 1.
+  const q2 = "What is my name, and what was the multiplication result you gave me?";
+  console.log(`\n[thread=${thread}] User: ${q2}`);
+  console.log(`Assistant: ${await send(q2, thread)}`);
+
+  // Turn 3: a different thread has no memory of Ada - proves isolation.
+  const q3 = "What is my name?";
+  console.log(`\n[thread=demo-thread-2] User: ${q3}`);
+  console.log(`Assistant: ${await send(q3, "demo-thread-2")}`);
+}
+
+main().catch((err) =&gt; {
+  console.error(err);
+  process.exitCode = 1;
+});</code></pre></div>
+
+<div data-only="py">
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–14</td><td><code>from langgraph.graph import StateGraph, START<br>from langgraph.prebuilt import ToolNode, tools_condition<br>…<br>from langgraph.checkpoint.memory import MemorySaver</code></td><td>Imports. The key new ones: <code>ToolNode</code> and <code>tools_condition</code> for tool calling, and <code>MemorySaver</code> for checkpointing.</td></tr>
+<tr><td>16</td><td><code>load_dotenv(override=True)</code></td><td>Loads your keys, including the LangSmith variables you pasted into <code>.env</code>.</td></tr>
+<tr><td>18–23</td><td><code>class State(TypedDict):<br>  messages: Annotated[list, add_messages]<br>graph_builder = StateGraph(State)</code></td><td>Steps 1–2: the same one-field State and a fresh builder.</td></tr>
+<tr><td>25–37</td><td><code>def push(text): requests.post(pushover_url, data={…})<br>tool_push = Tool(name="send_push_notification", func=push, description=…)</code></td><td>A custom <a class="term" href="glossary.html#push-notification">push-notification</a> tool, wrapped in a LangChain <code>Tool</code> with a name, the function to run, and a description the model reads.</td></tr>
+<tr><td>39–44</td><td><code>import nest_asyncio<br>nest_asyncio.apply()</code></td><td>A notebook-only fix. A notebook already runs an async event loop, and Playwright wants to start its own; <code>nest_asyncio</code> patches Python so one event loop can run inside another. In the real app (day 5) this is not needed.</td></tr>
+<tr><td>46–53</td><td><code>async_browser = create_async_playwright_browser(headless=False)<br>toolkit = PlayWrightBrowserToolkit.from_browser(async_browser=async_browser)<br>tools = toolkit.get_tools()</code></td><td>Launches a real Chromium browser (<code>headless=False</code> means you see the window) and builds a toolkit from it. <code>get_tools()</code> returns a set of browser tools: navigate, extract text, click, read links, and more.</td></tr>
+<tr><td>55–68</td><td><code>tool_dict = {tool.name: tool for tool in tools}<br>navigate_tool = tool_dict.get("navigate_browser")<br>…<br>await navigate_tool.arun({"url": "https://www.cnn.com"})<br>text = await extract_text_tool.arun({})</code></td><td>A quick manual test, no LLM involved: pick out the navigate and extract-text tools, drive the browser to CNN, and read the page text. <code>arun</code> is the async way to run a tool. This proves the browser tools work before handing them to an agent.</td></tr>
+<tr><td>70</td><td><code>all_tools = tools + [tool_push]</code></td><td>Combine the browser tools with the push tool into one list for the agent.</td></tr>
+<tr><td>73–74</td><td><code>llm = ChatOpenAI(model="gpt-4o-mini")<br>llm_with_tools = llm.bind_tools(all_tools)</code></td><td>The request side: <code>bind_tools</code> describes all the tools to the model so it can ask for any of them.</td></tr>
+<tr><td>77–78</td><td><code>def chatbot(state: State):<br>  return {"messages": [llm_with_tools.invoke(state["messages"])]}</code></td><td>The chatbot node, now invoking the tool-aware model. If the model decides to call a tool, that request rides back in its reply.</td></tr>
+<tr><td>82–84</td><td><code>graph_builder = StateGraph(State)<br>graph_builder.add_node("chatbot", chatbot)<br>graph_builder.add_node("tools", ToolNode(tools=all_tools))</code></td><td>Two nodes: the chatbot, and the prebuilt <code>ToolNode</code> — the response side that actually runs whatever tool the model asked for.</td></tr>
+<tr><td>85</td><td><code>graph_builder.add_conditional_edges("chatbot", tools_condition, "tools")</code></td><td>The conditional edge. After the chatbot, <code>tools_condition</code> inspects the reply: if it contains a tool call it routes to <code>"tools"</code>, otherwise the graph heads to END. This is the "if" that used to be hand-written.</td></tr>
+<tr><td>86–87</td><td><code>graph_builder.add_edge("tools", "chatbot")<br>graph_builder.add_edge(START, "chatbot")</code></td><td>The plain return edge (tool results go back to the chatbot) and the start edge. The return edge is easy to forget and essential.</td></tr>
+<tr><td>89–91</td><td><code>memory = MemorySaver()<br>graph = graph_builder.compile(checkpointer=memory)<br>display(Image(graph.get_graph().draw_mermaid_png()))</code></td><td>Create an in-RAM checkpointer and compile with it. That one argument gives the graph memory between supersteps. The picture now shows the chatbot&#8596;tools loop.</td></tr>
+<tr><td>93</td><td><code>config = {"configurable": {"thread_id": "10"}}</code></td><td>The config that names this conversation. The <code>thread_id</code> ("10") selects which checkpoint slot to read and write.</td></tr>
+<tr><td>95–100</td><td><code>async def chat(user_input, history):<br>  result = await graph.ainvoke({"messages": [{"role": "user", "content": user_input}]}, config=config)<br>  return result["messages"][-1].content<br>gr.ChatInterface(chat, type="messages").launch()</code></td><td>The chat loop. Because the tools are async, it uses <code>ainvoke</code> (the async version of <code>invoke</code>) and passes the <code>config</code> so every turn shares thread 10's memory. Now the bot remembers, and can browse the web and push notifications.</td></tr>
+</table></div>
+</div>
+
+<div data-only="ts">
+<h3>Line by line</h3>
+<p>The TypeScript port keeps the same ideas — <code>bindTools</code>, a <code>ToolNode</code>,
+<code>toolsCondition</code>, and a <code>MemorySaver</code> with a thread id — but uses two safe local tools
+instead of a browser, and ends by proving that different threads have separate memories.</p>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–12</td><td><code>// Week 4 - Day 3 …</code></td><td>The comment lists the three new ideas (bindTools, ToolNode + toolsCondition, a checkpointer + thread_id) and notes the local tools stand in for the course's Playwright tools.</td></tr>
+<tr><td>13–17</td><td><code>import { StateGraph, MessagesAnnotation, START, MemorySaver } from "@langchain/langgraph";<br>import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";<br>import { tool } from "@langchain/core/tools";<br>import { z } from "zod";</code></td><td>Imports: the builder and <code>MemorySaver</code>, the prebuilt <code>ToolNode</code> and <code>toolsCondition</code>, the <code>tool()</code> helper, and <code>zod</code> for describing a tool's inputs.</td></tr>
+<tr><td>19–40</td><td><code>const calculator = tool(async ({ expression }) =&gt; {…}, { name: "calculator", description: "…", schema: z.object({ expression: z.string()… }) });</code></td><td>The first tool: a safe calculator. The function evaluates an arithmetic string, but a regex first restricts the input to digits and operators so nothing dangerous can run. The <code>schema</code> describes its one input, and the <code>description</code> is how the model decides to call it.</td></tr>
+<tr><td>42–55</td><td><code>const getPrice = tool(async ({ symbol }) =&gt; {…}, { name: "get_price", description: "… (FAKE demo data).", schema: z.object({ symbol: z.string()… }) });</code></td><td>A second tool returning fake stock prices from a small table. It is labelled fake so neither the model nor you mistake it for a live feed.</td></tr>
+<tr><td>57–60</td><td><code>const tools = [calculator, getPrice];<br>const llmWithTools = makeLlm().bindTools(tools);</code></td><td>The tools list, then the request side: <code>bindTools</code> attaches their JSON to the model (TypeScript's spelling of Python's <code>bind_tools</code>).</td></tr>
+<tr><td>62–64</td><td><code>async function chatbot(state: typeof MessagesAnnotation.State) {<br>  return { messages: [await llmWithTools.invoke(state.messages)] };<br>}</code></td><td>The chatbot node, invoking the tool-aware model, same as Python.</td></tr>
+<tr><td>66–76</td><td><code>const graph = new StateGraph(MessagesAnnotation)<br>  .addNode("chatbot", chatbot)<br>  .addNode("tools", new ToolNode(tools))<br>  .addEdge(START, "chatbot")<br>  .addConditionalEdges("chatbot", toolsCondition)<br>  .addEdge("tools", "chatbot")<br>  .compile({ checkpointer: new MemorySaver() });</code></td><td>The whole graph: chatbot node, tools node, start edge, the conditional edge (<code>toolsCondition</code> routes to tools or END), the return edge from tools to chatbot, and compile with a <code>MemorySaver</code> so it remembers.</td></tr>
+<tr><td>78–85</td><td><code>export async function send(userInput: string, threadId: string): Promise&lt;string&gt; {<br>  const result = await graph.invoke({ messages: [{ role: "user", content: userInput }] }, { configurable: { thread_id: threadId } });<br>  return String(result.messages.at(-1)?.content ?? "");<br>}</code></td><td>A helper that sends one message on a given thread. The <code>thread_id</code> is a parameter, so the same graph can serve many separate conversations.</td></tr>
+<tr><td>87–95</td><td><code>const thread = "demo-thread-1";<br>const q1 = "My name is Ada. Please use the calculator to compute 23 * 19.";<br>console.log(`Assistant: ${await send(q1, thread)}`);</code></td><td>Turn 1 on thread 1: it gives a fact (the name) and asks for a tool in one message, exercising both memory and tool calling.</td></tr>
+<tr><td>97–100</td><td><code>const q2 = "What is my name, and what was the multiplication result you gave me?";<br>console.log(`Assistant: ${await send(q2, thread)}`);</code></td><td>Turn 2 on the <em>same</em> thread. If checkpointing works, the model recalls both the name and the earlier calculation.</td></tr>
+<tr><td>102–106</td><td><code>const q3 = "What is my name?";<br>console.log(`Assistant: ${await send(q3, "demo-thread-2")}`);</code></td><td>Turn 3 on a <em>different</em> thread. It has no memory of Ada, proving that threads are isolated by their <code>thread_id</code>.</td></tr>
+<tr><td>108–111</td><td><code>main().catch((err) =&gt; { console.error(err); process.exitCode = 1; });</code></td><td>Runs the demo and reports any error with a non-zero exit code.</td></tr>
+</table></div>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="tools_condition decides: a tool call routes to the tools node, otherwise the run ends">
+  <text x="380" y="24" class="title" text-anchor="middle">tools_condition is the if-statement</text>
+  <rect x="300" y="42" width="160" height="44" rx="8" class="box2"/>
+  <text x="380" y="62" text-anchor="middle" class="small">chatbot replied</text>
+  <text x="380" y="78" text-anchor="middle" class="small">tool call present?</text>
+  <path class="arrow-accent" d="M 340,86 L 200,122"/>
+  <text x="235" y="108" text-anchor="middle" class="small">yes</text>
+  <path class="arrow" d="M 420,86 L 560,122"/>
+  <text x="525" y="108" text-anchor="middle" class="small">no</text>
+  <rect x="100" y="124" width="200" height="38" rx="8" class="box-ok"/>
+  <text x="200" y="147" text-anchor="middle" class="small">run the tools node, loop back</text>
+  <rect x="460" y="124" width="200" height="38" rx="8" class="box-info"/>
+  <text x="560" y="147" text-anchor="middle" class="small">go to END, answer the user</text>
+</svg>
+<figcaption>The whole branch is one boolean. <strong>A tool call means "run tools and continue"; no tool call means
+"we are done".</strong></figcaption>
+</figure>
+
+<div class="callout ok">
+<strong>What you should see.</strong> Ask the Python bot to "send me a push notification with the current USD to GBP
+exchange rate" and it will browse, find the rate, and push it to your phone — two tool calls in one turn. Tell
+it your name, ask again later, and with the checkpointer on it remembers. Open LangSmith and the whole chain is
+laid out: the search, the navigation, the push, the final reply.
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes.</strong>
+<ul>
+<li><strong>No return edge from tools.</strong> Without <code>add_edge("tools", "chatbot")</code> the tool results never reach the model and the run stalls or answers nonsense.</li>
+<li><strong>Forgetting the <code>config</code>.</strong> Memory only works if you pass the same <code>thread_id</code> on every <code>invoke</code>. Leave it out and each turn starts fresh.</li>
+<li><strong>Expecting <code>MemorySaver</code> to persist.</strong> It lives in RAM and clears when the program stops. Use <code>SqliteSaver</code> for memory that survives a restart.</li>
+<li><strong>Mixing sync and async.</strong> Playwright tools are async, so the chat callback must use <code>ainvoke</code>, not <code>invoke</code>.</li>
+<li><strong>Browser does not launch.</strong> Run <code>playwright install</code> once first, and keep <code>nest_asyncio.apply()</code> in the notebook.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Tools appear twice: <code>bind_tools</code> describes them to the model, and a <code>ToolNode</code> runs the one the model asks for.</li>
+<li>A conditional edge with <code>tools_condition</code> routes the graph to the tools node on a tool call, or to END otherwise; the tools node always loops back to the chatbot.</li>
+<li>LangSmith records every run — inputs, outputs, latency, tokens, cost — and is the main way to debug agent behaviour.</li>
+<li>Checkpointing saves a snapshot after each superstep so the graph remembers; compile with a checkpointer to switch it on.</li>
+<li>The <code>thread_id</code> selects which conversation's memory to use, keeping separate chats isolated.</li>
+<li><code>MemorySaver</code> keeps memory in RAM; <code>SqliteSaver</code> writes it to disk, changing only one line.</li>
+<li>Playwright turns a real browser into tools the agent can drive — the foundation for day 4's browsing agent.</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Honesty note.</strong> Playwright browsing, Serper search, Pushover and LangSmith are shown as in the course
+and need their own keys or a browser to run; they were not re-run live for this guide. The graph wiring —
+conditional edges, the tool node, and checkpointing memory with a <code>thread_id</code> — was verified
+locally against <a class="term" href="glossary.html#ollama">Ollama</a>, and the TypeScript port type-checks and
+builds with <code>vite</code>.
+</div>
+
+<nav class="pager">
+<a class="prev" href="20-w4d2.html"><small>← Previous · Step 20</small>Week 4 · Day 2 — State, Nodes and Edges: a Chatbot Graph</a>
+<a class="next" href="22-w4d4.html"><small>Next · Step 22 →</small>Week 4 · Day 4 — The Sidekick: Browser Automation and an Evaluator</a>
+</nav>
+</main>
+</body>
+</html>

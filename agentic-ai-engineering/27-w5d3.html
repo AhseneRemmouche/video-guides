@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>27 · Week 5 · Day 3 — AutoGen Core: Message Passing</title>
+<meta name="description" content="The lower-level Core layer: registering agents, message handlers and dispatching. Build standalone agents that play rock-paper-scissors with different models.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Agentic AI Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 27/36</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 27 of 36 · Week 5 · Day 3 · 4 lessons</div>
+  <h1>Week 5 · Day 3 — AutoGen Core: Message Passing</h1>
+  <p class="lead">The lower-level Core layer: registering agents, message handlers and dispatching. Build standalone agents that play rock-paper-scissors with different models.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python (+ TypeScript/React where it fits) · code from the course repo</span>
+</section>
+<p>Day 3 drops below <a class="term" href="glossary.html#agentchat">AgentChat</a> to the layer it is built on:
+<a class="term" href="glossary.html#autogen-core">AutoGen Core</a>. Where AgentChat is about making one agent
+answer nicely, Core is about many agents finding and messaging each other. The instructor is clear that this
+is a flavour, not a deep dive — the examples are deliberately small — but it shows the idea that makes
+AutoGen distinctive.</p>
+
+<div class="callout">
+<strong>What Core is for.</strong> Core is an agent <em>interaction</em> framework. It takes care of creating
+agents and delivering messages between them, even across processes or programming languages. It does not care
+how you implement an agent — you could call an LLM directly, or delegate to an AgentChat agent, or write no
+AI at all. That separation (delivery versus logic) is the whole point.
+</div>
+
+<h2>The core idea: decouple logic from delivery</h2>
+<p>In Core you are responsible for one thing — what an agent <em>does</em> when it gets a message. The
+framework is responsible for everything else: creating agents, giving each a unique identity, and routing
+messages to the right handler. The instructor compares it to LangGraph, which also coordinates agents but is
+built around replayable, repeatable workflows. Core's emphasis is different: it is about supporting diverse
+agents interacting, possibly spread across many machines.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="AutoGen Core handles creation and delivery; you write the agent logic">
+  <text x="380" y="24" class="title" text-anchor="middle">Who does what in Core</text>
+  <rect x="40" y="50" width="320" height="110" rx="8" class="box-solid"/>
+  <text x="200" y="76" class="on-solid title" text-anchor="middle">AutoGen Core (the runtime)</text>
+  <text x="200" y="100" class="on-solid small" text-anchor="middle">creates agents · gives each an identity</text>
+  <text x="200" y="118" class="on-solid small" text-anchor="middle">routes messages to the right handler</text>
+  <text x="200" y="140" class="on-solid small" text-anchor="middle">manages the agent life cycle</text>
+  <rect x="400" y="50" width="320" height="110" rx="8" class="box-ok"/>
+  <text x="560" y="76" text-anchor="middle" class="title">You (the agent logic)</text>
+  <text x="560" y="100" text-anchor="middle" class="small">decide what happens on a message</text>
+  <text x="560" y="118" text-anchor="middle" class="small">call an LLM, a tool, or nothing</text>
+  <text x="560" y="140" text-anchor="middle" class="small">return a message</text>
+</svg>
+<figcaption>Core moves messages; you supply behaviour. <strong>Because the two are separate, the same agent
+code runs on a laptop or spread across a network.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to this? What a runtime is</summary>
+<p>A <a class="term" href="glossary.html#agent-runtime">runtime</a> is the world your agents live in. It keeps
+track of which agents exist, instantiates them when needed, and delivers messages between them. Core offers
+two kinds: a <strong>standalone</strong> runtime that runs on one machine (today), and a
+<strong>distributed</strong> runtime that spans processes and machines (Day 4). You write your agents once;
+the runtime decides where and how they actually run.</p>
+</details>
+
+<h2>Messages and agents in Core</h2>
+<p>Two things are new here. First, you define your own <strong>message</strong> type — a plain
+<code>@dataclass</code> that just holds data, because a message is a parcel of information, not behaviour.
+Second, a Core agent is a subclass of <a class="term" href="glossary.html#routed-agent">RoutedAgent</a>: a
+management wrapper that can be created, identified and messaged. It is <em>not</em> itself an LLM. If it needs
+intelligence, it delegates to something — often an AgentChat <code>AssistantAgent</code>.</p>
+
+<details class="primer">
+<summary>New to this? AgentId — type and key</summary>
+<p>Every agent has an <code>AgentId</code> made of two parts: a <strong>type</strong> (like a class name, for
+example <code>"simple_agent"</code>) and a <strong>key</strong> (an instance label, usually
+<code>"default"</code>). Together they are unique, so any agent anywhere can address any other just by knowing
+its type and key. In a distributed world with thousands of agents, that pair is how one agent is told apart
+from the next.</p>
+</details>
+
+<details class="primer">
+<summary>New to this? The @message_handler decorator</summary>
+<p>A method decorated with <a class="term" href="glossary.html#message-handler">@message_handler</a> is a
+place messages can arrive. The runtime looks at the <em>type</em> of the incoming message and dispatches it to
+the handler whose parameter matches that type. So you can have several handlers on one agent — one for text
+messages, one for image messages — and Core routes each to the right one automatically. That routing is the
+clever part you get for free.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 140" role="img" aria-label="An AgentId is a type plus a key">
+  <text x="380" y="24" class="title" text-anchor="middle">AgentId = type + key</text>
+  <rect x="150" y="50" width="200" height="56" rx="8" class="box"/>
+  <text x="250" y="74" text-anchor="middle" class="small">type</text>
+  <text x="250" y="94" text-anchor="middle" class="mono small">"simple_agent"</text>
+  <text x="380" y="84" text-anchor="middle" class="title">+</text>
+  <rect x="410" y="50" width="200" height="56" rx="8" class="box2"/>
+  <text x="510" y="74" text-anchor="middle" class="small">key</text>
+  <text x="510" y="94" text-anchor="middle" class="mono small">"default"</text>
+</svg>
+<figcaption>The pair is globally unique. <strong>To message an agent you need both halves of its id.</strong></figcaption>
+</figure>
+
+<h2>The standalone runtime, step by step</h2>
+<p>The lab's first agent, <code>SimpleAgent</code>, has no AI at all: it just disagrees with whatever you
+say. That is on purpose — it shows the plumbing without the distraction of an LLM. You
+<strong>register</strong> the agent type with a runtime (passing a factory that can build instances), start
+the runtime, send a message to an <code>AgentId</code>, read the reply, then stop and close the runtime.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 120" role="img" aria-label="Lifecycle of a standalone runtime: register, start, send, stop, close">
+  <text x="380" y="24" class="title" text-anchor="middle">The runtime lifecycle</text>
+  <rect x="20" y="50" width="120" height="44" rx="8" class="box"/>
+  <text x="80" y="77" text-anchor="middle" class="small">register type</text>
+  <rect x="170" y="50" width="110" height="44" rx="8" class="box"/>
+  <text x="225" y="77" text-anchor="middle" class="small">start()</text>
+  <rect x="310" y="50" width="150" height="44" rx="8" class="box-ok"/>
+  <text x="385" y="77" text-anchor="middle" class="small">send_message()</text>
+  <rect x="490" y="50" width="110" height="44" rx="8" class="box"/>
+  <text x="545" y="77" text-anchor="middle" class="small">stop()</text>
+  <rect x="630" y="50" width="110" height="44" rx="8" class="box"/>
+  <text x="685" y="77" text-anchor="middle" class="small">close()</text>
+  <path class="arrow" d="M 140,72 H 168"/>
+  <path class="arrow" d="M 280,72 H 308"/>
+  <path class="arrow" d="M 460,72 H 488"/>
+  <path class="arrow" d="M 600,72 H 628"/>
+</svg>
+<figcaption>Register a <em>type</em> (not an instance), start, send, then always stop and close.
+<strong>Registering tells the runtime such an agent <em>can</em> exist; the runtime builds one on demand.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="The runtime dispatches a message to the matching handler by its type">
+  <text x="380" y="24" class="title" text-anchor="middle">Routing by message type</text>
+  <rect x="30" y="60" width="150" height="56" rx="8" class="box"/>
+  <text x="105" y="84" text-anchor="middle" class="small">send_message(</text>
+  <text x="105" y="102" text-anchor="middle" class="small">Message, AgentId)</text>
+  <rect x="250" y="60" width="180" height="56" rx="8" class="box-solid"/>
+  <text x="340" y="84" class="on-solid small" text-anchor="middle">runtime looks up the id</text>
+  <text x="340" y="102" class="on-solid small" text-anchor="middle">and the message type</text>
+  <rect x="500" y="60" width="230" height="56" rx="8" class="box-ok"/>
+  <text x="615" y="84" text-anchor="middle" class="small">the @message_handler whose</text>
+  <text x="615" y="102" text-anchor="middle" class="small">parameter matches that type</text>
+  <path class="arrow" d="M 180,88 H 248"/>
+  <path class="arrow" d="M 430,88 H 498"/>
+  <text x="380" y="150" text-anchor="middle" class="small">Different message types can go to different handlers on the same agent</text>
+</svg>
+<figcaption>Core picks the handler by the message's type. <strong>This dispatch is why you rarely write
+if/else to sort messages yourself.</strong></figcaption>
+</figure>
+
+<h2>Giving an agent a brain, then a game</h2>
+<p>The second agent, <code>MyLLMAgent</code>, shows Core does not care about intelligence: inside its handler
+it delegates to an AgentChat <code>AssistantAgent</code> and returns whatever that produces. Watch the two
+message types — <code>TextMessage</code> is the AgentChat message used to talk to the delegate, while
+<code>Message</code> is our own dataclass used between Core agents. They look alike but belong to different
+layers.</p>
+
+<p>The finale is rock-paper-scissors between three agents: <code>player1</code> backed by
+<code>gpt-4o-mini</code>, <code>player2</code> backed by local <code>llama3.2</code>, and a referee that
+messages both players, collects their choices, and asks its own model who wins. It is trivial as a game, but
+it demonstrates agents discovering and messaging one another through the runtime.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="A RoutedAgent delegates to an AssistantAgent for intelligence">
+  <text x="380" y="24" class="title" text-anchor="middle">Wrapper vs brain</text>
+  <rect x="60" y="55" width="260" height="80" rx="8" class="box2"/>
+  <text x="190" y="82" text-anchor="middle" class="small">RoutedAgent (Core)</text>
+  <text x="190" y="102" text-anchor="middle" class="small">identity + message handler</text>
+  <text x="190" y="120" text-anchor="middle" class="small">the "management" wrapper</text>
+  <rect x="440" y="55" width="260" height="80" rx="8" class="box-ok"/>
+  <text x="570" y="82" text-anchor="middle" class="small">AssistantAgent (AgentChat)</text>
+  <text x="570" y="102" text-anchor="middle" class="small">the actual LLM call</text>
+  <text x="570" y="120" text-anchor="middle" class="mono small">self._delegate</text>
+  <path class="arrow" d="M 320,95 H 438"/>
+  <text x="380" y="88" text-anchor="middle" class="small">delegates to</text>
+</svg>
+<figcaption>A Core agent holds a <code>_delegate</code> that does the thinking.
+<strong>Core routes the message; the delegate answers it.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The referee agent messages two players and judges the result">
+  <text x="380" y="22" class="title" text-anchor="middle">Rock-paper-scissors through the runtime</text>
+  <rect x="300" y="44" width="160" height="50" rx="8" class="box-info"/>
+  <text x="380" y="66" text-anchor="middle" class="small">rock_paper_scissors</text>
+  <text x="380" y="84" text-anchor="middle" class="small">(referee, gpt-4o-mini)</text>
+  <rect x="80" y="140" width="190" height="52" rx="8" class="box"/>
+  <text x="175" y="164" text-anchor="middle" class="small">player1</text>
+  <text x="175" y="182" text-anchor="middle" class="small">gpt-4o-mini</text>
+  <rect x="490" y="140" width="190" height="52" rx="8" class="box"/>
+  <text x="585" y="164" text-anchor="middle" class="small">player2</text>
+  <text x="585" y="182" text-anchor="middle" class="small">llama3.2 (local)</text>
+  <path class="arrow" d="M 330,94 L 190,138"/>
+  <text x="225" y="116" text-anchor="middle" class="small">"pick one"</text>
+  <path class="arrow" d="M 430,94 L 570,138"/>
+  <text x="535" y="116" text-anchor="middle" class="small">"pick one"</text>
+  <path class="arrow" d="M 200,138 L 345,96"/>
+  <path class="arrow" d="M 560,138 L 415,96"/>
+  <text x="380" y="130" text-anchor="middle" class="small">referee collects both choices, then its model judges the winner</text>
+</svg>
+<figcaption>The referee finds each player by its <code>AgentId</code> and sends it a message.
+<strong>Agents interacting through the runtime — that is the lesson, not the game.</strong></figcaption>
+</figure>
+
+<h2>The full lab</h2>
+<p>Here is the complete file: the disagreeable agent, the LLM-backed agent, and the three-way game.</p>
+
+<pre data-file="5_autogen/3_lab3_autogen_core.py" data-lang="py" data-tag="complete file"><code>from dataclasses import dataclass
+from autogen_core import AgentId, MessageContext, RoutedAgent, message_handler
+from autogen_core import SingleThreadedAgentRuntime
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.messages import TextMessage
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+
+# Let's have a simple one!
+
+@dataclass
+class Message:
+    content: str
+
+
+class SimpleAgent(RoutedAgent):
+    def __init__(self) -&gt; None:
+        super().__init__("Simple")
+
+    @message_handler
+    async def on_my_message(self, message: Message, ctx: MessageContext) -&gt; Message:
+        return Message(content=f"This is {self.id.type}-{self.id.key}. You said '{message.content}' and I disagree.")
+        
+
+
+runtime = SingleThreadedAgentRuntime()
+await SimpleAgent.register(runtime, "simple_agent", lambda: SimpleAgent())
+
+runtime.start()
+
+agent_id = AgentId("simple_agent", "default")
+response = await runtime.send_message(Message("Well hi there!"), agent_id)
+print("&gt;&gt;&gt;", response.content)
+
+await runtime.stop()
+await runtime.close()
+
+
+class MyLLMAgent(RoutedAgent):
+    def __init__(self) -&gt; None:
+        super().__init__("LLMAgent")
+        model_client = OpenAIChatCompletionClient(model="gpt-4o-mini")
+        self._delegate = AssistantAgent("LLMAgent", model_client=model_client)
+
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        print(f"{self.id.type} received message: {message.content}")
+        text_message = TextMessage(content=message.content, source="user")
+        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)
+        reply = response.chat_message.content
+        print(f"{self.id.type} responded: {reply}")
+        return Message(content=reply)
+    
+
+
+from autogen_core import SingleThreadedAgentRuntime
+
+runtime = SingleThreadedAgentRuntime()
+await SimpleAgent.register(runtime, "simple_agent", lambda: SimpleAgent())
+await MyLLMAgent.register(runtime, "LLMAgent", lambda: MyLLMAgent())
+
+runtime.start()  # Start processing messages in the background.
+response = await runtime.send_message(Message("Hi there!"), AgentId("LLMAgent", "default"))
+print("&gt;&gt;&gt;", response.content)
+response =  await runtime.send_message(Message(response.content), AgentId("simple_agent", "default"))
+print("&gt;&gt;&gt;", response.content)
+response = await runtime.send_message(Message(response.content), AgentId("LLMAgent", "default"))
+
+await runtime.stop()
+await runtime.close()
+
+from autogen_ext.models.ollama import OllamaChatCompletionClient
+
+
+class Player1Agent(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OpenAIChatCompletionClient(model="gpt-4o-mini", temperature=1.0)
+        self._delegate = AssistantAgent(name, model_client=model_client)
+
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        text_message = TextMessage(content=message.content, source="user")
+        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)
+        return Message(content=response.chat_message.content)
+    
+class Player2Agent(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OllamaChatCompletionClient(model="llama3.2", temperature=1.0)
+        self._delegate = AssistantAgent(name, model_client=model_client)
+
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        text_message = TextMessage(content=message.content, source="user")
+        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)
+        return Message(content=response.chat_message.content)
+
+JUDGE = "You are judging a game of rock, paper, scissors. The players have made these choices:\n"
+
+class RockPaperScissorsAgent(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OpenAIChatCompletionClient(model="gpt-4o-mini", temperature=1.0)
+        self._delegate = AssistantAgent(name, model_client=model_client)
+
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        instruction = "You are playing rock, paper, scissors. Respond only with the one word, one of the following: rock, paper, or scissors."
+        message = Message(content=instruction)
+        inner_1 = AgentId("player1", "default")
+        inner_2 = AgentId("player2", "default")
+        response1 = await self.send_message(message, inner_1)
+        response2 = await self.send_message(message, inner_2)
+        result = f"Player 1: {response1.content}\nPlayer 2: {response2.content}\n"
+        judgement = f"{JUDGE}{result}Who wins?"
+        message = TextMessage(content=judgement, source="user")
+        response = await self._delegate.on_messages([message], ctx.cancellation_token)
+        return Message(content=result + response.chat_message.content)
+
+
+runtime = SingleThreadedAgentRuntime()
+await Player1Agent.register(runtime, "player1", lambda: Player1Agent("player1"))
+await Player2Agent.register(runtime, "player2", lambda: Player2Agent("player2"))
+await RockPaperScissorsAgent.register(runtime, "rock_paper_scissors", lambda: RockPaperScissorsAgent("rock_paper_scissors"))
+runtime.start()
+
+agent_id = AgentId("rock_paper_scissors", "default")
+message = Message(content="go")
+response = await runtime.send_message(message, agent_id)
+print(response.content)
+
+await runtime.stop()
+await runtime.close()</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–9</td><td><code>from autogen_core import AgentId, MessageContext, RoutedAgent, message_handler<br>from autogen_core import SingleThreadedAgentRuntime<br>from autogen_agentchat.agents import AssistantAgent<br>…<br>load_dotenv(override=True)</code></td><td>The Core imports: <code>AgentId</code> (identity), <code>RoutedAgent</code> (base class), <code>message_handler</code> (the decorator), <code>MessageContext</code> (extra info passed to a handler), and <code>SingleThreadedAgentRuntime</code> (the standalone runtime). It also pulls in AgentChat's <code>AssistantAgent</code> for the agents that need a brain.</td></tr>
+<tr><td>14–16</td><td><code>@dataclass<br>class Message:<br>    content: str</code></td><td>Our own message type. A <code>@dataclass</code> is a class that just holds data with no behaviour, which fits a message perfectly. Here it holds one string, <code>content</code>. Core agents will pass these to each other. You could make it richer with more fields.</td></tr>
+<tr><td>19–26</td><td><code>class SimpleAgent(RoutedAgent):<br>    def __init__(self) -&gt; None:<br>        super().__init__("Simple")<br>    @message_handler<br>    async def on_my_message(self, message: Message, ctx: MessageContext) -&gt; Message:<br>        return Message(content=f"This is {self.id.type}-{self.id.key}. You said '{message.content}' and I disagree.")</code></td><td>The simplest possible Core agent. It subclasses <code>RoutedAgent</code>, passes a description to the parent, and has one handler. The <code>@message_handler</code> marks the method as a message target; its <code>message: Message</code> parameter is how Core knows to route <code>Message</code> objects here. It returns a new <code>Message</code> that names itself (<code>self.id.type</code> / <code>self.id.key</code>) and disagrees. No LLM involved.</td></tr>
+<tr><td>29–30</td><td><code>runtime = SingleThreadedAgentRuntime()<br>await SimpleAgent.register(runtime, "simple_agent", lambda: SimpleAgent())</code></td><td>Creates a standalone runtime and registers the agent <em>type</em> under the name <code>"simple_agent"</code>. The <code>lambda</code> is a factory: the runtime calls it to build an instance when one is needed. Registering does not create an agent yet — it tells the runtime such a type exists.</td></tr>
+<tr><td>32</td><td><code>runtime.start()</code></td><td>Starts the runtime so it begins processing messages in the background. Until you start it, messages go nowhere.</td></tr>
+<tr><td>34–36</td><td><code>agent_id = AgentId("simple_agent", "default")<br>response = await runtime.send_message(Message("Well hi there!"), agent_id)<br>print("&gt;&gt;&gt;", response.content)</code></td><td>Builds the id (type <code>"simple_agent"</code>, key <code>"default"</code>) and sends it a message through the runtime. The runtime instantiates the agent if needed, routes the message to its handler, and returns the reply. The print shows the disagreeable response.</td></tr>
+<tr><td>38–39</td><td><code>await runtime.stop()<br>await runtime.close()</code></td><td>Stops and closes the runtime. AutoGen insists you do this before starting another, so each example tidies up after itself. Forgetting it can leave a runtime running.</td></tr>
+<tr><td>42–55</td><td><code>class MyLLMAgent(RoutedAgent):<br>    def __init__(self) -&gt; None:<br>        super().__init__("LLMAgent")<br>        model_client = OpenAIChatCompletionClient(model="gpt-4o-mini")<br>        self._delegate = AssistantAgent("LLMAgent", model_client=model_client)<br>    @message_handler<br>    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:<br>        …<br>        text_message = TextMessage(content=message.content, source="user")<br>        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)<br>        reply = response.chat_message.content<br>        return Message(content=reply)</code></td><td>A Core agent with a brain. In <code>__init__</code> it builds an AgentChat <code>AssistantAgent</code> and stores it as <code>self._delegate</code> (the underscore signals "internal"). Its handler converts our <code>Message</code> into an AgentChat <code>TextMessage</code>, calls the delegate's <code>on_messages</code> — reusing <code>ctx.cancellation_token</code> from the context — and wraps the reply back into our <code>Message</code>. Note the two message types living side by side.</td></tr>
+<tr><td>59–67</td><td><code>runtime = SingleThreadedAgentRuntime()<br>await SimpleAgent.register(runtime, "simple_agent", lambda: SimpleAgent())<br>await MyLLMAgent.register(runtime, "LLMAgent", lambda: MyLLMAgent())<br>runtime.start()<br>response = await runtime.send_message(Message("Hi there!"), AgentId("LLMAgent", "default"))<br>…<br>response = await runtime.send_message(Message(response.content), AgentId("simple_agent", "default"))</code></td><td>Registers both agents in one runtime, then plays them off each other: send "Hi there!" to the LLM agent, take its polite reply, and forward it to the disagreeable agent, which argues back. This is the first real agent-to-agent exchange — all through <code>send_message</code> and ids.</td></tr>
+<tr><td>72–73</td><td><code>await runtime.stop()<br>await runtime.close()</code></td><td>Clean up again before the next example.</td></tr>
+<tr><td>75–100</td><td><code>class Player1Agent(RoutedAgent):<br>    …<br>        model_client = OpenAIChatCompletionClient(model="gpt-4o-mini", temperature=1.0)<br>        self._delegate = AssistantAgent(name, model_client=model_client)<br>    …<br>class Player2Agent(RoutedAgent):<br>    …<br>        model_client = OllamaChatCompletionClient(model="llama3.2", temperature=1.0)</code></td><td>Two near-identical players. The only difference is the model behind each: player 1 uses cloud <code>gpt-4o-mini</code>, player 2 uses local <code>llama3.2</code> via Ollama. <code>temperature=1.0</code> makes their choices more random, so the game is not always the same. Each just forwards the incoming message to its delegate and returns the reply.</td></tr>
+<tr><td>102–122</td><td><code>JUDGE = "You are judging a game of rock, paper, scissors…"<br>class RockPaperScissorsAgent(RoutedAgent):<br>    …<br>    async def handle_my_message_type(self, message, ctx):<br>        instruction = "You are playing rock, paper, scissors. Respond only with the one word…"<br>        inner_1 = AgentId("player1", "default")<br>        inner_2 = AgentId("player2", "default")<br>        response1 = await self.send_message(message, inner_1)<br>        response2 = await self.send_message(message, inner_2)<br>        …<br>        return Message(content=result + response.chat_message.content)</code></td><td>The referee. Note it calls <code>self.send_message(...)</code> — an agent can message other agents directly through the runtime it belongs to. It looks up each player by its <code>AgentId</code>, sends the same "pick one word" instruction, collects both answers, builds a judging prompt, and asks its own delegate who wins. The returned message contains both choices and the verdict.</td></tr>
+<tr><td>125–134</td><td><code>runtime = SingleThreadedAgentRuntime()<br>await Player1Agent.register(runtime, "player1", lambda: Player1Agent("player1"))<br>await Player2Agent.register(runtime, "player2", lambda: Player2Agent("player2"))<br>await RockPaperScissorsAgent.register(runtime, "rock_paper_scissors", lambda: RockPaperScissorsAgent("rock_paper_scissors"))<br>runtime.start()<br>agent_id = AgentId("rock_paper_scissors", "default")<br>response = await runtime.send_message(Message(content="go"), agent_id)<br>print(response.content)</code></td><td>Registers all three agent types, starts the runtime, and kicks the whole thing off by sending a single "go" to the referee. The referee's handler does the rest — messaging the players and judging — so one message triggers a small cascade of agent-to-agent messages.</td></tr>
+<tr><td>136–137</td><td><code>await runtime.stop()<br>await runtime.close()</code></td><td>The usual tidy-up. Always stop and close a runtime when you are done with it.</td></tr>
+</table></div>
+
+<div class="callout ok">
+<strong>What you should see.</strong> The simple agent replies "This is simple_agent-default. You said 'Well
+hi there!' and I disagree." The LLM agent answers politely, and when its reply is forwarded, the simple agent
+disagrees with it. The game prints something like "Player 1: rock / Player 2: scissors / Player 1 wins
+because rock beats scissors." Because temperature is 1.0, the choices and winner change each run.
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes.</strong>
+<ul>
+<li><strong>Not starting the runtime.</strong> Messages sent before <code>runtime.start()</code> are never processed.</li>
+<li><strong>Forgetting stop and close.</strong> AutoGen wants each runtime stopped and closed before you build the next; skipping it can cause errors on the following example.</li>
+<li><strong>Confusing the two message types.</strong> <code>Message</code> is your Core dataclass; <code>TextMessage</code> is AgentChat's. Mixing them up where one is expected raises errors. Some people alias one to keep them clear.</li>
+<li><strong>Ollama not running for player 2.</strong> Player 2 uses local <code>llama3.2</code>, so Ollama must be started and the model pulled, or that agent's call fails.</li>
+<li><strong>Wrong AgentId.</strong> The type and key must match what you registered (<code>"player1"</code>, <code>"default"</code>), or the runtime cannot find the agent.</li>
+</ul>
+</div>
+
+<h2>In TypeScript</h2>
+<p>AutoGen Core is a Python runtime (Microsoft's other implementation is .NET). There is no JavaScript port,
+so none of <code>RoutedAgent</code>, <code>@message_handler</code>, <code>AgentId</code> or
+<code>SingleThreadedAgentRuntime</code> exists in TypeScript. The Week 5 React demo does not reproduce Core;
+it only shows a chat-style UI. Core work is Python work.</p>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>AutoGen Core separates message <em>delivery</em> (the framework's job) from agent <em>logic</em> (yours).</li>
+<li>Messages are your own <code>@dataclass</code>; agents subclass <code>RoutedAgent</code> and are management wrappers, not LLMs.</li>
+<li>Each agent has an <code>AgentId</code> of a type plus a key, which is how any agent addresses any other.</li>
+<li>A method marked <code>@message_handler</code> receives messages; Core routes each message to the handler whose parameter matches its type.</li>
+<li>The standalone <code>SingleThreadedAgentRuntime</code> lifecycle is register a type, <code>start()</code>, <code>send_message()</code>, then <code>stop()</code> and <code>close()</code>.</li>
+<li>An agent gains intelligence by delegating to an AgentChat <code>AssistantAgent</code>; an agent can message others with <code>self.send_message</code>, as the rock-paper-scissors referee does.</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Honesty note.</strong> The disagreeable <code>SimpleAgent</code> uses no model, so it runs anywhere.
+The LLM agent and player 1 call <code>gpt-4o-mini</code> and need an <code>OPENAI_API_KEY</code>; player 2
+uses local <code>llama3.2</code>. For this guide we verified a Core message-passing example against local
+Ollama; the cloud calls are shown as in the course and were not re-run live.
+</div>
+
+<nav class="pager">
+<a class="prev" href="26-w5d2.html"><small>← Previous · Step 26</small>Week 5 · Day 2 — Multimodal, Structured Output and an Evaluator</a>
+<a class="next" href="28-w5d4.html"><small>Next · Step 28 →</small>Week 5 · Day 4 — Distributed Agents</a>
+</nav>
+</main>
+</body>
+</html>
