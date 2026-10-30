@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>27 · Week 5 · Day 3 — Vector Stores and Visualizing Embeddings</title>
+<meta name="description" content="Store embeddings in Chroma, then actually see them: project the high-dimensional vectors down to 2-D/3-D with t-SNE to watch similar documents cluster together.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 27/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 27 of 48 · Week 5 · Day 3 · 3 lessons</div>
+  <h1>Week 5 · Day 3 — Vector Stores and Visualizing Embeddings</h1>
+  <p class="lead">Store embeddings in Chroma, then actually see them: project the high-dimensional vectors down to 2-D/3-D with t-SNE to watch similar documents cluster together.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>On Days 1 and 2 we turned our documents into <a class="term" href="glossary.html#chunk">chunks</a> and then into
+<a class="term" href="glossary.html#vector-embedding">vector embeddings</a> — long lists of numbers that capture the
+<em>meaning</em> of each piece of text. Today we do two things with those numbers. First we store them in a
+<a class="term" href="glossary.html#vector-database">vector database</a> called <a class="term" href="glossary.html#chroma">Chroma</a>,
+so they are saved on disk and ready to search. Then we <strong>visualize</strong> them: we flatten the high-dimensional
+vectors down to two or three dimensions with a technique called <a class="term" href="glossary.html#t-sne">t-SNE</a> and draw
+them as a coloured scatter plot. Seeing documents of the same kind land near each other is the moment embeddings stop
+feeling like magic and start feeling like meaning turned into geometry.</p>
+
+<p>This is the session the instructor describes as “finally getting to play with vectors.” It is deliberately
+hands-on and visual — the whole point is to build intuition before we wire up a full question-answering pipeline
+on Day 4.</p>
+
+<div class="callout"><strong>Honesty note.</strong> The code below is shown exactly as in the course notebook, normalised to
+the video’s models. It was <strong>not run live here</strong> (building the store calls the paid OpenAI embeddings API).
+The numbers quoted from the lesson — 123 chunks and 1,536 dimensions — are what the instructor sees on screen.</div>
+
+<h2>What a vector store is for</h2>
+
+<p>A vector is just a point in space. An embedding with 1,536 numbers
+is a point in 1,536-dimensional space, placed so that texts with similar meaning sit close together. A vector database is a
+store built to hold millions of these points and answer one question fast: <em>which stored vectors are closest to this new
+one?</em> That closeness search is what later powers <a class="term" href="glossary.html#semantic-search">semantic search</a> and
+retrieval. Today we only build the store and look at it; the searching comes next.</p>
+
+<details class="primer"><summary>New to vector databases and Chroma? What they are and why they matter</summary>
+<p>An ordinary database finds rows by exact matches: “give me the customer whose id is 42.” A <strong>vector
+database</strong> finds rows by <em>nearness</em>: “give me the chunks whose meaning is closest to this question.” It
+stores a vector next to each piece of text and can rank all of them by distance in milliseconds.</p>
+<p><strong>Chroma</strong> is a popular open-source vector database. The instructor notes that many regular databases (for example
+MongoDB) can now hold vectors too, but Chroma was built for this from the start and is very easy to use. In our project it saves
+everything to local files using SQLite, inside a folder we name <code>vector_db</code>. Deleting that folder resets the store.</p></details>
+
+<details class="primer"><summary>New to dimensions and t-SNE? What “projecting down” means</summary>
+<p>We can picture points in 2-D (a sheet of paper) or 3-D (a room). We cannot picture 1,536-D at all. <strong>Dimensionality
+reduction</strong> is a family of techniques that squeeze many dimensions down to two or three while trying to keep the overall
+shape — points that were far apart stay far apart, points that were close stay close.</p>
+<p><strong>t-SNE</strong> (t-distributed Stochastic Neighbor Embedding) is the one used here. You tell it how many dimensions you
+want (<code>n_components=2</code>) and give it a random seed (<code>random_state=42</code>) so the picture is reproducible, then
+call <code>fit_transform</code> to get the reduced points. It is excellent for <em>seeing</em> clusters, but it is only a
+visualization — see the warning below.</p></details>
+
+<details class="primer"><summary>Why visualize embeddings at all?</summary>
+<p>You never need a picture to run retrieval; the computer compares the full 1,536-D vectors directly. The picture is for
+<em>you</em>. When you watch chunks from the same folder gather into the same region — without ever telling the model which
+folder they came from — you understand, in one glance, that the embedding model really did capture meaning. That intuition
+makes every later design choice (chunk size, overlap, which store) easier to reason about.</p></details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 155" role="img" aria-label="Day 3 pipeline from chunks to embeddings to Chroma to t-SNE to a scatter plot">
+<rect class="box" x="10" y="44" width="120" height="58" rx="8"/>
+<text x="70" y="69" text-anchor="middle">Chunks</text>
+<text x="70" y="87" text-anchor="middle" class="small">123 pieces</text>
+<rect class="box" x="158" y="44" width="120" height="58" rx="8"/>
+<text x="218" y="69" text-anchor="middle">OpenAI</text>
+<text x="218" y="87" text-anchor="middle" class="small">embeddings</text>
+<rect class="box-solid" x="306" y="44" width="120" height="58" rx="8"/>
+<text x="366" y="69" text-anchor="middle" class="on-solid">Chroma</text>
+<text x="366" y="87" text-anchor="middle" class="on-solid small">vector store</text>
+<rect class="box" x="454" y="44" width="120" height="58" rx="8"/>
+<text x="514" y="69" text-anchor="middle">t-SNE</text>
+<text x="514" y="87" text-anchor="middle" class="small">to 2-D</text>
+<rect class="box" x="602" y="44" width="120" height="58" rx="8"/>
+<text x="662" y="69" text-anchor="middle">Plotly</text>
+<text x="662" y="87" text-anchor="middle" class="small">scatter</text>
+<path class="arrow" d="M 132,73 H 156"/>
+<path class="arrow" d="M 280,73 H 304"/>
+<path class="arrow arrow-accent" d="M 428,73 H 452"/>
+<path class="arrow arrow-accent" d="M 576,73 H 600"/>
+<text x="366" y="28" text-anchor="middle" class="label">store</text>
+<text x="588" y="28" text-anchor="middle" class="label accent">visualize</text>
+</svg>
+<figcaption>Day 3 has two passes over the same vectors: first build the store (left), then pull the vectors back out and
+project them for the eye (right). <strong>Storing and visualizing are separate steps.</strong></figcaption>
+</figure>
+
+<h2>The code</h2>
+
+<p>The whole lab fits in one file. It loads the knowledge base, chunks it, embeds each chunk, builds the Chroma store, then pulls
+every vector back out and plots it in 2-D and 3-D. The instructor’s big point: building the vector store is a single line
+of code — <a class="term" href="glossary.html#langchain">LangChain</a> hides all the glue.</p>
+
+<pre data-file="week5/day3.py" data-lang="py" data-tag="complete file"><code>import os
+import glob
+import numpy as np
+from dotenv import load_dotenv
+from langchain_openai import OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from sklearn.manifold import TSNE
+import plotly.graph_objects as go
+
+MODEL = "gpt-4o-mini"
+db_name = "vector_db"
+load_dotenv(override=True)
+
+# Load in everything in the knowledge base using LangChain's loaders
+
+folders = glob.glob("knowledge-base/*")
+
+documents = []
+for folder in folders:
+    doc_type = os.path.basename(folder)
+    loader = DirectoryLoader(folder, glob="**/*.md", loader_cls=TextLoader, loader_kwargs={'encoding': 'utf-8'})
+    folder_docs = loader.load()
+    for doc in folder_docs:
+        doc.metadata["doc_type"] = doc_type
+        documents.append(doc)
+
+# Divide into chunks using the RecursiveCharacterTextSplitter
+
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+chunks = text_splitter.split_documents(documents)
+print(f"Divided into {len(chunks)} chunks")
+
+# Pick an embedding model that turns each chunk into a vector
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# Delete the collection if it already exists, so we don't add vectors twice
+
+if os.path.exists(db_name):
+    Chroma(persist_directory=db_name, embedding_function=embeddings).delete_collection()
+
+# Create the Chroma vector store from the chunks - one line does it all
+
+vectorstore = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=db_name)
+print(f"Vectorstore created with {vectorstore._collection.count()} documents")
+
+# Let's investigate the vectors
+
+collection = vectorstore._collection
+count = collection.count()
+
+sample_embedding = collection.get(limit=1, include=["embeddings"])["embeddings"][0]
+dimensions = len(sample_embedding)
+print(f"There are {count:,} vectors with {dimensions:,} dimensions in the vector store")
+
+# Prework: pull every vector, its text and its metadata back out
+
+result = collection.get(include=['embeddings', 'documents', 'metadatas'])
+vectors = np.array(result['embeddings'])
+documents = result['documents']
+metadatas = result['metadatas']
+doc_types = [metadata['doc_type'] for metadata in metadatas]
+colors = [['blue', 'green', 'red', 'orange'][['products', 'employees', 'contracts', 'company'].index(t)] for t in doc_types]
+
+# We humans find it easier to visualize things in 2D!
+# Reduce the dimensionality of the vectors to 2D using t-SNE
+# (t-distributed stochastic neighbor embedding)
+
+tsne = TSNE(n_components=2, random_state=42)
+reduced_vectors = tsne.fit_transform(vectors)
+
+# Create the 2D scatter plot
+fig = go.Figure(data=[go.Scatter(
+    x=reduced_vectors[:, 0],
+    y=reduced_vectors[:, 1],
+    mode='markers',
+    marker=dict(size=5, color=colors, opacity=0.8),
+    text=[f"Type: {t}&lt;br&gt;Text: {d[:100]}..." for t, d in zip(doc_types, documents)],
+    hoverinfo='text'
+)])
+
+fig.update_layout(title='2D Chroma Vector Store Visualization',
+    scene=dict(xaxis_title='x', yaxis_title='y'),
+    width=800,
+    height=600,
+    margin=dict(r=20, b=10, l=10, t=40)
+)
+
+fig.show()
+
+# Let's try 3D!
+
+tsne = TSNE(n_components=3, random_state=42)
+reduced_vectors = tsne.fit_transform(vectors)
+
+# Create the 3D scatter plot
+fig = go.Figure(data=[go.Scatter3d(
+    x=reduced_vectors[:, 0],
+    y=reduced_vectors[:, 1],
+    z=reduced_vectors[:, 2],
+    mode='markers',
+    marker=dict(size=5, color=colors, opacity=0.8),
+    text=[f"Type: {t}&lt;br&gt;Text: {d[:100]}..." for t, d in zip(doc_types, documents)],
+    hoverinfo='text'
+)])
+
+fig.update_layout(
+    title='3D Chroma Vector Store Visualization',
+    scene=dict(xaxis_title='x', yaxis_title='y', zaxis_title='z'),
+    width=900,
+    height=700,
+    margin=dict(r=10, b=10, l=10, t=40)
+)
+
+fig.show()</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–3</td><td><code>import os, glob, numpy</code></td><td><code>os</code> and <code>glob</code> find folders and files on disk; <code>numpy</code> (as <code>np</code>) turns the list of vectors into a fast numeric array for t-SNE. Without numpy the plotting and slicing (<code>vectors[:, 0]</code>) would not work.</td></tr>
+<tr><td>4</td><td><code>from dotenv import load_dotenv</code></td><td>Lets us read the <code>.env</code> file so the OpenAI key is available as an environment variable, never hard-coded.</td></tr>
+<tr><td>5–6</td><td><code>OpenAIEmbeddings</code>, <code>Chroma</code></td><td>The two stars of the lab: <code>OpenAIEmbeddings</code> turns text into vectors; <code>Chroma</code> is the vector database wrapper. Both come from LangChain packages.</td></tr>
+<tr><td>7–8</td><td><code>DirectoryLoader, TextLoader</code>, <code>RecursiveCharacterTextSplitter</code></td><td>The loaders read every Markdown file in the knowledge base; the splitter breaks long documents into overlapping chunks. These are the same tools explained on Day 2.</td></tr>
+<tr><td>9–10</td><td><code>from sklearn.manifold import TSNE</code>, <code>plotly.graph_objects as go</code></td><td>The two new imports for today: <code>TSNE</code> (from scikit-learn) does the dimensionality reduction; <code>plotly</code> draws interactive scatter plots you can hover and rotate.</td></tr>
+<tr><td>12–14</td><td><code>MODEL</code>, <code>db_name</code>, <code>load_dotenv(...)</code></td><td><code>db_name = "vector_db"</code> is the folder Chroma will write to. <code>load_dotenv(override=True)</code> loads the key, overriding any stale value already in the shell.</td></tr>
+<tr><td>18–27</td><td><code>for folder in folders: ... documents.append(doc)</code></td><td>Loops over each sub-folder of <code>knowledge-base</code> (contracts, products, employees, company). <code>os.path.basename(folder)</code> is the folder name; it is stored on every document as <code>metadata["doc_type"]</code>. That label is what we later colour by — the embedding model never sees it.</td></tr>
+<tr><td>31–33</td><td><code>chunks = text_splitter.split_documents(documents)</code></td><td>Splits the loaded documents into ~1,000-character chunks with 200 characters of overlap. In the lesson this produces <strong>123 chunks</strong>, printed here so you can confirm the count.</td></tr>
+<tr><td>37</td><td><code>embeddings = OpenAIEmbeddings(model="text-embedding-3-small")</code></td><td>Creates the embedding model. Each chunk sent to it comes back as a vector of <strong>1,536</strong> numbers. (The repo also offers a free local HuggingFace model; we use OpenAI to match the video’s 1,536-D result.)</td></tr>
+<tr><td>41–42</td><td><code>if os.path.exists(db_name): ...delete_collection()</code></td><td>If the <code>vector_db</code> folder already exists, empty it first. Without this, re-running the file would add a second copy of every vector and the counts would double.</td></tr>
+<tr><td>46–47</td><td><code>vectorstore = Chroma.from_documents(...)</code></td><td>The one magic line. It embeds all 123 chunks and stores them in Chroma in a single call, passing three things: the <code>documents</code> (our chunks), the <code>embedding</code> model, and the <code>persist_directory</code>. <code>vectorstore._collection.count()</code> should print 123.</td></tr>
+<tr><td>51–56</td><td><code>collection = vectorstore._collection</code> … <code>dimensions = len(sample_embedding)</code></td><td>Reaches into the underlying Chroma collection. <code>collection.get(limit=1, include=["embeddings"])</code> pulls one stored vector back; <code>len(...)</code> on it reports <strong>1,536</strong> dimensions. This proves the vectors really are stored.</td></tr>
+<tr><td>60</td><td><code>result = collection.get(include=['embeddings', 'documents', 'metadatas'])</code></td><td>Pulls <em>everything</em> back out at once: every vector, its original text, and its metadata. This is the raw material for the plot.</td></tr>
+<tr><td>61–64</td><td><code>vectors = np.array(...)</code> … <code>doc_types = [...]</code></td><td>Unpacks the result into parallel lists: <code>vectors</code> (a numpy array t-SNE can use), <code>documents</code> (the text, used for hover labels), and <code>doc_types</code> (each chunk’s folder name).</td></tr>
+<tr><td>65</td><td><code>colors = [['blue','green','red','orange'][...index(t)] ...]</code></td><td>Maps each <code>doc_type</code> to a colour: products→blue, employees→green, contracts→red, company→orange. This is only for the plot; it does not change the vectors.</td></tr>
+<tr><td>71–72</td><td><code>tsne = TSNE(n_components=2, random_state=42)</code><br><code>reduced_vectors = tsne.fit_transform(vectors)</code></td><td>Projects every 1,536-D vector down to <strong>2 dimensions</strong>. <code>random_state=42</code> fixes the random seed so the picture is the same each run. <code>fit_transform</code> returns one (x, y) pair per chunk.</td></tr>
+<tr><td>75–82</td><td><code>fig = go.Figure(data=[go.Scatter(...)])</code></td><td>Builds the scatter plot. <code>x</code>/<code>y</code> are the reduced coordinates; <code>marker=dict(color=colors)</code> colours each dot by document type; the <code>text=[...]</code> list gives each point a hover label showing its type and the first 100 characters of its chunk (<code>d[:100]</code>).</td></tr>
+<tr><td>84–91</td><td><code>fig.update_layout(...)</code>, <code>fig.show()</code></td><td>Sets the title and size, then opens the interactive 2-D chart in the browser.</td></tr>
+<tr><td>95–96</td><td><code>tsne = TSNE(n_components=3, ...)</code></td><td>The 3-D version — almost the same code with <code>n_components=3</code>. The instructor notes 3-D looks impressive and can be rotated, but 2-D is often clearer.</td></tr>
+<tr><td>99–117</td><td><code>go.Scatter3d(...)</code> … <code>fig.show()</code></td><td>Same plot in three dimensions: it adds a <code>z</code> axis from the third reduced coordinate and uses <code>Scatter3d</code> instead of <code>Scatter</code>. Everything else — colours, hover text — is identical.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="A 1536-number vector being projected by t-SNE down to a single 2-D point">
+<rect class="box-info" x="30" y="40" width="210" height="120" rx="8"/>
+<text x="135" y="66" text-anchor="middle" class="title">one chunk’s vector</text>
+<text x="135" y="90" text-anchor="middle" class="small">1,536 numbers</text>
+<text x="135" y="118" text-anchor="middle" class="mono small">[0.021, -0.004,</text>
+<text x="135" y="136" text-anchor="middle" class="mono small">0.317, … ]</text>
+<path class="arrow arrow-accent" d="M 242,100 H 468"/>
+<text x="355" y="90" text-anchor="middle" class="label accent">t-SNE projects down</text>
+<rect class="box" x="472" y="40" width="258" height="120" rx="8"/>
+<line class="line" x1="500" y1="140" x2="710" y2="140"/>
+<line class="line" x1="510" y1="150" x2="510" y2="55"/>
+<text x="715" y="152" text-anchor="end" class="small">x</text>
+<text x="500" y="52" text-anchor="middle" class="small">y</text>
+<circle class="dot-info" cx="600" cy="95" r="6"/>
+<text x="612" y="92" class="small mono">(x, y)</text>
+</svg>
+<figcaption>t-SNE squeezes 1,536 numbers into just two so a single point can be drawn. Coordinates are illustrative.
+<strong>The 2-D point is a shadow of the full vector.</strong></figcaption>
+</figure>
+
+<h2>What the plot shows</h2>
+
+<p>Each dot is one chunk. Its colour is its folder (its <code>doc_type</code>), and its position comes from t-SNE. The striking
+result: chunks from the same folder gather into the same region, even though we never told the embedding model which folder a
+chunk came from. The model placed them by meaning alone.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Illustrative scatter plot with four coloured clusters of dots and a legend">
+<rect class="box" x="20" y="20" width="490" height="260" rx="8"/>
+<circle class="dot-ok" cx="110" cy="80" r="6"/>
+<circle class="dot-ok" cx="130" cy="95" r="6"/>
+<circle class="dot-ok" cx="95" cy="105" r="6"/>
+<circle class="dot-ok" cx="125" cy="70" r="6"/>
+<circle class="dot-bad" cx="400" cy="100" r="6"/>
+<circle class="dot-bad" cx="420" cy="115" r="6"/>
+<circle class="dot-bad" cx="385" cy="125" r="6"/>
+<circle class="dot-bad" cx="415" cy="85" r="6"/>
+<circle class="dot-info" cx="250" cy="225" r="6"/>
+<circle class="dot-info" cx="270" cy="235" r="6"/>
+<circle class="dot-info" cx="235" cy="210" r="6"/>
+<circle class="dot-info" cx="285" cy="215" r="6"/>
+<circle class="dot-warn" cx="255" cy="150" r="6"/>
+<circle class="dot-warn" cx="270" cy="160" r="6"/>
+<circle class="dot-warn" cx="240" cy="160" r="6"/>
+<rect class="box2" x="540" y="70" width="200" height="160" rx="8"/>
+<circle class="dot-ok" cx="562" cy="100" r="6"/>
+<text x="578" y="104">employees</text>
+<circle class="dot-bad" cx="562" cy="130" r="6"/>
+<text x="578" y="134">contracts</text>
+<circle class="dot-info" cx="562" cy="160" r="6"/>
+<text x="578" y="164">products</text>
+<circle class="dot-warn" cx="562" cy="190" r="6"/>
+<text x="578" y="194">company (central)</text>
+</svg>
+<figcaption>Illustration (simplified); dot positions are illustrative. Same-colour chunks cluster together, and the
+“company” chunks sit in the middle because they relate to everything. <strong>Nearby means similar in
+meaning.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> In the terminal: <code>Divided into 123 chunks</code>, then
+<code>Vectorstore created with 123 documents</code>, then <code>There are 123 vectors with 1,536 dimensions in the vector
+store</code>. Then a browser tab opens with a scatter plot of 123 dots in four colours, with same-topic dots grouped into their
+own regions. Hovering a dot shows its type and the first 100 characters of that chunk. (These are the lesson’s numbers; we
+did not run it live.)</div>
+
+<div class="callout warn"><strong>t-SNE is for your eyes, not for retrieval.</strong> The x and y axes carry
+<em>no meaning</em> — t-SNE only tries to keep near things near, so the layout, rotation and spacing can change with the
+random seed or settings. Never search or measure distances on the 2-D/3-D coordinates. Real retrieval always compares the full
+1,536-dimensional vectors inside Chroma, which is what the next day builds. Also: if you re-run the build without the delete step
+(lines 41–42), you will get 246 vectors instead of 123.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Store then query flow: question to embedding to nearest vectors to prompt">
+<rect class="box" x="10" y="60" width="160" height="52" rx="8"/>
+<text x="90" y="90" text-anchor="middle">Your question</text>
+<rect class="box" x="200" y="60" width="160" height="52" rx="8"/>
+<text x="280" y="90" text-anchor="middle">Embed to a vector</text>
+<rect class="box-solid" x="390" y="60" width="160" height="52" rx="8"/>
+<text x="470" y="90" text-anchor="middle" class="on-solid">Chroma: nearest</text>
+<rect class="box" x="580" y="60" width="170" height="52" rx="8"/>
+<text x="665" y="90" text-anchor="middle">Top chunks to prompt</text>
+<path class="arrow" d="M 172,86 H 198"/>
+<path class="arrow arrow-accent" d="M 362,86 H 388"/>
+<path class="arrow arrow-accent" d="M 552,86 H 578"/>
+<text x="470" y="40" text-anchor="middle" class="label accent">semantic search</text>
+</svg>
+<figcaption>How the store earns its keep later: a question is embedded, Chroma returns the nearest stored vectors, and their
+chunks go into the prompt. This retrieval path (built on Day 4) is separate from today’s plot.
+<strong>You query by meaning, not keywords.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Anatomy of a Chroma collection: id, embedding, document and metadata columns">
+<rect class="box2" x="30" y="20" width="700" height="170" rx="8"/>
+<text x="380" y="44" text-anchor="middle" class="title">collection (vector_db)</text>
+<text x="105" y="74" text-anchor="middle" class="label">id</text>
+<text x="270" y="74" text-anchor="middle" class="label">embedding</text>
+<text x="470" y="74" text-anchor="middle" class="label">document</text>
+<text x="640" y="74" text-anchor="middle" class="label">metadata</text>
+<line class="line" x1="50" y1="84" x2="710" y2="84"/>
+<text x="105" y="112" text-anchor="middle" class="mono small">c1</text>
+<text x="270" y="112" text-anchor="middle" class="mono small">[0.02, -0.00, …]</text>
+<text x="470" y="112" text-anchor="middle" class="small">“Avery is …”</text>
+<text x="640" y="112" text-anchor="middle" class="small">employees</text>
+<text x="105" y="142" text-anchor="middle" class="mono small">c2</text>
+<text x="270" y="142" text-anchor="middle" class="mono small">[0.11, 0.07, …]</text>
+<text x="470" y="142" text-anchor="middle" class="small">“CarLLM …”</text>
+<text x="640" y="142" text-anchor="middle" class="small">products</text>
+<text x="105" y="172" text-anchor="middle" class="mono small">c3</text>
+<text x="270" y="172" text-anchor="middle" class="mono small">[0.05, -0.09, …]</text>
+<text x="470" y="172" text-anchor="middle" class="small">“Contract …”</text>
+<text x="640" y="172" text-anchor="middle" class="small">contracts</text>
+</svg>
+<figcaption>Each item in the Chroma collection keeps four things together, and <code>collection.get(...)</code> pulls the
+embeddings, documents and metadatas back out for us. <strong>The vector, its text and its label travel together.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Knowledge base folders mapping to the four plot colours">
+<rect class="box" x="300" y="20" width="160" height="44" rx="8"/>
+<text x="380" y="47" text-anchor="middle">knowledge-base/</text>
+<rect class="box" x="20" y="150" width="160" height="56" rx="8"/>
+<circle class="dot-ok" cx="42" cy="178" r="6"/>
+<text x="110" y="182" text-anchor="middle">employees</text>
+<rect class="box" x="200" y="150" width="160" height="56" rx="8"/>
+<circle class="dot-info" cx="222" cy="178" r="6"/>
+<text x="290" y="182" text-anchor="middle">products</text>
+<rect class="box" x="380" y="150" width="160" height="56" rx="8"/>
+<circle class="dot-bad" cx="402" cy="178" r="6"/>
+<text x="470" y="182" text-anchor="middle">contracts</text>
+<rect class="box" x="560" y="150" width="170" height="56" rx="8"/>
+<circle class="dot-warn" cx="582" cy="178" r="6"/>
+<text x="650" y="182" text-anchor="middle">company</text>
+<path class="arrow" d="M 350,66 L 120,148"/>
+<path class="arrow" d="M 368,66 L 290,148"/>
+<path class="arrow" d="M 392,66 L 470,148"/>
+<path class="arrow" d="M 410,66 L 640,148"/>
+</svg>
+<figcaption>Each folder becomes one colour on the plot through its chunk’s <code>doc_type</code>.
+<strong>The colour is a label we add; the clustering is the model’s own doing.</strong></figcaption>
+</figure>
+
+<h2>In TypeScript</h2>
+
+<p>On Days 1 and 2 we saw <code>ingest.ts</code>, the <a class="term" href="glossary.html#langchain-js">LangChain.js</a> data-prep
+script. That file already builds the equivalent of today’s vector store: after loading and splitting the documents it calls
+<code>MemoryVectorStore.fromDocuments(docs, embeddings)</code>, which embeds every chunk and holds the vectors in memory. It is the
+same idea as <code>Chroma.from_documents</code> in Python — one call does the embedding and the storing — just with an
+in-memory store instead of Chroma’s on-disk SQLite files, so there are no native dependencies to install.</p>
+
+<p>The visualization half of today has <strong>no direct browser equivalent here</strong>. Projecting vectors with t-SNE and
+drawing them with Plotly is a Python/matplotlib-style step that lives naturally in a Jupyter notebook; it is a one-off exploration
+to build intuition, not part of the running application. So there is no <code>ingest.ts</code> change to show for it — if you
+want to visualize the TypeScript store’s vectors, the practical route is to export them and plot them in Python exactly as
+above. The TypeScript project was type-checked and built; its embedding calls were not run live.</p>
+
+<div class="callout"><strong>Video vs repo.</strong> The video builds the store with OpenAI embeddings (1,536 dimensions), which
+is what we show. The current repo offers a free local option too — a HuggingFace model (<code>all-MiniLM-L6-v2</code>) —
+and simply swaps the one <code>embeddings = ...</code> line; that model returns 384 dimensions instead of 1,536, so your printed
+dimension count will differ. The repo also uses model <code>gpt-6-luna</code> in place of the video’s
+<code>gpt-4o-mini</code>, though that only matters for the question-answering days, not for today’s embeddings.</div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A vector database like Chroma stores a vector next to each chunk and
+finds the nearest ones fast; <code>Chroma.from_documents</code> embeds and stores all 123 chunks in a single line.</li>
+<li><code>collection.get(...)</code> pulls the vectors, text and metadata back out; each vector here has 1,536 dimensions.</li>
+<li>t-SNE projects those 1,536-D vectors down to 2-D (or 3-D) so Plotly can draw them; <code>random_state=42</code> keeps the
+picture reproducible.</li>
+<li>Colouring dots by folder shows same-topic chunks clustering on their own — proof the embeddings captured meaning, since
+the model never saw the folder labels.</li>
+<li>The plot is for intuition only: its axes are meaningless and you must never retrieve from the 2-D coordinates — real
+search uses the full vectors, coming on Day 4.</li>
+<li>In TypeScript, <code>ingest.ts</code> builds the store with <code>MemoryVectorStore.fromDocuments</code>; the t-SNE plot is a
+Python-only step.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="26-w5d2.html"><small>← Previous · Step 26</small>Week 5 · Day 2 — LangChain: Loaders, Splitters, Embeddings</a>
+<a class="next" href="28-w5d4.html"><small>Next · Step 28 →</small>Week 5 · Day 4 — The Full RAG Pipeline in LangChain</a>
+</nav>
+</main>
+</body>
+</html>

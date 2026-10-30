@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>28 · Week 5 · Day 4 — The Full RAG Pipeline in LangChain</title>
+<meta name="description" content="Put it together: a retriever finds the relevant chunks, the LLM answers from them, and conversation memory keeps the chat coherent - the complete RAG chain.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 28/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 28 of 48 · Week 5 · Day 4 · 3 lessons</div>
+  <h1>Week 5 · Day 4 — The Full RAG Pipeline in LangChain</h1>
+  <p class="lead">Put it together: a retriever finds the relevant chunks, the LLM answers from them, and conversation memory keeps the chat coherent - the complete RAG chain.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>Everything in Week 5 has been building to this page. You loaded the documents, split them into chunks,
+embedded them, and stored the vectors. Now you wire the last pieces together and get a working
+<a class="term" href="glossary.html#rag">RAG</a> pipeline: you type a question, a
+<a class="term" href="glossary.html#retriever">retriever</a> pulls the most relevant chunks out of the vector
+store, those chunks are dropped into the prompt as context, the model answers using them, and
+<a class="term" href="glossary.html#conversation-memory">conversation memory</a> keeps a multi-turn chat
+coherent. The instructor calls it a knowledge worker for the fictional insurance company Insurellm, and he
+is right that it is "stupid easy" once the earlier pieces are in place.</p>
+
+<p>On the Python side this is done with <a class="term" href="glossary.html#langchain">LangChain</a>, which
+wraps the three moving parts into small objects and glues them together with one chain. On the TypeScript
+side we build the same flow by hand with LangChain.js, so you can see exactly what the chain does under the
+covers. The two versions do the same job; the code-tabs below let you read either one.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 404" role="img" aria-label="The RAG flow from top to bottom: your question, the retriever embeds it and searches the vector store, the top k chunks become context, a prompt is built from the system prompt plus context plus history plus the question, the LLM answers, and you get an answer plus its sources">
+  <text x="380" y="24" text-anchor="middle" class="title">One question, start to finish</text>
+  <rect class="box" x="170" y="40" width="420" height="40" rx="8"/>
+  <text x="380" y="65" text-anchor="middle">1. Your question</text>
+  <path class="arrow-accent" d="M 380,80 V 100"/>
+  <rect class="box box-info" x="170" y="102" width="420" height="40" rx="8"/>
+  <text x="380" y="127" text-anchor="middle">2. Retriever: embed it, search the vector store</text>
+  <path class="arrow" d="M 380,142 V 162"/>
+  <rect class="box box-info" x="170" y="164" width="420" height="40" rx="8"/>
+  <text x="380" y="189" text-anchor="middle">3. Top k chunks become the context</text>
+  <path class="arrow" d="M 380,204 V 224"/>
+  <rect class="box" x="170" y="226" width="420" height="40" rx="8"/>
+  <text x="380" y="251" text-anchor="middle">4. System prompt + context + history + question</text>
+  <path class="arrow" d="M 380,266 V 286"/>
+  <rect class="box-solid" x="170" y="288" width="420" height="40" rx="8"/>
+  <text x="380" y="313" text-anchor="middle" class="on-solid">5. LLM (gpt-4o-mini) reads it and writes an answer</text>
+  <path class="arrow-ok" d="M 380,328 V 348"/>
+  <rect class="box box-ok" x="170" y="350" width="420" height="40" rx="8"/>
+  <text x="380" y="375" text-anchor="middle">6. Answer, plus the source documents</text>
+</svg>
+<figcaption>The whole pipeline, top to bottom. The model never searches your documents itself:
+<strong>the retriever finds the chunks and the prompt hands them over</strong>, so the model only has to
+read and answer.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to retrievers? What a retriever is and why we need one</summary>
+<p>A retriever is the component that takes a question and
+returns the handful of chunks most likely to answer it. It works by
+<a class="term" href="glossary.html#semantic-search">semantic search</a>: it turns your question into the same
+kind of vector (a list of numbers that captures meaning) that the chunks were turned into, then finds the
+chunks whose vectors sit closest to the question's vector. Because it compares meaning, not letters, it can
+match "auto insurance" to a document that only ever says "car cover". In the Python code you do not build the
+retriever from scratch — you take the vector store you already created and call <code>as_retriever()</code> on
+it, and LangChain wraps it in the standard retriever interface.</p>
+</details>
+
+<details class="primer"><summary>New to the RAG chain? How retrieve, stuff, and answer fit together</summary>
+<p>RAG stands for Retrieval-Augmented Generation. "Retrieval" is
+the retriever finding chunks; "augmented" means those chunks are added to the prompt; "generation" is the
+model writing the answer. The key idea is that the model answers from text you handed it in the prompt, not
+only from what it learned during training. That is why it can talk accurately about your private documents and
+stay up to date: change the <a class="term" href="glossary.html#knowledge-base">knowledge base</a> and the
+answers change, with no retraining. If the answer is not in the retrieved chunks, a good system prompt tells
+the model to say it does not know rather than guess.</p>
+</details>
+
+<details class="primer"><summary>New to conversation memory? Why follow-up questions work</summary>
+<p>Conversation memory is how the assistant
+remembers earlier turns. Without it, "What did she do before?" is meaningless — the model has no idea who
+"she" is. Memory keeps the earlier messages and sends them along with the new question, so the model can
+resolve "she" to a person mentioned a moment ago. In the Python version LangChain's
+<code>ConversationBufferMemory</code> stores the turns for you and the chain replays them on every call. In the
+TypeScript version there is no memory object: the caller passes the earlier turns in as a <code>history</code>
+array, and we turn them into messages ourselves. Same effect, built two different ways.</p>
+</details>
+
+<details class="primer"><summary>New to returning sources? Why the answer carries its documents</summary>
+<p>A RAG answer is only trustworthy if you can check it. That is why the TypeScript version returns not just
+the text but a <code>sources</code> list — the filenames of the documents the chunks came from. The retriever
+stores each chunk's origin in its <code>metadata.source</code>, so after retrieving we collect those filenames,
+remove duplicates, and hand them back. The chat UI can then show "answered from: employees/avery.md", which
+lets a reader verify the claim and builds trust in the system.</p>
+</details>
+
+<p>Here is the complete code in both languages. Python uses the LangChain chain; TypeScript builds the same
+flow step by step. Use the switch to read whichever you prefer.</p>
+
+<div class="code-tabs"><pre data-file="week5/day4.py" data-lang="py" data-tag="complete file"><code>import os
+import glob
+from dotenv import load_dotenv
+import gradio as gr
+
+from langchain.document_loaders import DirectoryLoader, TextLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_chroma import Chroma
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
+
+MODEL = "gpt-4o-mini"
+db_name = "vector_db"
+
+load_dotenv(override=True)
+
+# Load every Markdown file in the knowledge base, tagging each with its folder name.
+folders = glob.glob("knowledge-base/*")
+documents = []
+for folder in folders:
+    doc_type = os.path.basename(folder)
+    loader = DirectoryLoader(folder, glob="**/*.md", loader_cls=TextLoader)
+    folder_docs = loader.load()
+    for doc in folder_docs:
+        doc.metadata["doc_type"] = doc_type
+        documents.append(doc)
+
+# Split the documents into overlapping chunks (about 123 chunks here).
+text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+chunks = text_splitter.split_documents(documents)
+print(f"Total number of chunks: {len(chunks)}")
+
+# Embed every chunk and store the vectors in Chroma (each vector has 1536 dimensions).
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+if os.path.exists(db_name):
+    Chroma(persist_directory=db_name, embedding_function=embeddings).delete_collection()
+vectorstore = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=db_name)
+print(f"Vectorstore created with {vectorstore._collection.count()} documents")
+
+# The four lines that build the whole RAG pipeline.
+llm = ChatOpenAI(temperature=0.7, model_name=MODEL)
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+retriever = vectorstore.as_retriever()
+conversation_chain = ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever, memory=memory)
+
+# Ask one question to prove it works end to end.
+query = "Can you describe Insurellm in a few sentences"
+result = conversation_chain.invoke({"question": query})
+print(result["answer"])
+
+
+# Wrap the same chain in a Gradio chat UI. We ignore Gradio's own `history`
+# argument because the chain's memory already tracks the conversation.
+def chat(message, history):
+    result = conversation_chain.invoke({"question": message})
+    return result["answer"]
+
+
+gr.ChatInterface(chat, type="messages").launch()</code></pre><pre data-file="src/rag.ts" data-lang="ts" data-tag="complete file"><code>// Day 4 / Day 5 - The RAG pipeline (TypeScript port of the knowledge-worker project)
+//
+// The Python course wired a retriever + an LLM + conversation history into a
+// ConversationalRetrievalChain and served it with Gradio. Here we build the same
+// pieces with LangChain.js and expose a single `answer(question, history)` function
+// that the Hono server and the `npm run ask` CLI both reuse.
+//
+//   retriever (MemoryVectorStore.asRetriever) -&gt; context -&gt; ChatOpenAI (gpt-4o-mini) -&gt; answer
+//
+// Key-guarded: it imports cleanly with no API key; answer() only needs one at call time.
+import "dotenv/config";
+import { pathToFileURL } from "node:url";
+import { ChatOpenAI } from "@langchain/openai";
+import { SystemMessage, HumanMessage, AIMessage, type BaseMessage } from "@langchain/core/messages";
+import type { Document } from "@langchain/core/documents";
+import type { MemoryVectorStore } from "langchain/vectorstores/memory";
+import { buildVectorStore, hasOpenAIKey } from "./ingest.js";
+
+export const MODEL = "gpt-4o-mini";
+export const RETRIEVAL_K = 4;
+
+export type ChatMessage = { role: "user" | "assistant"; content: string };
+export type RagAnswer = { answer: string; sources: string[] };
+
+const SYSTEM_PROMPT = `You are a knowledgeable, friendly assistant representing the company Insurellm.
+You are chatting with a user about Insurellm, its employees and its products.
+Answer only from the context extracts provided below. Be accurate, relevant and complete.
+If the answer is not in the context, say you don't know.
+
+Context:
+{context}`;
+
+// Build the store once and reuse it across calls (embedding every request would be wasteful).
+let storePromise: Promise&lt;MemoryVectorStore&gt; | null = null;
+function getStore(): Promise&lt;MemoryVectorStore&gt; {
+  if (!storePromise) storePromise = buildVectorStore();
+  return storePromise;
+}
+
+// Turn the stored {role, content} history into LangChain message objects.
+function toHistoryMessages(history: ChatMessage[]): BaseMessage[] {
+  return history.map((m) =&gt;
+    m.role === "assistant" ? new AIMessage(m.content) : new HumanMessage(m.content),
+  );
+}
+
+// AIMessage.content can be a string or an array of content parts; normalise to a string.
+function contentToString(content: BaseMessage["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((part) =&gt; (typeof part === "string" ? part : "text" in part ? part.text : ""))
+    .join("");
+}
+
+// Retrieve the most relevant chunks for a question.
+export async function retrieve(question: string, k: number = RETRIEVAL_K): Promise&lt;Document[]&gt; {
+  const store = await getStore();
+  const retriever = store.asRetriever(k);
+  return retriever.invoke(question);
+}
+
+// The core RAG call: retrieve context, stuff it into the system prompt, ask the model.
+export async function answer(question: string, history: ChatMessage[] = []): Promise&lt;RagAnswer&gt; {
+  if (!hasOpenAIKey()) {
+    throw new Error("OPENAI_API_KEY is not set - the RAG pipeline needs it. See .env.example.");
+  }
+
+  const docs = await retrieve(question);
+  const context = docs
+    .map((d) =&gt; `Extract from ${d.metadata.source ?? "unknown"}:\n${d.pageContent}`)
+    .join("\n\n");
+
+  const llm = new ChatOpenAI({ model: MODEL, temperature: 0.2 });
+  const messages: BaseMessage[] = [
+    new SystemMessage(SYSTEM_PROMPT.replace("{context}", context)),
+    ...toHistoryMessages(history),
+    new HumanMessage(question),
+  ];
+
+  const reply = await llm.invoke(messages);
+
+  // De-duplicate the source filenames so the UI can show which docs were used.
+  const sources = [...new Set(docs.map((d) =&gt; String(d.metadata.source ?? "unknown")))];
+  return { answer: contentToString(reply.content), sources };
+}
+
+async function main(): Promise&lt;void&gt; {
+  const question = process.argv.slice(2).join(" ") || "Who won the IIOTY award?";
+  if (!hasOpenAIKey()) {
+    console.log("OPENAI_API_KEY not set - this demo needs it. See .env.example.");
+    console.log(`Would ask: "${question}"`);
+    return;
+  }
+  console.log(`Q: ${question}`);
+  const { answer: a, sources } = await answer(question);
+  console.log(`\nA: ${a}`);
+  console.log(`\nSources: ${sources.join(", ")}`);
+}
+
+// Only run the demo when executed directly (npm run ask), not when imported.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err) =&gt; {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}</code></pre></div>
+
+<div data-only="py">
+<p>The headline of the lesson is that the pipeline is built in <strong>four lines</strong> (lines 42–45): an
+LLM object, a memory object, a retriever, and the chain that ties them together. Everything above those lines
+is the document loading and embedding you already did on earlier days; everything below is using the chain.</p>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–4</td><td><code>import os</code> … <code>import gradio as gr</code></td><td>Standard-library and utility imports. <code>os</code> and <code>glob</code> find the document files on disk; <code>load_dotenv</code> loads your API key from <code>.env</code>; <code>gradio</code> draws the chat web page at the end.</td></tr>
+<tr><td>6–11</td><td><code>from langchain.document_loaders import DirectoryLoader, TextLoader</code> … <code>from langchain.chains import ConversationalRetrievalChain</code></td><td>The LangChain pieces. The loaders read files, <code>CharacterTextSplitter</code> cuts them into chunks, <code>OpenAIEmbeddings</code> turns chunks into vectors, <code>Chroma</code> is the vector store, <code>ConversationBufferMemory</code> holds the chat history, and <code>ConversationalRetrievalChain</code> is the chain that glues retriever + model + memory together. These are the three abstractions the instructor names: an LLM, a retriever, and memory.</td></tr>
+<tr><td>13–14</td><td><code>MODEL = "gpt-4o-mini"</code><br><code>db_name = "vector_db"</code></td><td>Names the model in one place (easy to swap later) and the folder where Chroma keeps its database. Kept as constants so they are not buried in the code below.</td></tr>
+<tr><td>16</td><td><code>load_dotenv(override=True)</code></td><td>Reads <code>.env</code> into the environment so the OpenAI key is available. <code>override=True</code> lets it replace any stale value already set.</td></tr>
+<tr><td>18–27</td><td><code>folders = glob.glob("knowledge-base/*")</code> … <code>documents.append(doc)</code></td><td>Walks each folder in the knowledge base, loads every Markdown file inside it, and tags each loaded document with its folder name in <code>metadata["doc_type"]</code> (employees, products, companies, contracts). The tag is what lets you later tell which kind of document an answer came from.</td></tr>
+<tr><td>29–32</td><td><code>text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)</code><br><code>chunks = text_splitter.split_documents(documents)</code></td><td>Splits the documents into overlapping chunks of about 1000 characters, with 200 characters of overlap so a sentence split across a boundary still appears whole in one chunk. The instructor gets about 123 chunks here. The print line confirms the count.</td></tr>
+<tr><td>34–35</td><td><code>embeddings = OpenAIEmbeddings(model="text-embedding-3-small")</code></td><td>Creates the embedding model that turns each chunk into a vector. This model produces 1536-number vectors — the "1536 dimensions" the instructor mentions. The same model will later embed your questions so they can be compared with the chunks.</td></tr>
+<tr><td>36–37</td><td><code>if os.path.exists(db_name):</code><br><code>  Chroma(…).delete_collection()</code></td><td>If a database from a previous run exists, delete its collection first. This avoids adding the same chunks twice and keeps the run reproducible — you always rebuild from scratch.</td></tr>
+<tr><td>38–39</td><td><code>vectorstore = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=db_name)</code></td><td>Embeds every chunk and stores the vectors in Chroma on disk. This one call does the embedding and the saving. The print line reports how many vectors landed in the store.</td></tr>
+<tr><td>41–42</td><td><code>llm = ChatOpenAI(temperature=0.7, model_name=MODEL)</code></td><td><strong>Line 1 of 4.</strong> The LLM abstraction: a LangChain object that represents the chat model. <code>temperature=0.7</code> allows a little variety in wording; <code>model_name</code> is our <code>gpt-4o-mini</code>.</td></tr>
+<tr><td>43</td><td><code>memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)</code></td><td><strong>Line 2 of 4.</strong> The memory abstraction. <code>memory_key="chat_history"</code> is the name the chain will use to find the history; <code>return_messages=True</code> asks for the history as a list of message objects (system/user/assistant), not one big block of text. Both values are required for this kind of chat chain.</td></tr>
+<tr><td>44</td><td><code>retriever = vectorstore.as_retriever()</code></td><td><strong>Line 3 of 4.</strong> The retriever abstraction. It wraps the Chroma store in LangChain's standard retriever interface, the thing the chain expects for the retrieval step. By default it returns the 4 nearest chunks for each query.</td></tr>
+<tr><td>45</td><td><code>conversation_chain = ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever, memory=memory)</code></td><td><strong>Line 4 of 4.</strong> This single line builds the whole RAG pipeline. You pass in the three pieces and the chain knows how to use them: embed the question, retrieve chunks, add the history, build the prompt, call the model, and store the new turn in memory.</td></tr>
+<tr><td>47–50</td><td><code>query = "Can you describe Insurellm in a few sentences"</code><br><code>result = conversation_chain.invoke({"question": query})</code><br><code>print(result["answer"])</code></td><td>Uses the chain. You call <code>invoke</code> with a dictionary whose key is <code>question</code>, and read the model's reply from the <code>answer</code> key of the result. This is the one method call that runs the retrieve-and-answer cycle.</td></tr>
+<tr><td>53–57</td><td><code>def chat(message, history):</code><br><code>  result = conversation_chain.invoke({"question": message})</code><br><code>  return result["answer"]</code></td><td>The function Gradio will call for each chat turn. Notice it <em>ignores</em> the <code>history</code> argument Gradio passes in: the chain's own memory already tracks the conversation, so all it needs is the new message.</td></tr>
+<tr><td>60</td><td><code>gr.ChatInterface(chat, type="messages").launch()</code></td><td>Wraps the <code>chat</code> function in a ready-made chat web page and opens it in the browser. Now you can ask follow-up questions and memory keeps them connected.</td></tr>
+</table></div>
+
+<div class="callout"><strong>ConversationalRetrievalChain vs doing it by hand.</strong> In Python the chain
+hides the work: you never see the question get embedded, the chunks get retrieved, or the prompt get built.
+That is the point of LangChain — four lines and you are done. The trade-off is that the mechanics are out of
+sight. The TypeScript version on the other tab does the same steps in the open, which is the best way to
+understand what the chain is actually doing.</div>
+</div>
+
+<div data-only="ts">
+<p>The TypeScript port uses <a class="term" href="glossary.html#langchain-js">LangChain.js</a> but does
+<em>not</em> use a ready-made chain. It builds the flow by hand in an <code>answer(question, history)</code>
+function: retrieve the chunks, stuff them into the system prompt, add the history, call
+<code>ChatOpenAI</code>, and return an object with the answer and its sources. Reading it is the clearest way
+to see what the Python chain does under the covers.</p>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–9</td><td><code>// Day 4 / Day 5 - The RAG pipeline…</code></td><td>A comment block describing the file and the flow <code>retriever -&gt; context -&gt; ChatOpenAI -&gt; answer</code>. Ignored by the runtime; it orients a human reader.</td></tr>
+<tr><td>11</td><td><code>import "dotenv/config";</code></td><td>Loads <code>.env</code> into <code>process.env</code> as a side effect, so the OpenAI key is available. The TypeScript counterpart of Python's <code>load_dotenv()</code>.</td></tr>
+<tr><td>12</td><td><code>import { pathToFileURL } from "node:url";</code></td><td>A small Node helper used at the very bottom to detect whether the file was run directly or imported. It keeps the demo from running when another file imports this one.</td></tr>
+<tr><td>13–16</td><td><code>import { ChatOpenAI } from "@langchain/openai";</code> … <code>import type { MemoryVectorStore } from "langchain/vectorstores/memory";</code></td><td>The LangChain.js pieces: <code>ChatOpenAI</code> is the model; the message classes (<code>SystemMessage</code>, <code>HumanMessage</code>, <code>AIMessage</code>) build the prompt; <code>Document</code> and <code>MemoryVectorStore</code> are types only (the <code>type</code> keyword imports no runtime code). This project uses an in-memory store instead of Chroma, so it needs no database to run.</td></tr>
+<tr><td>17</td><td><code>import { buildVectorStore, hasOpenAIKey } from "./ingest.js";</code></td><td>Pulls in the store-builder and the key-check from the ingest file shown on Days 1–2. Reusing them keeps the data-prep and the question-answering in separate files.</td></tr>
+<tr><td>19–23</td><td><code>export const MODEL = "gpt-4o-mini";</code><br><code>export const RETRIEVAL_K = 4;</code><br><code>export type ChatMessage = …</code><br><code>export type RagAnswer = …</code></td><td>Constants and types. <code>RETRIEVAL_K = 4</code> sets how many chunks to retrieve — the same default the Python retriever uses. <code>ChatMessage</code> describes one history turn; <code>RagAnswer</code> is the <code>{ answer, sources }</code> object the function returns.</td></tr>
+<tr><td>25–31</td><td><code>const SYSTEM_PROMPT = `You are a knowledgeable, friendly assistant…`;</code></td><td>The system prompt, with a <code>{context}</code> placeholder near the bottom. It tells the model to answer only from the context and to say it does not know if the answer is missing — the instruction that stops the model from making things up.</td></tr>
+<tr><td>33–38</td><td><code>let storePromise … function getStore()</code></td><td>Builds the vector store once and reuses it on later calls. Embedding every document again for each question would be slow and wasteful, so the promise is cached.</td></tr>
+<tr><td>40–45</td><td><code>function toHistoryMessages(history: ChatMessage[]): BaseMessage[]</code></td><td>Turns the stored <code>{ role, content }</code> history into LangChain message objects — an <code>AIMessage</code> for the assistant's turns, a <code>HumanMessage</code> for the user's. This is the by-hand equivalent of Python's memory replay.</td></tr>
+<tr><td>47–53</td><td><code>function contentToString(content: BaseMessage["content"]): string</code></td><td>A model reply's content can be a plain string or an array of parts; this normalises it to one string so the caller always gets simple text back.</td></tr>
+<tr><td>55–60</td><td><code>export async function retrieve(question, k = RETRIEVAL_K): Promise&lt;Document[]&gt;</code></td><td>The retriever step on its own: get the store, call <code>store.asRetriever(k)</code>, and <code>invoke</code> it with the question to get back the <code>k</code> nearest chunks. This is exactly what <code>vectorstore.as_retriever()</code> does in Python, written out.</td></tr>
+<tr><td>62–66</td><td><code>export async function answer(question, history = []): Promise&lt;RagAnswer&gt;</code><br><code>if (!hasOpenAIKey()) { throw new Error(…) }</code></td><td>The main RAG call. It first checks the key is present and throws a clear error if not, so a missing key is an obvious message rather than a confusing crash deep in the SDK.</td></tr>
+<tr><td>68–71</td><td><code>const docs = await retrieve(question);</code><br><code>const context = docs.map((d) =&gt; `Extract from ${d.metadata.source …}:\n${d.pageContent}`).join("\n\n");</code></td><td>Retrieves the chunks, then joins them into one context string, labelling each extract with the file it came from. This is the "augment" step — the chunks about to be stuffed into the prompt.</td></tr>
+<tr><td>73–78</td><td><code>const llm = new ChatOpenAI({ model: MODEL, temperature: 0.2 });</code><br><code>const messages: BaseMessage[] = [ new SystemMessage(SYSTEM_PROMPT.replace("{context}", context)), ...toHistoryMessages(history), new HumanMessage(question) ];</code></td><td>Builds the model and the message list by hand: the system prompt with the context pasted into the <code>{context}</code> slot, then the earlier turns, then the new question. This is the prompt the Python chain assembles for you.</td></tr>
+<tr><td>80</td><td><code>const reply = await llm.invoke(messages);</code></td><td>Sends the whole message list to the model and waits for the reply. The one network call that generates the answer.</td></tr>
+<tr><td>82–85</td><td><code>const sources = [...new Set(docs.map((d) =&gt; String(d.metadata.source …)))];</code><br><code>return { answer: contentToString(reply.content), sources };</code></td><td>Collects the source filenames from the retrieved chunks, de-duplicates them with a <code>Set</code>, and returns the answer text together with that sources list. This is the "returning sources" feature the Python chain does not give you for free.</td></tr>
+<tr><td>87–98</td><td><code>async function main(): Promise&lt;void&gt; { … }</code></td><td>A small command-line demo: take a question from the arguments (or a default), and if a key is present, print the answer and its sources. If no key is set it explains what it <em>would</em> ask instead of failing.</td></tr>
+<tr><td>100–106</td><td><code>if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) { main()… }</code></td><td>Runs <code>main()</code> only when the file is executed directly (<code>npm run ask</code>), not when another file imports <code>answer()</code>. This is why the Hono server can import the function without triggering the demo.</td></tr>
+</table></div>
+
+<div class="callout"><strong>Memory vs passing history.</strong> Python hands memory to the chain and never
+thinks about it again — the chain stores each turn and replays it. TypeScript has no memory object: whoever
+calls <code>answer(question, history)</code> owns the history and passes it in each time, and
+<code>toHistoryMessages</code> converts it to messages. Both reach the same result; one hides the history, the
+other keeps it in your hands.</div>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="A vector store drawn as scattered dots; the question sits among them and the four nearest dots are highlighted as the retrieved chunks">
+  <text x="380" y="24" text-anchor="middle" class="title">The retriever picks the k nearest chunks</text>
+  <rect class="zone" x="20" y="40" width="520" height="210" rx="8"/>
+  <text x="40" y="60" class="small">vector store (every chunk is a point)</text>
+  <circle class="dot" cx="90" cy="95" r="5"/>
+  <circle class="dot" cx="150" cy="200" r="5"/>
+  <circle class="dot" cx="470" cy="80" r="5"/>
+  <circle class="dot" cx="500" cy="170" r="5"/>
+  <circle class="dot" cx="430" cy="220" r="5"/>
+  <circle class="dot" cx="110" cy="150" r="5"/>
+  <circle class="dot" cx="380" cy="60" r="5"/>
+  <circle class="dot-ok" cx="300" cy="130" r="6"/>
+  <circle class="dot-ok" cx="250" cy="110" r="6"/>
+  <circle class="dot-ok" cx="320" cy="170" r="6"/>
+  <circle class="dot-ok" cx="245" cy="165" r="6"/>
+  <circle class="dot-info" cx="285" cy="145" r="7"/>
+  <text x="285" y="135" text-anchor="middle" class="small accent">question</text>
+  <rect class="box box-ok" x="580" y="110" width="160" height="66" rx="8"/>
+  <text x="660" y="138" text-anchor="middle" class="label">k = 4 nearest</text>
+  <text x="660" y="158" text-anchor="middle" class="small">become the context</text>
+  <path class="arrow-ok" d="M 340,150 C 420,150 500,145 578,145"/>
+</svg>
+<figcaption>The question becomes a point too; the retriever returns the <strong>k chunks closest to it</strong>
+(k = 4 here). Positions are illustrative — real vectors have 1536 dimensions, not two.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 236" role="img" aria-label="Two chat turns showing memory at work: the first turn names Avery, and the second turn asks what she did before, which only makes sense because memory kept the first turn">
+  <text x="380" y="24" text-anchor="middle" class="title">Memory keeps a follow-up making sense</text>
+  <rect class="box" x="20" y="44" width="330" height="76" rx="8"/>
+  <text x="185" y="68" text-anchor="middle" class="label">Turn 1</text>
+  <text x="185" y="88" text-anchor="middle" class="small">You: "Who is Avery Lancaster?"</text>
+  <text x="185" y="106" text-anchor="middle" class="small">AI: "She founded Insurellm…"</text>
+  <rect class="box" x="410" y="44" width="330" height="76" rx="8"/>
+  <text x="575" y="68" text-anchor="middle" class="label">Turn 2</text>
+  <text x="575" y="88" text-anchor="middle" class="small">You: "What did she do before?"</text>
+  <text x="575" y="106" text-anchor="middle" class="small">AI: "Before Insurellm, she…"</text>
+  <path class="arrow" d="M 352,82 H 408"/>
+  <rect class="box box-info" x="180" y="160" width="400" height="56" rx="8"/>
+  <text x="380" y="184" text-anchor="middle" class="label">memory holds Turn 1</text>
+  <text x="380" y="203" text-anchor="middle" class="small">so "she" in Turn 2 still means Avery</text>
+  <path class="arrow-accent" d="M 185,120 V 160"/>
+  <path class="arrow-accent" d="M 575,160 V 120"/>
+</svg>
+<figcaption>Turn 2 says "she" and never names Avery. It only works because
+<strong>memory carried Turn 1 forward</strong>. Drop the memory and the model has no idea who "she" is.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="The four Python objects feeding into the ConversationalRetrievalChain, which you then call with invoke to get an answer">
+  <text x="380" y="24" text-anchor="middle" class="title">The four lines, as a picture</text>
+  <rect class="box" x="20" y="48" width="200" height="40" rx="8"/>
+  <text x="120" y="73" text-anchor="middle" class="mono small">llm = ChatOpenAI(...)</text>
+  <rect class="box" x="20" y="100" width="200" height="40" rx="8"/>
+  <text x="120" y="125" text-anchor="middle" class="mono small">memory = Buffer...</text>
+  <rect class="box" x="20" y="152" width="200" height="40" rx="8"/>
+  <text x="120" y="177" text-anchor="middle" class="mono small">retriever = as_retriever()</text>
+  <rect class="box-solid" x="300" y="100" width="220" height="56" rx="8"/>
+  <text x="410" y="124" text-anchor="middle" class="on-solid label">ConversationalRetrievalChain</text>
+  <text x="410" y="143" text-anchor="middle" class="on-solid small">.from_llm(llm, retriever, memory)</text>
+  <rect class="box box-ok" x="580" y="100" width="160" height="56" rx="8"/>
+  <text x="660" y="124" text-anchor="middle" class="small">invoke(</text>
+  <text x="660" y="143" text-anchor="middle" class="small">{"question": q})</text>
+  <path class="arrow" d="M 222,68 C 260,70 270,110 298,118"/>
+  <path class="arrow" d="M 222,120 H 298"/>
+  <path class="arrow" d="M 222,172 C 260,170 270,146 298,138"/>
+  <path class="arrow-ok" d="M 522,128 H 578"/>
+</svg>
+<figcaption>Three objects go in, one chain comes out, and you drive it with <code>invoke</code>. The chain
+is where <strong>retrieve, prompt, answer and remember all happen in one call</strong>.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 232" role="img" aria-label="Side by side comparison: Python wraps everything in ConversationalRetrievalChain, TypeScript builds the same steps by hand in an answer function">
+  <text x="193" y="26" text-anchor="middle" class="title">Python (LangChain)</text>
+  <text x="567" y="26" text-anchor="middle" class="title">TypeScript (by hand)</text>
+  <rect class="zone" x="18" y="40" width="350" height="174" rx="8"/>
+  <rect class="zone" x="392" y="40" width="350" height="174" rx="8"/>
+  <rect class="box" x="38" y="54" width="310" height="34" rx="8"/>
+  <text x="193" y="76" text-anchor="middle" class="small">one chain holds llm + retriever + memory</text>
+  <rect class="box" x="38" y="98" width="310" height="34" rx="8"/>
+  <text x="193" y="120" text-anchor="middle" class="small">chain does retrieve + prompt for you</text>
+  <rect class="box box-ok" x="38" y="142" width="310" height="34" rx="8"/>
+  <text x="193" y="164" text-anchor="middle" class="small">invoke({"question"}) -&gt; answer</text>
+  <text x="193" y="196" text-anchor="middle" class="small">memory is automatic</text>
+  <rect class="box" x="412" y="54" width="310" height="34" rx="8"/>
+  <text x="567" y="76" text-anchor="middle" class="small">retrieve() gets the chunks</text>
+  <rect class="box" x="412" y="98" width="310" height="34" rx="8"/>
+  <text x="567" y="120" text-anchor="middle" class="small">build messages + context yourself</text>
+  <rect class="box box-ok" x="412" y="142" width="310" height="34" rx="8"/>
+  <text x="567" y="164" text-anchor="middle" class="small">answer(q, history) -&gt; {answer, sources}</text>
+  <text x="567" y="196" text-anchor="middle" class="small">you pass history in</text>
+</svg>
+<figcaption>Same pipeline, two styles. Python trades visibility for brevity;
+<strong>TypeScript trades brevity for seeing every step</strong> — and gets the sources list as a bonus.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The retrieved chunks are pasted into the context slot of the system prompt, which then goes to the model along with the history and the question">
+  <text x="380" y="24" text-anchor="middle" class="title">Chunks are stuffed into the prompt</text>
+  <rect class="box box-info" x="20" y="48" width="180" height="120" rx="8"/>
+  <text x="110" y="70" text-anchor="middle" class="small">retrieved chunks</text>
+  <rect class="box" x="36" y="80" width="148" height="22" rx="8"/>
+  <text x="110" y="95" text-anchor="middle" class="small">chunk 1</text>
+  <rect class="box" x="36" y="108" width="148" height="22" rx="8"/>
+  <text x="110" y="123" text-anchor="middle" class="small">chunk 2</text>
+  <rect class="box" x="36" y="136" width="148" height="22" rx="8"/>
+  <text x="110" y="151" text-anchor="middle" class="small">chunk 3, 4…</text>
+  <path class="arrow-accent" d="M 202,108 H 258"/>
+  <rect class="box" x="260" y="48" width="260" height="120" rx="8"/>
+  <text x="390" y="72" text-anchor="middle" class="small">system prompt</text>
+  <text x="390" y="92" text-anchor="middle" class="small">"answer only from…"</text>
+  <rect class="box box-ok" x="280" y="108" width="220" height="40" rx="8"/>
+  <text x="390" y="132" text-anchor="middle" class="mono small">{context} slot filled</text>
+  <path class="arrow" d="M 522,108 H 578"/>
+  <rect class="box-solid" x="580" y="88" width="160" height="40" rx="8"/>
+  <text x="660" y="112" text-anchor="middle" class="on-solid small">to the model</text>
+</svg>
+<figcaption>"Augmented" means exactly this: the chunks are pasted into the <code>{context}</code> slot of the
+system prompt. <strong>The model answers from what it is handed</strong>, which is why the prompt tells it to
+use only that context.</figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> After the four lines run, nothing dramatic
+happens — the chain is just built. The payoff is the next call: <code>invoke({"question": query})</code>
+returns a dictionary, and <code>result["answer"]</code> holds a few sentences about Insurellm, pulled from the
+company documents. In the Gradio chat you can then ask a follow-up like "What did she do before?" and, because
+of memory, the assistant knows "she" is Avery and answers from her employee record. The TypeScript
+<code>npm run ask "your question"</code> prints the answer followed by the list of source files it used.</div>
+
+<div class="callout warn"><strong>Common mistakes.</strong> Retrieving too <em>few</em> chunks (a small
+<code>k</code>) can miss the one passage that holds the answer, so the model says it does not know. Retrieving
+too <em>many</em> wastes context-window space, costs more, and can bury the useful chunk among irrelevant ones
+— start around <code>k = 4</code> and adjust. The other classic slip is losing memory: if you rebuild or
+re-run the chain between turns (or forget to pass <code>history</code> in TypeScript), the assistant forgets
+everything and follow-up questions with "she" or "it" stop making sense. In Gradio, re-running the cell is how
+you deliberately clear the memory and start fresh.</div>
+
+<div class="callout"><strong>Video vs repo.</strong> The video builds the pipeline with LangChain's
+<code>ConversationalRetrievalChain</code> and <code>ConversationBufferMemory</code> — the four-line version
+shown here, which is what you see on screen. The current repo has since refactored the same project:
+it splits retrieval, answering and evaluation into separate modules and adds extras such as query rewriting and
+re-ranking (you meet those on <a href="29-w5d5.html">Day 5</a>). The idea is identical; only the packaging
+changed. As always, treat the model name <code>gpt-4o-mini</code> as a value you may need to swap, since
+providers retire models over time.</div>
+
+<figure class="shot"><img src="img/ts-week5-ui.png" alt="The Week 5 knowledge-worker chat app: a question box, the assistant's answer, and the list of source documents it used" width="1100" height="800" loading="lazy"><figcaption>The finished knowledge-worker UI (week5-ts/). Illustration — a chat box over the same <code>answer()</code> function, showing the answer and the source files it came from.</figcaption></figure>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A full RAG chain does four things per question: the retriever finds the nearest chunks, the chunks are
+stuffed into the prompt as context, the model answers from them, and memory keeps a multi-turn chat coherent.</li>
+<li>In Python it is four lines: an <code>llm</code>, a <code>memory</code>, a <code>retriever</code>, and a
+<code>ConversationalRetrievalChain.from_llm(...)</code> that ties them together. You drive it with
+<code>invoke({"question": q})</code> and read <code>result["answer"]</code>.</li>
+<li>In TypeScript the same flow is written by hand in <code>answer(question, history)</code>: retrieve, build
+the context and messages, call <code>ChatOpenAI</code>, and return <code>{ answer, sources }</code>.</li>
+<li>Memory (Python) and the <code>history</code> argument (TypeScript) are two ways to the same end: letting
+follow-up questions refer back to earlier turns.</li>
+<li>Tune <code>k</code> carefully — too few chunks miss the answer, too many waste the context window — and do
+not lose the memory between turns.</li>
+<li>The API and embedding calls are shown exactly as in the course and were not run live here; the TypeScript
+project type-checks and builds.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="27-w5d3.html"><small>← Previous · Step 27</small>Week 5 · Day 3 — Vector Stores and Visualizing Embeddings</a>
+<a class="next" href="29-w5d5.html"><small>Next · Step 29 →</small>Week 5 · Day 5 — Debugging RAG and the Knowledge Worker</a>
+</nav>
+</main>
+</body>
+</html>

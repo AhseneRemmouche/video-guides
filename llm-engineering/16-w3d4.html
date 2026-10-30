@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16 · Week 3 · Day 4 — Running and Quantizing Open-Source Models</title>
+<meta name="description" content="Load a model with AutoModelForCausalLM, shrink it with 4-bit quantization (bitsandbytes), generate text and stream the output, and watch the memory footprint.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 16/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 16 of 48 · Week 3 · Day 4 · 4 lessons</div>
+  <h1>Week 3 · Day 4 — Running and Quantizing Open-Source Models</h1>
+  <p class="lead">Load a model with AutoModelForCausalLM, shrink it with 4-bit quantization (bitsandbytes), generate text and stream the output, and watch the memory footprint.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>So far this week you have used the high-level <strong>pipeline</strong> API and then the <strong>tokenizer</strong>. Today you drop down one more level to the <strong>model</strong> itself: you load a real transformer from the Hugging Face hub, run it to generate text, and watch the words stream out token by token. Along the way you meet the single most useful trick for running big open-source models on a small graphics card: <em>4-bit quantization</em>.</p>
+
+<p>The star of the lab is the lower-level model class <a class="term" href="glossary.html#auto-model">AutoModelForCausalLM</a>. It is the general class for loading any autoregressive (causal) large language model — a model that reads the tokens so far and predicts the next one. The instructor runs three models (Llama 3.1, Microsoft's Phi-3, and Google's Gemma 2) and leaves two more (Qwen2 and Mistral) as exercises. The same few lines of code load and run all of them.</p>
+
+<div class="callout warn"><strong>Video vs repo — and where this runs.</strong> Week 3 runs in <strong>Google Colab</strong>, not the course repo (the repo's week-3 notebooks are just links to Colab). The Python below is standard Hugging Face code, reconstructed to match the course's Colab notebook. It needs a <a class="term" href="glossary.html#gpu">GPU</a> (such as a free Colab T4) and was <strong>not executed in this guide</strong>. Model ids and the memory figure (~5.5 GB) are the real values the instructor shows on screen.</div>
+
+<h2>What quantization is and why it matters</h2>
+
+<p>A model's <strong>weights</strong> are the billions of numbers learned during training. Normally each weight is a 32-bit floating-point number — four bytes each. An 8-billion-parameter model at full precision would therefore want roughly 32 GB of memory just to sit in the GPU, which is more than most affordable cards have. <a class="term" href="glossary.html#quantization">Quantization</a> reduces the precision of those numbers so the model takes far less memory, loads faster, and runs faster.</p>
+
+<p>The surprising part, and the instructor flags it as surprising, is how little accuracy you lose. Going from 32-bit down to 8-bit, and even all the way down to <strong>4 bits</strong> (half a byte), hurts quality only a little — a trade worth making because it lets a big model fit on a small GPU. This same technique returns later in the course inside <strong>QLoRA</strong> (the "Q" stands for quantization) when you fine-tune.</p>
+
+<details class="primer"><summary>New to "quantization"? What it is and why it matters</summary><p>Think of a weight as a very precise decimal, like 0.4718265. Quantization rounds it to something coarser, like 0.47, so it needs fewer bits to store. Do that to every weight and the whole model shrinks dramatically. The rounding adds a small error to each number, but across billions of weights those errors mostly wash out, so the model still answers well. The payoff is concrete: a model that would not fit in your GPU at full precision suddenly does.</p></details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Two bars comparing GPU memory used by the same model at full precision versus 4-bit quantization">
+<text x="20" y="28" class="title">Same model, two precisions (illustrative)</text>
+<text x="20" y="60" class="label">32-bit weights (full precision)</text>
+<rect x="20" y="70" width="680" height="38" rx="8" class="box-bad"/>
+<text x="360" y="94" text-anchor="middle" class="mono">~32 GB, will not fit a small GPU</text>
+<text x="20" y="140" class="label">4-bit weights (quantized)</text>
+<rect x="20" y="150" width="120" height="38" rx="8" class="box-ok"/>
+<text x="80" y="174" text-anchor="middle" class="mono small">~5.5 GB</text>
+<text x="160" y="174" class="small">fits a free Colab T4 GPU</text>
+<text x="20" y="220" class="small">Bar lengths are illustrative. The ~5.5 GB figure is the value shown for Llama 3.1 8B at 4-bit.</text>
+</svg>
+<figcaption>Dropping each weight from 32 bits to 4 bits shrinks the model roughly eightfold. <strong>Quantization is what lets a big model load on a small GPU.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="A 32-bit floating point weight being compressed into a 4-bit nf4 value">
+<text x="20" y="28" class="title">What 4-bit quantization does to one weight</text>
+<rect x="20" y="55" width="300" height="48" rx="8" class="box"/>
+<text x="170" y="78" text-anchor="middle" class="mono">0.4718265...</text>
+<text x="170" y="95" text-anchor="middle" class="small">32-bit float (4 bytes)</text>
+<path class="arrow arrow-accent" d="M 330,79 H 440"/>
+<text x="385" y="70" text-anchor="middle" class="small">nf4</text>
+<rect x="450" y="55" width="290" height="48" rx="8" class="box-ok"/>
+<text x="595" y="78" text-anchor="middle" class="mono">~0.47 (4 bits)</text>
+<text x="595" y="95" text-anchor="middle" class="small">normalized-float 4-bit</text>
+<text x="20" y="140" class="small">nf4 = "normalized float 4". It assumes the weights follow a normal distribution, which keeps more</text>
+<text x="20" y="158" class="small">accuracy when squeezing a number down to just 4 bits. Double-quant then quantizes again to save a little more.</text>
+</svg>
+<figcaption>Each weight becomes a coarser number stored in 4 bits instead of 32. <strong>A small, tolerable error per weight buys a huge memory saving.</strong></figcaption>
+</figure>
+
+<h2>The tools: bitsandbytes, the model class, and the streamer</h2>
+
+<details class="primer"><summary>New to "bitsandbytes" and "nf4"?</summary><p><a class="term" href="glossary.html#bitsandbytes">bitsandbytes</a> is a library that works hand in hand with Hugging Face <a class="term" href="glossary.html#transformers-library">transformers</a> to do the quantization for you. You describe the quantization you want in a <code>BitsAndBytesConfig</code> object and pass it when you load the model. The key options: <code>load_in_4bit=True</code> (use 4 bits), <code>bnb_4bit_quant_type="nf4"</code> (the normalized-float 4-bit format, which is more accurate than plain 4-bit), <code>bnb_4bit_use_double_quant=True</code> (quantize the quantization constants too, saving a little more memory), and <code>bnb_4bit_compute_dtype=torch.bfloat16</code> (do the math in a fast 16-bit float). You can also set <code>load_in_8bit=True</code> instead, to try 8 bits.</p></details>
+
+<details class="primer"><summary>New to "AutoModelForCausalLM"?</summary><p>It is the general class for creating any <strong>causal</strong> (also called autoregressive) LLM — one that takes the tokens so far and predicts the next token. You build one with <code>AutoModelForCausalLM.from_pretrained(name, ...)</code>, exactly mirroring how <code>AutoTokenizer.from_pretrained(name)</code> builds the matching tokenizer. The first time you load a model, it downloads the weights from the hub into a cache on the machine (on Colab, a temporary disk that is wiped when the session disconnects) and loads them into GPU memory. Under the hood the model is a stack of PyTorch layers: an embedding layer, attention and MLP blocks, an activation function, layer norms, and a final linear head. Printing the model shows that architecture.</p></details>
+
+<details class="primer"><summary>New to "TextStreamer" and the memory footprint?</summary><p><code>TextStreamer</code> prints each token as the model produces it, so you watch the answer appear instead of waiting for the whole thing. It needs the tokenizer, because tokens must be turned back into readable text as they arrive. You pass it to <code>model.generate(..., streamer=streamer)</code>. Separately, <code>model.get_memory_footprint()</code> returns how many bytes the loaded model occupies; dividing by <code>1e9</code> gives gigabytes. For Llama 3.1 8B at 4-bit that is about 5.5 GB — a handy way to confirm quantization worked.</p></details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Flow from a messages list through the tokenizer to the model on the GPU and back to decoded text">
+<text x="20" y="28" class="title">The generate loop</text>
+<rect x="20" y="50" width="200" height="54" rx="8" class="box"/>
+<text x="120" y="74" text-anchor="middle">messages (system + user)</text>
+<text x="120" y="92" text-anchor="middle" class="small">list of dicts</text>
+<path class="arrow" d="M 220,77 H 300"/>
+<text x="260" y="68" text-anchor="middle" class="small">apply_chat_template</text>
+<rect x="300" y="50" width="200" height="54" rx="8" class="box-info"/>
+<text x="400" y="74" text-anchor="middle">input token ids</text>
+<text x="400" y="92" text-anchor="middle" class="small">.to("cuda")</text>
+<path class="arrow arrow-accent" d="M 400,104 V 150"/>
+<rect x="260" y="150" width="280" height="60" rx="8" class="box-solid"/>
+<text x="400" y="176" text-anchor="middle" class="on-solid">model.generate(inputs,</text>
+<text x="400" y="196" text-anchor="middle" class="on-solid mono">max_new_tokens=80)</text>
+<path class="arrow arrow-ok" d="M 540,180 H 620 V 104"/>
+<rect x="540" y="50" width="200" height="54" rx="8" class="box-info"/>
+<text x="640" y="80" text-anchor="middle">output token ids</text>
+<path class="arrow" d="M 400,210 V 250"/>
+<text x="470" y="238" text-anchor="middle" class="small">tokenizer.decode</text>
+<rect x="260" y="250" width="280" height="40" rx="8" class="box-ok"/>
+<text x="400" y="275" text-anchor="middle">readable text (the joke)</text>
+</svg>
+<figcaption>Text becomes token ids, the model turns those into new token ids on the GPU, and <code>decode</code> turns them back into words. <strong>generate is where the model actually runs.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Where the code runs: a Colab GPU notebook downloading model weights from the Hugging Face hub">
+<text x="20" y="28" class="title">Where this runs</text>
+<rect x="20" y="50" width="180" height="150" rx="8" class="zone"/>
+<text x="110" y="74" text-anchor="middle" class="label">Your browser</text>
+<rect x="40" y="90" width="140" height="44" rx="8" class="box"/>
+<text x="110" y="117" text-anchor="middle" class="small">Colab notebook tab</text>
+<rect x="290" y="50" width="200" height="150" rx="8" class="zone"/>
+<text x="390" y="74" text-anchor="middle" class="label">Google Colab (cloud)</text>
+<rect x="310" y="90" width="160" height="44" rx="8" class="box-solid"/>
+<text x="390" y="112" text-anchor="middle" class="on-solid small">GPU (e.g. T4)</text>
+<text x="390" y="128" text-anchor="middle" class="on-solid small">model + generate</text>
+<rect x="310" y="146" width="160" height="34" rx="8" class="box"/>
+<text x="390" y="167" text-anchor="middle" class="small">disk cache (temporary)</text>
+<rect x="560" y="50" width="180" height="150" rx="8" class="zone"/>
+<text x="650" y="74" text-anchor="middle" class="label">Hugging Face hub</text>
+<rect x="580" y="90" width="140" height="44" rx="8" class="box-info"/>
+<text x="650" y="117" text-anchor="middle" class="small">model weights</text>
+<path class="arrow" d="M 200,112 H 288"/>
+<path class="arrow arrow-accent" d="M 558,112 H 492"/>
+<text x="525" y="104" text-anchor="middle" class="small">download</text>
+</svg>
+<figcaption>Your browser drives a notebook; the real work happens on Colab's GPU, which downloads the weights from the hub on first load. <strong>No GPU, no local run — that is why this lab lives in Colab.</strong></figcaption>
+</figure>
+
+<h2>The code</h2>
+
+<p>This one file sets up the 4-bit config, loads Llama 3.1 and inspects it, then wraps the whole thing in a reusable function that also streams the output for Phi-3 and Gemma 2.</p>
+
+<pre data-file="day4_models.py" data-lang="py" data-tag="complete file"><code># Reconstructed to match the course's Google Colab notebook for this day.
+# Standard HuggingFace code; runs on a GPU (e.g. Colab T4). Not executed here (no GPU).
+#
+# Week 3 - Day 4: the model class - loading a real transformer and running generate().
+# Covers:
+#   - quantization: load the weights at 4-bit precision (bitsandbytes) so a big model
+#     fits a small GPU and loads/runs faster, with only a modest accuracy cost.
+#   - AutoModelForCausalLM: the general class for an autoregressive (causal) LLM.
+#   - model.generate: produce new tokens; TextStreamer streams them as they arrive.
+#   - model.get_memory_footprint(): see how much GPU memory the model occupies.
+#
+# Colab setup (run once in a cell):
+#   !pip install -q transformers accelerate bitsandbytes
+#   from huggingface_hub import login
+#   from google.colab import userdata
+#   login(userdata.get("HF_TOKEN"), add_to_git_credential=True)
+# Llama 3.1 is gated: accept Meta's terms on its model page first.
+
+import gc
+
+import torch
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TextStreamer,
+)
+
+# Current model ids on the HuggingFace hub.
+LLAMA = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+PHI3 = "microsoft/Phi-3-mini-4k-instruct"
+GEMMA2 = "google/gemma-2-2b-it"
+QWEN2 = "Qwen/Qwen2-7B-Instruct"  # exercise: repeat the run with Qwen2
+
+messages = [
+    {"role": "system", "content": "You are a helpful assistant"},
+    {"role": "user", "content": "Tell a light-hearted joke for a room of Data Scientists"},
+]
+
+# 4-bit quantization config. load_in_4bit halves-the-halving twice with double quant;
+# nf4 is the normalized-float 4-bit type; bfloat16 is used for the compute dtype.
+quant_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_quant_type="nf4",
+)
+
+
+def load_llama_and_inspect():
+    # Build the tokenizer, and set the pad token to the end-of-sentence token
+    # (standard boilerplate that silences a warning).
+    tokenizer = AutoTokenizer.from_pretrained(LLAMA)
+    tokenizer.pad_token = tokenizer.eos_token
+    inputs = tokenizer.apply_chat_template(
+        messages, return_tensors="pt", add_generation_prompt=True
+    ).to("cuda")
+
+    # AutoModelForCausalLM.from_pretrained is to models what AutoTokenizer is to
+    # tokenizers. device_map="auto" uses the GPU; quantization_config loads it at 4-bit.
+    model = AutoModelForCausalLM.from_pretrained(
+        LLAMA, device_map="auto", quantization_config=quant_config
+    )
+
+    # How much GPU memory the quantized model occupies (~5.5 GB for Llama 3.1 8B at 4-bit).
+    print(f"Memory footprint: {model.get_memory_footprint() / 1e9:,.1f} GB")
+
+    # Printing the model shows the actual PyTorch layers: embedding, attention and MLP
+    # blocks, activation, layer norms, and the final linear head.
+    print(model)
+
+    # Generate up to 80 new tokens, then decode the single output sequence to text.
+    outputs = model.generate(inputs, max_new_tokens=80)
+    print(tokenizer.decode(outputs[0]))
+
+    # Clean up so the next model has GPU memory to work with.
+    del model, inputs, tokenizer, outputs
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+def generate(model_name, messages):
+    # Everything above, packaged into a reusable function that also streams output.
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    inputs = tokenizer.apply_chat_template(
+        messages, return_tensors="pt", add_generation_prompt=True
+    ).to("cuda")
+
+    # TextStreamer prints tokens as the model produces them; it needs the tokenizer
+    # to turn those tokens back into text.
+    streamer = TextStreamer(tokenizer)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, device_map="auto", quantization_config=quant_config
+    )
+    model.generate(inputs, max_new_tokens=80, streamer=streamer)
+
+    del model, inputs, tokenizer, streamer
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+def main():
+    # Llama 3.1: load, inspect the architecture + memory footprint, generate.
+    load_llama_and_inspect()
+
+    # Phi-3 via the reusable streaming function.
+    generate(PHI3, messages)
+
+    # Gemma 2 does not support a system prompt, so pass the user message only.
+    generate(GEMMA2, [{"role": "user", "content": messages[1]["content"]}])
+
+    # Exercise: generate(QWEN2, messages)
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>19</td><td><code>import gc</code></td><td>Python's garbage collector. It is called later to free memory between models so the GPU does not fill up.</td></tr>
+<tr><td>21–27</td><td><code>import torch</code> … <code>from transformers import (AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextStreamer)</code></td><td>PyTorch (the numeric engine underneath the model) plus the four Hugging Face classes this lab uses: the model class, the tokenizer class, the quantization config, and the streamer. Importing them by name keeps the later code short.</td></tr>
+<tr><td>30–33</td><td><code>LLAMA = "meta-llama/Meta-Llama-3.1-8B-Instruct"</code> …</td><td>The hub ids of the models, in <code>company/model</code> form. Llama 3.1 8B, Phi-3 mini, Gemma 2 2B, and Qwen2 (left as an exercise). Treat these as values you can swap for any model of 8 billion parameters or fewer.</td></tr>
+<tr><td>35–38</td><td><code>messages = [ {"role": "system", …}, {"role": "user", …} ]</code></td><td>The same chat format from earlier weeks: a system message and a user message as two dicts in a list. The user prompt asks for a light-hearted joke for a room of data scientists.</td></tr>
+<tr><td>42–47</td><td><code>quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4")</code></td><td>The quantization recipe. <code>load_in_4bit</code> stores weights in 4 bits (the big memory win); <code>use_double_quant</code> quantizes the quantization constants too for a little extra saving; <code>compute_dtype=bfloat16</code> runs the math in fast 16-bit float; <code>quant_type="nf4"</code> picks the normalized-float 4-bit format, which keeps more accuracy. Without this object the model would load at full precision and not fit the GPU.</td></tr>
+<tr><td>53–54</td><td><code>tokenizer = AutoTokenizer.from_pretrained(LLAMA)</code><br><code>tokenizer.pad_token = tokenizer.eos_token</code></td><td>Build the matching tokenizer for Llama, then set the padding token to the end-of-sentence token. This is standard boilerplate that silences a warning; it does not change the output.</td></tr>
+<tr><td>55–57</td><td><code>inputs = tokenizer.apply_chat_template(messages, return_tensors="pt", add_generation_prompt=True).to("cuda")</code></td><td>Turn the messages into model-ready token ids using the model's own chat template, as PyTorch tensors (<code>"pt"</code>), with the prompt that cues the model to start answering, then move them onto the GPU (<code>"cuda"</code>). The model and its inputs must live on the same device.</td></tr>
+<tr><td>61–63</td><td><code>model = AutoModelForCausalLM.from_pretrained(LLAMA, device_map="auto", quantization_config=quant_config)</code></td><td>The heart of the lab: load the real model. <code>device_map="auto"</code> places it on the GPU if one is present; <code>quantization_config=quant_config</code> loads it at 4-bit using the recipe above. On first run this downloads the weights from the hub into a cache.</td></tr>
+<tr><td>66</td><td><code>print(f"Memory footprint: {model.get_memory_footprint() / 1e9:,.1f} GB")</code></td><td>Ask the loaded model how many bytes it occupies and print it in gigabytes. For Llama 3.1 8B at 4-bit this reads about 5.5 GB — proof the quantization worked.</td></tr>
+<tr><td>70</td><td><code>print(model)</code></td><td>Print the architecture: the PyTorch layers behind the model — embedding, attention and MLP blocks, the activation function, layer norms, and the final linear head. A peek inside the transformer.</td></tr>
+<tr><td>73–74</td><td><code>outputs = model.generate(inputs, max_new_tokens=80)</code><br><code>print(tokenizer.decode(outputs[0]))</code></td><td>Run the model: generate up to 80 new tokens from the inputs, take the single output sequence, and decode it back into text to print. This is where the joke is actually produced.</td></tr>
+<tr><td>77–79</td><td><code>del model, inputs, tokenizer, outputs</code><br><code>gc.collect()</code><br><code>torch.cuda.empty_cache()</code></td><td>Clean up so the next model has GPU memory. Delete the big objects, run garbage collection, and clear PyTorch's CUDA cache. Skipping this quickly runs the GPU out of memory when you load the next model.</td></tr>
+<tr><td>92</td><td><code>streamer = TextStreamer(tokenizer)</code></td><td>Create a streamer, handing it the tokenizer so it can turn tokens back into text as they arrive. This is what makes the output appear word by word.</td></tr>
+<tr><td>97</td><td><code>model.generate(inputs, max_new_tokens=80, streamer=streamer)</code></td><td>Same generate call as before, but passing <code>streamer</code> so the tokens print live instead of all at once at the end.</td></tr>
+<tr><td>111–112</td><td><code>generate(GEMMA2, [{"role": "user", "content": messages[1]["content"]}])</code></td><td>Gemma 2 does not support a system prompt, so pass only the user message. A reminder that each model family has its own chat conventions.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="TextStreamer printing tokens one at a time as the model generates them">
+<text x="20" y="28" class="title">Streaming with TextStreamer</text>
+<rect x="20" y="50" width="160" height="50" rx="8" class="box-solid"/>
+<text x="100" y="79" text-anchor="middle" class="on-solid small">model.generate</text>
+<path class="arrow arrow-ok" d="M 180,75 H 250"/>
+<text x="215" y="66" text-anchor="middle" class="small">token</text>
+<rect x="250" y="50" width="150" height="50" rx="8" class="box"/>
+<text x="325" y="79" text-anchor="middle" class="small">TextStreamer</text>
+<path class="arrow" d="M 400,75 H 470"/>
+<rect x="470" y="50" width="270" height="50" rx="8" class="box-ok"/>
+<text x="605" y="72" text-anchor="middle" class="small mono">Why did the ...</text>
+<text x="605" y="90" text-anchor="middle" class="small">printed as it arrives</text>
+<text x="20" y="140" class="small">Without a streamer, generate returns all tokens at once and you decode them after. With a streamer,</text>
+<text x="20" y="158" class="small">each token is decoded and printed the moment the model produces it.</text>
+</svg>
+<figcaption>The streamer sits between the model and your screen, decoding each token as it is produced. <strong>You see the answer grow live instead of waiting for the whole thing.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> The footprint line prints roughly <code>Memory footprint: 5.5 GB</code>, then a long description of the model's PyTorch layers, then a short joke — for Llama 3.1, something like "Why did the logistic regression model go to therapy?". With the streaming function, Phi-3 and Gemma 2 print their answers word by word. (In the video Phi-3 declines to tell a joke and rambles instead — a fair reminder that small models vary.)</div>
+
+<div class="callout warn"><strong>Common mistakes.</strong> <strong>Out of memory without quantization:</strong> loading an 8B model at full precision needs around 32 GB and will fail on a small GPU — always pass the <code>quantization_config</code>. <strong>Running out between models:</strong> if you skip the cleanup (<code>del</code> + <code>gc.collect()</code> + <code>empty_cache()</code>), the next load crashes; if it does, use <em>Runtime → Restart session</em> and rerun the imports. <strong>Gated model:</strong> Llama 3.1 requires you to accept Meta's licence on its model page and to be signed in with your Hugging Face token, or the download is refused. <strong>Wrong device:</strong> inputs must be on the same device as the model (<code>.to("cuda")</code>), or generate errors.</div>
+
+<h2>In TypeScript</h2>
+
+<p>This lab is Python-only, and honestly so. The 4-bit <a class="term" href="glossary.html#bitsandbytes">bitsandbytes</a> quantization and the GPU-based <code>AutoModelForCausalLM</code> run only in Python on a CUDA GPU — there is no JavaScript equivalent of bitsandbytes.</p>
+
+<p>In TypeScript you have two honest options. First, <a class="term" href="glossary.html#transformers-js">transformers.js</a> (the <code>@huggingface/transformers</code> package) can run <em>small</em> open-source models directly in Node or the browser — for example a small text-generation model — using quantized ONNX weights rather than bitsandbytes. That is great for tiny models but will not load an 8-billion-parameter Llama on a laptop. Second, for anything that size you call a hosted <a class="term" href="glossary.html#inference-api">inference API</a> (such as Hugging Face's) from your TypeScript code and let the provider's GPUs do the work. So the pattern carries over — load, prompt, generate, stream — but the heavy 4-bit-on-your-own-GPU part stays in Python.</p>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li><a class="term" href="glossary.html#auto-model">AutoModelForCausalLM</a><code>.from_pretrained(name, ...)</code> loads a real causal LLM, mirroring how <code>AutoTokenizer</code> loads its tokenizer.</li>
+<li><a class="term" href="glossary.html#quantization">Quantization</a> lowers each weight's precision; a <code>BitsAndBytesConfig</code> with <code>load_in_4bit</code>, <code>nf4</code>, double-quant, and <code>bfloat16</code> compute fits an 8B model into about 5.5 GB.</li>
+<li>Run the model with <code>model.generate(inputs, max_new_tokens=80)</code>; decode the output ids back to text, or pass a <code>TextStreamer</code> to see it word by word.</li>
+<li><code>model.get_memory_footprint()</code> confirms how much GPU memory the loaded model uses.</li>
+<li>Clean up (<code>del</code>, <code>gc.collect()</code>, <code>torch.cuda.empty_cache()</code>) between models, and remember Llama 3.1 is gated and the whole lab needs a Colab GPU.</li>
+<li>In TypeScript, <a class="term" href="glossary.html#transformers-js">transformers.js</a> runs small models in Node/the browser, but big models and 4-bit bitsandbytes stay in Python or behind a hosted <a class="term" href="glossary.html#inference-api">inference API</a>.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="15-w3d3.html"><small>← Previous · Step 15</small>Week 3 · Day 3 — Tokenizers for Open-Source Models</a>
+<a class="next" href="17-w3d5.html"><small>Next · Step 17 →</small>Week 3 · Day 5 — Meeting Minutes from Audio</a>
+</nav>
+</main>
+</body>
+</html>

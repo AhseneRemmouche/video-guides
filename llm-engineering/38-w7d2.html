@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>38 · Week 7 · Day 2 — Evaluating the Base Model</title>
+<meta name="description" content="Measure the open-source model before fine-tuning: an evaluation harness that runs it over the test set and scores its price predictions, as a starting point.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 38/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 38 of 48 · Week 7 · Day 2 · 6 lessons</div>
+  <h1>Week 7 · Day 2 — Evaluating the Base Model</h1>
+  <p class="lead">Measure the open-source model before fine-tuning: an evaluation harness that runs it over the test set and scores its price predictions, as a starting point.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>Today is the day the project stops being about other people's models and starts being about <em>ours</em>. Week 7 is where we build a small, specialised <a class="term" href="glossary.html#open-source-model">open-source model</a> and try to make it compete with the giants. But before we change a single weight, we have to answer one honest question: how good is the model <strong>right now</strong>, straight off the shelf, before any <a class="term" href="glossary.html#fine-tuning">fine-tuning</a>?</p>
+
+<p>That is what Day 2 is about. We pick a <a class="term" href="glossary.html#base-model">base model</a>, run it over our test set exactly as it comes, parse the price it predicts for each product, and score the average error in dollars. That one number is our starting line. If fine-tuning cannot beat it, fine-tuning is not helping. And if the base model is already far behind the <a class="term" href="glossary.html#frontier-model">frontier models</a>, that is fine too, because our model is free to run and the whole point of the next few days is to close that gap.</p>
+
+<details class="primer">
+<summary>New to this? Why measure a "base score" first</summary>
+<p>A base score is the result you get from the untouched model before you do any work on it. You measure it first for three reasons. It gives you a target to beat, so you can tell whether fine-tuning actually improved anything. It is cheap to get, so you learn early if the whole idea is hopeless. And it keeps you honest: it is easy to fool yourself into thinking a model is clever until you compare it against a dumb guess. In this project the "dumb guess" is a model that always answers the average training price, and the base open-source model is going to have to prove it can do better than that.</p>
+</details>
+
+<h2>Choosing the base model</h2>
+
+<p>The instructor spends real time on this choice, because the base model is, in his words, like one giant <a class="term" href="glossary.html#hyperparameter">hyperparameter</a>: change it and everything downstream changes. A few decisions come up.</p>
+
+<p><strong>How big?</strong> More <a class="term" href="glossary.html#parameters">parameters</a> usually means a better shot at the problem, and we are not short of data (the course has around 400,000 training examples). The real limit is memory: we want the model to fit on one affordable GPU box, which caps us at roughly a 7-to-8-billion-parameter model.</p>
+
+<p><strong>Base or instruct?</strong> Most chat models ship in two forms: the raw pre-trained "base" (sometimes called a foundation model) and an "instruct" variant that has been further trained to follow system and user prompts. For a single, fixed task like ours the instructor leans towards the base variant: we are going to train it for one job anyway, so we would rather it spend all of its capacity on that job than on learning chat manners. He mentions that he tried both and base did slightly better.</p>
+
+<p><strong>Which family?</strong> After touring the Hugging Face Open LLM Leaderboard he settles on <a class="term" href="glossary.html#llama">Llama</a> 3.1 8B. Several models score higher, but Llama has one convenient property for <em>this</em> task: its <a class="term" href="glossary.html#tokenizer">tokenizer</a> turns every whole number from 0 to 999 into a single token. Qwen, Gemma and Phi-3 mostly use about one token per digit instead. Since we want the model to predict a price, it is much simpler if the whole price lands in one token the model has to get right.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Llama turns a three-digit price into one token, while other models use one token per digit">
+<text class="title" x="380" y="26" text-anchor="middle">Why Llama 3.1: a 3-digit price is a single token</text>
+<text x="30" y="92" class="label">Llama 3.1</text>
+<rect class="box-ok" x="180" y="66" width="80" height="44" rx="8"/>
+<text x="220" y="93" text-anchor="middle" class="mono">374</text>
+<text x="300" y="92" class="accent">one token (the whole price)</text>
+<text x="30" y="162" class="label">Qwen, Gemma, Phi-3</text>
+<rect class="box" x="180" y="136" width="40" height="44" rx="8"/>
+<text x="200" y="163" text-anchor="middle" class="mono">3</text>
+<rect class="box" x="230" y="136" width="40" height="44" rx="8"/>
+<text x="250" y="163" text-anchor="middle" class="mono">7</text>
+<rect class="box" x="280" y="136" width="40" height="44" rx="8"/>
+<text x="300" y="163" text-anchor="middle" class="mono">4</text>
+<text x="340" y="162" class="warn">three tokens (one per digit)</text>
+</svg>
+<figcaption>Both tokenizers can represent the price "374"; Llama does it in one token. <strong>That means the model only has to get one next-token right to nail the whole price.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to tokens? Greedy decoding and the "top token"</summary>
+<p>When a model generates, it does not pick a word directly. It produces a probability for every possible next <a class="term" href="glossary.html#token">token</a>, and then something chooses one. The simplest choice is "greedy decoding": always take the single highest-probability token. Because a three-digit price is one token in Llama, predicting the price well boils down to putting a high probability on the right number token. The code still asks for up to four new tokens, just in case the model adds a dollar sign or a stray character, but one token is really all we need.</p>
+</details>
+
+<h2>The method: run the base model over the test set</h2>
+
+<p>The recipe is short and is the same idea the course has used before. Load the base model, wrap it in a small predict function, run that function over all 250 test prompts, and let a test harness add up how wrong it was.</p>
+
+<ol class="steps">
+<li><strong>Load the model in 4-bit.</strong> The 8-billion-parameter Llama is loaded through Hugging Face with <a class="term" href="glossary.html#quantization">quantization</a> turned on, so it fits in a free GPU. In the video this uses the <a class="term" href="glossary.html#auto-model">AutoModel</a> loader (the causal-LM variant) together with <a class="term" href="glossary.html#bitsandbytes">bitsandbytes</a> for the 4-bit config, and <a class="term" href="glossary.html#auto-tokenizer">AutoTokenizer</a> for the matching tokenizer. The 4-bit model takes about 5.6 GB of memory.</li>
+<li><strong>Write a predict function.</strong> It takes one test item, encodes the prompt with the tokenizer, pushes it to the GPU, calls the model's <code>generate</code> with up to four new tokens and a single returned sequence, then decodes the answer back to text.</li>
+<li><strong>Parse the price.</strong> The generated text is messy, so a small helper plucks the number out of it (for example turning "Price is $1,800" into <code>1800</code>).</li>
+<li><strong>Score it.</strong> The Week 6 <code>Tester</code> harness runs the predict function over the 250 test points, colours each guess green or red by how close it is, and reports the average dollar error.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Pipeline from the raw base model through predictions to a single score">
+<text class="title" x="380" y="26" text-anchor="middle">From a raw model to one number: the base score</text>
+<rect class="box" x="30" y="60" width="210" height="70" rx="8"/>
+<text x="135" y="90" text-anchor="middle">Base model</text>
+<text x="135" y="110" text-anchor="middle" class="small">Llama 3.1, 4-bit</text>
+<rect class="box" x="275" y="60" width="210" height="70" rx="8"/>
+<text x="380" y="90" text-anchor="middle">Run over 250 prompts</text>
+<text x="380" y="110" text-anchor="middle" class="small">predict, then extract price</text>
+<rect class="box-info" x="520" y="60" width="210" height="70" rx="8"/>
+<text x="625" y="90" text-anchor="middle">Score with Tester</text>
+<text x="625" y="110" text-anchor="middle" class="small">average dollar error</text>
+<path class="arrow" d="M240,95 H273"/>
+<path class="arrow" d="M485,95 H518"/>
+</svg>
+<figcaption>The whole day is this one pipeline. <strong>The number coming out of the Tester is the base score we will spend the rest of the week trying to beat.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to this? What a "test harness" is (the Tester recap)</summary>
+<p>A test harness is a small piece of code that runs your model over a fixed set of examples and reports how well it did, the same way for every model so comparisons are fair. The course's <code>Tester</code> class, first built in Week 6, takes a prediction function and the test data, loops over each item, compares the guess to the true price, prints each one in green (close) or red (far off), and at the end draws a chart and prints the average error. The Week 7 version is almost identical; the instructor notes one subtle change, that it reads a data point from the dataset rather than an <code>Item</code> object.</p>
+</details>
+
+<details class="primer">
+<summary>New to this? Parsing a number out of model text</summary>
+<p>The model does not hand back a tidy number; it hands back text such as "Price is $89.99" or "$1,800.00 for this item". Before we can score it we have to pull the number out. A small helper (the course calls it <code>extract_price</code>) scans the text, drops the dollar sign and commas, and returns the first number it finds as a plain value. If the model writes nothing number-like, it falls back to zero. This is a common, slightly boring step whenever a language model is used to produce a value your code needs to do maths on.</p>
+</details>
+
+<div class="callout ok">
+<strong>What you should see</strong>
+<p>In the video the base Llama 3.1, quantized to 4-bit, scores an average error of about <strong>$395</strong>. Re-running the exact same harness with 8-bit quantization instead gives about <strong>$301</strong> — better, because 8 bits keep more information than 4, but still poor. For comparison, a model that just guesses the average training price is off by about $146, so the untouched base model is actually <em>worse</em> than guessing. That is the uncomfortable, motivating result: a tiny, heavily compressed model, with no training on our task, loses to a constant guess. The first test product (an OEM AC compressor that costs $374) is predicted at $1,800. <em>Honesty note: these figures are read from the course video; this evaluation was not run here because it needs a GPU and a gated model.</em></p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="Bar chart of average dollar error for several models, base Llama being the worst">
+<text class="title" x="380" y="26" text-anchor="middle">Average dollar error (lower is better)</text>
+<text x="20" y="74" class="label">GPT-4o</text>
+<rect class="box-ok" x="180" y="56" width="103" height="26" rx="4"/>
+<text x="291" y="74" class="small accent">$76</text>
+<text x="20" y="114" class="label">Random forest</text>
+<rect class="box-ok" x="180" y="96" width="132" height="26" rx="4"/>
+<text x="320" y="114" class="small accent">$97</text>
+<text x="20" y="154" class="label">Constant guess</text>
+<rect class="box" x="180" y="136" width="199" height="26" rx="4"/>
+<text x="387" y="154" class="small">$146</text>
+<text x="20" y="194" class="label">Base Llama 8-bit</text>
+<rect class="box-bad" x="180" y="176" width="409" height="26" rx="4"/>
+<text x="597" y="194" class="small bad">$301</text>
+<text x="20" y="234" class="label">Base Llama 4-bit</text>
+<rect class="box-bad" x="180" y="216" width="537" height="26" rx="4"/>
+<text x="632" y="234" class="small bad">$395</text>
+</svg>
+<figcaption>Where the base model sits before we touch it: dead last. <strong>Fine-tuning's job this week is to drag the two red bars down towards GPT-4o's $76.</strong> Figures are the course video's measured results.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 340" role="img" aria-label="The evaluation loop, repeated for every test item, feeding the Tester">
+<text class="title" x="230" y="24" text-anchor="middle">The test loop, run for each item</text>
+<rect class="box" x="80" y="36" width="300" height="44" rx="8"/>
+<text x="230" y="63" text-anchor="middle">Take the next test item (prompt only)</text>
+<rect class="box" x="80" y="104" width="300" height="44" rx="8"/>
+<text x="230" y="131" text-anchor="middle">generate up to 4 new tokens</text>
+<rect class="box" x="80" y="172" width="300" height="44" rx="8"/>
+<text x="230" y="199" text-anchor="middle">decode text, then extract the price</text>
+<rect class="box" x="80" y="240" width="300" height="44" rx="8"/>
+<text x="230" y="267" text-anchor="middle">add the gap from the true price</text>
+<path class="arrow" d="M230,80 V104"/>
+<path class="arrow" d="M230,148 V172"/>
+<path class="arrow" d="M230,216 V240"/>
+<path class="arrow-accent" d="M80,262 H44 V58 H78"/>
+<text class="small accent" x="38" y="160" text-anchor="middle" transform="rotate(-90 38 160)">repeat for all 250 items</text>
+<rect class="box-info" x="80" y="300" width="300" height="30" rx="8"/>
+<text x="230" y="320" text-anchor="middle">Tester: average dollar error + chart</text>
+<path class="arrow" d="M230,284 V300"/>
+</svg>
+<figcaption>Each item is predicted and scored on its own; the harness keeps the running error. <strong>Note the test prompt has no price in it — the price is exactly what the model must produce.</strong></figcaption>
+</figure>
+
+<div class="callout warn">
+<strong>Common gotchas</strong>
+<ul>
+<li><strong>The model is gated.</strong> Llama is a gated model on <a class="term" href="glossary.html#hugging-face">Hugging Face</a>: you must accept its licence on the model page and log in with a Hugging Face token before the download works. The code logs in with <code>HF_TOKEN</code>; without an accepted licence you get an access error, not the model.</li>
+<li><strong>It is slow on a CPU.</strong> Generating 250 times through an 8-billion-parameter model is painfully slow without a <a class="term" href="glossary.html#gpu">GPU</a>. Run this in <a class="term" href="glossary.html#google-colab">Google Colab</a> on a GPU runtime, which is what the course does.</li>
+<li><strong>Do not read too much into one product.</strong> The first item being wildly wrong ($1,800 for a $374 part) is a bad omen, but the real verdict is the average over all 250 points, not any single guess.</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Video vs repo — read this before the code</strong>
+<p>The code file below (<code>week7/day2.py</code>) is the <strong>current repository's</strong> version, and it is a <strong>newer re-recording</strong> of the course. It does not line up one-to-one with the video you just read about. The differences:</p>
+<ul>
+<li><strong>Model.</strong> The repo uses <code>meta-llama/Llama-3.2-3B</code> (3 billion parameters). The <em>video</em> uses Llama 3.1 8B. Treat the model id as a value you can swap.</li>
+<li><strong>Data.</strong> The repo loads a custom <code>pricer.items.Item</code> class and the <code>ed-donner/items_full</code> dataset, builds prompts, and pushes a new <code>ed-donner/items_prompts_full</code> dataset to the Hub. The video uses the Week 6 pricing dataset directly.</li>
+<li><strong>What the file actually does.</strong> This re-recorded <code>day2.py</code> is really the <em>data-preparation</em> step: load data, study the token lengths, decide a cutoff, turn each item into a prompt-and-completion pair, and upload the result. The <strong>base-model evaluation</strong> that this page teaches (load the model, <code>model.predict</code>, <code>extract_price</code>, the <code>Tester</code> and the ~$395 score) is what the <em>video</em> performs; it is described above in prose and diagrams rather than shown as code, because that evaluation code is not in the current repository file.</li>
+<li><strong>Frontier ids.</strong> The re-recording also refreshes the frontier model ids it compares against. Use whatever model still exists when you run it.</li>
+</ul>
+<p>In short: learn the <em>method</em> (run the base model over the test set and get a starting error to beat) from the discussion above; read the file below to see how the re-recorded course prepares the data that the training in the next days will consume.</p>
+</div>
+
+<h2>The repository code (day2.py)</h2>
+
+<p>Here is the current repository file exactly as it ships. It loads the data through the course's <code>Item</code> class, loads the Llama-3.2-3B tokenizer, looks at how many tokens each product description uses, picks a cutoff, turns every item into a prompt-and-completion pair, and pushes the prepared dataset back to the Hub.</p>
+
+<pre data-file="week7/day2.py" data-lang="py" data-tag="complete file"><code>import os
+from dotenv import load_dotenv
+from huggingface_hub import login
+from pricer.items import Item
+from tqdm.notebook import tqdm
+from transformers import AutoTokenizer
+import matplotlib.pyplot as plt
+
+
+LITE_MODE = False
+
+load_dotenv(override=True)
+hf_token = os.environ['HF_TOKEN']
+login(hf_token, add_to_git_credential=True)
+
+username = "ed-donner"
+dataset = f"{username}/items_lite" if LITE_MODE else f"{username}/items_full"
+
+train, val, test = Item.from_hub(dataset)
+items = train + val + test
+
+print(f"Loaded {len(train):,} training items, {len(val):,} validation items, {len(test):,} test items")
+
+BASE_MODEL = "meta-llama/Llama-3.2-3B"
+
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+
+token_counts = [item.count_tokens(tokenizer) for item in tqdm(items)]
+
+plt.figure(figsize=(15, 6))
+plt.title(f"Tokens in Summary: Avg {sum(token_counts)/len(token_counts):,.1f} and highest {max(token_counts):,}\n")
+plt.xlabel('Number of tokens in summary')
+plt.ylabel('Count')
+plt.hist(token_counts, rwidth=0.7, color="skyblue", bins=range(0, 200, 10))
+plt.show()
+
+CUTOFF = 110
+cut = len([count for count in token_counts if count &gt; CUTOFF])
+print(f"With this CUTOFF, we will truncate {cut:,} items which is {cut/len(items):.1%}")
+
+
+print(train[0].summary)
+
+for item in tqdm(train+val):
+    item.make_prompts(tokenizer, CUTOFF, True)
+for item in tqdm(test):
+    item.make_prompts(tokenizer, CUTOFF, False)
+
+print("PROMPT:")
+print(test[0].prompt)
+print("COMPLETION:")
+print(test[0].completion)
+
+
+prompt_token_counts = [item.count_prompt_tokens(tokenizer) for item in tqdm(items)]
+
+plt.figure(figsize=(15, 6))
+plt.title(f"Tokens: Avg {sum(prompt_token_counts)/len(prompt_token_counts):,.1f} and highest {max(prompt_token_counts):,}\n")
+plt.xlabel('Number of tokens in prompt and the completion')
+plt.ylabel('Count')
+plt.hist(prompt_token_counts, rwidth=0.7, color="gold", bins=range(0, 200, 10))
+plt.show()
+
+username = "ed-donner"
+dataset = f"{username}/items_prompts_lite" if LITE_MODE else f"{username}/items_prompts_full"
+
+Item.push_prompts_to_hub(dataset, train, val, test)</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="The data-preparation pipeline inside the repository day2.py file">
+<text class="title" x="380" y="24" text-anchor="middle">What day2.py actually does (data preparation)</text>
+<rect class="box" x="40" y="44" width="200" height="54" rx="8"/>
+<text x="140" y="68" text-anchor="middle">load dataset</text>
+<text x="140" y="86" text-anchor="middle" class="small">items_full</text>
+<rect class="box" x="280" y="44" width="200" height="54" rx="8"/>
+<text x="380" y="68" text-anchor="middle">split</text>
+<text x="380" y="86" text-anchor="middle" class="small">train / val / test</text>
+<rect class="box" x="520" y="44" width="200" height="54" rx="8"/>
+<text x="620" y="68" text-anchor="middle">AutoTokenizer</text>
+<text x="620" y="86" text-anchor="middle" class="small">Llama-3.2-3B</text>
+<rect class="box" x="520" y="150" width="200" height="54" rx="8"/>
+<text x="620" y="174" text-anchor="middle">count tokens</text>
+<text x="620" y="192" text-anchor="middle" class="small">CUTOFF = 110</text>
+<rect class="box-info" x="280" y="150" width="200" height="54" rx="8"/>
+<text x="380" y="174" text-anchor="middle">make_prompts</text>
+<text x="380" y="192" text-anchor="middle" class="small">prompt + completion</text>
+<rect class="box-ok" x="40" y="150" width="200" height="54" rx="8"/>
+<text x="140" y="174" text-anchor="middle">push to Hub</text>
+<text x="140" y="192" text-anchor="middle" class="small">items_prompts_full</text>
+<path class="arrow" d="M240,71 H278"/>
+<path class="arrow" d="M480,71 H518"/>
+<path class="arrow" d="M620,98 V150"/>
+<path class="arrow" d="M520,177 H482"/>
+<path class="arrow" d="M280,177 H242"/>
+</svg>
+<figcaption>Follow the arrows: load, split, tokenize, measure, build prompts, upload. <strong>The output is a prepared prompt dataset for the next days' training, not a price score.</strong></figcaption>
+</figure>
+
+<h3>Line by line</h3>
+<p>These are the key parts of the repository file. (The base-model load, <code>model.predict</code> and <code>Tester</code> scoring that the video runs are not in this file — see the Video-vs-repo callout above.)</p>
+<div class="table-wrap">
+<table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–7</td><td><code>import os ... import matplotlib.pyplot as plt</code></td><td>The imports. <code>os</code> reads environment variables; <code>load_dotenv</code> loads the <code>.env</code> file; <code>login</code> signs in to Hugging Face; <code>Item</code> is the course's own data class (from the <code>pricer</code> package); <code>tqdm</code> draws progress bars for the long loops; <code>AutoTokenizer</code> fetches the tokenizer that matches the model; <code>matplotlib</code> draws the histograms. Without these the script cannot read secrets, reach the Hub, or plot.</td></tr>
+<tr><td>10</td><td><code>LITE_MODE = False</code></td><td>A single switch that chooses between a small "lite" dataset and the full one. Setting it to <code>False</code> uses the full, 400,000-item data. Flipping it to <code>True</code> is how you do a quick test run on a fraction of the data.</td></tr>
+<tr><td>12–14</td><td><code>load_dotenv(override=True)</code> … <code>login(hf_token, add_to_git_credential=True)</code></td><td>Loads the <code>.env</code> file, reads the <code>HF_TOKEN</code> secret, and logs in to Hugging Face. This login is what lets you download the gated Llama tokenizer and later push your dataset. <code>override=True</code> makes the <code>.env</code> values win over anything already set; if <code>HF_TOKEN</code> is missing this line raises a <code>KeyError</code> immediately.</td></tr>
+<tr><td>16–17</td><td><code>dataset = f"{username}/items_lite" if LITE_MODE else f"{username}/items_full"</code></td><td>Builds the dataset name on the Hub from the username and the lite switch. With <code>LITE_MODE = False</code> this is <code>ed-donner/items_full</code>. Keeping the name in one place means the rest of the code never hard-codes it.</td></tr>
+<tr><td>19–20</td><td><code>train, val, test = Item.from_hub(dataset)</code></td><td>Downloads the dataset and splits it into training, validation and test sets in one call, using the course's <code>Item</code> class so each row becomes an <code>Item</code> object. Line 20 glues all three back together as <code>items</code> for the token-counting that follows.</td></tr>
+<tr><td>22</td><td><code>print(f"Loaded {len(train):,} ... test items")</code></td><td>Prints how many items landed in each split, with thousands separators (<code>:,</code>). A quick sanity check that the download worked and the sizes look right before anything slow runs.</td></tr>
+<tr><td>24</td><td><code>BASE_MODEL = "meta-llama/Llama-3.2-3B"</code></td><td>Names the base model. This is the single most important swap point: it is the open-source model everything else is built around, and it is a <em>newer, smaller</em> model (3B) than the video's Llama 3.1 8B.</td></tr>
+<tr><td>26</td><td><code>tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)</code></td><td>Downloads and builds the tokenizer that matches <code>BASE_MODEL</code>. We need the <em>same</em> tokenizer the model was trained with, otherwise the token counts and prompts would not match what the model expects. This is the only piece of the model this file actually loads — the weights are loaded later, during training.</td></tr>
+<tr><td>28</td><td><code>token_counts = [item.count_tokens(tokenizer) for item in tqdm(items)]</code></td><td>Counts how many tokens each item's text uses, wrapped in <code>tqdm</code> so you see progress. These counts tell us how long the inputs are, which decides the cutoff on the next lines.</td></tr>
+<tr><td>30–35</td><td><code>plt.figure(...)</code> … <code>plt.show()</code></td><td>Draws a histogram of those token counts, with the average and the highest count in the title. It is purely diagnostic: a picture of how long the descriptions are, so you can choose a sensible cutoff instead of guessing.</td></tr>
+<tr><td>37–39</td><td><code>CUTOFF = 110</code> … <code>print(f"... truncate {cut:,} items which is {cut/len(items):.1%}")</code></td><td>Sets the maximum length at 110 tokens, counts how many items are longer than that, and prints the share as a percentage (<code>:.1%</code>). Truncating keeps every prompt a fixed, manageable length for training; this line tells you how much data the cutoff chops.</td></tr>
+<tr><td>42</td><td><code>print(train[0].summary)</code></td><td>Prints the text summary of the first training item, so you can eyeball what one real example looks like before turning it into a prompt.</td></tr>
+<tr><td>44–47</td><td><code>for item in tqdm(train+val): item.make_prompts(tokenizer, CUTOFF, True)</code> … <code>for item in tqdm(test): item.make_prompts(tokenizer, CUTOFF, False)</code></td><td>The heart of the file. It turns every item into a prompt-and-completion pair. The final argument is the difference that matters: <code>True</code> for training and validation <strong>includes the price</strong> in the completion (the model learns from it); <code>False</code> for the test set <strong>leaves the price out</strong> so the model has to predict it. That hidden price is exactly what the evaluation on this page measures.</td></tr>
+<tr><td>49–52</td><td><code>print("PROMPT:") ... print(test[0].completion)</code></td><td>Prints a built test prompt and its (held-back) completion so you can confirm the format: the prompt ends asking for the price, and the completion is just the number.</td></tr>
+<tr><td>55–62</td><td><code>prompt_token_counts = [...]</code> … <code>plt.show()</code></td><td>Repeats the counting and histogram, this time on the finished prompts (prompt plus completion), to confirm that after the cutoff everything fits in the length budget training will use.</td></tr>
+<tr><td>64–65</td><td><code>dataset = f"{username}/items_prompts_lite" if LITE_MODE else f"{username}/items_prompts_full"</code></td><td>Builds the name for the <em>new</em> dataset of prepared prompts. Note it is a different name (<code>items_prompts_full</code>) from the raw dataset loaded earlier, so the original is left untouched.</td></tr>
+<tr><td>67</td><td><code>Item.push_prompts_to_hub(dataset, train, val, test)</code></td><td>Uploads the prepared prompts back to the Hugging Face Hub under that name. The next days' training will simply load this ready-made dataset instead of repeating all the preparation.</td></tr>
+</table>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="A training item keeps the price while a test item hides it">
+<text class="title" x="380" y="24" text-anchor="middle">Why the last argument to make_prompts matters</text>
+<rect class="box-ok" x="30" y="44" width="330" height="150" rx="8"/>
+<text x="195" y="70" text-anchor="middle">Training item — make_prompts(..., True)</text>
+<text x="195" y="98" text-anchor="middle" class="small">prompt: How much is this to the</text>
+<text x="195" y="116" text-anchor="middle" class="small">nearest dollar? ... Price is $</text>
+<rect class="box-solid" x="150" y="134" width="90" height="30" rx="6"/>
+<text x="195" y="154" text-anchor="middle" class="on-solid mono">374</text>
+<text x="195" y="184" text-anchor="middle" class="small">model sees the price while training</text>
+<rect class="box-info" x="400" y="44" width="330" height="150" rx="8"/>
+<text x="565" y="70" text-anchor="middle">Test item — make_prompts(..., False)</text>
+<text x="565" y="98" text-anchor="middle" class="small">prompt: same text, ending</text>
+<text x="565" y="116" text-anchor="middle" class="small">with ... Price is $</text>
+<rect class="box-warn" x="520" y="134" width="90" height="30" rx="6"/>
+<text x="565" y="154" text-anchor="middle" class="mono">??</text>
+<text x="565" y="184" text-anchor="middle" class="small">price hidden — the model must predict it</text>
+</svg>
+<figcaption>Same prompt format on both sides; only the training item keeps the answer. <strong>The test item's missing price is the one token the base model is scored on.</strong></figcaption>
+</figure>
+
+<div class="recap">
+<strong>Recap</strong>
+<ul>
+<li>Before any fine-tuning, measure the untouched base model so you have a starting score to beat; a model that cannot beat a constant guess has a lot to prove.</li>
+<li>The method: load the base model, write a predict function, run it over the 250 test prompts, parse the price out of its text, and score the average dollar error with the <code>Tester</code> harness.</li>
+<li>Llama 3.1 8B was chosen partly because its tokenizer maps a three-digit price to a single token, so predicting the price is predicting one next token well.</li>
+<li>In the video the 4-bit base model scores about $395 average error ($301 at 8-bit) — worse than the $146 constant guess and far behind GPT-4o's $76. That gap is the week's challenge. (Not run here; it needs a GPU and a gated model.)</li>
+<li>The repository's <code>day2.py</code> is a newer re-recording: it uses Llama-3.2-3B and prepares a prompt dataset (<code>items_prompts_full</code>) rather than running the evaluation. Learn the method from the discussion; read the file for the data prep.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="37-w7d1.html"><small>← Previous · Step 37</small>Week 7 · Day 1 — QLoRA and Loading the Base Model</a>
+<a class="next" href="39-w7d3.html"><small>Next · Step 39 →</small>Week 7 · Day 3 — The QLoRA Training Run</a>
+</nav>
+</main>
+</body>
+</html>

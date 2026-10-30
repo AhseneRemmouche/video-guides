@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>29 · Week 5 · Day 5 — Debugging RAG and the Knowledge Worker</title>
+<meta name="description" content="Fix common RAG problems (bad retrieval, wrong chunks), swap vector stores (FAISS vs Chroma), look behind LangChain&#x27;s curtain, and build a personal AI knowledge worker.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 29/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 29 of 48 · Week 5 · Day 5 · 5 lessons</div>
+  <h1>Week 5 · Day 5 — Debugging RAG and the Knowledge Worker</h1>
+  <p class="lead">Fix common RAG problems (bad retrieval, wrong chunks), swap vector stores (FAISS vs Chroma), look behind LangChain&#x27;s curtain, and build a personal AI knowledge worker.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>This is the last day of Week 5, and it is where <a class="term" href="glossary.html#rag">retrieval-augmented
+generation (RAG)</a> stops being a demo and starts being something you can actually trust. Days 1 to 4 built
+the machine: you loaded a <a class="term" href="glossary.html#knowledge-base">knowledge base</a> of company
+documents, split each one into <a class="term" href="glossary.html#chunk">chunks</a>, turned every chunk into a
+vector, stored those vectors, and wired a <a class="term" href="glossary.html#retriever">retriever</a> plus a
+chat model into an answer function. Today we ask the harder question: <strong>what do you do when the answer
+comes back wrong?</strong></p>
+
+<p>The instructor covers three things in this session, and then sets the week's project. First, a quick side
+trip showing how easy it is to swap one vector store for another: <a class="term" href="glossary.html#chroma">Chroma</a>
+out, <a class="term" href="glossary.html#faiss">FAISS</a> in, one line of code. Second, a look under the hood
+at <a class="term" href="glossary.html#langchain">LangChain</a> so you can <em>see</em> the exact prompt it
+sends to the model, which is the key to debugging. Third, the most common RAG failure of all, a question whose
+answer is sitting right there in the documents and yet the model says "I don't know", and the simple fixes for
+it. Finally, the Week 5 project: point this exact pipeline at <strong>your own</strong> files and build a
+personal AI knowledge worker.</p>
+
+<div class="callout"><strong>Video vs repo.</strong> This is the biggest gap in the week between what you
+watch and what is in the repo, so read this first. In the <em>videos</em> the instructor uses LangChain's
+<code>ConversationalRetrievalChain</code> with a Gradio chat window, swaps Chroma for FAISS with a one-line
+change, turns on a <code>StdOutCallbackHandler</code> to print the prompt, and fixes a bad answer by asking the
+retriever for <strong>25</strong> chunks instead of 3. The current <code>week5/day5.py</code> in the repo is a
+more advanced, <em>library-free</em> rewrite: it talks to Chroma directly, and it adds two extra tricks the
+videos only hint at, a <strong>query rewrite</strong> step and an LLM <strong>re-ranker</strong>. We embed the
+repo's <code>day5.py</code> as the code, and explain the video's LangChain version (FAISS swap, callbacks,
+Gradio, tuning <code>k</code>) in the primers and diagrams, because the ideas are the same either way.</div>
+
+<h2>Why a RAG answer goes wrong</h2>
+
+<p>RAG has two halves: <em>retrieval</em> (find the right chunks) and <em>generation</em> (write an answer from
+them). When an answer is wrong, the generation half is almost never the culprit. The model only sees the chunks
+you hand it, so if the right chunk was never retrieved, the model has no way to know the answer, and a
+well-written prompt will make it say "I don't know" rather than invent something. That is exactly what the
+instructor demonstrates: he adds a sentence to one employee's HR record ("won the IIOTY award in 2023"), asks
+"who received the IIOTY award?", and the model answers "I don't know" because the retriever pulled back a few
+chunks that did not include that sentence.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="A wrong RAG answer traced from cause to symptom to fix: wrong or too-few chunks retrieved leads to the model saying I don't know, which is fixed by raising k, re-chunking, adding overlap, or re-ranking">
+  <text x="380" y="24" text-anchor="middle" class="title">A wrong answer: cause, symptom, fix</text>
+  <rect class="box-bad" x="15" y="46" width="215" height="70" rx="8"/>
+  <text x="122" y="74" text-anchor="middle">Wrong or too-few</text>
+  <text x="122" y="92" text-anchor="middle">chunks retrieved</text>
+  <text x="122" y="108" text-anchor="middle" class="small">the fact never reaches the model</text>
+  <path class="arrow-bad" d="M 232,81 H 268"/>
+  <rect class="box-warn" x="270" y="46" width="200" height="70" rx="8"/>
+  <text x="370" y="74" text-anchor="middle">Model says</text>
+  <text x="370" y="92" text-anchor="middle" class="mono">"I don't know"</text>
+  <text x="370" y="108" text-anchor="middle" class="small">(or a vague answer)</text>
+  <path class="arrow-ok" d="M 472,81 H 523"/>
+  <rect class="box-ok" x="525" y="46" width="220" height="70" rx="8"/>
+  <text x="635" y="70" text-anchor="middle">Fix the retrieval</text>
+  <text x="635" y="88" text-anchor="middle" class="small">raise k · smaller chunks</text>
+  <text x="635" y="104" text-anchor="middle" class="small">more overlap · re-rank</text>
+</svg>
+<figcaption>Trace every bad answer back one step. <strong>If the right chunk was not retrieved, no prompt can
+save you</strong>, so the fixes all live on the retrieval side, not the wording of the question.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to debugging retrieval? Where to actually look</summary>
+When an answer is wrong, resist the urge to reword the prompt. Instead, print the chunks the retriever
+returned for that question and read them with your own eyes. One of three things will be true: (1) the right
+chunk is simply missing, so you need to retrieve more of them (raise <code>k</code>) or chunk the documents
+differently; (2) the right chunk is there but buried far down the list, so a re-ranking step helps; or (3) the
+fact is split awkwardly across two chunks, so more overlap between chunks keeps it whole. The instructor's own
+fix for the IIOTY question was the simplest one: ask for more chunks. As a rule of thumb, modern models are
+good at ignoring irrelevant context, so sending more chunks rarely hurts and often fixes the problem.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Tuning k: with k equals 3 the retriever stops before the award chunk and misses it, but with k equals 25 the same ranked list includes the award chunk">
+  <text x="380" y="24" text-anchor="middle" class="title">How many chunks to retrieve (k)</text>
+
+  <text x="40" y="66" class="label bad">k = 3</text>
+  <rect class="box-ok" x="40" y="74" width="150" height="34" rx="8"/>
+  <circle class="dot-info" cx="70" cy="91" r="6"/>
+  <circle class="dot-info" cx="110" cy="91" r="6"/>
+  <circle class="dot-info" cx="150" cy="91" r="6"/>
+  <text x="215" y="95" class="small">top 3 only</text>
+  <circle class="dot-warn" cx="470" cy="91" r="7"/>
+  <text x="560" y="88" text-anchor="middle" class="small">award chunk sits</text>
+  <text x="560" y="102" text-anchor="middle" class="small">further down - missed</text>
+  <path class="arrow-bad" d="M 190,91 H 455"/>
+
+  <text x="40" y="156" class="label ok">k = 25</text>
+  <rect class="box-ok" x="40" y="164" width="560" height="40" rx="8"/>
+  <circle class="dot-info" cx="70" cy="184" r="6"/>
+  <circle class="dot-info" cx="110" cy="184" r="6"/>
+  <circle class="dot-info" cx="150" cy="184" r="6"/>
+  <circle class="dot-info" cx="190" cy="184" r="6"/>
+  <circle class="dot-info" cx="230" cy="184" r="6"/>
+  <circle class="dot-info" cx="270" cy="184" r="6"/>
+  <circle class="dot-info" cx="310" cy="184" r="6"/>
+  <circle class="dot-info" cx="350" cy="184" r="6"/>
+  <circle class="dot-info" cx="390" cy="184" r="6"/>
+  <circle class="dot-info" cx="430" cy="184" r="6"/>
+  <circle class="dot-ok" cx="470" cy="184" r="7"/>
+  <circle class="dot-info" cx="510" cy="184" r="6"/>
+  <circle class="dot-info" cx="550" cy="184" r="6"/>
+  <text x="635" y="188" class="small ok">award chunk included</text>
+</svg>
+<figcaption>Dots are chunks ranked by similarity to the question (positions illustrative). Ask for too few and
+the right one falls outside the window; <strong>raising <code>k</code> widens the net until the answer is in
+it</strong>. Here the course went from 3 chunks to 25.</figcaption>
+</figure>
+
+<h2>Swapping the vector store: FAISS vs Chroma</h2>
+
+<p>Before the debugging, the instructor takes a short detour he calls "day 4.5" to prove how little code it
+takes to switch vector stores. The whole pipeline up to Day 4 used Chroma, a database that saves your vectors
+to disk so they survive a restart. FAISS (Facebook AI Similarity Search) is a different tool for the same job:
+an open-source library that keeps vectors in memory and finds the nearest ones very fast. Because LangChain
+wraps both behind the same interface, moving from one to the other is a single line.</p>
+
+<details class="primer"><summary>New to FAISS? What it is and how it differs from Chroma</summary>
+Both store the vectors for your chunks and answer the same question, "which stored vectors are closest to this
+query vector?", which is the <a class="term" href="glossary.html#semantic-search">semantic search</a> at the
+heart of RAG. The difference is where the vectors live. Chroma is a proper database that <em>persists</em> to
+disk, so you build the index once and reopen it later. FAISS keeps the index in memory: it is extremely fast
+and comes in a CPU build and a GPU build, but it does not save itself to disk, so you rebuild the index each
+run (or save and load it yourself). For a small knowledge base either is fine; the point of the detour is that
+your RAG "plumbing" does not care which one you pick.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Chroma persists vectors to disk and is opened with a PersistentClient, while FAISS keeps them in memory; both answer the same nearest-vector query, and switching between them is a one-line change">
+  <text x="190" y="24" text-anchor="middle" class="title">Chroma</text>
+  <text x="570" y="24" text-anchor="middle" class="title">FAISS</text>
+  <rect class="zone" x="15" y="36" width="350" height="140" rx="8"/>
+  <rect class="zone" x="395" y="36" width="350" height="140" rx="8"/>
+
+  <rect class="box-info" x="35" y="54" width="310" height="34" rx="8"/>
+  <text x="190" y="76" text-anchor="middle">Persists to disk</text>
+  <rect class="box" x="35" y="98" width="310" height="30" rx="8"/>
+  <text x="190" y="118" text-anchor="middle" class="small">a full, reopenable database</text>
+  <rect class="box" x="35" y="136" width="310" height="30" rx="8"/>
+  <text x="190" y="156" text-anchor="middle" class="small">PersistentClient(path=DB_NAME)</text>
+
+  <rect class="box-info" x="415" y="54" width="310" height="34" rx="8"/>
+  <text x="570" y="76" text-anchor="middle">In memory (fast)</text>
+  <rect class="box" x="415" y="98" width="310" height="30" rx="8"/>
+  <text x="570" y="118" text-anchor="middle" class="small">Facebook AI Similarity Search</text>
+  <rect class="box" x="415" y="136" width="310" height="30" rx="8"/>
+  <text x="570" y="156" text-anchor="middle" class="small">no disk; CPU or GPU build</text>
+
+  <rect class="box-solid" x="110" y="196" width="540" height="50" rx="8"/>
+  <text x="380" y="218" text-anchor="middle" class="on-solid mono small">Chroma.from_documents(chunks, embeddings, ...)</text>
+  <text x="380" y="236" text-anchor="middle" class="on-solid mono small">-&gt; FAISS.from_documents(chunks, embeddings)</text>
+</svg>
+<figcaption>Same vectors, same nearest-neighbour search, same embeddings. <strong>Only one line changes to
+switch stores</strong> in the video's LangChain version, which is the whole point of using the library's
+abstractions.</figcaption>
+</figure>
+
+<p>The instructor also shows that the search is genuinely <em>semantic</em>, not text matching: he asks "what
+did <em>Avery</em> do before?" with the name misspelled and lower-cased, and the store still finds Avery
+Lancaster's HR record, because the misspelled question turns into almost the same vector as the real name. That
+tolerance for typos and paraphrases is exactly what you get from vector search and would never get from a
+plain keyword lookup.</p>
+
+<h2>Seeing what LangChain does under the hood</h2>
+
+<p>The reason the video can debug the "I don't know" answer is that LangChain lets you print the real prompt it
+builds. You attach a <code>StdOutCallbackHandler</code> to the chain, and when a question runs, it prints every
+step, ending with the full text sent to the model: a carefully written system instruction ("Use the following
+pieces of context... if you don't know the answer, just say you don't know, don't make one up"), then the
+retrieved chunks as context, then the conversation history, then your question. Reading that printout is how
+you discover the chunks are wrong. There is no magic in LangChain: it retrieves chunks and stitches them into a
+prompt, and the callback simply shows you the stitched result.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="LangChain assembles one prompt from the system instruction, the retrieved context chunks, the conversation history, and the question, then sends it to the model; a callback handler can print this exact prompt">
+  <text x="380" y="24" text-anchor="middle" class="title">The one prompt the model actually sees</text>
+  <rect class="box" x="15" y="44" width="210" height="34" rx="8"/>
+  <text x="120" y="66" text-anchor="middle" class="small">System: rules + "say you don't know"</text>
+  <rect class="box-info" x="15" y="86" width="210" height="34" rx="8"/>
+  <text x="120" y="108" text-anchor="middle" class="small">Context: the retrieved chunks</text>
+  <rect class="box" x="15" y="128" width="210" height="34" rx="8"/>
+  <text x="120" y="150" text-anchor="middle" class="small">History: earlier turns</text>
+  <rect class="box" x="15" y="170" width="210" height="34" rx="8"/>
+  <text x="120" y="192" text-anchor="middle" class="small">Human: the question</text>
+
+  <path class="arrow" d="M 225,61 H 300"/>
+  <path class="arrow" d="M 225,103 H 300"/>
+  <path class="arrow" d="M 225,145 H 300"/>
+  <path class="arrow" d="M 225,187 H 300"/>
+
+  <rect class="box-solid" x="302" y="96" width="170" height="56" rx="8"/>
+  <text x="387" y="120" text-anchor="middle" class="on-solid">One prompt</text>
+  <text x="387" y="138" text-anchor="middle" class="on-solid small">assembled by the chain</text>
+  <path class="arrow-accent" d="M 472,124 H 540"/>
+  <rect class="box" x="542" y="96" width="200" height="56" rx="8"/>
+  <text x="642" y="120" text-anchor="middle" class="mono">gpt-4o-mini</text>
+  <text x="642" y="138" text-anchor="middle" class="small">writes the answer</text>
+
+  <rect class="box-warn" x="302" y="178" width="440" height="40" rx="8"/>
+  <text x="522" y="202" text-anchor="middle" class="small">A callback prints this whole prompt - if the context box is wrong, the answer will be wrong</text>
+</svg>
+<figcaption>LangChain's job is to fill the context box with the right chunks. <strong>Turn on a callback and
+read the printed prompt</strong>; the wrong context jumps out, and you know to fix retrieval, not wording.</figcaption>
+</figure>
+
+<h2>The repo's knowledge worker, in code</h2>
+
+<p>Here is the repo's <code>week5/day5.py</code> in full. It is a complete, self-contained knowledge worker:
+it loads the Insurellm documents, uses the model itself to split them into well-labelled chunks, embeds and
+stores them in Chroma, draws the t-SNE picture from Day 3, and then answers questions with a four-step pipeline
+(rewrite the question, retrieve, re-rank, answer). The file is long, so after the listing we walk through the
+parts that matter most and summarise the rest in prose.</p>
+
+<p><pre data-file="week5/day5.py" data-lang="py" data-tag="complete file"><code>from pathlib import Path
+from openai import OpenAI
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+from chromadb import PersistentClient
+from tqdm import tqdm
+from litellm import completion
+import numpy as np
+from sklearn.manifold import TSNE
+import plotly.graph_objects as go
+
+
+load_dotenv(override=True)
+
+MODEL = "openai/gpt-4o-mini"
+
+DB_NAME = "preprocessed_db"
+collection_name = "docs"
+embedding_model = "text-embedding-3-large"
+KNOWLEDGE_BASE_PATH = Path("knowledge-base")
+AVERAGE_CHUNK_SIZE = 500
+
+openai = OpenAI()
+
+# Inspired by LangChain's Document - let's have something similar
+
+class Result(BaseModel):
+    page_content: str
+    metadata: dict
+
+# A class to perfectly represent a chunk
+
+class Chunk(BaseModel):
+    headline: str = Field(description="A brief heading for this chunk, typically a few words, that is most likely to be surfaced in a query")
+    summary: str = Field(description="A few sentences summarizing the content of this chunk to answer common questions")
+    original_text: str = Field(description="The original text of this chunk from the provided document, exactly as is, not changed in any way")
+
+    def as_result(self, document):
+        metadata = {"source": document["source"], "type": document["type"]}
+        return Result(page_content=self.headline + "\n\n" + self.summary + "\n\n" + self.original_text,metadata=metadata)
+
+
+class Chunks(BaseModel):
+    chunks: list[Chunk]
+
+def fetch_documents():
+    """A homemade version of the LangChain DirectoryLoader"""
+
+    documents = []
+
+    for folder in KNOWLEDGE_BASE_PATH.iterdir():
+        doc_type = folder.name
+        for file in folder.rglob("*.md"):
+            with open(file, "r", encoding="utf-8") as f:
+                documents.append({"type": doc_type, "source": file.as_posix(), "text": f.read()})
+
+    print(f"Loaded {len(documents)} documents")
+    return documents
+
+documents = fetch_documents()
+
+def make_prompt(document):
+    how_many = (len(document["text"]) // AVERAGE_CHUNK_SIZE) + 1
+    return f"""
+You take a document and you split the document into overlapping chunks for a KnowledgeBase.
+
+The document is from the shared drive of a company called Insurellm.
+The document is of type: {document["type"]}
+The document has been retrieved from: {document["source"]}
+
+A chatbot will use these chunks to answer questions about the company.
+You should divide up the document as you see fit, being sure that the entire document is returned in the chunks - don't leave anything out.
+This document should probably be split into {how_many} chunks, but you can have more or less as appropriate.
+There should be overlap between the chunks as appropriate; typically about 25% overlap or about 50 words, so you have the same text in multiple chunks for best retrieval results.
+
+For each chunk, you should provide a headline, a summary, and the original text of the chunk.
+Together your chunks should represent the entire document with overlap.
+
+Here is the document:
+
+{document["text"]}
+
+Respond with the chunks.
+"""
+
+print(make_prompt(documents[0]))
+
+def make_messages(document):
+    return [
+        {"role": "user", "content": make_prompt(document)},
+    ]
+
+make_messages(documents[0])
+
+def process_document(document):
+    messages = make_messages(document)
+    response = completion(model=MODEL, extra_body={"reasoning_effort": "none"}, messages=messages, response_format=Chunks)
+    reply = response.choices[0].message.content
+    doc_as_chunks = Chunks.model_validate_json(reply).chunks
+    return [chunk.as_result(document) for chunk in doc_as_chunks]
+
+process_document(documents[0])
+
+def create_chunks(documents):
+    chunks = []
+    for doc in tqdm(documents):
+        chunks.extend(process_document(doc))
+    return chunks
+
+chunks = create_chunks(documents)
+
+print(len(chunks))
+
+def create_embeddings(chunks):
+    chroma = PersistentClient(path=DB_NAME)
+    if collection_name in [c.name for c in chroma.list_collections()]:
+        chroma.delete_collection(collection_name)
+
+    texts = [chunk.page_content for chunk in chunks]
+    emb = openai.embeddings.create(model=embedding_model, input=texts).data
+    vectors = [e.embedding for e in emb]
+
+    collection = chroma.get_or_create_collection(collection_name)
+
+    ids = [str(i) for i in range(len(chunks))]
+    metas = [chunk.metadata for chunk in chunks]
+
+    collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metas)
+    print(f"Vectorstore created with {collection.count()} documents")
+
+create_embeddings(chunks)
+
+chroma = PersistentClient(path=DB_NAME)
+collection = chroma.get_or_create_collection(collection_name)
+result = collection.get(include=['embeddings', 'documents', 'metadatas'])
+vectors = np.array(result['embeddings'])
+documents = result['documents']
+metadatas = result['metadatas']
+doc_types = [metadata['type'] for metadata in metadatas]
+colors = [['blue', 'green', 'red', 'orange'][['products', 'employees', 'contracts', 'company'].index(t)] for t in doc_types]
+
+tsne = TSNE(n_components=2, random_state=42)
+reduced_vectors = tsne.fit_transform(vectors)
+
+# Create the 2D scatter plot
+fig = go.Figure(data=[go.Scatter(
+    x=reduced_vectors[:, 0],
+    y=reduced_vectors[:, 1],
+    mode='markers',
+    marker=dict(size=5, color=colors, opacity=0.8),
+    text=[f"Type: {t}&lt;br&gt;Text: {d[:100]}..." for t, d in zip(doc_types, documents)],
+    hoverinfo='text'
+)])
+
+fig.update_layout(title='2D Chroma Vector Store Visualization',
+    scene=dict(xaxis_title='x',yaxis_title='y'),
+    width=800,
+    height=600,
+    margin=dict(r=20, b=10, l=10, t=40)
+)
+
+fig.show()
+
+tsne = TSNE(n_components=3, random_state=42)
+reduced_vectors = tsne.fit_transform(vectors)
+
+# Create the 3D scatter plot
+fig = go.Figure(data=[go.Scatter3d(
+    x=reduced_vectors[:, 0],
+    y=reduced_vectors[:, 1],
+    z=reduced_vectors[:, 2],
+    mode='markers',
+    marker=dict(size=5, color=colors, opacity=0.8),
+    text=[f"Type: {t}&lt;br&gt;Text: {d[:100]}..." for t, d in zip(doc_types, documents)],
+    hoverinfo='text'
+)])
+
+fig.update_layout(
+    title='3D Chroma Vector Store Visualization',
+    scene=dict(xaxis_title='x', yaxis_title='y', zaxis_title='z'),
+    width=900,
+    height=700,
+    margin=dict(r=10, b=10, l=10, t=40)
+)
+
+fig.show()
+
+class RankOrder(BaseModel):
+    order: list[int] = Field(
+        description="The order of relevance of chunks, from most relevant to least relevant, by chunk id number"
+    )
+
+def rerank(question, chunks):
+    system_prompt = """
+You are a document re-ranker.
+You are provided with a question and a list of relevant chunks of text from a query of a knowledge base.
+The chunks are provided in the order they were retrieved; this should be approximately ordered by relevance, but you may be able to improve on that.
+You must rank order the provided chunks by relevance to the question, with the most relevant chunk first.
+Reply only with the list of ranked chunk ids, nothing else. Include all the chunk ids you are provided with, reranked.
+"""
+    user_prompt = f"The user has asked the following question:\n\n{question}\n\nOrder all the chunks of text by relevance to the question, from most relevant to least relevant. Include all the chunk ids you are provided with, reranked.\n\n"
+    user_prompt += "Here are the chunks:\n\n"
+    for index, chunk in enumerate(chunks):
+        user_prompt += f"# CHUNK ID: {index + 1}:\n\n{chunk.page_content}\n\n"
+    user_prompt += "Reply only with the list of ranked chunk ids, nothing else."
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    response = completion(model=MODEL, extra_body={"reasoning_effort": "none"}, messages=messages, response_format=RankOrder)
+    reply = response.choices[0].message.content
+    order = RankOrder.model_validate_json(reply).order
+    print(order)
+    return [chunks[i - 1] for i in order]
+
+RETRIEVAL_K = 10
+
+def fetch_context_unranked(question):
+    query = openai.embeddings.create(model=embedding_model, input=[question]).data[0].embedding
+    results = collection.query(query_embeddings=[query], n_results=RETRIEVAL_K)
+    chunks = []
+    for result in zip(results["documents"][0], results["metadatas"][0]):
+        chunks.append(Result(page_content=result[0], metadata=result[1]))
+    return chunks
+
+question = "Who won the IIOTY award?"
+chunks = fetch_context_unranked(question)
+
+for chunk in chunks:
+    print(chunk.page_content[:15]+"...")
+
+reranked = rerank(question, chunks)
+
+for chunk in reranked:
+    print(chunk.page_content[:15]+"...")
+
+question = "Who went to Manchester University?"
+RETRIEVAL_K = 20
+chunks = fetch_context_unranked(question)
+for index, c in enumerate(chunks):
+    if "manchester" in c.page_content.lower():
+        print(index)
+
+reranked = rerank(question, chunks)
+
+for index, c in enumerate(reranked):
+    if "manchester" in c.page_content.lower():
+        print(index)
+
+reranked[0].page_content
+
+def fetch_context(question):
+    chunks = fetch_context_unranked(question)
+    return rerank(question, chunks)
+
+SYSTEM_PROMPT = """
+You are a knowledgeable, friendly assistant representing the company Insurellm.
+You are chatting with a user about Insurellm.
+Your answer will be evaluated for accuracy, relevance and completeness, so make sure it only answers the question and fully answers it.
+If you don't know the answer, say so.
+For context, here are specific extracts from the Knowledge Base that might be directly relevant to the user's question:
+{context}
+
+With this context, please answer the user's question. Be accurate, relevant and complete.
+"""
+
+# In the context, include the source of the chunk
+
+def make_rag_messages(question, history, chunks):
+    context = "\n\n".join(f"Extract from {chunk.metadata['source']}:\n{chunk.page_content}" for chunk in chunks)
+    system_prompt = SYSTEM_PROMPT.format(context=context)
+    return [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": question}]
+
+def rewrite_query(question, history=[]):
+    """Rewrite the user's question to be a more specific question that is more likely to surface relevant content in the Knowledge Base."""
+    message = f"""
+You are in a conversation with a user, answering questions about the company Insurellm.
+You are about to look up information in a Knowledge Base to answer the user's question.
+
+This is the history of your conversation so far with the user:
+{history}
+
+And this is the user's current question:
+{question}
+
+Respond only with a single, refined question that you will use to search the Knowledge Base.
+It should be a VERY short specific question most likely to surface content. Focus on the question details.
+Don't mention the company name unless it's a general question about the company.
+IMPORTANT: Respond ONLY with the knowledgebase query, nothing else.
+"""
+    response = completion(model=MODEL, extra_body={"reasoning_effort": "none"}, messages=[{"role": "system", "content": message}])
+    return response.choices[0].message.content
+
+rewrite_query("Who won the IIOTY award?", [])
+
+def answer_question(question: str, history: list[dict] = []) -&gt; tuple[str, list]:
+    """
+    Answer a question using RAG and return the answer and the retrieved context
+    """
+    query = rewrite_query(question, history)
+    print(query)
+    chunks = fetch_context(query)
+    messages = make_rag_messages(question, history, chunks)
+    response = completion(model=MODEL, extra_body={"reasoning_effort": "none"}, messages=messages)
+    return response.choices[0].message.content, chunks
+
+answer_question("Who won the IIOTY award?", [])
+
+answer_question("Who went to Manchester University?", [])</code></pre></p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="The knowledge-worker answer pipeline: a question is rewritten into a short search, embedded, used to query Chroma for the top k chunks, those chunks are re-ranked, built into context, and sent to gpt-4o-mini, which returns an answer with its sources">
+  <text x="380" y="24" text-anchor="middle" class="title">answer_question(): one question, four steps</text>
+  <rect class="box" x="15" y="50" width="160" height="50" rx="8"/>
+  <text x="95" y="72" text-anchor="middle">Your question</text>
+  <text x="95" y="90" text-anchor="middle" class="small">from the chat box</text>
+  <path class="arrow" d="M 175,75 H 203"/>
+  <rect class="box" x="205" y="50" width="160" height="50" rx="8"/>
+  <text x="285" y="72" text-anchor="middle" class="mono small">rewrite_query()</text>
+  <text x="285" y="90" text-anchor="middle" class="small">short search query</text>
+  <path class="arrow" d="M 365,75 H 393"/>
+  <rect class="box" x="395" y="50" width="160" height="50" rx="8"/>
+  <text x="475" y="72" text-anchor="middle">Embed query</text>
+  <text x="475" y="90" text-anchor="middle" class="small">text-embedding-3-large</text>
+  <path class="arrow" d="M 555,75 H 583"/>
+  <rect class="box-info" x="585" y="50" width="160" height="50" rx="8"/>
+  <text x="665" y="72" text-anchor="middle">Chroma query</text>
+  <text x="665" y="90" text-anchor="middle" class="small">top k chunks</text>
+
+  <path class="arrow" d="M 665,100 V 158"/>
+
+  <rect class="box-info" x="585" y="160" width="160" height="50" rx="8"/>
+  <text x="665" y="182" text-anchor="middle" class="mono small">rerank()</text>
+  <text x="665" y="200" text-anchor="middle" class="small">LLM re-orders</text>
+  <path class="arrow" d="M 585,185 H 557"/>
+  <rect class="box" x="395" y="160" width="160" height="50" rx="8"/>
+  <text x="475" y="182" text-anchor="middle">Build context</text>
+  <text x="475" y="200" text-anchor="middle" class="small">stuff into prompt</text>
+  <path class="arrow" d="M 395,185 H 367"/>
+  <rect class="box" x="205" y="160" width="160" height="50" rx="8"/>
+  <text x="285" y="182" text-anchor="middle" class="mono">gpt-4o-mini</text>
+  <text x="285" y="200" text-anchor="middle" class="small">answers from context</text>
+  <path class="arrow-ok" d="M 205,185 H 177"/>
+  <rect class="box-ok" x="15" y="160" width="160" height="50" rx="8"/>
+  <text x="95" y="182" text-anchor="middle">Answer</text>
+  <text x="95" y="200" text-anchor="middle" class="small">+ the chunks used</text>
+</svg>
+<figcaption>Read the top row left to right, drop down on the right, then read the bottom row right to left.
+<strong>Retrieval happens in the middle; the model only writes the final step</strong> from whatever context it
+was handed.</figcaption>
+</figure>
+
+<h3>Line by line: the chat function</h3>
+
+<p>This is the heart of the file, the function the UI would call for every message. It ties the four steps
+together and returns both the answer and the chunks it used (so the UI can show its sources).</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>296</td><td><code>def answer_question(question: str, history: list[dict] = []) -&gt; tuple[str, list]:</code></td><td>Defines the one entry point. It takes the new <code>question</code> and the running conversation <code>history</code> (a list of past messages, empty by default), and promises to return a <em>pair</em>: the answer text and the list of chunks it used.</td></tr>
+<tr><td>300</td><td><code>query = rewrite_query(question, history)</code></td><td>Step 1. Turns a possibly chatty or vague question into a short, specific search query. Searching with a clean query finds better chunks than searching with the raw sentence, especially in a follow-up like "and what about her?".</td></tr>
+<tr><td>301</td><td><code>print(query)</code></td><td>Prints the rewritten query so you can see what was actually searched for. This is a debugging aid, the same spirit as the video's callback: when an answer is wrong, the rewritten query is the first thing to check.</td></tr>
+<tr><td>302</td><td><code>chunks = fetch_context(query)</code></td><td>Step 2 and 3 together. <code>fetch_context</code> retrieves the nearest chunks from Chroma and then re-ranks them, so <code>chunks</code> ends up ordered best-first.</td></tr>
+<tr><td>303</td><td><code>messages = make_rag_messages(question, history, chunks)</code></td><td>Builds the message list for the model: a system prompt with the chunks pasted in as context, then the history, then the original question. This is the same "stuff the context into the prompt" step the LangChain diagram shows.</td></tr>
+<tr><td>304</td><td><code>response = completion(model=MODEL, extra_body={"reasoning_effort": "none"}, messages=messages)</code></td><td>Step 4. Calls the model (<code>gpt-4o-mini</code>) through LiteLLM with the assembled messages. <code>reasoning_effort="none"</code> keeps it fast and cheap, since RAG does the heavy lifting, not the model's own reasoning.</td></tr>
+<tr><td>305</td><td><code>return response.choices[0].message.content, chunks</code></td><td>Returns the answer text <em>and</em> the chunks, so a UI can display both the reply and which documents it came from. Returning the sources is what makes the answer auditable.</td></tr>
+</table></div>
+
+<h3>Line by line: building the Chroma vector store</h3>
+
+<p>Before any questions can be answered, every chunk must be embedded and stored. This function is the "write"
+side of Chroma; it runs once to build the database.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>114</td><td><code>def create_embeddings(chunks):</code></td><td>Takes the list of chunks produced earlier and loads them into Chroma.</td></tr>
+<tr><td>115</td><td><code>chroma = PersistentClient(path=DB_NAME)</code></td><td>Opens (or creates) a Chroma database on disk at <code>DB_NAME</code> ("preprocessed_db"). "Persistent" means the vectors are saved, so you do not have to re-embed everything next time. This is the line that would change if you switched to FAISS.</td></tr>
+<tr><td>116-117</td><td><code>if collection_name in [c.name for c in chroma.list_collections()]: chroma.delete_collection(collection_name)</code></td><td>If a collection with this name already exists, delete it first. Without this, re-running the cell would add duplicate vectors on top of the old ones and poison retrieval.</td></tr>
+<tr><td>119-121</td><td><code>texts = [chunk.page_content for chunk in chunks]</code> … <code>vectors = [e.embedding for e in emb]</code></td><td>Collects the text of every chunk, sends them all to OpenAI's embedding model in one call, and pulls out the resulting list of vectors. Embedding in a single batch is far faster than one call per chunk.</td></tr>
+<tr><td>123</td><td><code>collection = chroma.get_or_create_collection(collection_name)</code></td><td>Gets a fresh, empty collection (a named table of vectors) to write into.</td></tr>
+<tr><td>125-126</td><td><code>ids = [str(i) for i in range(len(chunks))]</code> … <code>metas = [chunk.metadata for chunk in chunks]</code></td><td>Prepares a unique id for each chunk and its metadata (which document and type it came from). Metadata is what later lets the answer cite its source.</td></tr>
+<tr><td>128</td><td><code>collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metas)</code></td><td>Writes everything into Chroma in one go: the ids, the vectors, the original text, and the metadata, lined up together. After this line the store is ready to be queried.</td></tr>
+</table></div>
+
+<h3>Line by line: retrieval and the k setting</h3>
+
+<p>This is the "read" side, and the one knob the video spends the most time on. <code>RETRIEVAL_K</code> is how
+many chunks each query pulls back, the exact value the instructor tunes to fix the bad answer.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>216</td><td><code>RETRIEVAL_K = 10</code></td><td>Sets how many chunks every query returns. This is the single most important dial in RAG: too small and the right chunk is missed (the "I don't know" bug); larger is usually safer because good models ignore the extra. The file even bumps it to 20 later (line 238) for a harder question.</td></tr>
+<tr><td>218</td><td><code>def fetch_context_unranked(question):</code></td><td>Retrieves the raw nearest chunks for a question, before any re-ranking.</td></tr>
+<tr><td>219</td><td><code>query = openai.embeddings.create(model=embedding_model, input=[question]).data[0].embedding</code></td><td>Turns the question into a vector with the <em>same</em> embedding model used to build the store. Using the same model matters: a query vector and a chunk vector are only comparable if they were made the same way.</td></tr>
+<tr><td>220</td><td><code>results = collection.query(query_embeddings=[query], n_results=RETRIEVAL_K)</code></td><td>Asks Chroma for the <code>RETRIEVAL_K</code> stored vectors closest to the query vector. This is the actual semantic search, and <code>n_results</code> is where <code>k</code> takes effect.</td></tr>
+<tr><td>221-223</td><td><code>for result in zip(results["documents"][0], results["metadatas"][0]): chunks.append(Result(...))</code></td><td>Repackages Chroma's raw output (parallel lists of texts and metadata) into tidy <code>Result</code> objects, each pairing a chunk's text with its source. Easier to pass around than loose lists.</td></tr>
+<tr><td>224</td><td><code>return chunks</code></td><td>Hands back the retrieved chunks, still in Chroma's similarity order, ready to be re-ranked.</td></tr>
+</table></div>
+
+<h3>Line by line: the re-ranker</h3>
+
+<p>This is the repo's extra step beyond the videos. Vector similarity gets you <em>close</em> chunks, but not
+always in the best order; so a second, cheap LLM call re-orders the shortlist by true relevance to the
+question.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>193</td><td><code>def rerank(question, chunks):</code></td><td>Takes the retrieved shortlist and the question, and returns the same chunks in a better order.</td></tr>
+<tr><td>194-200</td><td><code>system_prompt = """You are a document re-ranker…"""</code></td><td>Tells the model its job: given a question and a numbered list of chunks, reply with the chunk ids ordered most-relevant first, and nothing else. Keeping the reply to just ids makes it easy to parse.</td></tr>
+<tr><td>203-204</td><td><code>for index, chunk in enumerate(chunks): user_prompt += f"# CHUNK ID: {index + 1}:\n\n{chunk.page_content}\n\n"</code></td><td>Numbers each chunk and lays them out in the prompt so the model can refer to them by id. The number is the chunk's position in the shortlist.</td></tr>
+<tr><td>210</td><td><code>response = completion(model=MODEL, extra_body={"reasoning_effort": "none"}, messages=messages, response_format=RankOrder)</code></td><td>Calls the model and forces the reply into the <code>RankOrder</code> shape (a list of ints), using structured output so you get clean data, not prose.</td></tr>
+<tr><td>212</td><td><code>order = RankOrder.model_validate_json(reply).order</code></td><td>Parses the model's JSON reply into an actual list of chunk ids.</td></tr>
+<tr><td>214</td><td><code>return [chunks[i - 1] for i in order]</code></td><td>Reorders the original chunks to match the model's ranking (subtracting 1 because the prompt numbered them from 1). The best chunk now sits first in the context.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Chunk size trade-off: too-big chunks are few and coarse and mix topics, too-small chunks are many fragments that lose context, and overlapping chunks keep a fact whole across the boundary">
+  <text x="380" y="24" text-anchor="middle" class="title">Chunk size and overlap</text>
+
+  <text x="130" y="54" text-anchor="middle" class="label">Too big</text>
+  <rect class="box-warn" x="40" y="64" width="180" height="40" rx="8"/>
+  <text x="130" y="88" text-anchor="middle" class="small">few, coarse; mixes topics</text>
+
+  <text x="380" y="54" text-anchor="middle" class="label">Too small</text>
+  <rect class="box-warn" x="300" y="64" width="26" height="40" rx="4"/>
+  <rect class="box-warn" x="330" y="64" width="26" height="40" rx="4"/>
+  <rect class="box-warn" x="360" y="64" width="26" height="40" rx="4"/>
+  <rect class="box-warn" x="390" y="64" width="26" height="40" rx="4"/>
+  <rect class="box-warn" x="420" y="64" width="26" height="40" rx="4"/>
+  <text x="380" y="124" text-anchor="middle" class="small">many fragments; loses context</text>
+
+  <text x="630" y="54" text-anchor="middle" class="label ok">With overlap</text>
+  <rect class="box-ok" x="540" y="64" width="110" height="40" rx="8"/>
+  <rect class="box-ok" x="610" y="76" width="110" height="40" rx="8"/>
+  <text x="630" y="124" text-anchor="middle" class="small">shared edge keeps a fact whole</text>
+
+  <rect class="box-info" x="120" y="150" width="520" height="40" rx="8"/>
+  <text x="380" y="174" text-anchor="middle" class="small">Aim for the middle, with ~25% overlap, so each chunk is focused but nothing falls between two chunks</text>
+</svg>
+<figcaption>The dial on the write side. <strong>Overlap is the cheap insurance</strong>: it stops a fact that
+straddles a boundary from being lost by whichever chunk gets retrieved.</figcaption>
+</figure>
+
+<h3>The rest of the file, in brief</h3>
+<ul>
+<li><strong>Setup (lines 1-23).</strong> Imports and config: the model (<code>gpt-4o-mini</code> via LiteLLM),
+the embedding model (<code>text-embedding-3-large</code>), the Chroma database name, and the knowledge-base
+folder. <code>load_dotenv</code> reads your API key from <code>.env</code>.</li>
+<li><strong>Smart chunking (lines 27-112).</strong> Instead of splitting on character counts, this version asks
+the model to split each document into overlapping chunks and to add a <em>headline</em> and a <em>summary</em>
+to every chunk (the <code>Chunk</code> and <code>Chunks</code> models). Richer chunks tend to retrieve better.
+The <code>make_prompt</code> function estimates how many chunks a document needs from
+<code>AVERAGE_CHUNK_SIZE</code> and asks for about 25% overlap.</li>
+<li><strong>The t-SNE picture (lines 133-186).</strong> The same 2-D and 3-D Plotly scatter plots from Day 3,
+colouring each chunk by its document type, so you can literally see the four groups (products, employees,
+contracts, company) cluster in space. This is a sanity check on the embeddings, not part of answering.</li>
+<li><strong>Query rewriting (lines 274-294).</strong> <code>rewrite_query</code> asks the model to compress the
+user's question (plus history) into a short, specific search query, which is what gets embedded and sent to
+Chroma. It is why a follow-up question still finds the right documents.</li>
+<li><strong>Prompt assembly (lines 256-272).</strong> <code>SYSTEM_PROMPT</code> and
+<code>make_rag_messages</code> paste the retrieved chunks into the system message as context, each labelled
+with its source file, then append the history and the question.</li>
+</ul>
+
+<div class="callout ok"><strong>What you should see.</strong> Build the store once and it prints
+<code>Vectorstore created with N documents</code>. Ask <code>answer_question("Who won the IIOTY award?")</code>
+and it first prints the rewritten query, then returns a correct answer naming the employee plus the chunks it
+used. The misspelled "Avery" question still finds Avery Lancaster, proving the search is semantic. The t-SNE
+plots show four coloured clusters, one per document type.</div>
+
+<div class="callout warn"><strong>Common RAG failures.</strong> <strong>Missing context:</strong> the answer is
+"I don't know" because <code>RETRIEVAL_K</code> is too small, so raise it (3 is rarely enough; the video uses
+25). <strong>Stale index:</strong> you edited the documents but did not rebuild the store, so Chroma still holds
+the old vectors; delete the collection and re-run <code>create_embeddings</code>. <strong>Duplicate vectors:</strong>
+re-running the build without deleting the old collection first stacks copies on top and skews retrieval.
+<strong>Mismatched embeddings:</strong> embedding the query with a different model than you used for the chunks
+makes the vectors incomparable and retrieval returns noise.</div>
+
+<h2>In TypeScript</h2>
+
+<p>There is no separate TypeScript file for today, because the finished knowledge worker already exists: it is
+<code>rag.ts</code>, the pipeline shown line by line on the <a href="28-w5d4.html">Day 4</a> page. That one
+file <em>is</em> the knowledge worker in <a class="term" href="glossary.html#langchain-js">LangChain.js</a>: its
+<code>answer(question, history)</code> function retrieves the nearest chunks from the in-memory vector store,
+stuffs them into the system prompt, calls <code>gpt-4o-mini</code>, and returns both the answer and its
+de-duplicated source filenames, exactly like the Python <code>answer_question</code> above. The LangChain.js
+retriever is created with <code>store.asRetriever(k)</code>, so tuning <code>k</code> there is the same one-knob
+fix as tuning <code>RETRIEVAL_K</code> in Python.</p>
+
+<p>A couple of honest differences. The TypeScript project uses an in-memory <code>MemoryVectorStore</code>
+rather than Chroma or FAISS, to keep it dependency-free; the idea is identical, only the store changes, which is
+the very lesson of today's FAISS detour. It also keeps retrieval simple, with no separate query-rewrite or
+re-rank step, matching the videos rather than the repo's more advanced Python. The web front end for all of this
+is the React app in <code>week5-ts/</code>: a chat window with suggestion chips and source tags, served by a
+small Hono API that calls <code>answer()</code>. The TypeScript project type-checks and the web app builds; the
+model and embedding calls (in both languages) were not run live here, because they need an API key.</p>
+
+<figure class="shot"><img src="img/ts-week5-ui.png" alt="The Week 5 knowledge-worker React app: a chat with suggestion chips and source tags" width="1100" height="800" loading="lazy"><figcaption>The TypeScript/React knowledge worker (week5-ts/, LangChain.js + a Hono API). Illustration - the UI shell; answers need an API key.</figcaption></figure>
+
+<h2>The Week 5 project: your own knowledge worker</h2>
+
+<p>The week ends with a challenge: take this exact pipeline and point it at <strong>your own</strong>
+information. Gather your files into a folder structure (the way the course used one folder per document type),
+vectorise them into Chroma, and put a chat window on top, and you have a private assistant that can answer
+questions across everything you have written. The instructor suggests going further by pulling in email through
+the Gmail API or documents from Google Drive, and notes a privacy option: if you would rather not send private
+data to OpenAI for embedding, you can embed locally with an open-source model (he mentions BERT, and running it
+yourself via Google Colab or llama.cpp). The minimum version is small, drop a few text files into the folder
+and ask questions about them, and the full build is laid out on the <a href="30-w5-build.html">Project
+Build</a> page.</p>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>When a RAG answer is wrong, debug <em>retrieval</em>, not the prompt: print the chunks that came back, and
+the fault is almost always that the right chunk was never retrieved.</li>
+<li>The simplest and most effective fix is raising <code>k</code> (the number of retrieved chunks), the
+course's <code>RETRIEVAL_K</code>; other fixes are re-chunking, more overlap, and re-ranking.</li>
+<li>Swapping vector stores is trivial behind LangChain: <strong>Chroma</strong> persists to disk,
+<strong>FAISS</strong> keeps vectors in memory, and in the video it is a one-line change.</li>
+<li>LangChain is not magic: a callback prints the exact prompt it sends, so you can confirm the context box
+holds the right chunks.</li>
+<li>The repo's <code>day5.py</code> is a library-free knowledge worker that adds a <em>query rewrite</em> and an
+LLM <em>re-ranker</em> around the familiar retrieve-then-answer loop; <code>rag.ts</code> (<a href="28-w5d4.html">Day
+4</a>) is the TypeScript equivalent, behind the <code>week5-ts/</code> React app.</li>
+<li><strong>Week 5 in one line:</strong> Day 1 built a DIY RAG and met embeddings; <a href="26-w5d2.html">Day
+2</a> added LangChain loaders, the text splitter and OpenAI embeddings; <a href="27-w5d3.html">Day 3</a> stored
+the vectors and visualised them with t-SNE; <a href="28-w5d4.html">Day 4</a> assembled the full RAG chain with
+conversation history; and today you learned to debug it and turned it into a personal knowledge worker.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="28-w5d4.html"><small>← Previous · Step 28</small>Week 5 · Day 4 — The Full RAG Pipeline in LangChain</a>
+<a class="next" href="30-w5-build.html"><small>Next · Step 30 →</small>Week 5 · Project Build — AI Knowledge Worker, Step by Step</a>
+</nav>
+</main>
+</body>
+</html>

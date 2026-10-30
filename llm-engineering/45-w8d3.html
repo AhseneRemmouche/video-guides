@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>45 · Week 8 · Day 3 — Structured Outputs and the Scanner Agent</title>
+<meta name="description" content="Make the model return reliable typed data with structured outputs (Pydantic), then build the scanner agent that finds candidate deals and the messaging agent that sends alerts.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 45/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 45 of 48 · Week 8 · Day 3 · 5 lessons</div>
+  <h1>Week 8 · Day 3 — Structured Outputs and the Scanner Agent</h1>
+  <p class="lead">Make the model return reliable typed data with structured outputs (Pydantic), then build the scanner agent that finds candidate deals and the messaging agent that sends alerts.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>So far this week you built pricing <a class="term" href="glossary.html#agent">agents</a> that take a clean product
+description and return a number. Today you build the piece that <em>finds</em> something worth pricing in the first
+place: a <a class="term" href="glossary.html#scanner-agent">ScannerAgent</a> that reads public deal feeds, hands the
+raw text to a <a class="term" href="glossary.html#frontier-model">frontier model</a>, and gets back a tidy, typed list
+of the five best deals - product description, price, and link - ready to feed into the rest of the system. The new
+skill that makes this reliable is <a class="term" href="glossary.html#structured-output">structured outputs</a>: a way
+to tell the model "answer in exactly this shape" and have it obey.</p>
+
+<p>The instructor frames Day 3 as a callback to Week 1. Back then you wrote a web summarizer - "the Reader's Digest of
+the internet". Today takes that same idea a few notches further: instead of summarizing one page, you scrape dozens of
+deal listings and ask the model to synthesize them into structured data you can act on. It is also a throwback in a
+second way - the messy, real-world text ("up to $350 off with trade-in") is exactly the kind of fuzzy input that only a
+language model can parse sensibly, which is the whole reason a model sits in the middle of this pipeline.</p>
+
+<div class="callout"><strong>Where today's code sits in the project.</strong> The scanner is the front door of "The
+Price is Right". It produces candidate deals; the Day 2 pricing agents (the <a class="term" href="glossary.html#rag">RAG</a>
+<a class="term" href="glossary.html#retriever">retriever</a>, the fine-tuned specialist, and the
+<a class="term" href="glossary.html#ensemble">ensemble</a>) then estimate what each item is really worth; and today's
+<a class="term" href="glossary.html#messaging-agent">MessagingAgent</a> sends you a phone alert when a deal looks like a
+genuine bargain. Day 4 wires all of these together under a planner.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Pipeline: RSS feeds flow into the ScannerAgent, which outputs five typed deals, which the pricing agents value, and the MessagingAgent then pushes to your phone">
+  <text x="380" y="24" text-anchor="middle" class="title">Where Day 3 fits in the week</text>
+
+  <rect class="box" x="16" y="56" width="132" height="60" rx="8"/>
+  <text x="82" y="82" text-anchor="middle">RSS deal</text>
+  <text x="82" y="100" text-anchor="middle">feeds</text>
+
+  <rect class="box box2" x="164" y="56" width="132" height="60" rx="8"/>
+  <text x="230" y="82" text-anchor="middle">ScannerAgent</text>
+  <text x="230" y="100" text-anchor="middle" class="small">scrape + parse</text>
+
+  <rect class="box box-ok" x="312" y="56" width="132" height="60" rx="8"/>
+  <text x="378" y="82" text-anchor="middle">5 typed deals</text>
+  <text x="378" y="100" text-anchor="middle" class="small">desc / price / url</text>
+
+  <rect class="box box2" x="460" y="56" width="132" height="60" rx="8"/>
+  <text x="526" y="82" text-anchor="middle">MessagingAgent</text>
+  <text x="526" y="100" text-anchor="middle" class="small">Pushover alert</text>
+
+  <rect class="box box-solid" x="608" y="56" width="136" height="60" rx="8"/>
+  <text x="676" y="82" text-anchor="middle" class="on-solid">Your phone</text>
+  <text x="676" y="100" text-anchor="middle" class="on-solid small">notification</text>
+
+  <path class="arrow" d="M 148,86 H 162"/>
+  <path class="arrow" d="M 296,86 H 310"/>
+  <path class="arrow" d="M 444,86 H 458"/>
+  <path class="arrow" d="M 592,86 H 606"/>
+
+  <rect class="box box-info" x="312" y="148" width="280" height="44" rx="8"/>
+  <text x="452" y="166" text-anchor="middle" class="small">Day 2 pricing agents estimate value and</text>
+  <text x="452" y="182" text-anchor="middle" class="small">compute the discount in between</text>
+  <path class="arrow dashed" d="M 400,116 V 146"/>
+  <path class="arrow dashed" d="M 504,146 V 118"/>
+</svg>
+<figcaption>Today builds the first and last boxes. <strong>The scanner turns messy feeds into clean, typed deals; the messaging agent delivers the winners.</strong> The pricing step in the middle was Day 2's work.</figcaption>
+</figure>
+
+<h2>The concepts the instructor explains</h2>
+
+<p>Two ideas carry the day. The first is <strong>structured outputs</strong>. You have already used
+<a class="term" href="glossary.html#json-mode">JSON mode</a> in earlier weeks - you ask the model, in words, to reply in
+JSON and describe the shape in the prompt. That works surprisingly often, but it is not a guarantee. On complicated
+objects the model can drift: a missing field, a wrong type, a stray sentence of explanation. Structured outputs fix that
+by letting you hand the model an actual <a class="term" href="glossary.html#pydantic">Pydantic</a> class as the required
+schema. The model is constrained to produce data that fits the class, and the SDK hands you back a real Python object,
+already validated - not a string you have to parse and pray over.</p>
+
+<p>The second idea is the <a class="term" href="glossary.html#agent">agent</a> itself. The notebook first does the whole
+job inline - scrape, prompt, parse - so you can see every moving part. Then it shows the same logic packaged into a
+<code>ScannerAgent</code> class that lives in the project's <code>agents/</code> folder. That is the shape of an
+<a class="term" href="glossary.html#agentic-ai">agentic</a> system: small, single-purpose components with a clear job,
+that a higher-level planner can call. The scanner's one job is "give me new, well-described, clearly-priced deals".</p>
+
+<details class="primer"><summary>New to structured outputs? What they are and why they matter</summary>
+<p>A language model normally returns free text. "Structured outputs" is a feature of modern frontier models where you
+supply a schema - a precise description of the fields you want and their types - and the model is forced to answer in
+that exact shape. In this code the schema is a Pydantic class called <code>DealSelection</code>. Because the answer is
+guaranteed to fit, your program can use it directly (loop over <code>results.deals</code>, read
+<code>deal.price</code>) instead of writing fragile text-cleaning code. It is the difference between "please reply in
+JSON" (a polite request) and "you may only reply in this shape" (a contract).</p></details>
+
+<details class="primer"><summary>New to Pydantic and BaseModel? A one-minute tour</summary>
+<p>Pydantic is a popular Python library for describing and validating data. You define a class that inherits from
+<code>BaseModel</code> and list its fields with their types, for example a <code>price</code> that must be a
+<code>float</code>. Pydantic then checks any data against that definition and can convert cleanly between the class and
+JSON. The course defines three such classes in <code>agents/deals.py</code>: a <code>Deal</code> (product_description,
+price, url), a <code>DealSelection</code> (just a list of <code>Deal</code> objects), and an <code>Opportunity</code>
+(a deal plus an estimated value and the resulting discount). Passing <code>DealSelection</code> to the model is how you
+say "I want a list of deals, each shaped like this".</p></details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The three Pydantic classes: DealSelection holds a list of Deal objects; an Opportunity wraps one Deal with an estimate and a discount">
+  <text x="380" y="24" text-anchor="middle" class="title">The three Pydantic classes (agents/deals.py)</text>
+
+  <rect class="box box2" x="40" y="48" width="220" height="150" rx="8"/>
+  <text x="150" y="70" text-anchor="middle" class="label">DealSelection</text>
+  <text x="150" y="92" text-anchor="middle" class="small">the shape we ask the model for</text>
+  <rect class="box" x="64" y="104" width="172" height="80" rx="8"/>
+  <text x="150" y="126" text-anchor="middle" class="small">deals: list of</text>
+  <text x="150" y="146" text-anchor="middle">Deal</text>
+  <text x="150" y="166" text-anchor="middle" class="small">(one field only)</text>
+
+  <rect class="box box-ok" x="300" y="78" width="200" height="110" rx="8"/>
+  <text x="400" y="100" text-anchor="middle" class="label">Deal</text>
+  <text x="400" y="124" text-anchor="middle" class="small">product_description: str</text>
+  <text x="400" y="146" text-anchor="middle" class="small">price: float</text>
+  <text x="400" y="168" text-anchor="middle" class="small">url: str</text>
+
+  <rect class="box box-info" x="540" y="48" width="196" height="150" rx="8"/>
+  <text x="638" y="70" text-anchor="middle" class="label">Opportunity</text>
+  <text x="638" y="94" text-anchor="middle" class="small">deal: Deal</text>
+  <text x="638" y="116" text-anchor="middle" class="small">estimate: float</text>
+  <text x="638" y="138" text-anchor="middle" class="small">discount: float</text>
+  <text x="638" y="166" text-anchor="middle" class="small">(used later, Day 4)</text>
+
+  <path class="arrow" d="M 236,144 H 298"/>
+  <path class="arrow dashed" d="M 500,133 H 538"/>
+  <text x="267" y="136" text-anchor="middle" class="small">list of</text>
+  <text x="519" y="125" text-anchor="middle" class="small">wraps</text>
+</svg>
+<figcaption>Read it left to right: a <code>DealSelection</code> is just a list of <code>Deal</code> objects; an
+<code>Opportunity</code> wraps one deal with an estimate. <strong>The class you pass to the model is the JSON shape it
+must return.</strong></figcaption>
+</figure>
+
+<h2>The full notebook</h2>
+
+<p>Here is the complete Day 3 notebook code. It runs top to bottom: set up, scrape the feeds, build the prompts, call
+the model with a structured-output schema, print the results, then switch to the packaged <code>ScannerAgent</code> and
+finally test push notifications. The code is shown exactly as in the course; it was <strong>not run live here</strong>
+(it needs live RSS feeds, a paid OpenAI key, and a Pushover account).</p>
+
+<pre data-file="week8/day3.py" data-lang="py" data-tag="complete file"><code>import os
+from dotenv import load_dotenv
+from openai import OpenAI
+from agents.deals import ScrapedDeal, DealSelection
+import logging
+import requests
+load_dotenv(override=True)
+openai = OpenAI()
+MODEL = 'gpt-4o-mini'
+
+deals = ScrapedDeal.fetch(show_progress=True)
+
+len(deals)
+
+deals[10].describe()
+
+SYSTEM_PROMPT = """You identify and summarize the 5 most detailed deals from a list, by selecting deals that have the most detailed, high quality description and the most clear price.
+Respond strictly in JSON with no explanation, using this format. You should provide the price as a number derived from the description. If the price of a deal isn't clear, do not include that deal in your response.
+Most important is that you respond with the 5 deals that have the most detailed product description with price. It's not important to mention the terms of the deal; most important is a thorough description of the product.
+Be careful with products that are described as "$XXX off" or "reduced by $XXX" - this isn't the actual price of the product. Only respond with products when you are highly confident about the price. 
+"""
+
+USER_PROMPT_PREFIX = """Respond with the most promising 5 deals from this list, selecting those which have the most detailed, high quality product description and a clear price that is greater than 0.
+You should rephrase the description to be a summary of the product itself, not the terms of the deal.
+Remember to respond with a short paragraph of text in the product_description field for each of the 5 items that you select.
+Be careful with products that are described as "$XXX off" or "reduced by $XXX" - this isn't the actual price of the product. Only respond with products when you are highly confident about the price. 
+
+Deals:
+
+"""
+
+USER_PROMPT_SUFFIX = "\n\nInclude exactly 5 deals, no more."
+
+# this makes a suitable user prompt given scraped deals
+
+def make_user_prompt(scraped):
+    user_prompt = USER_PROMPT_PREFIX
+    user_prompt += '\n\n'.join([scrape.describe() for scrape in scraped])
+    user_prompt += USER_PROMPT_SUFFIX
+    return user_prompt
+
+# Let's create a user prompt for the deals we just scraped, and look at how it begins
+
+user_prompt = make_user_prompt(deals)
+print(user_prompt[:2000])
+messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}]
+
+response = openai.chat.completions.parse(model=MODEL, messages=messages, response_format=DealSelection)
+results = response.choices[0].message.parsed
+results
+
+for deal in results.deals:
+    print(deal.product_description)
+    print(deal.price)
+    print(deal.url)
+    print()
+
+
+root = logging.getLogger()
+root.setLevel(logging.INFO)
+
+from agents.scanner_agent import ScannerAgent
+
+agent = ScannerAgent()
+result = agent.scan()
+
+result
+
+load_dotenv(override=True)
+
+pushover_user = os.getenv('PUSHOVER_USER')
+pushover_token = os.getenv('PUSHOVER_TOKEN')
+pushover_url = "https://api.pushover.net/1/messages.json"
+
+if pushover_user:
+    print(f"Pushover user found and starts with {pushover_user[0]}")
+else:
+    print("Pushover user not found")
+
+if pushover_token:
+    print(f"Pushover token found and starts with {pushover_token[0]}")
+else:
+    print("Pushover token not found")
+
+def push(message):
+    print(f"Push: {message}")
+    payload = {"user": pushover_user, "token": pushover_token, "message": message}
+    requests.post(pushover_url, data=payload)
+
+push("MASSIVE DEAL!!")
+
+from agents.messaging_agent import MessagingAgent
+
+agent = MessagingAgent()
+agent.push("SUCH A MASSIVE DEAL!!")
+
+agent.notify("A special deal on Sumsung 60 inch LED TV going at a great bargain", 300, 1000, "www.samsung.com")</code></pre>
+
+<div class="callout warn"><strong>Video vs repo.</strong> Two differences to know. (1) <strong>Model name:</strong> the
+video uses <code>gpt-4o-mini</code> (shown above); the current repo uses <code>gpt-6-luna</code> and adds
+<code>reasoning_effort="none"</code> to the parse call. Treat the model id as a value you swap - providers retire models.
+(2) <strong>API namespace:</strong> in the video the structured-output call is written
+<code>openai.beta.chat.completions.parse(...)</code> because it was a beta feature at the time. In the current SDK it
+has graduated, so the code above calls <code>openai.chat.completions.parse(...)</code> without <code>beta</code>. The
+arguments are otherwise identical.</div>
+
+<h3>Line by line: setup and the structured-output imports (lines 1-15)</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1-2</td><td><code>import os</code> / <code>from dotenv import load_dotenv</code></td><td><code>os</code> reads environment variables; <code>load_dotenv</code> loads your <code>.env</code> file so secret keys never sit in the code. Without them the keys would not be found.</td></tr>
+<tr><td>3</td><td><code>from openai import OpenAI</code></td><td>The OpenAI client library. You create one <code>OpenAI()</code> object and call the model through it.</td></tr>
+<tr><td>4</td><td><code>from agents.deals import ScrapedDeal, DealSelection</code></td><td>Imports two things from the project. <code>ScrapedDeal</code> is the class that fetches and cleans deals from RSS feeds; <code>DealSelection</code> is the Pydantic schema the model must answer in. This single import is what makes structured outputs possible here.</td></tr>
+<tr><td>5-6</td><td><code>import logging</code> / <code>import requests</code></td><td><code>logging</code> is used later to turn on progress messages from the agent; <code>requests</code> sends the HTTP call that triggers a push notification.</td></tr>
+<tr><td>7</td><td><code>load_dotenv(override=True)</code></td><td>Actually loads the <code>.env</code> values. <code>override=True</code> means these values win even if the shell already set a variable - a safe default when you edit <code>.env</code> and re-run.</td></tr>
+<tr><td>8</td><td><code>openai = OpenAI()</code></td><td>Creates the client. With no arguments it reads <code>OPENAI_API_KEY</code> from the environment.</td></tr>
+<tr><td>9</td><td><code>MODEL = 'gpt-4o-mini'</code></td><td>The model used for the selection task - a small, cheap, capable model. See the Video-vs-repo note about the newer model id.</td></tr>
+<tr><td>11</td><td><code>deals = ScrapedDeal.fetch(show_progress=True)</code></td><td>Pulls fresh deals. Internally this reads several RSS feeds (via the <code>feedparser</code> package), takes the top ten from each, then fetches each deal's page and cleans it with BeautifulSoup - the same scraping idea as Week 1. <code>show_progress=True</code> prints a bar because it takes a couple of minutes.</td></tr>
+<tr><td>13</td><td><code>len(deals)</code></td><td>Shows how many were retrieved. With five feeds times ten each, the instructor gets 50. A quick sanity check that the fetch worked.</td></tr>
+<tr><td>15</td><td><code>deals[10].describe()</code></td><td>Prints one deal in full. This reveals the problem the model must solve: the RSS text often has no clean price, or says "$XXX off" rather than a real price.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to RSS feeds? What "fetching deals" actually means</summary>
+<p>An RSS feed is a machine-readable list a website publishes of its latest items - here, newly posted deals. The
+<code>feedparser</code> package reads a feed URL and returns the entries as plain dictionaries (title, summary, link).
+The course picks feeds in categories its pricing model knows well (electronics, computers, automotive, smart home).
+Because the feed summary alone is thin, <code>ScrapedDeal</code> also follows each link and scrapes the real page with
+<a class="term" href="glossary.html#beautifulsoup">BeautifulSoup</a>, pausing briefly between requests so it does not
+hammer the server. That pause is simply good manners when scraping.</p></details>
+
+<h3>Line by line: the prompts and the user-prompt builder (lines 17-45)</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>17-21</td><td><code>SYSTEM_PROMPT = """..."""</code></td><td>The <a class="term" href="glossary.html#system-prompt">system prompt</a> sets the model's standing instructions: pick the 5 best-described, clearly-priced deals; derive the price as a number; skip deals with no clear price. The last line - "Be careful with products described as $XXX off" - was added after the model made exactly that mistake on screen.</td></tr>
+<tr><td>23-30</td><td><code>USER_PROMPT_PREFIX = """..."""</code></td><td>The opening of the <a class="term" href="glossary.html#user-prompt">user prompt</a>. It repeats the key rules (detailed description, price greater than 0, rephrase into a product summary) and ends with the word "Deals:" so the list can be appended after it.</td></tr>
+<tr><td>32</td><td><code>USER_PROMPT_SUFFIX = "\n\nInclude exactly 5 deals, no more."</code></td><td>The closing line, pinned to the end so the count instruction is the last thing the model reads.</td></tr>
+<tr><td>36-40</td><td><code>def make_user_prompt(scraped): ...</code></td><td>Assembles the final prompt: the prefix, then every deal's <code>describe()</code> text joined by blank lines, then the suffix. Building it from pieces keeps the rules and the data clearly separated.</td></tr>
+<tr><td>44-45</td><td><code>user_prompt = make_user_prompt(deals)</code> / <code>print(user_prompt[:2000])</code></td><td>Builds the prompt for the deals just scraped and prints the first 2,000 characters - the full prompt is long, so this is just a peek to confirm it looks right.</td></tr>
+</table></div>
+
+<h3>Line by line: calling the model with a schema (lines 46-56) - the heart of the day</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>46</td><td><code>messages = [{"role": "system", ...}, {"role": "user", ...}]</code></td><td>The standard two-message conversation: the system rules plus the user request. Same message shape you have used all course.</td></tr>
+<tr><td>48</td><td><code>response = openai.chat.completions.parse(model=MODEL, messages=messages, response_format=DealSelection)</code></td><td>The key line. It calls <code>parse</code> (not the usual <code>create</code>) and passes the Pydantic class as <a class="term" href="glossary.html#response-format">response_format</a>. That is how you demand structured output: the model must return data shaped like <code>DealSelection</code>. Without this, you would get free text and have to parse it yourself.</td></tr>
+<tr><td>49</td><td><code>results = response.choices[0].message.parsed</code></td><td>Here is the payoff. You read <code>.parsed</code>, not <code>.content</code>. <code>.parsed</code> is already a <code>DealSelection</code> object - validated and ready to use - instead of a JSON string. If you read <code>.content</code> you would be back to text wrangling.</td></tr>
+<tr><td>50</td><td><code>results</code></td><td>Displays the object. It is of type <code>DealSelection</code>, with its one field <code>deals</code> holding five <code>Deal</code> objects.</td></tr>
+<tr><td>52-56</td><td><code>for deal in results.deals: print(deal.product_description) ...</code></td><td>Loops over the five deals and prints each field. Because <code>results</code> is a real typed object, you access <code>deal.price</code> and <code>deal.url</code> directly - no string parsing. This is the concrete benefit of structured outputs.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Structured-output flow: fifty scraped deals plus two prompts go into parse with a DealSelection schema, and a validated object with five deals comes back">
+  <text x="380" y="24" text-anchor="middle" class="title">One call, a guaranteed shape</text>
+
+  <rect class="box" x="16" y="56" width="150" height="54" rx="8"/>
+  <text x="91" y="80" text-anchor="middle">50 scraped deals</text>
+  <text x="91" y="98" text-anchor="middle" class="small">describe() text</text>
+
+  <rect class="box" x="16" y="132" width="150" height="54" rx="8"/>
+  <text x="91" y="156" text-anchor="middle">system + user</text>
+  <text x="91" y="174" text-anchor="middle" class="small">prompts</text>
+
+  <rect class="box box2" x="276" y="86" width="200" height="74" rx="8"/>
+  <text x="376" y="112" text-anchor="middle">chat.completions</text>
+  <text x="376" y="130" text-anchor="middle">.parse</text>
+  <text x="376" y="148" text-anchor="middle" class="small">response_format=DealSelection</text>
+
+  <rect class="box box-ok" x="566" y="86" width="178" height="74" rx="8"/>
+  <text x="655" y="110" text-anchor="middle">DealSelection</text>
+  <text x="655" y="128" text-anchor="middle" class="small">object (validated)</text>
+  <text x="655" y="146" text-anchor="middle" class="small">5 Deal items</text>
+
+  <path class="arrow" d="M 166,83 H 274"/>
+  <path class="arrow" d="M 166,159 H 274"/>
+  <path class="arrow arrow-ok" d="M 476,123 H 564"/>
+  <text x="520" y="114" text-anchor="middle" class="small">.parsed</text>
+</svg>
+<figcaption>The <code>response_format</code> argument is the contract. <strong>What comes back is a ready-to-use Python
+object, not a string you must parse.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>Structured outputs vs function calling - which should I use?</summary>
+<p>The instructor notes these are close cousins; both force the model's answer into a defined shape. The rule of thumb:
+if the model's output will be fed straight into application code as function arguments, prefer
+<a class="term" href="glossary.html#function-calling">function calling</a> (tools) - it is built for driving real
+functions with the right parameters. If you just want well-formed <em>data</em> for downstream use - like our list of
+deals - structured outputs is the cleaner fit. Both are far more reliable than describing the shape in words and hoping.
+You develop a feel for which performs better with practice.</p></details>
+
+<h2>From inline code to a packaged agent</h2>
+
+<p>The second half of the notebook takes everything above and uses it through a proper
+<a class="term" href="glossary.html#scanner-agent">ScannerAgent</a> class that lives in <code>agents/scanner_agent.py</code>.
+Same system and user prompts, same <code>parse</code> call - but wrapped as a reusable component with two extra touches:
+it can take a <strong>memory</strong> of URLs it has already seen and drop those, so you only get <em>new</em> deals; and
+it filters out anything whose price is not greater than zero before returning. If nothing new is found it returns
+<code>None</code>. That packaging is what lets a higher-level planner call the scanner on a schedule.</p>
+
+<h3>Line by line: the agent, and sending a push (lines 59-97)</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>59-60</td><td><code>root = logging.getLogger()</code> / <code>root.setLevel(logging.INFO)</code></td><td>Turns on INFO-level logging so the agent prints what it is doing as it runs. Useful because the scan is slow and otherwise silent.</td></tr>
+<tr><td>62</td><td><code>from agents.scanner_agent import ScannerAgent</code></td><td>Imports the packaged agent - the production-quality version of the inline code above.</td></tr>
+<tr><td>64-65</td><td><code>agent = ScannerAgent()</code> / <code>result = agent.scan()</code></td><td>Creates the agent and runs it. <code>scan()</code> does the whole job - fetch, build prompt, parse into <code>DealSelection</code>, filter - in one call.</td></tr>
+<tr><td>67</td><td><code>result</code></td><td>Shows the returned <code>DealSelection</code> (or <code>None</code> if nothing new).</td></tr>
+<tr><td>71-73</td><td><code>pushover_user = os.getenv('PUSHOVER_USER')</code> ...</td><td>Reads the two Pushover secrets and the Pushover API URL. Pushover is the service that delivers a notification to your phone.</td></tr>
+<tr><td>75-83</td><td><code>if pushover_user: print(...) else: ...</code></td><td>A friendly check that each key was loaded, printing only its first character so a secret is never shown in full. If you see "not found", your <code>.env</code> is missing that line.</td></tr>
+<tr><td>85-88</td><td><code>def push(message): ... requests.post(pushover_url, data=payload)</code></td><td>Builds the payload (user key, app token, message) and POSTs it to Pushover. That HTTP call is what makes your phone buzz.</td></tr>
+<tr><td>90</td><td><code>push("MASSIVE DEAL!!")</code></td><td>A quick test of the raw push function.</td></tr>
+<tr><td>92-95</td><td><code>from agents.messaging_agent import MessagingAgent</code> / <code>agent.push(...)</code></td><td>Imports and tests the packaged <a class="term" href="glossary.html#messaging-agent">MessagingAgent</a>, which wraps the same push logic as a reusable component.</td></tr>
+<tr><td>97</td><td><code>agent.notify("...Samsung 60 inch LED TV...", 300, 1000, "www.samsung.com")</code></td><td>The real interface the system uses: notify takes a description, the <strong>estimated</strong> value (1000), the <strong>deal</strong> price (300) and the URL, and sends a formatted bargain alert. This is where a priced deal becomes a message.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to agents? What "an agent" means in this course</summary>
+<p>Here an <a class="term" href="glossary.html#agent">agent</a> is simply a small Python class with one clear
+responsibility and a method you call to do its job. The <code>ScannerAgent</code> finds deals; the
+<code>MessagingAgent</code> sends alerts; Day 2's agents estimate prices. None of them is "intelligent" on its own - the
+intelligence comes from the model calls inside. What makes the overall system <em>agentic</em> is that these
+independent pieces can be organized by a planner, keep a memory, and run without a human in the loop. Day 4 assembles
+them.</p></details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Inside the ScannerAgent: fetch deals, drop ones already seen in memory, ask the model with the schema, keep only priced deals">
+  <text x="380" y="24" text-anchor="middle" class="title">Inside ScannerAgent.scan()</text>
+
+  <rect class="box" x="12" y="60" width="150" height="60" rx="8"/>
+  <text x="87" y="84" text-anchor="middle">fetch deals</text>
+  <text x="87" y="102" text-anchor="middle" class="small">RSS + scrape</text>
+
+  <rect class="box box-info" x="186" y="60" width="150" height="60" rx="8"/>
+  <text x="261" y="84" text-anchor="middle">drop seen URLs</text>
+  <text x="261" y="102" text-anchor="middle" class="small">using memory</text>
+
+  <rect class="box box2" x="360" y="60" width="160" height="60" rx="8"/>
+  <text x="440" y="84" text-anchor="middle">model + schema</text>
+  <text x="440" y="102" text-anchor="middle" class="small">parse to DealSelection</text>
+
+  <rect class="box box-ok" x="544" y="60" width="150" height="60" rx="8"/>
+  <text x="619" y="84" text-anchor="middle">keep price &gt; 0</text>
+  <text x="619" y="102" text-anchor="middle" class="small">else return None</text>
+
+  <path class="arrow" d="M 162,90 H 184"/>
+  <path class="arrow" d="M 336,90 H 358"/>
+  <path class="arrow" d="M 520,90 H 542"/>
+  <text x="380" y="160" text-anchor="middle" class="small">Memory makes every run surface only new deals, not ones you have already seen.</text>
+</svg>
+<figcaption>The agent is the inline notebook steps, packaged and hardened. <strong>Memory plus the price filter are what
+make it safe to run on a schedule.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Sequence: the messaging agent builds a message, posts it to the Pushover API, which delivers a notification to the phone">
+  <text x="380" y="24" text-anchor="middle" class="title">Sending the alert (sequence)</text>
+
+  <rect class="box box2" x="40" y="48" width="160" height="40" rx="8"/>
+  <text x="120" y="73" text-anchor="middle">MessagingAgent</text>
+  <rect class="box" x="300" y="48" width="160" height="40" rx="8"/>
+  <text x="380" y="73" text-anchor="middle">Pushover API</text>
+  <rect class="box box-solid" x="560" y="48" width="160" height="40" rx="8"/>
+  <text x="640" y="73" text-anchor="middle" class="on-solid">Your phone</text>
+
+  <path class="line dashed" d="M 120,88 V 210"/>
+  <path class="line dashed" d="M 380,88 V 210"/>
+  <path class="line dashed" d="M 640,88 V 210"/>
+
+  <path class="arrow" d="M 122,120 H 298"/>
+  <text x="210" y="112" text-anchor="middle" class="small">1. notify(): build message</text>
+
+  <path class="arrow" d="M 382,160 H 558"/>
+  <text x="470" y="152" text-anchor="middle" class="small">2. POST payload</text>
+
+  <path class="arrow arrow-ok" d="M 560,195 H 384"/>
+  <text x="470" y="188" text-anchor="middle" class="small">3. notification delivered</text>
+</svg>
+<figcaption>Time flows downward. <strong>A single HTTP POST to Pushover is all it takes to turn a found bargain into a
+buzz on your phone.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Comparison: JSON mode described in words can drift, while structured outputs with a schema are validated">
+  <text x="380" y="24" text-anchor="middle" class="title">Why structured outputs beat JSON-by-prompt</text>
+
+  <rect class="zone" x="16" y="44" width="352" height="156" rx="8"/>
+  <text x="192" y="64" text-anchor="middle" class="label">JSON mode (described in words)</text>
+  <rect class="box box-warn" x="40" y="80" width="304" height="40" rx="8"/>
+  <text x="192" y="104" text-anchor="middle" class="small">"please reply in JSON like this..."</text>
+  <rect class="box box-bad" x="40" y="132" width="304" height="52" rx="8"/>
+  <text x="192" y="154" text-anchor="middle" class="small">usually fine, but can drift:</text>
+  <text x="192" y="172" text-anchor="middle" class="small">missing field, wrong type, stray text</text>
+
+  <rect class="zone" x="392" y="44" width="352" height="156" rx="8"/>
+  <text x="568" y="64" text-anchor="middle" class="label">Structured outputs (a schema)</text>
+  <rect class="box box2" x="416" y="80" width="304" height="40" rx="8"/>
+  <text x="568" y="104" text-anchor="middle" class="small">response_format = DealSelection</text>
+  <rect class="box box-ok" x="416" y="132" width="304" height="52" rx="8"/>
+  <text x="568" y="154" text-anchor="middle" class="small">answer must fit the class;</text>
+  <text x="568" y="172" text-anchor="middle" class="small">you get a validated object back</text>
+</svg>
+<figcaption>Same goal, stronger guarantee. <strong>A schema turns a polite request into a contract the model must
+satisfy.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> After <code>fetch</code> finishes (a minute or two),
+<code>len(deals)</code> prints 50 (five feeds times ten). The <code>parse</code> call returns an object whose type is
+<code>DealSelection</code>, and <code>results.deals</code> holds exactly five <code>Deal</code> objects, each with a
+sensible product summary, a numeric price, and a working URL. The Pushover checks should print that each key "found and
+starts with" a letter, and the test pushes should arrive on your phone.</div>
+
+<div class="callout warn"><strong>Common mistakes and the one the instructor hit live.</strong>
+<ul>
+<li><strong>Reading <code>.content</code> instead of <code>.parsed</code>.</strong> With <code>parse</code>, the typed
+object is on <code>.parsed</code>. <code>.content</code> gives you a raw string and defeats the whole point.</li>
+<li><strong>Trusting the price blindly.</strong> On screen the model read "up to $350 off with trade-in" as a
+<em>price</em> of $350. The fix was to add explicit warnings about "$XXX off" to both prompts and tell the model to
+answer only when highly confident. Always spot-check the numbers a model extracts.</li>
+<li><strong>Missing Pushover keys.</strong> If the checks print "not found", add <code>PUSHOVER_USER</code> and
+<code>PUSHOVER_TOKEN</code> to <code>.env</code>, save, and re-run <code>load_dotenv(override=True)</code>.</li>
+<li><strong>Stale results.</strong> Without the agent's memory of seen URLs you would get the same deals every run. The
+memory filter is what keeps each scan fresh.</li>
+</ul></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Day 3 builds the <strong>scanner</strong> (the system's front door) and the <strong>messaging</strong> piece (its
+exit), using a new skill: <a class="term" href="glossary.html#structured-output">structured outputs</a>.</li>
+<li>You pass a <a class="term" href="glossary.html#pydantic">Pydantic</a> class (<code>DealSelection</code>) as
+<code>response_format</code> to <code>chat.completions.parse</code>, and read <code>.parsed</code> to get a validated
+Python object - no fragile text parsing.</li>
+<li><code>ScrapedDeal.fetch</code> gathers deals from RSS feeds (a Week 1 scraping callback); the model then selects the
+five best-described, clearly-priced ones.</li>
+<li>The inline code is repackaged as a <code>ScannerAgent</code> with memory and a price filter, and a
+<code>MessagingAgent</code> sends phone alerts via Pushover.</li>
+<li>Structured outputs and <a class="term" href="glossary.html#function-calling">function calling</a> both pin down the
+model's output shape; use tools for driving code, structured outputs for producing data.</li>
+<li>Always double-check model-extracted numbers - "$XXX off" is not a price.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="44-w8d2.html"><small>← Previous · Step 44</small>Week 8 · Day 2 — Deploying the Pricer and the Ensemble</a>
+<a class="next" href="46-w8d4.html"><small>Next · Step 46 →</small>Week 8 · Day 4 — Agents That Collaborate</a>
+</nav>
+</main>
+</body>
+</html>

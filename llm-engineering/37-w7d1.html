@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>37 · Week 7 · Day 1 — QLoRA and Loading the Base Model</title>
+<meta name="description" content="The idea behind QLoRA: freeze a 4-bit quantized open-source model and train tiny low-rank adapters on top. Load Llama in 4-bit and prepare the pricing dataset.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 37/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 37 of 48 · Week 7 · Day 1 · 9 lessons</div>
+  <h1>Week 7 · Day 1 — QLoRA and Loading the Base Model</h1>
+  <p class="lead">The idea behind QLoRA: freeze a 4-bit quantized open-source model and train tiny low-rank adapters on top. Load Llama in 4-bit and prepare the pricing dataset.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>Welcome to Week 7, the week the instructor calls a "massive" and advanced one. Last week you
+fine-tuned a <em>frontier</em> model and the result was a slight disappointment: a huge, already-excellent
+model had little room to improve on a task it already handled. This week flips the approach. You take a far
+smaller <a class="term" href="glossary.html#open-source-model">open-source model</a> — Meta's Llama
+3.1 8B — and train it on your own pricing data. A smaller model has much more room to grow, and the
+technique that makes this cheap enough to run on a single budget GPU is called
+<a class="term" href="glossary.html#qlora">QLoRA</a>.</p>
+
+<p>Today is the setup day. You will learn the ideas behind QLoRA, then load the Llama 3.1 8B
+<a class="term" href="glossary.html#base-model">base model</a> squeezed down to 4-bit so it fits in memory,
+load the pricing dataset you built back in Week 6, and see how one training example is shaped. No training
+happens yet — that is Days 3 and 4. First, the big idea.</p>
+
+<h2>The big idea: freeze the giant, train a tiny add-on</h2>
+
+<p>Llama 3.1 comes in three sizes: 8 billion, 70 billion, and a monstrous 405 billion parameters. Even the
+smallest, the 8B, is too big to train the normal way. Its 8 billion
+<a class="term" href="glossary.html#weights">weights</a> take about 32 GB of memory just to hold the
+model — and real training needs several times that, because you also store a gradient for every single
+weight. A cheap single-<a class="term" href="glossary.html#gpu">GPU</a> box (the free Colab T4 has only
+about 15 GB) cannot come close. Training the biggest models from scratch has cost labs over
+$100 million. That is not our budget.</p>
+
+<p>QLoRA is the stack of tricks that makes this affordable. It has two halves, and the name is literally the
+two letters joined: <strong>Q</strong> for quantization and <strong>LoRA</strong> for the low-rank adapters.</p>
+
+<ol class="steps">
+<li><span class="eyebrow">Shrink</span> <strong>Quantize</strong> the base model to 4-bit so the whole thing
+fits in a small GPU's memory.</li>
+<li><span class="eyebrow">Freeze</span> <strong>Freeze</strong> every one of those 8 billion weights —
+we will not change them at all.</li>
+<li><span class="eyebrow">Add</span> <strong>Attach</strong> small
+<a class="term" href="glossary.html#low-rank">low-rank</a>
+<a class="term" href="glossary.html#adapter">adapter</a> matrices onto a few chosen layers, and train
+<em>only those</em>.</li>
+</ol>
+
+<p>The result: instead of adjusting 8 billion weights, you adjust about 27 million — roughly 100 MB
+of new numbers riding on top of a frozen 32 GB model. That is why it is cheap, and it works
+surprisingly well.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Full fine-tuning adjusts all 8 billion weights; LoRA freezes them and trains only small adapters">
+  <text x="190" y="26" text-anchor="middle" class="title">Full fine-tuning</text>
+  <rect class="box box-bad" x="30" y="40" width="320" height="150" rx="8"/>
+  <text x="190" y="92" text-anchor="middle">Adjust ALL 8,000,000,000</text>
+  <text x="190" y="112" text-anchor="middle">weights</text>
+  <text x="190" y="140" text-anchor="middle" class="small">needs gradients for every weight</text>
+  <text x="190" y="158" text-anchor="middle" class="small">far too much memory + time</text>
+  <text x="190" y="214" text-anchor="middle" class="small bad">too expensive for one GPU</text>
+  <text x="570" y="26" text-anchor="middle" class="title">LoRA fine-tuning</text>
+  <rect class="box" x="410" y="40" width="320" height="150" rx="8"/>
+  <text x="570" y="70" text-anchor="middle" class="small">8B base weights: FROZEN</text>
+  <rect class="box box-ok" x="470" y="86" width="200" height="60" rx="8"/>
+  <text x="570" y="112" text-anchor="middle">Train ~27,000,000</text>
+  <text x="570" y="130" text-anchor="middle">adapter weights</text>
+  <text x="570" y="170" text-anchor="middle" class="small">about 100 MB of new numbers</text>
+  <text x="570" y="214" text-anchor="middle" class="small ok">runs on a cheap GPU box</text>
+</svg>
+<figcaption>Same goal, hugely different cost. <strong>LoRA leaves the giant model untouched and trains a
+small add-on — roughly 0.3% as many weights.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to fine-tuning? A quick recap of what it means</summary>
+<p><a class="term" href="glossary.html#fine-tuning">Fine-tuning</a> is just another word for
+<em>training</em> — but you never start from nothing. Training a model from scratch costs a fortune, so
+instead you take a model that is already trained (a <em>base</em> or <em>pre-trained</em> model) and train it
+a little more on your own examples so it gets better at one specific task. Last week you did this to a
+frontier model through OpenAI's API, where the training ran on OpenAI's servers and you never saw the
+weights. This week is different: the model is open-source, so the weights are on <em>your</em> GPU, and
+<em>you</em> run the training. That is what makes techniques like LoRA and quantization matter — they
+are about fitting the job onto hardware you can actually afford.</p>
+</details>
+
+<details class="primer">
+<summary>New to LoRA and low-rank adapters? What they are and why they matter</summary>
+<p><a class="term" href="glossary.html#lora">LoRA</a> stands for <strong>Low-Rank Adaptation</strong>. The
+idea: don't touch the model's own weights at all. Pick a few layers you care about (the instructor calls
+these the <strong>target modules</strong>), and for each one add two small new matrices off to the side,
+named <code>lora_A</code> and <code>lora_B</code> in the code. These are much smaller — "lower rank"
+means fewer dimensions, so far fewer numbers. During training only these small matrices change. When the
+model runs, the two matrices are multiplied together, scaled, and added as a small nudge on top of the frozen
+layer. Because the matrices are tiny, there is very little to train, which is why it is fast and cheap. Those
+small side matrices are the <a class="term" href="glossary.html#adapter">adapters</a>.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="A target module keeps its frozen base layer and adds small trainable LoRA A and B matrices that combine into a small nudge">
+  <rect class="zone" x="20" y="16" width="720" height="176" rx="8"/>
+  <text x="36" y="40" class="title">One target module (e.g. an attention projection)</text>
+  <rect class="box box-info" x="40" y="58" width="240" height="70" rx="8"/>
+  <text x="160" y="88" text-anchor="middle">Base layer</text>
+  <text x="160" y="108" text-anchor="middle" class="small">big, FROZEN (never changes)</text>
+  <rect class="box box-ok" x="330" y="56" width="150" height="34" rx="8"/>
+  <text x="405" y="78" text-anchor="middle" class="mono">lora_A</text>
+  <rect class="box box-ok" x="330" y="98" width="150" height="34" rx="8"/>
+  <text x="405" y="120" text-anchor="middle" class="mono">lora_B</text>
+  <text x="405" y="150" text-anchor="middle" class="small ok">small, TRAINABLE</text>
+  <path class="arrow-accent" d="M 480,90 H 560"/>
+  <path class="arrow-accent" d="M 480,114 H 520 V 90 H 560"/>
+  <rect class="box box-solid" x="562" y="72" width="156" height="44" rx="8"/>
+  <text x="640" y="92" text-anchor="middle" class="on-solid small">alpha &#215; A &#215; B</text>
+  <text x="640" y="108" text-anchor="middle" class="on-solid small">= small nudge</text>
+  <path class="arrow" d="M 640,116 V 150 H 160 V 128"/>
+  <text x="380" y="178" text-anchor="middle" class="small">the nudge is added on top of the frozen base layer's output</text>
+</svg>
+<figcaption>Illustrative. The big base layer is frozen; the two small matrices are all that train.
+<strong>Their product, scaled by alpha, is added as a small adjustment — it adapts the layer without
+rewriting it.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to "freezing" a model? What it means and why it matters</summary>
+<p>Normal training works by <em>optimization</em>: the model makes a prediction, you compare it to the right
+answer, and then you nudge every weight a little so next time the prediction is slightly better. Doing that
+for 8 billion weights is what is too expensive. <strong>Freezing</strong> a weight simply means "leave this
+one alone" — no gradient is computed for it and it never changes during training. In LoRA you freeze
+<em>all</em> of the base model's weights, so none of the heavy machinery runs for them. Only the small
+adapter matrices are left unfrozen, so only they get trained. Freezing is what turns an 8-billion-weight
+training problem into a 27-million-weight one.</p>
+</details>
+
+<h2>The Q in QLoRA: quantization</h2>
+
+<p>LoRA solves the training cost, but there is still a problem: even <em>loading</em> the 8B base model takes
+about 32 GB, and the cheap T4 GPU has only 15 GB. The model will not even fit before you start.
+<a class="term" href="glossary.html#quantization">Quantization</a> is the fix. Rather than cut the
+<em>number</em> of weights (which would lose the model's power), you cut the <em>precision</em> of each
+weight. Normally each weight is a 32-bit floating-point number — a very finely graded dial. Quantizing
+replaces it with a coarser one: 8-bit, or even 4-bit, which is like a dial with only 16 settings.</p>
+
+<p>The surprising discovery is that this barely hurts the model. You keep all 8 billion weights, just store
+each one in less space. Llama 3.1 8B drops from <strong>32 GB</strong> (32-bit) to about
+<strong>9 GB</strong> (8-bit) to about <strong>5.6 GB</strong> (4-bit with the double-quant trick)
+— and now it fits comfortably on the 15 GB T4. One important detail: quantization shrinks the
+<em>base</em> model only. The LoRA adapters stay at full 32-bit precision, because they are small and we want
+them to train accurately.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Memory footprint of Llama 3.1 8B at 32-bit, 8-bit, and 4-bit, against the 15 GB T4 GPU limit">
+  <text x="36" y="24" class="title">Llama 3.1 8B in memory (lower is better)</text>
+  <line class="line dashed" x1="150" y1="40" x2="150" y2="200"/>
+  <text x="40" y="70" class="label">32-bit (fp32)</text>
+  <rect class="box-bad" x="150" y="58" width="520" height="22" rx="4"/>
+  <text x="678" y="74" class="small">~32 GB</text>
+  <text x="40" y="112" class="label">8-bit</text>
+  <rect class="box-warn" x="150" y="100" width="146" height="22" rx="4"/>
+  <text x="304" y="116" class="small">~9 GB</text>
+  <text x="40" y="154" class="label">4-bit (nf4 + double)</text>
+  <rect class="box-ok" x="150" y="142" width="91" height="22" rx="4"/>
+  <text x="249" y="158" class="small">~5.6 GB</text>
+  <line class="line" x1="394" y1="44" x2="394" y2="196"/>
+  <text x="400" y="192" class="small warn">15 GB T4 limit</text>
+  <text x="380" y="220" text-anchor="middle" class="small">anything left of the line fits on the free GPU; 4-bit leaves plenty of room to train</text>
+</svg>
+<figcaption>Same model, same 8 billion weights — just fewer bits each. <strong>4-bit is what gets the
+giant under the 15 GB line so it fits on a cheap GPU.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to QLoRA = quantization + LoRA? How the two halves fit together</summary>
+<p><a class="term" href="glossary.html#qlora">QLoRA</a> is just the two tricks used together.
+<strong>Quantization</strong> shrinks the base model so it <em>fits</em> in the GPU's memory.
+<strong>LoRA</strong> means you <em>train</em> only small adapters instead of the whole model. One solves the
+"it doesn't fit" problem, the other solves the "it's too expensive to train" problem. Put them together and
+you can fine-tune an 8-billion-parameter model on a single cheap GPU: load the base model in 4-bit, freeze
+it, and train 32-bit LoRA adapters on top. That combination is the whole point of this week.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The QLoRA stack: a 4-bit frozen quantized base model with full-precision trainable LoRA adapters on the attention layers">
+  <text x="380" y="26" text-anchor="middle" class="title">The QLoRA stack</text>
+  <rect class="box box-info" x="60" y="42" width="640" height="104" rx="8"/>
+  <text x="380" y="66" text-anchor="middle">Llama 3.1 8B base model</text>
+  <text x="380" y="86" text-anchor="middle" class="small">quantized to 4-bit (~5.6 GB) &#183; FROZEN</text>
+  <rect class="box box-ok" x="90" y="98" width="130" height="36" rx="8"/>
+  <text x="155" y="121" text-anchor="middle" class="mono small">q_proj + A/B</text>
+  <rect class="box box-ok" x="235" y="98" width="130" height="36" rx="8"/>
+  <text x="300" y="121" text-anchor="middle" class="mono small">k_proj + A/B</text>
+  <rect class="box box-ok" x="395" y="98" width="130" height="36" rx="8"/>
+  <text x="460" y="121" text-anchor="middle" class="mono small">v_proj + A/B</text>
+  <rect class="box box-ok" x="540" y="98" width="130" height="36" rx="8"/>
+  <text x="605" y="121" text-anchor="middle" class="mono small">o_proj + A/B</text>
+  <text x="380" y="176" text-anchor="middle" class="small">LoRA adapters (green): full 32-bit precision &#183; TRAINABLE &#183; ~27M weights, ~100 MB</text>
+  <text x="380" y="200" text-anchor="middle" class="small">target modules = the four attention projections (the most common choice for Llama)</text>
+  <text x="380" y="228" text-anchor="middle" class="small accent">frozen 4-bit giant + tiny trainable full-precision adapters</text>
+</svg>
+<figcaption>How the pieces sit together. <strong>The base is 4-bit and frozen; the small adapters on the
+attention layers stay full precision and are the only thing that trains.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to PEFT? What the library is and why it matters</summary>
+<p><a class="term" href="glossary.html#peft">PEFT</a> stands for <strong>Parameter-Efficient Fine-Tuning</strong>
+— the family of techniques, LoRA among them, that fine-tune a model by training only a small number of
+extra parameters instead of all of them. Hugging Face ships a library of the same name, <code>peft</code>,
+that implements these methods for you. You will install it this week and use it on Days 3 and 4 to wrap the
+frozen base model with LoRA adapters. Today's file only loads and quantizes the base model, so
+<code>peft</code> appears in the week's installs rather than in this first script — but it is the
+library that makes the "train only the adapters" idea real in code.</p>
+</details>
+
+<h2>Three hyperparameters you will meet</h2>
+
+<p>When you configure the adapters on Days 3 and 4, three settings matter most. They are worth meeting now,
+because the instructor introduces them today. A <em>hyperparameter</em> is simply a knob you choose yourself;
+there is no formula for the right value, so you try a few and keep what works.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Name</th><th>What it is</th><th>Rule of thumb</th></tr>
+<tr><td><strong>r</strong> (rank)</td><td>How many dimensions the low-rank adapter matrices have. Smaller = less memory, faster; larger = more capacity.</td><td>Start at 8, then double to 16, 32… until more stops helping. The instructor settled on 32.</td></tr>
+<tr><td><strong>alpha</strong></td><td>A scaling factor applied to the adapters. The adjustment added to a layer is <code>alpha &#215; A &#215; B</code>, so bigger alpha means a bigger effect.</td><td>Set it to double <code>r</code>. So r=32 gives alpha=64.</td></tr>
+<tr><td><strong>target modules</strong></td><td>Which layers get adapters. For Llama these are the attention projections <code>q_proj</code>, <code>k_proj</code>, <code>v_proj</code>, <code>o_proj</code>.</td><td>Targeting the attention layers is by far the most common choice, and the one used here.</td></tr>
+</table></div>
+
+<h2>What today's script does</h2>
+
+<p>With the theory in place, the setup script is short. It logs in to Hugging Face, loads the Week 6 pricing
+dataset, prepares the tokenizer, builds a 4-bit quantization config, and loads the quantized base model. At
+the end you have the frozen 4-bit Llama in memory, ready for the LoRA adapters on Days 3 and 4.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 120" role="img" aria-label="The pipeline for day 1: log in, load dataset, prepare tokenizer, build quant config, load the 4-bit base model">
+  <rect class="box" x="16" y="42" width="120" height="44" rx="8"/>
+  <text x="76" y="60" text-anchor="middle" class="small">Log in to</text>
+  <text x="76" y="76" text-anchor="middle" class="small">Hugging Face</text>
+  <path class="arrow" d="M 136,64 H 160"/>
+  <rect class="box" x="162" y="42" width="120" height="44" rx="8"/>
+  <text x="222" y="60" text-anchor="middle" class="small">Load pricing</text>
+  <text x="222" y="76" text-anchor="middle" class="small">dataset</text>
+  <path class="arrow" d="M 282,64 H 306"/>
+  <rect class="box" x="308" y="42" width="120" height="44" rx="8"/>
+  <text x="368" y="60" text-anchor="middle" class="small">Prepare</text>
+  <text x="368" y="76" text-anchor="middle" class="small">tokenizer</text>
+  <path class="arrow" d="M 428,64 H 452"/>
+  <rect class="box box-info" x="454" y="42" width="130" height="44" rx="8"/>
+  <text x="519" y="60" text-anchor="middle" class="small">Build 4-bit</text>
+  <text x="519" y="76" text-anchor="middle" class="small">quant config</text>
+  <path class="arrow" d="M 584,64 H 608"/>
+  <rect class="box box-ok" x="610" y="42" width="134" height="44" rx="8"/>
+  <text x="677" y="60" text-anchor="middle" class="small">Load 4-bit</text>
+  <text x="677" y="76" text-anchor="middle" class="small">base model</text>
+  <text x="380" y="26" text-anchor="middle" class="title">Day 1 setup, start to finish</text>
+  <text x="380" y="110" text-anchor="middle" class="small">end state: a frozen 4-bit Llama in memory, ready for LoRA adapters on days 3&#8211;4</text>
+</svg>
+<figcaption>Read left to right. <strong>Nothing is trained today — the goal is simply to get the
+quantized base model and the data loaded and inspected.</strong></figcaption>
+</figure>
+
+<div class="callout warn">
+<strong>Before you run it: a gated model and a GPU</strong>
+<ul>
+<li><strong>Llama is gated.</strong> Meta's Llama weights require you to accept a license on the model's
+Hugging Face page and to log in with a Hugging Face <strong>token</strong>. Without that, the download is
+refused. In Colab the token is stored as a secret named <code>HF_TOKEN</code>; the script reads it with
+<code>userdata.get("HF_TOKEN")</code>.</li>
+<li><strong>You need a GPU.</strong> This runs on Colab (or any machine with a suitable GPU). On the free T4,
+pick a GPU runtime before you start.</li>
+<li><strong>Out of memory without 4-bit.</strong> Loading the model at full precision needs about 32 GB
+and will not fit the 15 GB T4 — you get an out-of-memory error, or it spills onto the CPU and
+crawls. Keep <code>QUANT_4_BIT = True</code> so the model loads in 4-bit (~5.6 GB).</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Reconstructed, not run here</strong>
+<p>This page's code was rebuilt to match the course's Google Colab notebook. It needs a GPU and takes several
+minutes just to load the model, so it was <strong>not run on this machine</strong> (there is no GPU here).
+The memory figures (~32 GB, ~9 GB, ~5.6 GB) and the adapter sizes (~27 million weights,
+~109 MB) are the instructor's own numbers from the video. Treat the code as a faithful, standard QLoRA
+setup to run yourself on Colab, not as output captured here.</p>
+</div>
+
+<h2>The full program</h2>
+
+<p>Here is the complete setup file. Read it once top to bottom, then use the line-by-line tables below to
+understand each part.</p>
+
+<pre data-file="day1_setup.py" data-lang="py" data-tag="complete file"><code># Reconstructed to match the course's Google Colab notebook for this day.
+# Standard QLoRA/PEFT code; runs on a GPU (e.g. Colab). Not executed here (no GPU).
+#
+# Week 7 - Day 1 / Day 2: pick the open-source base model (Llama 3.1 8B), load it
+# quantized to 4-bit with BitsAndBytes (QLoRA), load the pricing dataset from the
+# HuggingFace Hub (built back in Week 6), and show how a training prompt is built.
+#
+# The big idea (QLoRA): we do NOT fine-tune the 8B base weights. We freeze the
+# quantized base model and later (day 3/4) train small low-rank LoRA adapter
+# matrices that are applied on top of a few target modules (the attention layers).
+
+import os
+
+import torch
+from google.colab import userdata  # on Colab; for local runs read os.environ instead
+from huggingface_hub import login
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+
+
+# ----------------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------------
+
+# The base model. Llama 3.1 comes in 8B / 70B / 405B; the 8B is the only one that
+# realistically fits on a single affordable GPU box once quantized.
+# We use the plain *base* (foundation) model, NOT the "-Instruct" variant, because
+# we train it for one fixed task with one fixed prompt structure.
+BASE_MODEL = "meta-llama/Meta-Llama-3.1-8B"
+
+# The pricing dataset built in Week 6 and pushed to the HuggingFace Hub.
+# Each row has a "text" field (the prompt, ending in "Price is $NNN") and a
+# numeric "price" field. Swap in your own username if you uploaded your own copy.
+HF_USER = "ed-donner"
+DATASET_NAME = f"{HF_USER}/pricer-data"
+
+# Every training "text" was curated in Week 6 to be at most ~179 tokens. We leave a
+# little headroom (beginning-of-sequence + any padding/eos tokens) so the all-important
+# final price token is never truncated.
+MAX_SEQUENCE_LENGTH = 182
+
+# Quantization choice: True -&gt; 4-bit (fits the ~15GB T4), False -&gt; 8-bit.
+QUANT_4_BIT = True
+
+
+# ----------------------------------------------------------------------------
+# Log in to the HuggingFace Hub (needed for the gated Llama weights + the dataset)
+# ----------------------------------------------------------------------------
+
+hf_token = userdata.get("HF_TOKEN")  # set this as a Colab secret
+login(hf_token, add_to_git_credential=True)
+
+
+# ----------------------------------------------------------------------------
+# Load the pricing dataset
+# ----------------------------------------------------------------------------
+
+dataset = load_dataset(DATASET_NAME)
+train = dataset["train"]
+test = dataset["test"]
+
+print(f"Training items: {len(train):,}")
+print(f"Test items: {len(test):,}")
+
+# A training data point: the prompt with the price baked in at the end.
+# Example "text":
+#   How much does this cost to the nearest dollar?
+#
+#   &lt;product title and description, truncated to ~179 tokens&gt;
+#
+#   Price is $226.00
+# and a separate numeric field: price = 226.0
+print("\nFirst TRAINING item text:\n")
+print(train[0]["text"])
+print("\nprice field:", train[0]["price"])
+
+# A test data point looks identical EXCEPT the price is withheld - the text stops at
+# "Price is $" and it is the model's job to predict the next token (the price).
+print("\nFirst TEST item text:\n")
+print(test[0]["text"])
+print("\n(true price, used only for scoring):", test[0]["price"])
+
+
+# ----------------------------------------------------------------------------
+# Tokenizer
+# ----------------------------------------------------------------------------
+
+# Llama 3.1 has a convenient property for this task: every integer 0..999 maps to a
+# SINGLE token, so predicting a 3-digit price becomes "predict one token correctly".
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
+
+# Quick sanity check on the one-token-per-price property.
+for number in ["0", "1", "10", "100", "999", "1000"]:
+    tokens = tokenizer.encode(number, add_special_tokens=False)
+    print(f"{number:&gt;5} -&gt; {tokens}")
+
+
+# ----------------------------------------------------------------------------
+# 4-bit (QLoRA) quantization config via BitsAndBytes
+# ----------------------------------------------------------------------------
+#
+# nf4           : interpret each 4-bit value on a normal (gaussian) distribution
+# double_quant  : a second quantization pass over the quantization constants
+#                 (~10-20% extra memory savings, almost free in quality)
+# compute_dtype : bfloat16 during the forward/backward math (faster, tiny quality cost)
+#
+# 8-bit alternative is shown for reference; 4-bit gets the model down to ~5.6GB vs
+# ~9GB (8-bit) vs ~32GB (full fp32).
+
+if QUANT_4_BIT:
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_quant_type="nf4",
+    )
+else:
+    quant_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        bnb_8bit_compute_dtype=torch.bfloat16,
+    )
+
+
+# ----------------------------------------------------------------------------
+# Load the quantized base model
+# ----------------------------------------------------------------------------
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    quantization_config=quant_config,
+    device_map="auto",
+)
+base_model.generation_config.pad_token_id = tokenizer.pad_token_id
+
+# ~5,591.5 MB for the 4-bit double-quant version of Llama 3.1 8B.
+print(f"\nMemory footprint: {base_model.get_memory_footprint() / 1e6:,.1f} MB")
+
+# Printing the model shows the architecture: embedding -&gt; 32 x LlamaDecoderLayer
+# (each with self-attn q_proj/k_proj/v_proj/o_proj, an MLP, SiLU activation and
+# RMSNorm layers) -&gt; final RMSNorm -&gt; lm_head. The attention projections are the
+# modules we will target with LoRA adapters in day 3/4.
+print(base_model)</code></pre>
+
+<h3>Line by line</h3>
+
+<p>Imports and constants.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>12</td><td><code>import os</code></td><td>Standard-library access to the environment. For a local run you would read your token from <code>os.environ</code> instead of Colab's secret store.</td></tr>
+<tr><td>14</td><td><code>import torch</code></td><td>PyTorch, the deep-learning framework the model runs on. Here it is used for the data type <code>torch.bfloat16</code> in the quant config.</td></tr>
+<tr><td>15</td><td><code>from google.colab import userdata</code></td><td>Colab's secret store, used to read your Hugging Face token safely instead of pasting it into the code. The inline comment notes that a local run reads <code>os.environ</code> instead.</td></tr>
+<tr><td>16</td><td><code>from huggingface_hub import login</code></td><td>The function that signs you in to the Hugging Face Hub, needed to download the gated Llama weights and the dataset.</td></tr>
+<tr><td>17</td><td><code>from datasets import load_dataset</code></td><td>Hugging Face's <code>datasets</code> library, used to pull the pricing dataset down from the Hub.</td></tr>
+<tr><td>18</td><td><code>from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig</code></td><td>Three tools from <code>transformers</code>: the tokenizer loader, the model loader for text generation, and the config class that turns on quantization via <a class="term" href="glossary.html#bitsandbytes">bitsandbytes</a>.</td></tr>
+<tr><td>29</td><td><code>BASE_MODEL = "meta-llama/Meta-Llama-3.1-8B"</code></td><td>The model to load. The 8B is the only Llama 3.1 size that fits a single affordable GPU once quantized. Note it is the plain <em>base</em> model, not the <code>-Instruct</code> chat variant, because we train it for one fixed task with one fixed prompt shape.</td></tr>
+<tr><td>34-35</td><td><code>HF_USER = "ed-donner"</code> / <code>DATASET_NAME = f"{HF_USER}/pricer-data"</code></td><td>The Hugging Face account and dataset name for the pricing data built in Week 6. Swap in your own username if you uploaded your own copy.</td></tr>
+<tr><td>40</td><td><code>MAX_SEQUENCE_LENGTH = 182</code></td><td>The longest training text was curated to about 179 tokens; 182 leaves a little headroom for the start-of-sequence and padding tokens, so the all-important final price token is never cut off.</td></tr>
+<tr><td>43</td><td><code>QUANT_4_BIT = True</code></td><td>The switch between 4-bit (fits the 15 GB T4) and 8-bit. Leave it <code>True</code> on a small GPU; <code>False</code> loads the heavier 8-bit version.</td></tr>
+</table></div>
+
+<p>Logging in and loading the dataset.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>50</td><td><code>hf_token = userdata.get("HF_TOKEN")</code></td><td>Reads your Hugging Face token from the Colab secret named <code>HF_TOKEN</code>. You set this once in Colab's key panel; it never appears in the code.</td></tr>
+<tr><td>51</td><td><code>login(hf_token, add_to_git_credential=True)</code></td><td>Signs in to the Hub with that token, which unlocks the gated Llama download and the dataset. Without a valid token this step fails.</td></tr>
+<tr><td>58</td><td><code>dataset = load_dataset(DATASET_NAME)</code></td><td>Downloads the pricing dataset from the Hub. It arrives already split into parts.</td></tr>
+<tr><td>59-60</td><td><code>train = dataset["train"]</code> / <code>test = dataset["test"]</code></td><td>Pulls out the training split (to learn from) and the test split (to score against later). Day 2 evaluates the base model on the test split.</td></tr>
+<tr><td>62-63</td><td><code>print(f"Training items: {len(train):,}")</code> / <code>print(f"Test items: {len(test):,}")</code></td><td>Prints how many examples are in each split, with thousands separators, so you can confirm the download worked.</td></tr>
+<tr><td>73-75</td><td><code>print(train[0]["text"])</code> / <code>print("\nprice field:", train[0]["price"])</code></td><td>Shows the first training example: its <code>text</code> field (the full prompt, ending in the real price) and its separate numeric <code>price</code> field. This is the training prompt — see the next section.</td></tr>
+<tr><td>79-81</td><td><code>print(test[0]["text"])</code> / <code>print("\n(true price, used only for scoring):", test[0]["price"])</code></td><td>Shows the first test example. It looks identical except the text stops at <code>Price is $</code>; the real price is kept aside, used only to score the model's guess.</td></tr>
+</table></div>
+
+<p>The tokenizer.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>90</td><td><code>tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)</code></td><td>Loads the tokenizer that matches Llama 3.1 — the piece that turns text into the token numbers the model reads. It must match the model exactly.</td></tr>
+<tr><td>91</td><td><code>tokenizer.pad_token = tokenizer.eos_token</code></td><td>Llama has no dedicated padding token, so we reuse its end-of-sequence token for padding. Padding fills short sequences out to the same length when examples are batched together.</td></tr>
+<tr><td>92</td><td><code>tokenizer.padding_side = "right"</code></td><td>Adds any padding on the right-hand end, after the real text. That keeps the meaningful tokens (including the final price) at the start, where the model expects them.</td></tr>
+<tr><td>95-97</td><td><code>for number in [...]:</code> / <code>tokens = tokenizer.encode(number, add_special_tokens=False)</code></td><td>A sanity check that prints how each number tokenizes. Llama 3.1 has a handy property: every integer 0–999 is a <em>single</em> token, so predicting a 3-digit price is "predict one token correctly". <code>add_special_tokens=False</code> keeps extra markers out of the check.</td></tr>
+</table></div>
+
+<p>The 4-bit quantization config — the heart of the "Q" in QLoRA.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>112</td><td><code>if QUANT_4_BIT:</code></td><td>Branches on the switch from line 43. The <code>True</code> branch builds a 4-bit config; the <code>else</code> builds an 8-bit one.</td></tr>
+<tr><td>113</td><td><code>quant_config = BitsAndBytesConfig(</code></td><td>Creates the <a class="term" href="glossary.html#bitsandbytes">bitsandbytes</a> config object that tells <code>transformers</code> how to shrink the weights as it loads them.</td></tr>
+<tr><td>114</td><td><code>load_in_4bit=True</code></td><td>The key setting: store each weight in 4 bits instead of 32. This is what drops the model to ~5.6 GB so it fits the T4.</td></tr>
+<tr><td>115</td><td><code>bnb_4bit_use_double_quant=True</code></td><td>Turns on "double quantization" — a second pass that also quantizes the quantization constants, saving roughly another 10–20% of memory for almost no quality cost. Nearly free, so it is recommended on.</td></tr>
+<tr><td>116</td><td><code>bnb_4bit_compute_dtype=torch.bfloat16</code></td><td>The data type used during the actual math. <code>bfloat16</code> makes training faster with only a tiny quality cost; the weights are stored in 4-bit but computed in bfloat16.</td></tr>
+<tr><td>117</td><td><code>bnb_4bit_quant_type="nf4"</code></td><td>How to interpret each 4-bit value. <code>nf4</code> ("normal float 4") maps the 16 possible values onto a normal (bell-curve) distribution, which fits how weights are actually spread. It is the recommended, most common choice.</td></tr>
+<tr><td>119-123</td><td><code>else:</code> / <code>BitsAndBytesConfig(load_in_8bit=True, ...)</code></td><td>The fallback for <code>QUANT_4_BIT = False</code>: an 8-bit config. It keeps more precision but uses about 9 GB instead of 5.6 GB, so it is tighter on a 15 GB GPU.</td></tr>
+</table></div>
+
+<p>Loading the quantized base model.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>130</td><td><code>base_model = AutoModelForCausalLM.from_pretrained(</code></td><td>Downloads and loads the Llama 3.1 8B weights for text generation ("causal LM" means it predicts the next token). This is the line that actually fills the GPU.</td></tr>
+<tr><td>131</td><td><code>BASE_MODEL,</code></td><td>Which model to load — the name set on line 29.</td></tr>
+<tr><td>132</td><td><code>quantization_config=quant_config,</code></td><td>Passes in the config built above, so the weights are quantized to 4-bit as they load. Leave this out and you would load the full 32 GB model and run out of memory.</td></tr>
+<tr><td>133</td><td><code>device_map="auto",</code></td><td>Lets <code>transformers</code> place the model automatically — onto the GPU when one is available, which it is on Colab.</td></tr>
+<tr><td>135</td><td><code>base_model.generation_config.pad_token_id = tokenizer.pad_token_id</code></td><td>Tells the model which token is padding, matching the tokenizer setting from line 91, so generation behaves correctly.</td></tr>
+<tr><td>138</td><td><code>print(f"\nMemory footprint: {base_model.get_memory_footprint() / 1e6:,.1f} MB")</code></td><td>Prints how much memory the loaded model uses — about 5,591.5 MB for the 4-bit double-quant version, versus ~32 GB at full precision.</td></tr>
+<tr><td>144</td><td><code>print(base_model)</code></td><td>Prints the architecture: an embedding layer, 32 <code>LlamaDecoderLayer</code> blocks (each with the <code>q_proj</code>/<code>k_proj</code>/<code>v_proj</code>/<code>o_proj</code> attention projections, an MLP, SiLU activation and RMSNorm), then a final norm and <code>lm_head</code>. The four attention projections are exactly the modules LoRA will target on Days 3 and 4.</td></tr>
+</table></div>
+
+<h2>The training prompt</h2>
+
+<p>The dataset does the hard part of prompt-building for you: each row already carries a ready-made
+<code>text</code> field. A <strong>training</strong> row ends with the real answer baked in —
+<code>Price is $226.00</code> — so the model learns to produce it. A <strong>test</strong> row is
+identical but stops at <code>Price is $</code>, and the model must predict the next token (the price). The
+separate numeric <code>price</code> field is kept aside purely for scoring.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="A training row ends with the real price baked in; a test row stops at the dollar sign so the model predicts it">
+  <text x="200" y="26" text-anchor="middle" class="title">Training row</text>
+  <rect class="box box-ok" x="30" y="40" width="340" height="150" rx="8"/>
+  <text x="46" y="66" class="small">How much does this cost to the</text>
+  <text x="46" y="84" class="small">nearest dollar?</text>
+  <text x="46" y="110" class="small">[product title + description,</text>
+  <text x="46" y="128" class="small">trimmed to ~179 tokens]</text>
+  <rect class="box box-solid" x="46" y="144" width="300" height="30" rx="6"/>
+  <text x="196" y="164" text-anchor="middle" class="on-solid mono small">Price is $226.00</text>
+  <text x="560" y="26" text-anchor="middle" class="title">Test row</text>
+  <rect class="box box-info" x="390" y="40" width="340" height="150" rx="8"/>
+  <text x="406" y="66" class="small">How much does this cost to the</text>
+  <text x="406" y="84" class="small">nearest dollar?</text>
+  <text x="406" y="110" class="small">[product title + description,</text>
+  <text x="406" y="128" class="small">trimmed to ~179 tokens]</text>
+  <rect class="box" x="406" y="144" width="300" height="30" rx="6"/>
+  <text x="556" y="164" text-anchor="middle" class="mono small">Price is $ &#8592; model predicts</text>
+</svg>
+<figcaption>Prices are illustrative. <strong>Training rows show the answer so the model learns it; test rows
+withhold it so the model must guess.</strong> The one-token-per-price property makes the guess a single
+token.</figcaption>
+</figure>
+
+<div class="callout ok">
+<strong>What you should see</strong>
+<p>After the login cell, Hugging Face confirms you are signed in. The dataset cell prints the two counts
+(training and test items). The first training example prints as a block of product text ending in a line
+like <code>Price is $226.00</code>, and its <code>price</code> field prints as <code>226.0</code>. The test
+example looks the same but ends at <code>Price is $</code>. The tokenizer check prints each number mapping to
+a single token id for 0–999 (and 1000 splitting into more). Finally, the model-load cell takes a few
+minutes and prints <code>Memory footprint: 5,591.5 MB</code>, followed by the long architecture listing with
+32 <code>LlamaDecoderLayer</code> blocks.</p>
+</div>
+
+<div class="callout">
+<strong>Video vs repo</strong>
+<ul>
+<li><strong>Model and dataset.</strong> The videos use <code>meta-llama/Meta-Llama-3.1-8B</code> with the
+Week 6 <code>pricer-data</code> dataset, shown here. The current repo's newer re-recording uses the smaller
+<code>meta-llama/Llama-3.2-3B</code>, a custom <code>pricer.items.Item</code> class, and the
+<code>ed-donner/items_prompts_full</code> dataset. The method is the same; only the names differ. We follow
+the video so the on-screen numbers (32 GB, 5.6 GB, and the T4) line up.</li>
+<li><strong>8-bit shown first.</strong> In the video the instructor loads the model unquantized, then 8-bit,
+then 4-bit, restarting the session between each to clear memory. This file keeps the 8-bit path as the
+<code>else</code> branch and defaults to 4-bit, which is what you ultimately want.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Fine-tuning an open-source model yourself needs the model on your own <a class="term" href="glossary.html#gpu">GPU</a>, which is why cost-saving tricks matter this week.</li>
+<li><a class="term" href="glossary.html#qlora">QLoRA</a> = <strong>Q</strong>uantization + <strong>LoRA</strong>:
+quantization makes the base model <em>fit</em>, LoRA makes it <em>cheap to train</em>.</li>
+<li><a class="term" href="glossary.html#lora">LoRA</a> freezes all 8 billion base weights and trains small
+<a class="term" href="glossary.html#low-rank">low-rank</a>
+<a class="term" href="glossary.html#adapter">adapter</a> matrices (<code>lora_A</code>/<code>lora_B</code>)
+on the attention target modules — about 27 million weights, ~100 MB, instead of 8 billion.</li>
+<li><a class="term" href="glossary.html#quantization">Quantization</a> lowers each weight's precision, not the
+number of weights: Llama 3.1 8B goes 32 GB → ~9 GB (8-bit) → ~5.6 GB (4-bit), fitting
+the 15 GB T4. Only the base model is quantized; the adapters stay full precision.</li>
+<li>The 4-bit config via <a class="term" href="glossary.html#bitsandbytes">bitsandbytes</a> uses
+<code>nf4</code>, double-quant, and a <code>bfloat16</code> compute type; the Hugging Face
+<a class="term" href="glossary.html#peft">PEFT</a> library applies the adapters on Days 3 and 4.</li>
+<li>Today's script logs in, loads the <a class="term" href="glossary.html#base-model">base model</a> in 4-bit,
+loads the pricing dataset, and prepares the tokenizer — nothing is trained yet.</li>
+<li>Llama gates its weights (license + Hugging Face token) and the full model OOMs without 4-bit; keep
+<code>QUANT_4_BIT = True</code>. This code is reconstructed to match the Colab lab and was not run here
+(no GPU).</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="36-w6-build.html"><small>← Previous · Step 36</small>Week 6 · Project Build — The Product Pricer, Step by Step</a>
+<a class="next" href="38-w7d2.html"><small>Next · Step 38 →</small>Week 7 · Day 2 — Evaluating the Base Model</a>
+</nav>
+</main>
+</body>
+</html>

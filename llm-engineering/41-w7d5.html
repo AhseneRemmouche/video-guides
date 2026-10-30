@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>41 · Week 7 · Day 5 — Does It Beat the Frontier?</title>
+<meta name="description" content="Load the fine-tuned adapter, evaluate it on the test set, and compare the open-source result head-to-head with the frontier models and the baselines.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 41/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 41 of 48 · Week 7 · Day 5 · 8 lessons</div>
+  <h1>Week 7 · Day 5 — Does It Beat the Frontier?</h1>
+  <p class="lead">Load the fine-tuned adapter, evaluate it on the test set, and compare the open-source result head-to-head with the frontier models and the baselines.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>This is the moment the whole week has been building towards. You have quantized a big open-source model
+down to 4 bits, attached tiny trainable <a class="term" href="glossary.html#lora">LoRA</a> adapters, and let
+them train overnight on product descriptions and prices. Today you put the finished model to the test:
+you load the trained adapter on top of the 4-bit base, run the model over the <strong>test set</strong> it
+has never seen, read a price out of each reply, score the average error, and line it up against the frontier
+models and the Week 6 baselines. The payoff is remarkable - a small, free, fine-tuned open-source model that
+beats a trillion-parameter frontier model at this one narrow job, for a fraction of the cost.</p>
+
+<p>Loading the model has two halves. First you rebuild the exact 4-bit base model from Week 7 Day 1
+(<code>meta-llama/Meta-Llama-3.1-8B</code> with the same quantization settings). Then you load the trained
+adapter on top of it with <code>PeftModel.from_pretrained</code>. The base weights stay frozen; only the
+~109MB of adapter weights are new. Together they are your fine-tuned pricer.</p>
+
+<details class="primer"><summary>New to loading a PEFT adapter? What "base plus adapter" means</summary>
+During training (Days 3-4) you never changed the 8-billion-parameter base model - that would need far too much
+memory and money. Instead <a class="term" href="glossary.html#peft">PEFT</a> (Parameter-Efficient Fine-Tuning,
+the Hugging Face library that implements LoRA) trained small side matrices called
+<a class="term" href="glossary.html#adapter">adapters</a> and saved only those. So your fine-tuned model is
+not one big file - it is the original public base model plus a small adapter file.
+<code>PeftModel.from_pretrained(base_model, adapter_name)</code> takes a base model you have already loaded and
+wraps it so the adapter weights are applied on top. That is why the memory footprint only grows from about
+5.6GB (the 4-bit base) to about 5.7GB (base + adapter) - the adapter really is tiny.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The frozen 4-bit base Llama model plus the small trained LoRA adapter are combined by PeftModel.from_pretrained into one fine-tuned model used for inference">
+  <text x="380" y="24" text-anchor="middle" class="title">base + adapter = fine-tuned model</text>
+  <rect class="box" x="24" y="48" width="220" height="92" rx="8"/>
+  <text x="134" y="74" text-anchor="middle" class="small">4-bit base model (frozen)</text>
+  <text x="134" y="94" text-anchor="middle" class="mono small">Meta-Llama-3.1-8B</text>
+  <text x="134" y="114" text-anchor="middle" class="small">~5.6GB, 8B params</text>
+  <text x="134" y="131" text-anchor="middle" class="small">weights never change</text>
+
+  <rect class="box box-info" x="24" y="156" width="220" height="74" rx="8"/>
+  <text x="134" y="182" text-anchor="middle" class="small">trained LoRA adapter</text>
+  <text x="134" y="202" text-anchor="middle" class="small">~109MB (the only new weights)</text>
+  <text x="134" y="219" text-anchor="middle" class="small">saved on the Hub</text>
+
+  <path class="arrow" d="M 246,94 H 300"/>
+  <path class="arrow" d="M 246,192 C 275,192 285,120 300,104"/>
+  <rect class="box-solid" x="302" y="86" width="204" height="56" rx="8"/>
+  <text x="404" y="110" text-anchor="middle" class="on-solid small">PeftModel</text>
+  <text x="404" y="128" text-anchor="middle" class="on-solid small">.from_pretrained(...)</text>
+
+  <path class="arrow-accent" d="M 506,114 H 560"/>
+  <rect class="box box-ok" x="562" y="86" width="184" height="56" rx="8"/>
+  <text x="654" y="110" text-anchor="middle" class="small">fine-tuned pricer</text>
+  <text x="654" y="128" text-anchor="middle" class="small">~5.7GB, ready to run</text>
+</svg>
+<figcaption>Your fine-tuned model is assembled at load time. <strong>The big base model is reused unchanged; only
+the small adapter is yours.</strong> That is why fine-tuning this way is cheap to store and share.</figcaption>
+</figure>
+
+<h2>Running the model and reading a price</h2>
+
+<p>Each test item is a product description ending in the words <code>Price is $</code>. You feed that text to
+the model and ask it to generate the next few tokens; the model writes the number. A small helper,
+<code>extract_price</code>, pulls that number back out of the generated string. This is ordinary
+inference - light enough to run on a cheap GPU, since there is no training today.</p>
+
+<details class="primer"><summary>New to inference with a fine-tuned model? How prediction works here</summary>
+Inference means running the model forward to get an answer, with the weights fixed. You call
+<code>model.generate(inputs, max_new_tokens=4)</code> and it continues the text. Because the price always comes
+right after <code>Price is $</code>, you only need a handful of new tokens. The course takes advantage of a
+lucky fact about Llama 3.1: every whole number from 1 to 999 is a single token, so one token is usually enough
+to name the price. You then decode the tokens back to text and run <code>extract_price</code> to turn
+<code>"Price is $89.00"</code> into the number <code>89.0</code>.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Inference flow: the test item text ending in Price is dollar goes into the fine-tuned model generate call, which writes tokens, which are decoded and passed to extract_price to get a number">
+  <text x="380" y="24" text-anchor="middle" class="title">one prediction, step by step</text>
+  <rect class="box" x="14" y="52" width="150" height="64" rx="8"/>
+  <text x="89" y="78" text-anchor="middle" class="small">item text</text>
+  <text x="89" y="98" text-anchor="middle" class="mono small">...Price is $</text>
+  <path class="arrow" d="M 166,84 H 194"/>
+  <rect class="box box-info" x="196" y="52" width="160" height="64" rx="8"/>
+  <text x="276" y="78" text-anchor="middle" class="small">fine-tuned model</text>
+  <text x="276" y="98" text-anchor="middle" class="mono small">.generate(...)</text>
+  <path class="arrow" d="M 358,84 H 386"/>
+  <rect class="box" x="388" y="52" width="160" height="64" rx="8"/>
+  <text x="468" y="78" text-anchor="middle" class="small">decoded reply</text>
+  <text x="468" y="98" text-anchor="middle" class="mono small">"Price is $89.00"</text>
+  <path class="arrow" d="M 550,84 H 578"/>
+  <rect class="box box-ok" x="580" y="52" width="166" height="64" rx="8"/>
+  <text x="663" y="78" text-anchor="middle" class="small">extract_price</text>
+  <text x="663" y="98" text-anchor="middle" class="mono small">89.0</text>
+</svg>
+<figcaption>The model writes the price as text; a tiny parser reads the number back out.
+<strong>You never give the model the real price - only the description.</strong></figcaption>
+</figure>
+
+<h2>The top-token weighted-average trick</h2>
+
+<p>The simple <code>model_predict</code> just takes the model's single most likely next token and reads it as
+the price. The course then shows a smarter <code>improved_model_predict</code>. Pricing is really a
+<em>regression</em> problem (predict a number) that we have dressed up as a classification problem (pick the
+next token). So instead of trusting only the top token, this version looks at the top three most likely price
+tokens and takes a weighted average of them, weighted by the model's own probabilities. It squeezes out a
+little more accuracy and can predict in-between values like <code>$90.50</code>.</p>
+
+<details class="primer"><summary>New to the weighted-average trick? Why softmax and top-k help</summary>
+The last layer of the network does not output one token - it outputs a <em>logit</em> (a raw score) for every
+token in the vocabulary. Run those scores through <code>softmax</code> and they become probabilities that add
+up to 1. The instructor explains it like this: the model might say $100 is most likely, with $99 and $101 close
+behind. Taking only the single top token throws away that nuance. By reading the top three price tokens and
+averaging their numbers using the probabilities as weights, you get an estimate that can land between whole
+numbers and reflects how sure the model was. It only helps a little here, but it is a neat illustration of what
+those final layers actually produce.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="The top-token weighting trick: the final layer outputs logits for all tokens, softmax turns them into probabilities, the top three price tokens are kept, and their prices are averaged weighted by probability">
+  <text x="380" y="24" text-anchor="middle" class="title">top-token weighted average (improved_model_predict)</text>
+  <rect class="box" x="18" y="48" width="170" height="52" rx="8"/>
+  <text x="103" y="70" text-anchor="middle" class="small">final layer logits</text>
+  <text x="103" y="88" text-anchor="middle" class="small">(score per token)</text>
+  <path class="arrow" d="M 190,74 H 216"/>
+  <rect class="box box-info" x="218" y="48" width="150" height="52" rx="8"/>
+  <text x="293" y="70" text-anchor="middle" class="mono small">softmax</text>
+  <text x="293" y="88" text-anchor="middle" class="small">to probabilities</text>
+  <path class="arrow" d="M 370,74 H 396"/>
+  <rect class="box" x="398" y="48" width="150" height="52" rx="8"/>
+  <text x="473" y="70" text-anchor="middle" class="small">keep top 3</text>
+  <text x="473" y="88" text-anchor="middle" class="small">price tokens</text>
+
+  <rect class="box" x="120" y="128" width="200" height="30" rx="8"/>
+  <text x="220" y="148" text-anchor="middle" class="small">$101 &#215; 0.46</text>
+  <rect class="box" x="120" y="162" width="200" height="30" rx="8"/>
+  <text x="220" y="182" text-anchor="middle" class="small">$100 &#215; 0.34</text>
+  <rect class="box" x="120" y="196" width="200" height="30" rx="8"/>
+  <text x="220" y="216" text-anchor="middle" class="small">$99 &#215; 0.20</text>
+  <path class="arrow" d="M 473,100 C 473,118 360,150 322,160"/>
+  <path class="arrow-accent" d="M 322,178 H 392"/>
+  <rect class="box box-ok" x="394" y="160" width="190" height="40" rx="8"/>
+  <text x="489" y="184" text-anchor="middle" class="small">weighted avg &#8776; $100.3</text>
+  <text x="430" y="226" text-anchor="middle" class="small">illustrative probabilities</text>
+</svg>
+<figcaption>Instead of trusting one token, average the top three by their probabilities.
+<strong>It lets a classification-style model give a smooth, between-the-lines number.</strong> The
+probabilities shown are illustrative.</figcaption>
+</figure>
+
+<h2>Scoring and the head-to-head</h2>
+
+<p>The same <code>Tester</code> harness from earlier in the course runs the chosen predictor over 250 test
+items. For each one it records the guess, the truth, the absolute error, and the squared log error, and colours
+the result green, orange or red by how close it was. At the end it reports the average absolute error (dollars)
+and the <a class="term" href="glossary.html#rmsle">RMSLE</a>, draws the scatter chart, and we drop the result
+onto the podium next to the Week 6 baselines and the frontier models.</p>
+
+<details class="primer"><summary>New to comparing against the frontier? What the podium measures</summary>
+Across Weeks 6 and 7 every method is scored the same way: average how many dollars off its price guesses are
+across the test set. That single number lets very different approaches be compared on one podium - a
+constant-guess model, traditional machine learning, a human, big frontier models like GPT-4o, the untrained
+base Llama, and finally our fine-tuned model. Lower is better. The whole point of measuring the baselines and
+frontier first (Week 6) was to have a fair bar to judge fine-tuning against.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 360" role="img" aria-label="Podium of average dollar error by method: base Llama untrained 396, constant 146, linear regression 139, human 127, random forest 97, GPT-4o-mini 81, GPT-4o 76, fine-tuned ours 47">
+  <text x="380" y="22" text-anchor="middle" class="title">Average error ($) - lower is better</text>
+  <text x="250" y="52" text-anchor="end" class="small">Base Llama (untrained)</text>
+  <rect class="box-bad" x="258" y="40" width="480" height="18" rx="8"/>
+  <text x="248" y="88" text-anchor="end" class="small">Constant (avg)</text>
+  <rect class="box-warn" x="258" y="76" width="177" height="18" rx="8"/>
+  <text x="248" y="124" text-anchor="end" class="small">Linear Regression</text>
+  <rect class="box-warn" x="258" y="112" width="169" height="18" rx="8"/>
+  <text x="248" y="160" text-anchor="end" class="small">Human</text>
+  <rect class="box-warn" x="258" y="148" width="154" height="18" rx="8"/>
+  <text x="248" y="196" text-anchor="end" class="small">Random Forest</text>
+  <rect class="box-warn" x="258" y="184" width="118" height="18" rx="8"/>
+  <text x="248" y="232" text-anchor="end" class="small">GPT-4o-mini</text>
+  <rect class="box-info" x="258" y="220" width="98" height="18" rx="8"/>
+  <text x="248" y="268" text-anchor="end" class="small">GPT-4o (frontier best)</text>
+  <rect class="box-info" x="258" y="256" width="92" height="18" rx="8"/>
+  <text x="248" y="304" text-anchor="end" class="small">Fine-tuned Llama (ours)</text>
+  <rect class="box-ok" x="258" y="292" width="57" height="18" rx="8"/>
+
+  <text x="744" y="54" class="small">$396</text>
+  <text x="440" y="90" class="small">$146</text>
+  <text x="432" y="126" class="small">$139</text>
+  <text x="417" y="162" class="small">$127</text>
+  <text x="381" y="198" class="small">$97</text>
+  <text x="361" y="234" class="small">$81</text>
+  <text x="355" y="270" class="small">$76</text>
+  <text x="320" y="306" class="accent small">$47</text>
+  <text x="380" y="344" text-anchor="middle" class="small">Values from the course run (full 250-item test set).</text>
+</svg>
+<figcaption>The fine-tuned open-source model (green, $47) beats everything - including GPT-4o at $76.
+<strong>A tiny, free, 4-bit model, specialised by a 109MB adapter, outscores a trillion-parameter frontier
+model at this one job.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> As the tester runs you get a stream of coloured
+lines - mostly green (within $40 or 20%), some orange, a few red - and a scatter chart hugging the
+ground-truth line. The final line reports the fine-tuned model around <strong>$47 average error</strong>
+(the course saw $46.67), compared with <strong>$76 for GPT-4o</strong>, <strong>$127 for the human</strong>,
+<strong>$97 for Random Forest</strong>, and <strong>$396 for the untrained base Llama</strong>. In other words,
+the fine-tuned model wins the podium.</div>
+
+<div class="callout warn"><strong>Common mistakes.</strong> Never evaluate on data the model trained on - the
+test split deliberately hides the price (the model sees only the description), and scoring on training items
+would flatter the model and tell you nothing. Just as important, pick the <em>right checkpoint</em>: the
+instructor selects a revision from <em>before</em> the model started to overfit (around the end of the third
+epoch). A later checkpoint can score worse even though its training loss kept falling - that is overfitting.
+Set <code>REVISION</code> to pin that checkpoint, and use <code>revision=None</code> only if you want the
+latest saved weights.</div>
+
+<h2>The code</h2>
+
+<p>Here is the full evaluation script. It rebuilds the 4-bit base model, loads the trained adapter with
+<code>PeftModel.from_pretrained</code>, defines the two prediction strategies, runs the <code>Tester</code>
+over the test set, and prints the final podium.</p>
+
+<pre data-file="day5_evaluate.py" data-lang="py" data-tag="complete file"><code># Reconstructed to match the course's Google Colab notebook for this day.
+# Standard QLoRA/PEFT code; runs on a GPU (e.g. Colab). Not executed here (no GPU).
+#
+# Week 7 - Day 5: evaluate the fine-tuned model.
+# Load the 4-bit base model, then load the trained LoRA adapter on top of it with
+# PeftModel.from_pretrained (optionally pinning a specific checkpoint revision).
+# Run inference over the test set, parse the predicted price, and score the average
+# absolute error / RMSLE against the Week 6 baselines and frontier models.
+#
+# Inference is light enough to run on a cheap T4 box (no training here).
+
+import re
+import math
+
+import torch
+import matplotlib.pyplot as plt
+from google.colab import userdata
+from huggingface_hub import login
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
+
+
+# ----------------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------------
+
+BASE_MODEL = "meta-llama/Meta-Llama-3.1-8B"
+HF_USER = "ed-donner"  # change to your own username / your own run
+
+DATASET_NAME = f"{HF_USER}/pricer-data"
+
+# The trained run and the checkpoint to evaluate. Pick the checkpoint from BEFORE
+# the model started to overfit (the instructor used the end of the 3rd epoch).
+RUN_NAME = "2024-09-13_13.04.39"
+PROJECT_RUN_NAME = f"pricer-{RUN_NAME}"
+FINETUNED_MODEL = f"{HF_USER}/{PROJECT_RUN_NAME}"
+REVISION = None  # e.g. a commit hash / "checkpoint-5000"; None -&gt; latest on the branch
+
+QUANT_4_BIT = True
+
+# For scoring colored output in the notebook.
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
+COLOR_MAP = {"green": GREEN, "orange": YELLOW, "red": RED}
+
+# Week 6 reference results (average absolute error, $) for the final podium.
+BASELINES = {
+    "Constant (avg)": 146,
+    "Linear Regression (features)": 139,
+    "Random Forest": 97,
+    "Human": 127,
+    "GPT-4o-mini": 81,
+    "GPT-4o (frontier best)": 76,
+    "Base Llama 3.1 (4-bit, untrained)": 396,
+}
+
+
+# ----------------------------------------------------------------------------
+# Log in and load data
+# ----------------------------------------------------------------------------
+
+hf_token = userdata.get("HF_TOKEN")
+login(hf_token, add_to_git_credential=True)
+
+dataset = load_dataset(DATASET_NAME)
+test = dataset["test"]
+
+
+# ----------------------------------------------------------------------------
+# Load the quantized base model + the trained LoRA adapter
+# ----------------------------------------------------------------------------
+
+if QUANT_4_BIT:
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_quant_type="nf4",
+    )
+else:
+    quant_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        bnb_8bit_compute_dtype=torch.bfloat16,
+    )
+
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    quantization_config=quant_config,
+    device_map="auto",
+)
+base_model.generation_config.pad_token_id = tokenizer.pad_token_id
+
+# This is the key step for inference on a PEFT model: base + adapter.
+if REVISION:
+    fine_tuned_model = PeftModel.from_pretrained(base_model, FINETUNED_MODEL, revision=REVISION)
+else:
+    fine_tuned_model = PeftModel.from_pretrained(base_model, FINETUNED_MODEL)
+
+# ~5.7GB: the 5.6GB 4-bit base plus ~109MB of LoRA adapters.
+print(f"Memory footprint: {fine_tuned_model.get_memory_footprint() / 1e6:,.1f} MB")
+
+
+# ----------------------------------------------------------------------------
+# Price parsing + prediction
+# ----------------------------------------------------------------------------
+
+def extract_price(text):
+    """Pull the first number appearing after 'Price is $' out of a generated string."""
+    if "Price is $" in text:
+        text = text.split("Price is $")[1]
+    text = text.replace(",", "")
+    match = re.search(r"[-+]?\d*\.?\d+", text)
+    return float(match.group()) if match else 0.0
+
+
+def model_predict(prompt):
+    """Simple strategy: generate a few tokens and read off the price."""
+    inputs = tokenizer.encode(prompt, return_tensors="pt").to("cuda")
+    attention_mask = torch.ones(inputs.shape, device="cuda")
+    outputs = fine_tuned_model.generate(
+        inputs,
+        attention_mask=attention_mask,
+        max_new_tokens=4,
+        num_return_sequences=1,
+    )
+    reply = tokenizer.decode(outputs[0])
+    return extract_price(reply)
+
+
+# A smarter strategy: treat the (really regression) problem as a weighted average
+# over the top-k most likely next price tokens, using their softmax probabilities.
+# This squeezes out a little more accuracy than taking only the single top token.
+TOP_K = 3
+
+
+def improved_model_predict(prompt):
+    inputs = tokenizer.encode(prompt, return_tensors="pt").to("cuda")
+    attention_mask = torch.ones(inputs.shape, device="cuda")
+    with torch.no_grad():
+        outputs = fine_tuned_model(inputs, attention_mask=attention_mask)
+        # logits for the next token only -&gt; probabilities via softmax
+        next_token_logits = outputs.logits[0, -1, :].to("cpu")
+        next_token_probs = torch.nn.functional.softmax(next_token_logits, dim=-1)
+
+    top_prob, top_token_id = next_token_probs.topk(TOP_K)
+    prices, weights = [], []
+    for prob, token_id in zip(top_prob, top_token_id):
+        price = extract_price(tokenizer.decode(token_id))
+        if price &gt; 0:
+            prices.append(price)
+            weights.append(prob.item())
+
+    if not prices:
+        return 0.0
+    total = sum(weights)
+    return sum(p * w for p, w in zip(prices, weights)) / total
+
+
+# ----------------------------------------------------------------------------
+# Tester harness (same structure used throughout the course)
+# ----------------------------------------------------------------------------
+
+class Tester:
+    def __init__(self, predictor, data, title=None, size=250):
+        self.predictor = predictor
+        self.data = data
+        self.title = title or predictor.__name__.replace("_", " ").title()
+        self.size = size
+        self.guesses = []
+        self.truths = []
+        self.errors = []
+        self.sles = []
+        self.colors = []
+
+    @staticmethod
+    def color_for(error, truth):
+        if error &lt; 40 or error / truth &lt; 0.2:
+            return "green"
+        elif error &lt; 80 or error / truth &lt; 0.4:
+            return "orange"
+        return "red"
+
+    def run_datapoint(self, i):
+        datapoint = self.data[i]
+        guess = self.predictor(datapoint["text"])
+        truth = datapoint["price"]
+        error = abs(guess - truth)
+        log_error = math.log(truth + 1) - math.log(guess + 1)
+        sle = log_error ** 2
+        color = self.color_for(error, truth)
+        self.guesses.append(guess)
+        self.truths.append(truth)
+        self.errors.append(error)
+        self.sles.append(sle)
+        self.colors.append(color)
+        title = datapoint["text"].split("\n\n")[1][:20] + "..."
+        print(
+            f"{COLOR_MAP[color]}{i+1}: Guess: ${guess:,.2f} "
+            f"Truth: ${truth:,.2f} Error: ${error:,.2f} "
+            f"SLE: {sle:,.2f} Item: {title}{RESET}"
+        )
+
+    def chart(self, title):
+        max_val = max(max(self.truths), max(self.guesses))
+        plt.figure(figsize=(12, 8))
+        plt.plot([0, max_val], [0, max_val], color="deepskyblue", lw=2, alpha=0.6)
+        plt.scatter(self.truths, self.guesses, s=3, c=self.colors)
+        plt.xlabel("Ground Truth")
+        plt.ylabel("Model Estimate")
+        plt.xlim(0, max_val)
+        plt.ylim(0, max_val)
+        plt.title(title)
+        plt.show()
+
+    def report(self):
+        average_error = sum(self.errors) / self.size
+        rmsle = math.sqrt(sum(self.sles) / self.size)
+        hits = sum(1 for c in self.colors if c == "green")
+        title = (
+            f"{self.title} Error=${average_error:,.2f} "
+            f"RMSLE={rmsle:,.2f} Hits={hits/self.size*100:.1f}%"
+        )
+        self.chart(title)
+        return average_error, rmsle
+
+    def run(self):
+        self.error = 0
+        for i in range(self.size):
+            self.run_datapoint(i)
+        return self.report()
+
+    @classmethod
+    def test(cls, function, data):
+        return cls(function, data).run()
+
+
+# ----------------------------------------------------------------------------
+# Run the evaluation and print the final podium
+# ----------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    average_error, rmsle = Tester.test(improved_model_predict, test)
+
+    print("\n================ Final podium (avg absolute error, $) ================")
+    rows = list(BASELINES.items()) + [("Fine-tuned Llama 3.1 (ours)", round(average_error))]
+    for name, err in sorted(rows, key=lambda kv: kv[1]):
+        print(f"  {name:&lt;40} ${err}")
+    print(f"\nOur fine-tuned model: ${average_error:,.2f} error, RMSLE {rmsle:,.2f}")
+    # On the course's full run this lands around $47 - beating GPT-4o ($76).</code></pre>
+
+<h3>Line by line</h3>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>12-21</td><td><code>import re, math, torch, ...; from peft import PeftModel</code></td><td>The imports. <code>re</code> and <code>math</code> parse the price and compute RMSLE; <code>torch</code> runs the model; <code>transformers</code> gives the tokenizer, the base model class and <code>BitsAndBytesConfig</code> for 4-bit loading; <code>datasets</code> loads the test data; and <code>PeftModel</code> is the one piece that attaches the trained adapter to the base model. Without the <code>peft</code> import there is no way to load the adapter.</td></tr>
+<tr><td>28-38</td><td><code>BASE_MODEL = "..."; FINETUNED_MODEL = ...; REVISION = None</code></td><td>Constants naming the public 4-bit base model, your Hugging Face username, the training run, and - crucially - <code>REVISION</code>, the specific checkpoint to evaluate. Pick a checkpoint from before overfitting. <code>REVISION = None</code> means "use the latest weights on the branch".</td></tr>
+<tr><td>50-58</td><td><code>BASELINES = {"Constant (avg)": 146, ...}</code></td><td>The Week 6 reference results in dollars - constant, linear regression, random forest, human, GPT-4o-mini, GPT-4o, and the untrained base Llama. These are the bar the fine-tuned model has to beat; they are printed on the final podium.</td></tr>
+<tr><td>76-87</td><td><code>quant_config = BitsAndBytesConfig(load_in_4bit=True, ...)</code></td><td>Rebuilds the <em>exact</em> 4-bit quantization settings used when the base model was first loaded in Day 1 (double quant, <code>nf4</code>, bfloat16 compute). The adapter was trained on top of this quantized base, so the base must be loaded the same way or the numbers will not line up.</td></tr>
+<tr><td>89-98</td><td><code>tokenizer = AutoTokenizer.from_pretrained(...); base_model = AutoModelForCausalLM.from_pretrained(..., quantization_config=quant_config, device_map="auto")</code></td><td>Loads the tokenizer (with its padding settings) and the 4-bit <a class="term" href="glossary.html#base-model">base model</a>. <code>device_map="auto"</code> places it on the GPU. On its own this is the untrained model that scored $396.</td></tr>
+<tr><td>101-104</td><td><code>fine_tuned_model = PeftModel.from_pretrained(base_model, FINETUNED_MODEL, revision=REVISION)</code></td><td><strong>The key step.</strong> Wraps the loaded base model with the trained LoRA adapter to produce the fine-tuned model. If <code>REVISION</code> is set it pins that checkpoint; otherwise it loads the latest. This is what turns the generic base into your specialised pricer.</td></tr>
+<tr><td>107</td><td><code>print(f"Memory footprint: {... / 1e6:,.1f} MB")</code></td><td>Prints the memory footprint - about 5,700MB: the ~5.6GB 4-bit base plus the ~109MB of adapter weights. Seeing it tick up by ~100MB confirms the adapter actually loaded.</td></tr>
+<tr><td>114-120</td><td><code>def extract_price(text): ... re.search(r"[-+]?\d*\.?\d+", text)</code></td><td>Pulls the first number appearing after <code>Price is $</code> out of a generated string. It strips commas and returns a <code>float</code>, or <code>0.0</code> if nothing matches - so a garbled reply scores as a wrong guess instead of crashing the run.</td></tr>
+<tr><td>123-134</td><td><code>def model_predict(prompt): ... outputs = fine_tuned_model.generate(inputs, ..., max_new_tokens=4)</code></td><td>The simple strategy: tokenize the prompt, build an attention mask, generate up to 4 new tokens, decode them and read the price. Only a few tokens are needed because the price follows <code>Price is $</code> immediately and most numbers are one token.</td></tr>
+<tr><td>143-150</td><td><code>outputs = fine_tuned_model(inputs, ...); next_token_logits = outputs.logits[0, -1, :]; next_token_probs = softmax(...)</code></td><td>The improved strategy. Instead of generating text, it calls the model once to get the raw <em>logits</em> for the next token, then runs <code>softmax</code> to turn them into probabilities over the whole vocabulary.</td></tr>
+<tr><td>152-163</td><td><code>top_prob, top_token_id = next_token_probs.topk(TOP_K); ... return sum(p*w ...) / total</code></td><td>The top-token weighted average. It takes the three most likely tokens, converts each to a price, and returns the average of those prices weighted by their probabilities - a smoother estimate that can land between whole numbers. Falls back to <code>0.0</code> if none of the top tokens look like a price.</td></tr>
+<tr><td>190-208</td><td><code>def run_datapoint(self, i): guess = self.predictor(datapoint["text"]); truth = datapoint["price"]; error = abs(guess - truth)</code></td><td>Scores one test item. It feeds the predictor <strong>only the text</strong>, compares the guess with the true price, records the absolute error and squared log error, and prints a coloured line. Passing only <code>text</code> is what keeps the price hidden from the model.</td></tr>
+<tr><td>222-231</td><td><code>def report(self): average_error = sum(self.errors)/self.size; rmsle = math.sqrt(sum(self.sles)/self.size)</code></td><td>Computes the headline numbers: the average absolute dollar error and the <a class="term" href="glossary.html#evaluation-metric">evaluation metric</a> RMSLE (root mean squared log error), plus the percentage of green "hits", then draws the scatter chart.</td></tr>
+<tr><td>248-256</td><td><code>average_error, rmsle = Tester.test(improved_model_predict, test); ... sorted(rows, ...)</code></td><td>Runs the whole evaluation with the improved predictor over the test set, then prints the final podium - the baselines plus our fine-tuned result, sorted best-first. On the course's run our model lands near $47, beating GPT-4o at $76.</td></tr>
+</table></div>
+
+<div class="callout"><strong>Video vs repo (and reconstructed).</strong> Honesty note: this evaluation was
+<strong>not run here</strong> - it needs a GPU and the trained adapter from an overnight run, so this script is
+<em>reconstructed</em> standard QLoRA/PEFT evaluation code written to match the course's Colab notebook, not a
+live run on this machine. The dollar numbers quoted ($47, $76, $396, and so on) are the figures the instructor
+reports in the videos. The repo also keeps moving ahead of the videos: a newer re-recording uses
+<code>meta-llama/Llama-3.2-3B</code>, a custom <code>Item</code> class and newer frontier model ids, while the
+videos use Llama-3.1-8B and the Week 6 pricing dataset shown here. Treat the base model name and frontier ids
+as values you can swap. The Week 6 React pricer demo below does type-check and build; its live model call was
+not run.</div>
+
+<h2>Try it in the demo</h2>
+
+<p>There is no separate Week 7 app - the finished fine-tuned model drives the <em>same</em> React pricer demo
+you built in Week 6. Point its <code>FINE_TUNED_MODEL</code> setting (or the API it calls) at your fine-tuned
+open-source model's endpoint, and the same form will show the open-source model's price estimates instead of
+the frontier model's.</p>
+
+<figure class="shot"><img src="img/ts-week6-ui.png" alt="The pricer demo app" width="1100" height="800" loading="lazy"><figcaption>The Week 6 React pricer demo (week6-ts/) - point FINE_TUNED_MODEL / the API at your fine-tuned open-source model's endpoint to try it. Illustration - the UI shell; calls need an endpoint.</figcaption></figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="The Week 7 result in one line: 4-bit base plus a trained adapter, run over the hidden test set, scores 47 dollars which beats GPT-4o at 76 dollars">
+  <text x="380" y="24" text-anchor="middle" class="title">The Week 7 result</text>
+  <rect class="box" x="14" y="50" width="176" height="56" rx="8"/>
+  <text x="102" y="74" text-anchor="middle" class="small">4-bit base + adapter</text>
+  <text x="102" y="92" text-anchor="middle" class="small">fine-tuned pricer</text>
+  <path class="arrow" d="M 192,78 H 218"/>
+  <rect class="box box-info" x="220" y="50" width="176" height="56" rx="8"/>
+  <text x="308" y="74" text-anchor="middle" class="small">run over hidden</text>
+  <text x="308" y="92" text-anchor="middle" class="small">test set (250 items)</text>
+  <path class="arrow" d="M 398,78 H 424"/>
+  <rect class="box box-ok" x="426" y="50" width="150" height="56" rx="8"/>
+  <text x="501" y="74" text-anchor="middle" class="small">our error</text>
+  <text x="501" y="92" text-anchor="middle" class="accent">$47</text>
+  <path class="arrow-accent" d="M 578,78 H 604"/>
+  <rect class="box" x="606" y="50" width="140" height="56" rx="8"/>
+  <text x="676" y="74" text-anchor="middle" class="small">beats GPT-4o</text>
+  <text x="676" y="92" text-anchor="middle" class="small">at $76</text>
+  <text x="380" y="140" text-anchor="middle" class="small">A small, free, open-source model wins this narrow task at a fraction of the cost.</text>
+</svg>
+<figcaption>Week 7 in a sentence. <strong>Fine-tuning a quantized open-source model with LoRA produced a $47
+pricer that beats a trillion-parameter frontier model's $76.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Keep it in perspective.</strong> This model only wins at <em>this</em> narrow
+pricing task - ask it to write poetry and it will do poorly. Prices also vary a lot naturally (sales,
+volatility), so there is a floor on how low the error can go. The instructor's challenge is to push below $40
+by tuning <a class="term" href="glossary.html#qlora">QLoRA</a> hyperparameters, improving the data curation, or
+trying other base models.</div>
+
+<h2>Week 7, wrapped up</h2>
+
+<p>This closes Week 7. You took a big open-source model, quantized it to 4 bits, attached small trainable LoRA
+adapters, trained them with <a class="term" href="glossary.html#fine-tuning">fine-tuning</a> on your pricing
+data, and today loaded the trained adapter back on top of the base to evaluate it. You can now carry out the
+full process of selecting, training and evaluating an open-source model that outperforms the frontier on a
+specialised task - a genuine milestone. Next week is the course finale: packaging and deploying what you have
+built behind an API as a real application.</p>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Load the fine-tuned model in two halves: rebuild the 4-bit base with the <em>same</em>
+<code>BitsAndBytesConfig</code>, then attach the trained adapter with
+<code>PeftModel.from_pretrained(base_model, FINETUNED_MODEL, revision=REVISION)</code>.</li>
+<li>Pick the checkpoint from <em>before</em> overfitting (the instructor used the end of the third epoch) via
+<code>REVISION</code>; the memory footprint growing from ~5.6GB to ~5.7GB confirms the ~109MB adapter loaded.</li>
+<li>Predict by generating a few tokens and reading the number with <code>extract_price</code>; the smarter
+<code>improved_model_predict</code> averages the top three price tokens weighted by their softmax
+probabilities for a slightly better estimate.</li>
+<li>Score with the same <code>Tester</code> harness (average absolute error and RMSLE) over the hidden test
+set - the model sees only the description, never the price.</li>
+<li>Result: the fine-tuned open-source model reaches about <strong>$47</strong> error, beating GPT-4o ($76),
+the human ($127), Random Forest ($97) and the untrained base Llama ($396) - a small, free model beating the
+frontier at a fraction of the cost.</li>
+<li>Honesty: the evaluation is reconstructed standard PEFT code (not run here - needs a GPU); the dollar
+figures are the course's. The Week 6 React demo type-checks and builds.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="40-w7d4.html"><small>← Previous · Step 40</small>Week 7 · Day 4 — Monitoring and Hyperparameters</a>
+<a class="next" href="42-w7-build.html"><small>Next · Step 42 →</small>Week 7 · Project Build — The Open-Source Pricer, Step by Step</a>
+</nav>
+</main>
+</body>
+</html>

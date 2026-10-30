@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 · Week 2 · Day 3 — Chatbots with History and Context</title>
+<meta name="description" content="Build a conversational assistant that remembers the conversation, with a system prompt and multi-shot context to shape its answers.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 09/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 09 of 48 · Week 2 · Day 3 · 4 lessons</div>
+  <h1>Week 2 · Day 3 — Chatbots with History and Context</h1>
+  <p class="lead">Build a conversational assistant that remembers the conversation, with a system prompt and multi-shot context to shape its answers.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p class="lead">Today you build your first real <a class="term" href="glossary.html#chatbot">chatbot</a>: an assistant you can
+hold a back-and-forth conversation with, that remembers what was said earlier in the chat, that has a persona (a
+friendly clothes-store assistant), and that you can steer with examples. The surprise of the lesson is how little
+code it takes. In Python, <a class="term" href="glossary.html#gradio">Gradio</a> hands you a ready-made chat window
+if you write one small function; in <a class="term" href="glossary.html#typescript">TypeScript</a> we write the same
+function so a React app or a server can reuse it.</p>
+
+<p>Everything today comes in two languages. Use the <strong>Python | TypeScript</strong> switch on the code card — or
+the <strong>Code in:</strong> switch at the top of the page — to flip between them; your choice is remembered as you
+read. The two versions do the same thing; only the syntax changes.</p>
+
+<p>The big idea carries over from Day 4: an LLM is <em>stateless</em> and remembers nothing on its own. The sense of a
+continuous conversation is an illusion we build. Each turn, your code resends the whole conversation so far — the
+<a class="term" href="glossary.html#system-prompt">system prompt</a>, every earlier exchange, and the new question —
+and the model predicts the next reply from all of it. This resent transcript is the
+<a class="term" href="glossary.html#conversation-history">conversation history</a>.</p>
+
+<div class="callout">
+<strong>Video vs repo</strong>
+<p>Two differences to know. <strong>Model name:</strong> the videos use OpenAI's <code>gpt-4o-mini</code>, which is what
+this page shows; the current <code>ed-donner/llm_engineering</code> repo has moved to a newer model,
+<code>gpt-6-luna</code>, called with an extra <code>reasoning_effort="none"</code> argument. Treat the model id as a
+value you swap when a lab retires a model. <strong>History shape:</strong> in the recorded video the instructor
+describes history as a "list of lists" (pairs of user/assistant text). The current code uses Gradio's newer
+<code>type="messages"</code> mode, so history arrives already as a list of
+<code>{"role": ..., "content": ...}</code> dictionaries — the same shape OpenAI uses. This page explains the
+<code>type="messages"</code> version, because that is the code you will run.</p>
+</div>
+
+<details class="primer">
+<summary>New to conversation history? What it is and why we resend it</summary>
+<p>A chat model does not keep a memory between calls. So to make it look like it remembers, your program keeps the whole
+conversation in a list and sends that entire list on every turn. That list — the system prompt, each thing you said,
+and each thing the model replied — is the conversation history. When you ask "and a red one" after talking about ties,
+the model only knows what "one" means because the earlier turns are sitting right there in the list you just resent. The
+cost of this trick is that the list grows every turn, so a long chat sends more tokens (and costs a little more) each
+time. Managing that growth becomes your job as the engineer.</p>
+</details>
+
+<h2>A conversation is a list of messages</h2>
+<p>You already know the shape of a chat request: a list of <code>message</code> dictionaries, each with a
+<code>role</code> and <code>content</code>. The roles take turns: a <code>system</code> message first to set the rules,
+then <code>user</code>, <code>assistant</code>, <code>user</code>, <code>assistant</code>, and so on. The chatbot's
+whole job is to keep appending to this list and resend it.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="A conversation stack growing over three turns, each turn resending all earlier messages">
+  <text class="small" x="115" y="46" text-anchor="middle">Turn 1</text>
+  <rect class="box" x="40" y="54" width="150" height="20" rx="8" />
+  <text class="small" x="115" y="68" text-anchor="middle">system (the rules)</text>
+  <rect class="box" x="40" y="76" width="150" height="20" rx="8" />
+  <text class="small" x="115" y="90" text-anchor="middle">you: a tie please</text>
+
+  <text class="small" x="365" y="46" text-anchor="middle">Turn 2</text>
+  <rect class="box" x="290" y="54" width="150" height="20" rx="8" />
+  <text class="small" x="365" y="68" text-anchor="middle">system (the rules)</text>
+  <rect class="box" x="290" y="76" width="150" height="20" rx="8" />
+  <text class="small" x="365" y="90" text-anchor="middle">you: a tie please</text>
+  <rect class="box box-info" x="290" y="98" width="150" height="20" rx="8" />
+  <text class="small" x="365" y="112" text-anchor="middle">bot: what colour?</text>
+  <rect class="box" x="290" y="120" width="150" height="20" rx="8" />
+  <text class="small" x="365" y="134" text-anchor="middle">you: a red one</text>
+
+  <text class="small" x="615" y="46" text-anchor="middle">Turn 3</text>
+  <rect class="box" x="540" y="54" width="150" height="20" rx="8" />
+  <text class="small" x="615" y="68" text-anchor="middle">system (the rules)</text>
+  <rect class="box" x="540" y="76" width="150" height="20" rx="8" />
+  <text class="small" x="615" y="90" text-anchor="middle">you: a tie please</text>
+  <rect class="box box-info" x="540" y="98" width="150" height="20" rx="8" />
+  <text class="small" x="615" y="112" text-anchor="middle">bot: what colour?</text>
+  <rect class="box" x="540" y="120" width="150" height="20" rx="8" />
+  <text class="small" x="615" y="134" text-anchor="middle">you: a red one</text>
+  <rect class="box box-info" x="540" y="142" width="150" height="20" rx="8" />
+  <text class="small" x="615" y="156" text-anchor="middle">bot: here are reds</text>
+  <rect class="box box-ok" x="540" y="164" width="150" height="20" rx="8" />
+  <text class="small" x="615" y="178" text-anchor="middle">you: new question</text>
+
+  <path class="arrow" d="M 192,84 H 288" />
+  <path class="arrow" d="M 442,110 H 538" />
+  <text class="small" x="380" y="214" text-anchor="middle">The list only grows; every turn resends all of the earlier messages.</text>
+</svg>
+<figcaption>How to read it: each column is the full list sent on that turn. <strong>Nothing is remembered on the
+server — the growing list IS the memory.</strong></figcaption>
+</figure>
+
+<h2>The callback Gradio wants: <code>chat(message, history)</code></h2>
+<p>Gradio's chat UI does not want you to draw bubbles or track state. It wants one function with a fixed shape: it
+receives the new <code>message</code> the user just typed and the <code>history</code> of everything before it, and it
+returns (or streams) the reply. Gradio calls this function every turn, handing you a fresh copy of the history each
+time. Your function's one job is to turn that history into the <code>messages</code> list OpenAI expects, call the
+model, and give back the answer.</p>
+
+<details class="primer">
+<summary>New to Gradio's ChatInterface? What it gives you for free</summary>
+<p>Gradio is a Python library that turns a function into a web UI with no front-end code.
+<a class="term" href="glossary.html#chat-interface">ChatInterface</a> is its ready-made chat window: a scrolling
+transcript, a text box, and a send button, all wired up. You pass it your <code>chat</code> function as
+<code>fn</code>, add <code>type="messages"</code> so history arrives in the modern role/content shape, and call
+<code>.launch()</code>. That single line gives you the instant-message interface the instructor demos. In the
+TypeScript world there is no Gradio; instead a React app provides the window and a small server calls the same
+<code>chat</code> function, which is why the port keeps the function but drops the UI line.</p>
+</details>
+
+<p>The instructor builds the function up in stages. First a throwaway version that ignores its inputs and always returns
+<code>"bananas"</code>, just to prove the wiring works. Then a version that echoes the <code>message</code> and
+<code>history</code> back so you can see their shape. Then the real one that calls OpenAI. We show the complete file
+below; those early "bananas" cells are included so you can see the progression, and the real work is in the final
+<code>chat</code> function.</p>
+
+<div class="code-tabs"><pre data-file="week2/day3.py" data-lang="py" data-tag="complete file"><code># imports
+
+import os
+from dotenv import load_dotenv
+from openai import OpenAI
+import gradio as gr
+
+# Load environment variables in a file called .env
+# Print the key prefixes to help with any debugging
+
+load_dotenv(override=True)
+openai_api_key = os.getenv('OPENAI_API_KEY')
+
+if openai_api_key:
+    print(f"OpenAI API Key exists and begins {openai_api_key[:8]}")
+else:
+    print("OpenAI API Key not set")
+
+# Initialize
+
+openai = OpenAI()
+MODEL = 'gpt-4o-mini'
+
+# Again, I'll be in scientist-mode and change this global during the lab
+
+system_message = "You are a helpful assistant"
+
+def chat(message, history):
+    return "bananas"
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+def chat(message, history):
+    return f"You said {message} and the history is {history} but I still say bananas"
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+
+def chat(message, history):
+    history = [{"role":h["role"], "content":h["content"]} for h in history]
+    messages = [{"role": "system", "content": system_message}] + history + [{"role": "user", "content": message}]
+    response = openai.chat.completions.create(model=MODEL, messages=messages)
+    return response.choices[0].message.content
+
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+def chat(message, history):
+    history = [{"role":h["role"], "content":h["content"]} for h in history]
+    messages = [{"role": "system", "content": system_message}] + history + [{"role": "user", "content": message}]
+    stream = openai.chat.completions.create(model=MODEL, messages=messages, stream=True)
+    response = ""
+    for chunk in stream:
+        response += chunk.choices[0].delta.content or ''
+        yield response
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+system_message = "You are a helpful assistant in a clothes store. You should try to gently encourage \
+the customer to try items that are on sale. Hats are 60% off, and most other items are 50% off. \
+For example, if the customer says 'I'm looking to buy a hat', \
+you could reply something like, 'Wonderful - we have lots of hats - including several that are part of our sales event.'\
+Encourage the customer to buy hats if they are unsure what to get."
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+system_message += "\nIf the customer asks for shoes, you should respond that shoes are not on sale today, \
+but remind the customer to look at hats!"
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+
+def chat(message, history):
+    history = [{"role":h["role"], "content":h["content"]} for h in history]
+    relevant_system_message = system_message
+    if 'belt' in message.lower():
+        relevant_system_message += " The store does not sell belts; if you are asked for belts, be sure to point out other items on sale."
+    
+    messages = [{"role": "system", "content": relevant_system_message}] + history + [{"role": "user", "content": message}]
+
+    stream = openai.chat.completions.create(model=MODEL, messages=messages, stream=True)
+
+    response = ""
+    for chunk in stream:
+        response += chunk.choices[0].delta.content or ''
+        yield response
+
+gr.ChatInterface(fn=chat, type="messages").launch()</code></pre><pre data-file="src/day3_chatbot.ts" data-lang="ts" data-tag="complete file"><code>// Day 3 - A chat function with history + a system prompt (TypeScript port of day3.py)
+// Gradio's ChatInterface gave us `chat(message, history)` for free; here we write the
+// equivalent as a plain function so the React UI (and the Hono server) can reuse it.
+import "dotenv/config";
+import { pathToFileURL } from "node:url";
+import OpenAI from "openai";
+
+export const MODEL = "gpt-4o-mini";
+
+export const DEFAULT_SYSTEM_MESSAGE =
+  "You are a helpful assistant in a clothes store. You should try to gently encourage the " +
+  "customer to try items that are on sale. Hats are 60% off, and most other items are 50% off. " +
+  "For example, if the customer says 'I'm looking to buy a hat', you could reply something like, " +
+  "'Wonderful - we have lots of hats - including several that are part of our sales event.' " +
+  "Encourage the customer to buy hats if they are unsure what to get.\n" +
+  "If the customer asks for shoes, you should respond that shoes are not on sale today, but " +
+  "remind the customer to look at hats!";
+
+export type ChatMessage = { role: "user" | "assistant"; content: string };
+
+// Build the messages array the API expects: system prompt + prior turns + the new message.
+// Like the Python lab, we tweak the system prompt on the fly when 'belt' is mentioned.
+export function buildMessages(
+  message: string,
+  history: ChatMessage[],
+  system: string = DEFAULT_SYSTEM_MESSAGE,
+): OpenAI.Chat.ChatCompletionMessageParam[] {
+  let relevantSystem = system;
+  if (message.toLowerCase().includes("belt")) {
+    relevantSystem +=
+      " The store does not sell belts; if you are asked for belts, be sure to point out other items on sale.";
+  }
+  return [
+    { role: "system", content: relevantSystem },
+    ...history.map((h) =&gt; ({ role: h.role, content: h.content })),
+    { role: "user", content: message },
+  ];
+}
+
+// Non-streaming version (returns the whole reply).
+export async function chat(
+  openai: OpenAI,
+  message: string,
+  history: ChatMessage[],
+  system: string = DEFAULT_SYSTEM_MESSAGE,
+): Promise&lt;string&gt; {
+  const response = await openai.chat.completions.create({
+    model: MODEL,
+    messages: buildMessages(message, history, system),
+  });
+  return response.choices[0]?.message.content ?? "";
+}
+
+// Streaming version: yields the growing reply, mirroring the Gradio `yield response` loop.
+export async function* chatStream(
+  openai: OpenAI,
+  message: string,
+  history: ChatMessage[],
+  system: string = DEFAULT_SYSTEM_MESSAGE,
+): AsyncGenerator&lt;string&gt; {
+  const stream = await openai.chat.completions.create({
+    model: MODEL,
+    messages: buildMessages(message, history, system),
+    stream: true,
+  });
+  for await (const chunk of stream) {
+    const delta = chunk.choices[0]?.delta.content ?? "";
+    if (delta) yield delta;
+  }
+}
+
+async function main(): Promise&lt;void&gt; {
+  if (!process.env.OPENAI_API_KEY) {
+    console.log("OPENAI_API_KEY not set - this demo needs it. See .env.example.");
+    return;
+  }
+  const openai = new OpenAI();
+  const history: ChatMessage[] = [];
+  const reply = await chat(openai, "I'm looking to buy a hat", history);
+  console.log("Assistant:", reply);
+}
+
+// Only run the demo when this file is executed directly, not when imported.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err) =&gt; {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}</code></pre></div>
+
+<p data-only="py">In Python the file is a notebook flattened to a script. It imports <code>gradio as gr</code>, loads the
+key, sets a global <code>system_message</code>, and redefines <code>chat</code> several times — each redefinition is a
+step the instructor takes live. The last <code>def chat</code> is the finished one. Every
+<code>gr.ChatInterface(fn=chat, type="messages").launch()</code> line opens the chat window using whatever
+<code>chat</code> and <code>system_message</code> were most recently defined.</p>
+<p data-only="ts">The TypeScript port keeps the same logic but drops Gradio. It exports a reusable
+<code>buildMessages</code> helper, a non-streaming <code>chat</code> and a streaming <code>chatStream</code>, plus a
+<code>DEFAULT_SYSTEM_MESSAGE</code> that already includes the clothes-store persona and the shoes rule. Because there
+is no Gradio, the UI is supplied by the React app (Day 2) and the reply is produced by whichever function the server
+calls. The <code>main()</code> at the bottom runs a one-line demo only when you execute the file directly.</p>
+
+<div data-only="py">
+<h3>Line by line: imports and setup</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code># imports</code></td><td>A comment (Python ignores anything after <code>#</code>). It labels the block.</td></tr>
+<tr><td>3–5</td><td><code>import os</code> … <code>from openai import OpenAI</code></td><td>Brings in the standard library <code>os</code> (to read environment variables), <code>load_dotenv</code> (to load your <code>.env</code> file), and the <code>OpenAI</code> client class. Without these the names below are undefined.</td></tr>
+<tr><td>6</td><td><code>import gradio as gr</code></td><td>Imports Gradio under the short name <code>gr</code>. This is the library that builds the chat UI; it must be installed (via <code>uv add gradio</code>).</td></tr>
+<tr><td>11</td><td><code>load_dotenv(override=True)</code></td><td>Reads <code>.env</code> and puts its values into the environment. <code>override=True</code> makes the file win over any value already set, so you always get the key you edited.</td></tr>
+<tr><td>12</td><td><code>openai_api_key = os.getenv('OPENAI_API_KEY')</code></td><td>Fetches your key from the environment into a variable, so the next lines can check it.</td></tr>
+<tr><td>14–17</td><td><code>if openai_api_key: … else: …</code></td><td>Prints the first 8 characters of the key if it was found, or a warning if not. It is a quick sanity check; it never prints the whole secret.</td></tr>
+<tr><td>21</td><td><code>openai = OpenAI()</code></td><td>Creates the API client. With no arguments it reads <code>OPENAI_API_KEY</code> from the environment, so your secret never appears in the code.</td></tr>
+<tr><td>22</td><td><code>MODEL = 'gpt-4o-mini'</code></td><td>Stores the model name once so it is easy to swap. This is the video's model; the repo now uses a newer one (see the Video vs repo note).</td></tr>
+<tr><td>26</td><td><code>system_message = "You are a helpful assistant"</code></td><td>The starting persona. It is a global that the instructor changes during the lab, so the same <code>chat</code> function behaves differently as the prompt is edited.</td></tr>
+<tr><td>28–31</td><td><code>def chat(message, history): return "bananas"</code> … <code>gr.ChatInterface(fn=chat, type="messages").launch()</code></td><td>The throwaway first version: it ignores its inputs and always answers "bananas", then launches the UI. Its only purpose is to prove the Gradio wiring works before any model is involved.</td></tr>
+</table></div>
+</div>
+
+<div data-only="ts">
+<h3>Line by line: imports and setup</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–3</td><td><code>// Day 3 - A chat function with history + a system prompt</code></td><td>Comments (JavaScript ignores anything after <code>//</code>). They note this is the port of <code>day3.py</code> and that the function is written plainly so a React UI or server can reuse it.</td></tr>
+<tr><td>4</td><td><code>import "dotenv/config";</code></td><td>A side-effect import that loads your <code>.env</code> into <code>process.env</code> before anything else runs — the twin of Python's <code>load_dotenv()</code>.</td></tr>
+<tr><td>5</td><td><code>import { pathToFileURL } from "node:url";</code></td><td>Brings in a small helper used at the very bottom to tell whether the file is being run directly or imported.</td></tr>
+<tr><td>6</td><td><code>import OpenAI from "openai";</code></td><td>Imports the OpenAI JavaScript SDK's default export — the client class and its types.</td></tr>
+<tr><td>8</td><td><code>export const MODEL = "gpt-4o-mini";</code></td><td>The model name, exported so the server and UI share one value. Same video-era model as the Python side.</td></tr>
+<tr><td>10–17</td><td><code>export const DEFAULT_SYSTEM_MESSAGE = "You are a helpful assistant in a clothes store. …"</code></td><td>The finished clothes-store persona, built by joining string pieces with <code>+</code>. It already contains the sale facts, the example reply, and the shoes-are-not-on-sale rule, so the default behaviour matches the end of the Python lab.</td></tr>
+<tr><td>19</td><td><code>export type ChatMessage = { role: "user" | "assistant"; content: string };</code></td><td>A TypeScript type describing one history entry. The <code>role</code> can only be <code>"user"</code> or <code>"assistant"</code>, so a typo is caught before the code runs. This is the typing that Python does not have.</td></tr>
+</table></div>
+</div>
+
+<h3>Turning history into the messages OpenAI wants</h3>
+<p>This is the heart of the lesson. Gradio (or the React app) hands you the history; OpenAI wants a single
+<code>messages</code> list. The recipe is always the same: <strong>start with the system prompt, drop in every earlier
+turn from the history, then append the new user message at the end.</strong></p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Three inputs, the system prompt, the history, and the new message, combine into one messages list sent to OpenAI">
+  <rect class="box" x="20" y="40" width="150" height="40" rx="8" />
+  <text class="small" x="95" y="56" text-anchor="middle">system_message</text>
+  <text class="small" x="95" y="72" text-anchor="middle">(the persona)</text>
+  <rect class="box" x="20" y="92" width="150" height="40" rx="8" />
+  <text class="small" x="95" y="108" text-anchor="middle">history</text>
+  <text class="small" x="95" y="124" text-anchor="middle">(earlier turns)</text>
+  <rect class="box box-ok" x="20" y="144" width="150" height="40" rx="8" />
+  <text class="small" x="95" y="160" text-anchor="middle">message</text>
+  <text class="small" x="95" y="176" text-anchor="middle">(new question)</text>
+
+  <rect class="box box-info" x="300" y="82" width="170" height="60" rx="8" />
+  <text class="label" x="385" y="106" text-anchor="middle">messages = </text>
+  <text class="small" x="385" y="124" text-anchor="middle">[system] + history</text>
+  <text class="small" x="385" y="138" text-anchor="middle">+ [new user]</text>
+
+  <rect class="box-solid" x="590" y="92" width="150" height="40" rx="8" />
+  <text class="on-solid" x="665" y="116" text-anchor="middle">OpenAI model</text>
+
+  <path class="arrow" d="M 170,60 L 298,100" />
+  <path class="arrow" d="M 170,112 H 298" />
+  <path class="arrow" d="M 170,164 L 298,124" />
+  <path class="arrow-ok" d="M 470,112 H 588" />
+</svg>
+<figcaption>How to read it: three inputs merge into one ordered list. <strong>System first, history in the middle, the
+new message last — that order is what makes the reply fit the conversation.</strong></figcaption>
+</figure>
+
+<p data-only="py">The video (an older recording) calls history a "list of lists". The code you run uses
+<code>type="messages"</code>, so each history entry is already a <code>{"role": ..., "content": ...}</code> dictionary.
+Line 74 rebuilds those into clean dictionaries, and line 79 assembles the final list.</p>
+
+<div data-only="py">
+<h3>Line by line: the finished <code>chat</code> (streaming + context)</h3>
+<p>This is the last <code>def chat</code> in the file (lines 73–88). It adds two things to the earlier versions:
+streaming, and a small context tweak when the word "belt" appears.</p>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>73</td><td><code>def chat(message, history):</code></td><td>Defines the callback in the exact shape Gradio requires: the new <code>message</code> and the <code>history</code> before it.</td></tr>
+<tr><td>74</td><td><code>history = [{"role":h["role"], "content":h["content"]} for h in history]</code></td><td>Rebuilds each history entry into a plain <code>{"role", "content"}</code> dictionary. This keeps only the two keys OpenAI cares about and drops any extra fields Gradio may attach, so the list is safe to send.</td></tr>
+<tr><td>75</td><td><code>relevant_system_message = system_message</code></td><td>Copies the global persona into a local variable, so we can add to it for this one turn without changing the global.</td></tr>
+<tr><td>76–77</td><td><code>if 'belt' in message.lower(): relevant_system_message += " The store does not sell belts; …"</code></td><td>If the user's message mentions "belt", a sentence is appended to the system prompt just for this call, telling the model the store has no belts. This is context enrichment — adding a relevant fact at the moment it is needed. <code>message.lower()</code> makes the check case-insensitive.</td></tr>
+<tr><td>79</td><td><code>messages = [{"role": "system", "content": relevant_system_message}] + history + [{"role": "user", "content": message}]</code></td><td>Builds the final list in order: the (possibly enriched) system prompt, then all earlier turns, then the new user message. This single line is the whole "history into messages" recipe.</td></tr>
+<tr><td>81</td><td><code>stream = openai.chat.completions.create(model=MODEL, messages=messages, stream=True)</code></td><td>Calls the model. <code>stream=True</code> asks for the reply in pieces as it is generated, instead of waiting for the whole thing.</td></tr>
+<tr><td>83</td><td><code>response = ""</code></td><td>Starts an empty string that will collect the reply as the pieces arrive.</td></tr>
+<tr><td>84–86</td><td><code>for chunk in stream: response += chunk.choices[0].delta.content or ''; yield response</code></td><td>Loops over the streamed pieces, adds each one to <code>response</code>, and <code>yield</code>s the growing text. Because it uses <code>yield</code>, <code>chat</code> is a generator; Gradio shows the reply appearing live. <code>or ''</code> guards against a piece being <code>None</code>.</td></tr>
+<tr><td>88</td><td><code>gr.ChatInterface(fn=chat, type="messages").launch()</code></td><td>Launches the chat window bound to this final <code>chat</code>. <code>type="messages"</code> sets the modern history shape; <code>.launch()</code> starts the local web server.</td></tr>
+</table></div>
+<p>The earlier versions in the file are simpler stepping stones: lines 39–46 are the same idea without streaming
+(<code>return response.choices[0].message.content</code>), and lines 48–57 add streaming but not the belt tweak. Lines
+59–70 do not change the function at all — they only edit the global <code>system_message</code> to add the store
+persona and then the shoes rule, and relaunch.</p>
+</div>
+
+<div data-only="ts">
+<h3>Line by line: <code>buildMessages</code>, <code>chat</code>, and <code>chatStream</code></h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>23–27</td><td><code>export function buildMessages(message, history, system = DEFAULT_SYSTEM_MESSAGE): OpenAI.Chat.ChatCompletionMessageParam[]</code></td><td>Declares the helper that turns inputs into the messages list. <code>system</code> defaults to the store persona if the caller passes none. The return type (after the <code>:</code>) tells TypeScript this is an array of OpenAI chat messages, so a wrong shape is caught early.</td></tr>
+<tr><td>28</td><td><code>let relevantSystem = system;</code></td><td>Copies the system prompt into a local variable we can extend for this one call — the twin of Python's <code>relevant_system_message</code>.</td></tr>
+<tr><td>29–32</td><td><code>if (message.toLowerCase().includes("belt")) { relevantSystem += " The store does not sell belts; …"; }</code></td><td>The same context tweak: when "belt" appears, a sentence is appended to the system prompt. <code>toLowerCase().includes(...)</code> is JavaScript's case-insensitive substring check.</td></tr>
+<tr><td>33–37</td><td><code>return [ { role: "system", content: relevantSystem }, ...history.map((h) =&gt; ({ role: h.role, content: h.content })), { role: "user", content: message } ];</code></td><td>Builds the final list in the same order: system first, history in the middle, new message last. <code>...history.map(...)</code> spreads the mapped earlier turns into the array — the TypeScript twin of Python's <code>+ history +</code>.</td></tr>
+<tr><td>41–46</td><td><code>export async function chat(openai, message, history, system = …): Promise&lt;string&gt;</code></td><td>The non-streaming version. It is <code>async</code> and returns a <code>Promise&lt;string&gt;</code> because a network call takes time; the caller <code>await</code>s the whole reply.</td></tr>
+<tr><td>47–51</td><td><code>const response = await openai.chat.completions.create({ model: MODEL, messages: buildMessages(message, history, system) }); return response.choices[0]?.message.content ?? "";</code></td><td>Calls the model with the built messages and returns the reply text. <code>?.</code> guards against an empty <code>choices</code> array and <code>?? ""</code> falls back to an empty string, so the function never crashes on a missing reply.</td></tr>
+<tr><td>55–60</td><td><code>export async function* chatStream(openai, message, history, system = …): AsyncGenerator&lt;string&gt;</code></td><td>The streaming version. The <code>function*</code> plus <code>AsyncGenerator</code> return type is the TypeScript twin of Python's <code>yield</code> generator.</td></tr>
+<tr><td>61–69</td><td><code>const stream = await openai.chat.completions.create({ …, stream: true }); for await (const chunk of stream) { const delta = chunk.choices[0]?.delta.content ?? ""; if (delta) yield delta; }</code></td><td>Opens a streamed call and loops over the pieces with <code>for await</code>, yielding each non-empty <code>delta</code>. Note one difference from Python: this yields each <em>piece</em>, while the Python loop yields the whole growing string each time.</td></tr>
+</table></div>
+<p>Lines 72–89 are a tiny demo: <code>main()</code> builds an empty history, asks for a hat, and prints the reply —
+but only when the file is run directly (the <code>import.meta.url === pathToFileURL(...)</code> check), so importing
+the functions elsewhere does not trigger it.</p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Sequence diagram: each turn the UI calls chat, which sends system plus history plus new message to OpenAI and streams the reply back">
+  <rect class="box-solid" x="40" y="20" width="160" height="36" rx="8" />
+  <text class="on-solid" x="120" y="43" text-anchor="middle">Gradio / React UI</text>
+  <rect class="box-solid" x="320" y="20" width="170" height="36" rx="8" />
+  <text class="on-solid" x="405" y="43" text-anchor="middle">chat() in your code</text>
+  <rect class="box-solid" x="600" y="20" width="130" height="36" rx="8" />
+  <text class="on-solid" x="665" y="43" text-anchor="middle">OpenAI model</text>
+  <line class="line dashed" x1="120" y1="56" x2="120" y2="280" />
+  <line class="line dashed" x1="405" y1="56" x2="405" y2="280" />
+  <line class="line dashed" x1="665" y1="56" x2="665" y2="280" />
+
+  <text class="small" x="262" y="84" text-anchor="middle">1. chat(message, history)</text>
+  <path class="arrow" d="M 122,92 H 403" />
+  <text class="small" x="535" y="128" text-anchor="middle">2. system + history + new user</text>
+  <path class="arrow" d="M 407,136 H 663" />
+  <text class="small" x="535" y="176" text-anchor="middle">3. reply streams back</text>
+  <path class="arrow" d="M 663,184 H 407" />
+  <text class="small" x="262" y="224" text-anchor="middle">4. yield the growing reply</text>
+  <path class="arrow" d="M 403,232 H 122" />
+  <text class="small accent" x="380" y="272" text-anchor="middle">Next turn repeats 1–4 with a longer history.</text>
+</svg>
+<figcaption>How to read it: time flows down. <strong>Your <code>chat</code> function is the only thing that holds the
+conversation together — the model is called fresh every turn.</strong></figcaption>
+</figure>
+
+<h2>A system prompt sets the persona</h2>
+<p>With the wiring done, the instructor turns the plain "You are a helpful assistant" into a real character. The new
+<code>system_message</code> says the assistant works in a clothes store, should gently push items on sale, and lists the
+facts: hats are 60% off, most other items 50% off. It then gives an <em>example</em> reply for "I'm looking to buy a
+hat", so the model copies both the facts and the cheerful tone. Later a second line is appended: if the customer asks
+for shoes, say shoes are not on sale today but point them to hats.</p>
+
+<details class="primer">
+<summary>New to the system prompt as a persona? How a few sentences set behaviour</summary>
+<p>The system prompt is the first message in the list and the model treats it as its standing instructions. It is where
+you set the job ("you work in a clothes store"), the tone ("gently encourage"), the facts the model should know ("hats
+are 60% off"), and the rules ("if you don't know, say so"). You do not fine-tune or retrain anything — you just write
+clear instructions in plain English. Because the model was trained on millions of instruction-following examples, it
+tends to obey. Change the system prompt and the whole personality changes, which is why the instructor keeps editing one
+global and relaunching.</p>
+</details>
+
+<h2>Multi-shot prompting and context enrichment</h2>
+<p>Giving the model one worked example inside the prompt is <em>one-shot</em> prompting; giving it several is
+<a class="term" href="glossary.html#multi-shot-prompting">multi-shot prompting</a>. Each example does double duty: it
+sets the style of a good answer and it slips in extra facts the model can reuse. The clothes-store prompt is really a
+small pile of examples and facts — "if the customer says this, you could say that" — which is why the replies come out
+both on-brand and well informed. The instructor stresses this is not training: the network is already trained. At
+<em>inference</em> time the model simply predicts tokens that fit what it has seen, so a prompt full of good examples
+makes a good reply more likely.</p>
+
+<details class="primer">
+<summary>New to multi-shot prompting? One example vs several</summary>
+<p>Zero-shot means you just ask ("summarise this"). One-shot means you include a single worked example of the
+input-and-ideal-output before your real request. Multi-shot means you include several examples. More examples pin down
+the pattern more firmly — the format, the tone, and any facts the examples contain — so the model's next reply is more
+likely to match. It costs tokens (every example is resent in the prompt), and the examples can live in the system
+prompt or as a short made-up user/assistant exchange placed before the real conversation. Nothing is being trained; you
+are only giving the already-trained model better patterns to imitate.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="A plain system prompt gives a generic reply while a rich multi-shot prompt gives an on-brand reply">
+  <rect class="box zone" x="20" y="30" width="340" height="170" rx="8" />
+  <text class="title" x="190" y="54" text-anchor="middle">Plain prompt</text>
+  <rect class="box" x="40" y="68" width="300" height="34" rx="8" />
+  <text class="small" x="190" y="89" text-anchor="middle">"You are a helpful assistant"</text>
+  <path class="arrow" d="M 190,102 V 128" />
+  <rect class="box" x="40" y="130" width="300" height="56" rx="8" />
+  <text class="small" x="190" y="152" text-anchor="middle">Reply: correct but generic,</text>
+  <text class="small" x="190" y="170" text-anchor="middle">no sale talk, no store voice.</text>
+
+  <rect class="box zone" x="400" y="30" width="340" height="170" rx="8" />
+  <text class="title" x="570" y="54" text-anchor="middle">Multi-shot store prompt</text>
+  <rect class="box box-info" x="420" y="68" width="300" height="34" rx="8" />
+  <text class="small" x="570" y="89" text-anchor="middle">persona + facts + example replies</text>
+  <path class="arrow-ok" d="M 570,102 V 128" />
+  <rect class="box box-ok" x="420" y="130" width="300" height="56" rx="8" />
+  <text class="small" x="570" y="152" text-anchor="middle">Reply: effusive, on-brand,</text>
+  <text class="small" x="570" y="170" text-anchor="middle">mentions the 60% hats sale.</text>
+</svg>
+<figcaption>How to read it: same model, same question, two prompts. <strong>Examples and facts in the system prompt steer
+the tone and the content of the reply.</strong></figcaption>
+</figure>
+
+<p>The belt check is a first taste of <em>context enrichment</em> done per message: before building the list, the code
+looks at what the user said and, if it sees "belt", adds a fresh fact to the system prompt for that one turn. The
+instructor is honest that matching a bare substring is crude — it would also fire on "beltway" — and suggests a
+dictionary of store items and prices as a sturdier version. He frames it as a "baby version" of retrieval-augmented
+generation (RAG): find information relevant to the question and add it to the context before calling the model.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Decision: if the message mentions belt, append a fact to the system prompt before sending">
+  <rect class="box" x="20" y="74" width="150" height="42" rx="8" />
+  <text class="small" x="95" y="100" text-anchor="middle">new message</text>
+  <path class="arrow" d="M 170,95 H 236" />
+  <rect class="box box-info" x="238" y="66" width="170" height="58" rx="8" />
+  <text class="small" x="323" y="90" text-anchor="middle">does it contain</text>
+  <text class="small" x="323" y="106" text-anchor="middle">"belt"?</text>
+  <path class="arrow-ok" d="M 408,82 H 520" />
+  <text class="small ok" x="464" y="74" text-anchor="middle">yes</text>
+  <rect class="box box-ok" x="522" y="40" width="218" height="46" rx="8" />
+  <text class="small" x="631" y="60" text-anchor="middle">add "no belts" fact to</text>
+  <text class="small" x="631" y="76" text-anchor="middle">the system prompt</text>
+  <path class="arrow" d="M 408,112 H 520" />
+  <text class="small" x="464" y="132" text-anchor="middle">no</text>
+  <rect class="box" x="522" y="102" width="218" height="46" rx="8" />
+  <text class="small" x="631" y="122" text-anchor="middle">use the system</text>
+  <text class="small" x="631" y="138" text-anchor="middle">prompt unchanged</text>
+  <text class="small" x="380" y="178" text-anchor="middle">Either way, the (possibly enriched) prompt heads the messages list sent to the model.</text>
+</svg>
+<figcaption>How to read it: a tiny lookup runs before the API call. <strong>This is RAG in miniature — pull in a
+relevant fact and put it in the context.</strong></figcaption>
+</figure>
+
+<p>The instructor also notes a second way to do multi-shot prompting: instead of stuffing examples into the system
+prompt, you can prepend a <em>fictional</em> user/assistant exchange to the history — a conversation that never really
+happened — so the model sees how it "already" answered similar questions. Both approaches prime the model with style
+and facts; the suggested exercise is to try each and see which gives a better store assistant.</p>
+
+<div class="callout ok">
+<strong>What you should see</strong>
+<p>We did <strong>not</strong> run the API-calling code here, in either language — it needs a paid key — so it is shown
+exactly as the course presents it. The TypeScript project type-checks and <code>vite build</code> succeeds; only the
+live model call is unrun. Following the course, launching the Python cell opens a chat window in the browser, and:</p>
+<ul>
+<li>Say "I want to buy a tie", then "a red one". The second reply knows you mean a red tie, because the first turn is in
+the resent history.</li>
+<li>With the store persona, "I'd like to buy some shoes" brings a cheerful reply that mentions shoes are not on sale
+today but the hats are 60% off — the facts and tone came from the system prompt.</li>
+<li>Ask for a belt and the assistant says the store does not carry belts, then points you at items on sale — the belt
+fact was added to the context just for that turn.</li>
+</ul>
+<p>Exact wording varies from run to run and with the model.</p>
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes</strong>
+<ul>
+<li><strong>Forgetting to pass the history.</strong> If you build <code>messages</code> from only the system prompt and
+the new message and leave out <code>history</code>, the bot forgets everything instantly — "a red one" means nothing to
+it. The history must be in the list every single turn.</li>
+<li><strong>Wrong message format.</strong> Each entry must be a dictionary (object) with exactly <code>role</code> and
+<code>content</code>. Sending a raw string, a tuple, or a misspelled role like <code>"users"</code> makes the API reject
+the call. Line 74 rebuilds the history into clean <code>{"role", "content"}</code> dictionaries for this reason.</li>
+<li><strong>Dropping the system message, or putting it in the wrong place.</strong> The system prompt should be the first
+item in the list. If you forget it, the persona and rules disappear and you are back to a generic assistant.</li>
+<li><strong>Expecting the model to remember on its own.</strong> It does not. Each turn is a fresh, stateless call; the
+only memory is the list you resend.</li>
+<li><strong>Trusting a bare substring check.</strong> <code>'belt' in message.lower()</code> also matches "beltway" and
+misses a user who writes "belts". It is fine as a demo, but a real lookup needs whole-word matching or a small
+dictionary.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A <a class="term" href="glossary.html#chatbot">chatbot</a> feels like it remembers, but the model is stateless — the
+<a class="term" href="glossary.html#conversation-history">conversation history</a> is resent in full every turn.</li>
+<li>In Python, <a class="term" href="glossary.html#gradio">Gradio</a>'s
+<a class="term" href="glossary.html#chat-interface">ChatInterface</a> gives you a whole chat UI if you write one
+<code>chat(message, history)</code> function and add <code>type="messages"</code>; the TypeScript port keeps the
+function and lets a React app and server supply the UI.</li>
+<li>The core recipe is one line: <code>messages = [system] + history + [new user]</code>, sent to
+<code>openai.chat.completions.create</code>, optionally with <code>stream=True</code> to show the reply as it arrives.</li>
+<li>A <a class="term" href="glossary.html#system-prompt">system prompt</a> sets the persona, tone, facts, and rules; the
+clothes-store prompt turns the plain assistant into a sales-savvy helper.</li>
+<li><a class="term" href="glossary.html#multi-shot-prompting">Multi-shot prompting</a> puts several examples in the
+prompt to steer style and supply facts, all at inference time, not by training.</li>
+<li>Context enrichment adds a relevant fact to the prompt per turn (the "belt" check) — a baby version of RAG.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="08-w2d2.html"><small>← Previous · Step 08</small>Week 2 · Day 2 — Put a UI on It: Gradio and React</a>
+<a class="next" href="10-w2d4.html"><small>Next · Step 10 →</small>Week 2 · Day 4 — Tools: Giving the Model Function Calling</a>
+</nav>
+</main>
+</body>
+</html>

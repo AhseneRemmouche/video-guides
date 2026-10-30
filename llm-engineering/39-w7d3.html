@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>39 · Week 7 · Day 3 — The QLoRA Training Run</title>
+<meta name="description" content="Set up LoRA adapters (rank, alpha, target modules) and the training configuration (TRL&#x27;s SFTTrainer), and launch the fine-tune on a GPU.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 39/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 39 of 48 · Week 7 · Day 3 · 7 lessons</div>
+  <h1>Week 7 · Day 3 — The QLoRA Training Run</h1>
+  <p class="lead">Set up LoRA adapters (rank, alpha, target modules) and the training configuration (TRL&#x27;s SFTTrainer), and launch the fine-tune on a GPU.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>This is the moment the whole week has been building towards: you are about to train your own
+specialised model. In <a href="37-w7d1.html">Day 1</a> you loaded the open-source
+<a class="term" href="glossary.html#llama">Llama 3.1</a> <a class="term" href="glossary.html#base-model">base
+model</a> in 4-bit and met the pricing dataset; in <a href="38-w7d2.html">Day 2</a> you measured how badly
+that untouched base model prices products, so you have an error to beat. Today you wire up the
+<a class="term" href="glossary.html#qlora">QLoRA</a> training run and press go.</p>
+
+<p>The course combines Day 3 and Day 4 into one Google Colab notebook. <strong>This page is the first half:
+the setup and configuration</strong> - the <a class="term" href="glossary.html#lora">LoRA</a> settings, the
+supervised fine-tuning trainer, the data collator, and the single line that launches training. The
+<a href="40-w7d4.html">Day 4 page</a> embeds the <em>same</em> file but focuses on the other half:
+watching the run in Weights &amp; Biases, the training hyperparameters, and saving the finished adapter. So
+you will see the same code listing twice, explained from two angles.</p>
+
+<p>The big idea of QLoRA is that you never touch the giant base model. You keep its billions of
+<a class="term" href="glossary.html#weights">weights</a> frozen (and squashed to 4-bit with
+<a class="term" href="glossary.html#quantization">quantization</a>, which is the "Q"), and you train a tiny
+set of extra numbers bolted onto a few layers. Those extra numbers are the
+<a class="term" href="glossary.html#adapter">adapter</a>. Training only the adapter is what makes it
+possible to fine-tune an 8-billion-parameter model on a single rented GPU.</p>
+
+<div class="callout"><strong>Reconstructed, not run here.</strong> A real QLoRA run needs a GPU and hours
+(the instructor's full three-epoch run takes roughly a day on a top-end box). The code below is standard
+QLoRA / <a class="term" href="glossary.html#peft">PEFT</a> / <a class="term" href="glossary.html#trl">TRL</a>
+code reconstructed to match the Colab notebook; it was <strong>not executed on a GPU for this guide</strong>.
+The values (<code>r=32</code>, <code>alpha=64</code>, the target modules, the "Price is $" response
+template) are the ones the instructor uses on screen.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="QLoRA overview: a large frozen 4-bit base model with small trainable adapters attached to a few layers; only the adapters are trained">
+  <text x="380" y="24" text-anchor="middle" class="title">QLoRA in one picture</text>
+  <rect class="zone" x="20" y="40" width="360" height="190" rx="8"/>
+  <text x="200" y="60" text-anchor="middle" class="label">Base model (Llama 3.1, 8B) - FROZEN, 4-bit</text>
+  <rect class="box" x="44" y="74" width="140" height="30" rx="8"/>
+  <text x="114" y="94" text-anchor="middle" class="small">layer</text>
+  <rect class="box" x="44" y="112" width="140" height="30" rx="8"/>
+  <text x="114" y="132" text-anchor="middle" class="small">layer</text>
+  <rect class="box" x="44" y="150" width="140" height="30" rx="8"/>
+  <text x="114" y="170" text-anchor="middle" class="small">layer</text>
+  <rect class="box box-info" x="210" y="74" width="150" height="30" rx="8"/>
+  <text x="285" y="94" text-anchor="middle" class="small">+ adapter</text>
+  <rect class="box box-info" x="210" y="150" width="150" height="30" rx="8"/>
+  <text x="285" y="170" text-anchor="middle" class="small">+ adapter</text>
+  <text x="200" y="214" text-anchor="middle" class="small">billions of weights, never changed</text>
+
+  <path class="arrow-accent" d="M 384,127 H 452"/>
+  <text x="418" y="118" text-anchor="middle" class="small accent">train</text>
+
+  <rect class="box box-ok" x="456" y="92" width="286" height="70" rx="8"/>
+  <text x="599" y="118" text-anchor="middle" class="small">Only the adapters learn</text>
+  <text x="599" y="138" text-anchor="middle" class="small">(a few million numbers,</text>
+  <text x="599" y="154" text-anchor="middle" class="small">not billions)</text>
+</svg>
+<figcaption>The base model is loaded once, frozen and quantized to 4-bit. QLoRA attaches small trainable
+adapters to a handful of layers. <strong>Only those adapters are trained</strong>, which is why this fits on
+one GPU.</figcaption>
+</figure>
+
+<h2>The LoRA configuration</h2>
+
+<p>LoRA ("Low-Rank Adaptation") is the trick that makes the adapter small. Instead of learning a full,
+dense change for a layer's big weight matrix, LoRA learns two much thinner matrices and multiplies them
+together. That product is the "delta" - the change - added on top of the frozen weight. Because the two
+matrices are thin, there are very few numbers to train.</p>
+
+<details class="primer"><summary>New to <a class="term" href="glossary.html#low-rank">r</a>, alpha and target_modules? What the LoRA knobs mean</summary>
+A layer's weight is a big grid of numbers (a matrix). LoRA replaces the change to that grid with two thin
+matrices, <strong>A</strong> and <strong>B</strong>. <strong>r</strong> (the rank) is how thin they are - how
+many columns A has and rows B has. Small <code>r</code> = fewer numbers to train = cheaper and less likely to
+overfit; bigger <code>r</code> = more capacity. The instructor starts at <code>r=32</code> because the
+dataset is large; <code>r=8</code> is a fine, cheaper default. <strong>alpha</strong> is a scaling factor
+that controls how strongly the adapter's change counts when it is added to the frozen weight; the rule of
+thumb everyone uses is <code>alpha = 2 × r</code>, so <code>r=32</code> pairs with
+<code>alpha=64</code>. <strong>target_modules</strong> is the list of layers to attach adapters to - here the
+four attention projections. Everything not in that list stays frozen.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="LoRA maths: the change in a frozen weight equals alpha times matrix A times matrix B, where A and B are low-rank">
+  <text x="380" y="24" text-anchor="middle" class="title">The change = alpha × A × B</text>
+  <rect class="box" x="30" y="60" width="150" height="120" rx="8"/>
+  <text x="105" y="44" text-anchor="middle" class="label">frozen weight W</text>
+  <text x="105" y="126" text-anchor="middle" class="small">big, not trained</text>
+  <text x="200" y="128" text-anchor="middle" class="title">+</text>
+
+  <rect class="box box-info" x="228" y="60" width="44" height="120" rx="8"/>
+  <text x="250" y="44" text-anchor="middle" class="label">A</text>
+  <text x="250" y="200" text-anchor="middle" class="small">r cols</text>
+  <text x="292" y="128" text-anchor="middle" class="title">×</text>
+  <rect class="box box-info" x="312" y="104" width="150" height="34" rx="8"/>
+  <text x="387" y="44" text-anchor="middle" class="label">B</text>
+  <text x="387" y="200" text-anchor="middle" class="small">r rows</text>
+
+  <text x="486" y="128" text-anchor="middle" class="title">=</text>
+
+  <rect class="box box-ok" x="516" y="60" width="150" height="120" rx="8"/>
+  <text x="591" y="44" text-anchor="middle" class="label">delta (the change)</text>
+  <text x="591" y="122" text-anchor="middle" class="small">same shape as W,</text>
+  <text x="591" y="138" text-anchor="middle" class="small">but cheap to make</text>
+</svg>
+<figcaption>Illustrative shapes. A and B are thin (only <code>r</code> wide), so they hold few numbers.
+Their product has the same shape as the frozen weight, and <strong>only A and B are trained</strong>; the
+scaling factor <code>alpha</code> decides how loud their contribution is.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to the attention projections (q/k/v/o_proj)? Why those layers</summary>
+Inside every <a class="term" href="glossary.html#transformer">transformer</a> block there is an attention
+step, and it uses four weight matrices nicknamed the <strong>query</strong> (<code>q_proj</code>),
+<strong>key</strong> (<code>k_proj</code>), <strong>value</strong> (<code>v_proj</code>) and
+<strong>output</strong> (<code>o_proj</code>) projections. These are where most of the model's "how do I
+relate these tokens" behaviour lives, so they are the standard, high-impact place to attach LoRA adapters.
+The base model is far too big to retrain whole; targeting these few projections gets most of the benefit for
+a tiny fraction of the cost.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Inside one transformer block, LoRA adapters attach to the four attention projections q_proj, k_proj, v_proj and o_proj; the rest of the block is frozen">
+  <text x="380" y="24" text-anchor="middle" class="title">Which layers get adapters</text>
+  <rect class="zone" x="30" y="40" width="700" height="170" rx="8"/>
+  <text x="380" y="60" text-anchor="middle" class="label">one transformer block (repeated many times)</text>
+
+  <rect class="box box-info" x="54" y="76" width="130" height="44" rx="8"/>
+  <text x="119" y="102" text-anchor="middle" class="small">q_proj + adapter</text>
+  <rect class="box box-info" x="200" y="76" width="130" height="44" rx="8"/>
+  <text x="265" y="102" text-anchor="middle" class="small">k_proj + adapter</text>
+  <rect class="box box-info" x="346" y="76" width="130" height="44" rx="8"/>
+  <text x="411" y="102" text-anchor="middle" class="small">v_proj + adapter</text>
+  <rect class="box box-info" x="492" y="76" width="130" height="44" rx="8"/>
+  <text x="557" y="102" text-anchor="middle" class="small">o_proj + adapter</text>
+
+  <rect class="box" x="54" y="140" width="568" height="40" rx="8"/>
+  <text x="338" y="164" text-anchor="middle" class="small">feed-forward + the rest - FROZEN</text>
+
+  <rect class="box-ok" x="638" y="76" width="78" height="104" rx="8"/>
+  <text x="677" y="122" text-anchor="middle" class="small">trained</text>
+  <text x="677" y="140" text-anchor="middle" class="small">here</text>
+</svg>
+<figcaption>The four attention projections named in <code>target_modules</code> each get a LoRA adapter; the
+feed-forward and everything else stay frozen. <strong>Change the names here and you attach adapters to the
+wrong (or no) layers</strong> - training then barely learns anything.</figcaption>
+</figure>
+
+<h2>The data collator: train only on the price</h2>
+
+<p>Each training example is one long piece of text: a product description followed by
+<code>"Price is $"</code> and then the actual price. If you trained normally, the model would spend most of
+its effort learning to re-write product descriptions - which you do not care about. You only want it to get
+good at the number after <code>Price is $</code>.</p>
+
+<p>TRL's <code>DataCollatorForCompletionOnlyLM</code> does exactly this. You hand it a
+<strong>response template</strong> - the exact text <code>"Price is $"</code> - and it masks out (ignores for
+the loss) everything up to and including that template, so the model is scored only on the tokens it
+produces afterwards.</p>
+
+<details class="primer"><summary>New to the data collator and completion-only loss? What masking does</summary>
+A <strong>collator</strong> is the helper that packs a batch of examples into the tensors the trainer feeds
+the model. The <em>completion-only</em> collator also builds a <strong>loss mask</strong>: a yes/no flag per
+token saying "count this token when measuring how wrong the model was". It sets the flag to "no" for every
+token up to and including the response template, and "yes" for the tokens after it. So the model still
+<em>reads</em> the whole description for context, but it is only graded - and only learns - on predicting the
+price. This focuses all the training signal on the one thing you want.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="A training example split into two parts: the prompt up to Price is dollar is masked out, and only the price token after it is used for the loss">
+  <text x="380" y="24" text-anchor="middle" class="title">Completion-only masking</text>
+  <rect class="box" x="30" y="56" width="420" height="56" rx="8"/>
+  <text x="240" y="80" text-anchor="middle" class="small">product description ... Price is $</text>
+  <text x="240" y="98" text-anchor="middle" class="small">(context only - masked, no loss)</text>
+  <rect class="box box-ok" x="470" y="56" width="260" height="56" rx="8"/>
+  <text x="600" y="80" text-anchor="middle" class="small">99.00</text>
+  <text x="600" y="98" text-anchor="middle" class="small">(the model is trained here)</text>
+  <path class="arrow" d="M 240,120 V 140"/>
+  <text x="240" y="156" text-anchor="middle" class="small">response template: "Price is $"</text>
+  <path class="arrow-ok" d="M 600,120 V 140"/>
+  <text x="600" y="156" text-anchor="middle" class="small ok">loss computed only on these tokens</text>
+</svg>
+<figcaption>The collator finds the response template <code>"Price is $"</code> and ignores every token
+before it. <strong>Only the price after the dollar sign contributes to the loss</strong>, so all the training
+effort goes into pricing.</figcaption>
+</figure>
+
+<h2>SFTTrainer: the object that runs the training</h2>
+
+<p><a class="term" href="glossary.html#sft-trainer">SFTTrainer</a> (Supervised Fine-Tuning Trainer) comes from
+Hugging Face's TRL library. It is the engine that does the whole training loop for you: it feeds batches
+through the model, computes the loss, runs back-propagation, and steps the optimizer - over and over. You do
+not write that loop; you just hand the trainer the pieces and call one method.</p>
+
+<details class="primer"><summary>New to SFTTrainer / TRL and task_type? What they are</summary>
+<strong>TRL</strong> (Transformer Reinforcement Learning) is a Hugging Face library of high-level trainers.
+Its <strong>SFTTrainer</strong> wraps the standard training loop so you only supply the model, the data, the
+LoRA config and the training settings. It knows how to apply a PEFT/LoRA config, so it freezes the base model
+and attaches the adapters for you. <strong>task_type="CAUSAL_LM"</strong> on the LoRA config tells PEFT what
+kind of model this is: a <em>causal language model</em> - one that predicts the next token left to right,
+which is exactly what Llama is and what "guess the price token" needs. Setting the wrong task type would wire
+the adapters up for the wrong kind of head.</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Three inputs - the LoRA config, the SFT config and the data collator plus base model and data - feed into SFTTrainer, which is launched by calling trainer.train">
+  <text x="380" y="24" text-anchor="middle" class="title">config → trainer → train</text>
+  <rect class="box box-info" x="24" y="48" width="150" height="34" rx="8"/>
+  <text x="99" y="70" text-anchor="middle" class="small">LoraConfig</text>
+  <rect class="box box-info" x="24" y="90" width="150" height="34" rx="8"/>
+  <text x="99" y="112" text-anchor="middle" class="small">SFTConfig</text>
+  <rect class="box" x="24" y="132" width="150" height="30" rx="8"/>
+  <text x="99" y="152" text-anchor="middle" class="small">collator + model + data</text>
+
+  <path class="arrow" d="M 176,65 H 300"/>
+  <path class="arrow" d="M 176,107 H 300"/>
+  <path class="arrow" d="M 176,147 H 300"/>
+
+  <rect class="box box2" x="302" y="78" width="200" height="54" rx="8"/>
+  <text x="402" y="102" text-anchor="middle" class="small">SFTTrainer(...)</text>
+  <text x="402" y="120" text-anchor="middle" class="small">freezes base, adds adapters</text>
+
+  <path class="arrow-accent" d="M 504,105 H 600"/>
+  <text x="552" y="96" text-anchor="middle" class="small accent">kick off</text>
+  <rect class="box box-ok" x="602" y="78" width="134" height="54" rx="8"/>
+  <text x="669" y="102" text-anchor="middle" class="small">trainer.train()</text>
+  <text x="669" y="120" text-anchor="middle" class="small">the run begins</text>
+</svg>
+<figcaption>You build two configs and gather the model, data and collator, pass them all to
+<code>SFTTrainer(...)</code>, then call <strong><code>trainer.train()</code></strong> - a single line that
+starts the whole run.</figcaption>
+</figure>
+
+<h2>The training loop (what one step does)</h2>
+
+<p>You never write this loop, but it helps to picture what the trainer repeats for every batch. This is also
+why the <a class="term" href="glossary.html#hyperparameter">hyperparameters</a> on the Day 4 page matter -
+they control the size and shape of these steps.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="One training step: forward pass to predict the price, compute the loss on the masked tokens, back-propagate to get gradients, then the optimizer updates only the adapter weights; repeat for every batch and epoch">
+  <text x="380" y="24" text-anchor="middle" class="title">One training step, repeated</text>
+  <rect class="box" x="18" y="60" width="150" height="56" rx="8"/>
+  <text x="93" y="84" text-anchor="middle" class="small">1. forward pass:</text>
+  <text x="93" y="102" text-anchor="middle" class="small">predict the price</text>
+  <path class="arrow" d="M 170,88 H 196"/>
+  <rect class="box" x="198" y="60" width="150" height="56" rx="8"/>
+  <text x="273" y="84" text-anchor="middle" class="small">2. loss (only on</text>
+  <text x="273" y="102" text-anchor="middle" class="small">the price tokens)</text>
+  <path class="arrow" d="M 350,88 H 376"/>
+  <rect class="box" x="378" y="60" width="150" height="56" rx="8"/>
+  <text x="453" y="84" text-anchor="middle" class="small">3. back-propagate:</text>
+  <text x="453" y="102" text-anchor="middle" class="small">get gradients</text>
+  <path class="arrow" d="M 530,88 H 556"/>
+  <rect class="box box-ok" x="558" y="60" width="184" height="56" rx="8"/>
+  <text x="650" y="84" text-anchor="middle" class="small">4. optimizer updates</text>
+  <text x="650" y="102" text-anchor="middle" class="small">the adapter weights</text>
+  <path class="arrow-accent" d="M 650,118 C 650,150 93,150 93,120"/>
+  <text x="380" y="164" text-anchor="middle" class="small accent">repeat for every batch, then every epoch</text>
+</svg>
+<figcaption>Each step nudges only the adapter weights a little in the right direction. <strong>Step 2 only
+scores the price tokens</strong> thanks to the completion-only collator, so the whole loop pushes the model
+towards better prices.</figcaption>
+</figure>
+
+<h2>The code</h2>
+
+<p>Here is the complete training file. It is the same file the <a href="40-w7d4.html">Day 4 page</a> uses;
+below we walk through the <strong>LoRA config, the essential training settings, the trainer and the launch</strong>.
+Day 4 explains the Weights &amp; Biases logging, the deeper hyperparameters and the saving lines.</p>
+
+<pre data-file="day3_4_train.py" data-lang="py" data-tag="complete file"><code># Reconstructed to match the course's Google Colab notebook for this day.
+# Standard QLoRA/PEFT code; runs on a GPU (e.g. Colab). Not executed here (no GPU).
+#
+# Week 7 - Day 3 / Day 4: the actual QLoRA training run.
+# Freeze the 4-bit base model, attach LoRA adapters to the attention projections,
+# and fine-tune only those adapters with TRL's SFTTrainer. A DataCollator for
+# completion-only LM masks out the prompt so the model is trained only to predict
+# the price token(s) after "Price is $". Progress is logged to Weights &amp; Biases and
+# checkpoints are pushed to the HuggingFace Hub.
+
+import os
+from datetime import datetime
+
+import torch
+import wandb
+from google.colab import userdata
+from huggingface_hub import login
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import LoraConfig
+from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+
+
+# ----------------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------------
+
+BASE_MODEL = "meta-llama/Meta-Llama-3.1-8B"
+PROJECT_NAME = "pricer"
+HF_USER = "ed-donner"  # change to your own HuggingFace username
+
+DATASET_NAME = f"{HF_USER}/pricer-data"
+MAX_SEQUENCE_LENGTH = 182
+
+# Unique, timestamped run name so every run is its own Hub repo / W&amp;B run.
+RUN_NAME = f"{datetime.now():%Y-%m-%d_%H.%M.%S}"
+PROJECT_RUN_NAME = f"{PROJECT_NAME}-{RUN_NAME}"
+HUB_MODEL_NAME = f"{HF_USER}/{PROJECT_RUN_NAME}"
+
+# --- QLoRA hyperparameters ---
+LORA_R = 32                 # adapter rank (start 8, double to 16, then 32)
+LORA_ALPHA = 64             # scaling factor; rule of thumb alpha = 2 * r
+TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj"]  # the attention layers
+LORA_DROPOUT = 0.1          # regularization: drop 10% of neurons each step
+QUANT_4_BIT = True
+
+# --- Training hyperparameters ---
+EPOCHS = 3                  # instructor ran 3 (best checkpoint ~end of epoch 3);
+                            # a single epoch already gives strong results and is far cheaper.
+BATCH_SIZE = 16             # 16 fits an A100 (40GB); use 1 (or 2-4) on a T4.
+GRADIENT_ACCUMULATION_STEPS = 1
+LEARNING_RATE = 1e-4
+LR_SCHEDULER_TYPE = "cosine"
+WARMUP_RATIO = 0.03
+OPTIMIZER = "paged_adamw_32bit"  # good convergence; memory-hungry. Swap for a
+                                 # cheaper optimizer if you run out of memory.
+
+# --- Admin / logging ---
+STEPS = 50                  # log training loss to W&amp;B every 50 steps
+SAVE_STEPS = 5000           # push a checkpoint to the Hub every 5000 steps
+LOG_TO_WANDB = True
+
+
+# ----------------------------------------------------------------------------
+# Log in to HuggingFace and Weights &amp; Biases
+# ----------------------------------------------------------------------------
+
+hf_token = userdata.get("HF_TOKEN")
+login(hf_token, add_to_git_credential=True)
+
+if LOG_TO_WANDB:
+    wandb_api_key = userdata.get("WANDB_API_KEY")
+    os.environ["WANDB_API_KEY"] = wandb_api_key
+    wandb.login()
+    os.environ["WANDB_PROJECT"] = PROJECT_NAME
+    os.environ["WANDB_LOG_MODEL"] = "checkpoint"
+    os.environ["WANDB_WATCH"] = "gradients"
+
+
+# ----------------------------------------------------------------------------
+# Data
+# ----------------------------------------------------------------------------
+
+dataset = load_dataset(DATASET_NAME)
+train = dataset["train"]
+test = dataset["test"]
+
+print(f"Training on {len(train):,} items; holding out {len(test):,} test items")
+print("Example training text:\n")
+print(train[0]["text"])
+
+
+# ----------------------------------------------------------------------------
+# Quantization config + tokenizer + frozen base model
+# ----------------------------------------------------------------------------
+
+if QUANT_4_BIT:
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_quant_type="nf4",
+    )
+else:
+    quant_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        bnb_8bit_compute_dtype=torch.bfloat16,
+    )
+
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    quantization_config=quant_config,
+    device_map="auto",
+)
+base_model.generation_config.pad_token_id = tokenizer.pad_token_id
+print(f"Memory footprint: {base_model.get_memory_footprint() / 1e6:,.1f} MB")
+
+
+# ----------------------------------------------------------------------------
+# Completion-only data collator
+# ----------------------------------------------------------------------------
+#
+# We only want the model to learn the token(s) AFTER "Price is $" - not how to
+# rewrite the product description. The collator masks everything up to and
+# including the response template so the loss is computed only on the price.
+
+response_template = "Price is $"
+collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)
+
+
+# ----------------------------------------------------------------------------
+# LoRA config (the QLoRA adapters)
+# ----------------------------------------------------------------------------
+
+lora_config = LoraConfig(
+    r=LORA_R,
+    lora_alpha=LORA_ALPHA,
+    target_modules=TARGET_MODULES,
+    lora_dropout=LORA_DROPOUT,
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+
+
+# ----------------------------------------------------------------------------
+# SFT training config
+# ----------------------------------------------------------------------------
+
+train_config = SFTConfig(
+    output_dir=PROJECT_RUN_NAME,
+    num_train_epochs=EPOCHS,
+    per_device_train_batch_size=BATCH_SIZE,
+    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+    learning_rate=LEARNING_RATE,
+    lr_scheduler_type=LR_SCHEDULER_TYPE,
+    warmup_ratio=WARMUP_RATIO,
+    optim=OPTIMIZER,
+    max_grad_norm=0.3,
+    weight_decay=0.001,
+    max_seq_length=MAX_SEQUENCE_LENGTH,
+    dataset_text_field="text",
+    # logging
+    logging_steps=STEPS,
+    report_to="wandb" if LOG_TO_WANDB else "none",
+    run_name=RUN_NAME,
+    # saving / pushing to the Hub
+    save_strategy="steps",
+    save_steps=SAVE_STEPS,
+    push_to_hub=True,
+    hub_model_id=HUB_MODEL_NAME,
+    hub_strategy="every_save",
+    hub_private_repo=True,
+    # misc
+    save_total_limit=10,
+    bf16=True,
+    group_by_length=True,
+    seed=42,
+)
+
+
+# ----------------------------------------------------------------------------
+# Trainer
+# ----------------------------------------------------------------------------
+
+trainer = SFTTrainer(
+    model=base_model,
+    train_dataset=train,
+    peft_config=lora_config,
+    args=train_config,
+    data_collator=collator,
+    processing_class=tokenizer,  # older TRL versions use tokenizer=tokenizer
+)
+
+
+# ----------------------------------------------------------------------------
+# Train, then push the final adapter to the Hub
+# ----------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    trainer.train()
+    trainer.model.push_to_hub(PROJECT_RUN_NAME, private=True)
+    print(f"Saved adapter to the Hub: {HUB_MODEL_NAME}")
+    if LOG_TO_WANDB:
+        wandb.finish()</code></pre>
+
+<h3>Line by line</h3>
+
+<p>The imports that bring in the fine-tuning tools.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>19</td><td><code>from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig</code></td><td>Loads the tokenizer and the base model, and the 4-bit quantization settings. These are the pieces from Day 1 that produce the frozen base model.</td></tr>
+<tr><td>20</td><td><code>from peft import LoraConfig</code></td><td>PEFT ("Parameter-Efficient Fine-Tuning") is the Hugging Face library that implements LoRA. <code>LoraConfig</code> holds all the adapter settings.</td></tr>
+<tr><td>21</td><td><code>from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM</code></td><td>From TRL: the trainer that runs the loop, its settings object, and the collator that masks everything before <code>"Price is $"</code>.</td></tr>
+</table></div>
+
+<p>The LoRA hyperparameter constants, defined once at the top so they are easy to change.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>41</td><td><code>LORA_R = 32</code></td><td>The rank <code>r</code> - how thin the adapter matrices are. Bigger means more capacity but more memory. Drop to <code>8</code> on a small GPU; the instructor says 8 vs 32 was only marginally different.</td></tr>
+<tr><td>42</td><td><code>LORA_ALPHA = 64</code></td><td>The scaling factor for the adapter. The rule of thumb is <code>alpha = 2 × r</code>, so 32 pairs with 64. If you drop <code>r</code> to 8, make this 16.</td></tr>
+<tr><td>43</td><td><code>TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj"]</code></td><td>Which layers get adapters: the four attention projections. These names must match the model's real layer names, or the adapters attach to nothing useful.</td></tr>
+<tr><td>44</td><td><code>LORA_DROPOUT = 0.1</code></td><td>Dropout inside the adapter - randomly ignore 10% of connections each step to reduce <a class="term" href="glossary.html#overfitting">overfitting</a>. 5%-20% is the usual range.</td></tr>
+<tr><td>45</td><td><code>QUANT_4_BIT = True</code></td><td>Train against the 4-bit base model (the "Q" in QLoRA). 8-bit scored slightly better for the instructor but needs more memory; 4-bit is what fits.</td></tr>
+</table></div>
+
+<p>The completion-only collator (TRL does the fiddly masking for you).</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>131</td><td><code>response_template = "Price is $"</code></td><td>The exact text that marks where the answer begins. Everything up to and including this is masked out of the loss.</td></tr>
+<tr><td>132</td><td><code>collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)</code></td><td>Builds the collator. It needs the tokenizer so it can find the template in the tokenized text and set the loss mask, so the model is trained only on the price.</td></tr>
+</table></div>
+
+<p>The LoRA config - the adapter settings, assembled from the constants above.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>139</td><td><code>lora_config = LoraConfig(</code></td><td>Creates the LoRA configuration object that PEFT uses to attach adapters.</td></tr>
+<tr><td>141</td><td><code>r=LORA_R,</code></td><td>The rank (32) - the width of the adapter matrices A and B.</td></tr>
+<tr><td>142</td><td><code>lora_alpha=LORA_ALPHA,</code></td><td>The scaling factor (64) applied when the adapter's change is added to the frozen weight.</td></tr>
+<tr><td>143</td><td><code>target_modules=TARGET_MODULES,</code></td><td>The attention projections to adapt. This is the single most important LoRA setting to get right.</td></tr>
+<tr><td>144</td><td><code>lora_dropout=LORA_DROPOUT,</code></td><td>The 10% dropout for regularisation.</td></tr>
+<tr><td>145</td><td><code>bias="none",</code></td><td>Do not train the bias terms - a common, memory-saving default that keeps the adapter minimal.</td></tr>
+<tr><td>146</td><td><code>task_type="CAUSAL_LM",</code></td><td>Tells PEFT this is a next-token (causal) language model, so it wires the adapters to the right kind of head. Llama is causal, and so is "predict the price token".</td></tr>
+</table></div>
+
+<p>The SFT training config - the essential settings that shape the run. (Day 4 covers the logging and
+saving fields further down this same object.)</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>153</td><td><code>train_config = SFTConfig(</code></td><td>Creates the general training settings object the trainer reads.</td></tr>
+<tr><td>154</td><td><code>output_dir=PROJECT_RUN_NAME,</code></td><td>The local folder for this run's checkpoints, named with the timestamped run name so runs do not overwrite each other.</td></tr>
+<tr><td>155</td><td><code>num_train_epochs=EPOCHS,</code></td><td>How many passes over the whole dataset (3 here). One epoch already gives strong results and is far cheaper - Day 4 goes deeper.</td></tr>
+<tr><td>156</td><td><code>per_device_train_batch_size=BATCH_SIZE,</code></td><td>How many examples go through together each step (16 on the instructor's A100). This is the setting most tied to GPU memory - lower it to 1 on a small GPU.</td></tr>
+<tr><td>157</td><td><code>gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,</code></td><td>How many batches to add up before stepping the optimizer (1 = step every batch). A way to act as if the batch were bigger without using more memory.</td></tr>
+<tr><td>158</td><td><code>learning_rate=LEARNING_RATE,</code></td><td>How big a step each update takes (1e-4). A core hyperparameter explored on Day 4.</td></tr>
+<tr><td>159-160</td><td><code>lr_scheduler_type=LR_SCHEDULER_TYPE,</code> / <code>warmup_ratio=WARMUP_RATIO,</code></td><td>Lower the learning rate along a cosine curve over the run, after warming it up gently at the start so early steps do not destabilise training.</td></tr>
+<tr><td>161</td><td><code>optim=OPTIMIZER,</code></td><td>The optimizer algorithm (<code>paged_adamw_32bit</code>) - good convergence, but memory-hungry; swap for a cheaper one if you run out of memory.</td></tr>
+<tr><td>164</td><td><code>max_seq_length=MAX_SEQUENCE_LENGTH,</code></td><td>Every example is padded/truncated to 182 tokens. Keeping it small is what lets a batch of 16 fit in memory.</td></tr>
+<tr><td>165</td><td><code>dataset_text_field="text",</code></td><td>Tells the trainer which column of the dataset holds the training text (the description + "Price is $" + price).</td></tr>
+</table></div>
+
+<p>Building the trainer and launching the run.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>189</td><td><code>trainer = SFTTrainer(</code></td><td>Creates the trainer. Passing it the LoRA config makes it freeze the base model and attach the adapters automatically.</td></tr>
+<tr><td>190</td><td><code>model=base_model,</code></td><td>The frozen 4-bit base model to fine-tune.</td></tr>
+<tr><td>191</td><td><code>train_dataset=train,</code></td><td>The training split - the 400,000 "description + Price is $ + price" examples.</td></tr>
+<tr><td>192</td><td><code>peft_config=lora_config,</code></td><td>The LoRA settings from above. This is what turns a full fine-tune into a cheap QLoRA fine-tune.</td></tr>
+<tr><td>193</td><td><code>args=train_config,</code></td><td>The SFTConfig with epochs, batch size, learning rate and the rest.</td></tr>
+<tr><td>194</td><td><code>data_collator=collator,</code></td><td>The completion-only collator, so loss is computed only on the price tokens.</td></tr>
+<tr><td>195</td><td><code>processing_class=tokenizer,</code></td><td>The tokenizer the trainer uses to tokenize and pad. Older TRL versions used <code>tokenizer=tokenizer</code> instead - swap it if your version complains.</td></tr>
+<tr><td>203-204</td><td><code>if __name__ == "__main__":</code> / <code>trainer.train()</code></td><td>The launch. <strong><code>trainer.train()</code> is the single line that starts the whole run</strong> - the loop from the diagram, over every batch and epoch.</td></tr>
+<tr><td>205</td><td><code>trainer.model.push_to_hub(PROJECT_RUN_NAME, private=True)</code></td><td>After training, upload the finished adapter to the Hugging Face Hub as a private repo so you can load it later (covered on Day 4 and used on Day 5).</td></tr>
+</table></div>
+
+<div class="callout ok"><strong>What you should see.</strong> When <code>trainer.train()</code> starts, GPU
+memory climbs sharply (the instructor's A100 goes from about 6 GB to roughly 38 GB of its 40 GB with
+batch size 16). Then a progress bar appears and, every 50 steps, a training-loss number is printed and sent
+to <a class="term" href="glossary.html#weights-and-biases">Weights &amp; Biases</a>. The loss should trend
+downwards. The full three-epoch run shows an estimate of around a day on this hardware - you do not have to
+let it finish to see it working.</div>
+
+<div class="callout warn"><strong>Common mistakes.</strong> <em>Wrong target modules:</em> if the names in
+<code>target_modules</code> do not match the model's real layer names, the adapters attach to the wrong
+layers (or none), and the loss barely moves - double-check them for your base model.
+<em>Batch size vs GPU memory:</em> <code>per_device_train_batch_size=16</code> only fits a large (40 GB)
+GPU; on a smaller card (such as a Colab T4) it throws a CUDA out-of-memory error. Start at
+<code>1</code> and raise it only while memory has headroom. Powers of two (1, 2, 4, 8, 16) are the
+convention. Also remember <code>alpha</code> should track <code>r</code> (<code>alpha = 2 × r</code>) if
+you change the rank.</div>
+
+<div class="callout"><strong>Video vs repo.</strong> The guide follows the video's Colab: base model
+<code>meta-llama/Meta-Llama-3.1-8B</code>, the Week 6 pricing dataset, and the "Price is $" response
+template. The current repo's re-recording uses a newer, smaller Llama and a different dataset/Item class (see
+the <a href="38-w7d2.html">Day 2</a> note). Treat the model name and dataset id as values you swap; the QLoRA
+method - LoRA config, SFTTrainer, completion-only collator, <code>trainer.train()</code> - is the same
+either way. One real version note: newer TRL uses <code>processing_class=tokenizer</code>, older TRL uses
+<code>tokenizer=tokenizer</code>.</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>QLoRA freezes the 4-bit base model and trains only small <strong>LoRA adapters</strong>, so an 8B model
+fine-tunes on one GPU.</li>
+<li>The <strong>LoRA config</strong> sets <code>r=32</code> (rank), <code>alpha=64</code> (scaling, = 2×r),
+<code>target_modules=["q_proj","v_proj","k_proj","o_proj"]</code> (the attention projections),
+<code>lora_dropout=0.1</code> and <code>task_type="CAUSAL_LM"</code>.</li>
+<li>The <strong>DataCollatorForCompletionOnlyLM</strong> masks everything up to <code>"Price is $"</code>, so
+the model is trained only to predict the price.</li>
+<li><strong>SFTTrainer</strong> (from TRL) takes the base model, the data, the LoRA config, the SFTConfig and
+the collator, then runs the whole loop when you call <strong><code>trainer.train()</code></strong>.</li>
+<li>The key SFTConfig settings here are epochs, <code>per_device_train_batch_size</code> (watch GPU memory),
+learning rate with a cosine schedule, and <code>max_seq_length=182</code>.</li>
+<li>This run was <strong>not executed here</strong> (needs a GPU and hours); the code is reconstructed to
+match the Colab. The <a href="40-w7d4.html">Day 4 page</a> reuses the same file to cover monitoring,
+hyperparameters and saving.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="38-w7d2.html"><small>← Previous · Step 38</small>Week 7 · Day 2 — Evaluating the Base Model</a>
+<a class="next" href="40-w7d4.html"><small>Next · Step 40 →</small>Week 7 · Day 4 — Monitoring and Hyperparameters</a>
+</nav>
+</main>
+</body>
+</html>

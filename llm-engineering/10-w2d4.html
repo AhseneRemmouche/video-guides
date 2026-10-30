@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10 · Week 2 · Day 4 — Tools: Giving the Model Function Calling</title>
+<meta name="description" content="Build an AI airline assistant that can call your own functions - how you describe a tool, how the model asks to use it, and how you run it and return the result.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 10/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 10 of 48 · Week 2 · Day 4 · 4 lessons</div>
+  <h1>Week 2 · Day 4 — Tools: Giving the Model Function Calling</h1>
+  <p class="lead">Build an AI airline assistant that can call your own functions - how you describe a tool, how the model asks to use it, and how you run it and return the result.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p class="lead">So far the model could only ever answer with words. Today it gets a new power: it can ask your
+program to run real code for it. The instructor calls these <a class="term" href="glossary.html#tool">tools</a>, and
+the technique is OpenAI <a class="term" href="glossary.html#function-calling">function calling</a>. We build a customer
+support assistant for a fictional airline, "FlightAI", that can look up a ticket price with a
+<code>get_ticket_price</code> function. When a customer asks "how much is a ticket to London?", the model does not
+guess — it asks us to run that function, we hand back the real answer, and the model turns it into a courteous
+reply.</p>
+
+<p>Everything today is shown in two languages. Use the <strong>Python | TypeScript</strong> switch on the code card —
+or the <strong>Code in:</strong> switch at the top of the page — to flip between them; your choice is remembered as you
+read. The two versions do the same thing; only the syntax changes.</p>
+
+<p>This is the idea that turns a chatbot into something closer to an <a class="term" href="glossary.html#agent">agent</a>:
+a model that does not just talk, but reaches out to the world through code you control. It sounds spooky — we are
+"letting the model run code on our machine" — but under the covers it is a plain, repeatable loop of messages passed
+back and forth.</p>
+
+<div class="callout">
+<strong>Video vs repo</strong>
+<p>The videos were recorded with OpenAI's <code>gpt-4o-mini</code>, and that is the model shown here. The current
+<code>ed-donner/llm_engineering</code> repo has moved on to a newer model, <code>gpt-6-luna</code>, called with an
+extra <code>reasoning_effort="none"</code> argument. Treat the model name as a value you swap: labs retire models, so
+you may need a model id that still exists. One more difference: the video stores prices in a small Python dictionary,
+while the repo's current notebook later upgrades the same tool to read a tiny <code>sqlite</code> database. We show the
+dictionary version first — it is what you see on screen — and describe the database upgrade afterwards. The
+<code>tools</code> structure and the tool-call loop are identical either way.</p>
+</div>
+
+<h2>What a "tool" actually is</h2>
+<p>A tool is nothing more than a function you already wrote, plus a plain-English description of it that you hand to the
+model. The model never runs your function itself. Instead, when it decides your function would help, it replies with a
+<a class="term" href="glossary.html#tool-call">tool call</a>: a little message that says "please run
+<code>get_ticket_price</code> with <code>destination_city = "London"</code> and give me the result." Your code runs the
+real function, sends the result back, and the model carries on. The model stays a text predictor the whole time; the
+power to <em>act</em> lives entirely in your code.</p>
+
+<details class="primer">
+<summary>New to tools / function calling? What it is and why it matters</summary>
+<p>An LLM on its own is sealed off from the world: it cannot look anything up, do reliable arithmetic, or change
+anything. Function calling pokes a hole in that wall. You describe some of your own functions to the model; it may then
+ask for one to be run and use the result in its answer. The four classic uses the instructor lists are: <strong>fetch
+extra data</strong> (look something up in a database), <strong>take an action</strong> (book a meeting, buy a ticket),
+<strong>do a calculation</strong> (models are famously bad at arithmetic, so hand them a calculator), and
+<strong>change the UI</strong>. The key mental model: the model only ever <em>requests</em> a call — your program
+decides whether and how to run it.</p>
+</details>
+
+<h2>The JSON schema that describes the tool</h2>
+<p>To tell the model about a function, you write a <a class="term" href="glossary.html#json-schema">JSON schema</a>: a
+structured description giving the function's <code>name</code>, a human-readable <code>description</code> of when to use
+it, and its <code>parameters</code> (each with a type and its own description). OpenAI turns this schema into tokens and
+feeds it to the model alongside your messages, so the model learns what the function is for and what inputs it needs.
+The <code>description</code> fields are not decoration — they are the only thing the model reads to decide when and how
+to call the tool, so they must be clear.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 320" role="img" aria-label="The nested shape of the tool JSON schema, from the tools list down to a single destination_city string parameter">
+  <rect class="box" x="10" y="14" width="740" height="294" rx="8" />
+  <text class="title" x="30" y="38" text-anchor="start">tools  (a list)</text>
+  <rect class="box box-info" x="26" y="52" width="708" height="242" rx="8" />
+  <text class="label" x="44" y="74" text-anchor="start">{ type: "function", function: { … } }</text>
+  <rect class="box" x="44" y="86" width="672" height="196" rx="8" />
+  <text class="mono" x="60" y="108" text-anchor="start">name: "get_ticket_price"</text>
+  <text class="mono" x="60" y="132" text-anchor="start">description: "Get the price of a return ticket…"</text>
+  <text class="small" x="60" y="150" text-anchor="start">the model reads this to decide WHEN to call</text>
+  <rect class="box box-ok" x="60" y="162" width="640" height="106" rx="8" />
+  <text class="label" x="76" y="184" text-anchor="start">parameters  (a JSON schema object)</text>
+  <text class="mono" x="76" y="206" text-anchor="start">type: "object"</text>
+  <text class="mono" x="76" y="228" text-anchor="start">properties: { destination_city: { type: "string", … } }</text>
+  <text class="mono" x="76" y="250" text-anchor="start">required: ["destination_city"]</text>
+</svg>
+<figcaption>How to read it: boxes nest from outside in. <strong>A tool is a function wrapped in a description plus a
+schema of its inputs</strong> — the names here (<code>get_ticket_price</code>, <code>destination_city</code>) are the
+real ones from the lab.</figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to JSON schema? What it is and why it matters</summary>
+<p>JSON schema is a small, standard way to describe the <em>shape</em> of data: what fields exist, what type each one is
+(string, number, object, array…), and which are required. Here it describes the arguments your function expects. The
+model uses the schema twice: to understand that <code>destination_city</code> is a required string, and to format its
+request so the argument comes back in exactly that shape. <code>"additionalProperties": false</code> tells it not to
+invent extra fields. You do not have to learn all of JSON schema — copy this little pattern and change the names and
+types for your own function.</p>
+</details>
+
+<h2>The round trip: how a tool call actually flows</h2>
+<p>Here is the whole dance in order. You send the conversation <em>and</em> the tools. The model reads the question,
+decides it needs the price, and instead of answering it stops with a special
+<a class="term" href="glossary.html#tool-call">finish reason</a> of <code>tool_calls</code>. Your code notices that,
+runs the real function, and appends two new rows to the message list: first the model's own request (the
+<code>assistant</code> message that asked for the tool), then the result (a new <code>tool</code> message). You send the
+whole thing back, and now the model has the number it needed and writes the final answer.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 420" role="img" aria-label="Sequence diagram of one tool-call round trip between your code, the OpenAI model, and the get_ticket_price function">
+  <rect class="box-solid" x="40" y="20" width="150" height="34" rx="8" />
+  <text class="on-solid" x="115" y="42" text-anchor="middle">Your code</text>
+  <rect class="box-solid" x="320" y="20" width="150" height="34" rx="8" />
+  <text class="on-solid" x="395" y="42" text-anchor="middle">OpenAI model</text>
+  <rect class="box-solid" x="590" y="20" width="150" height="34" rx="8" />
+  <text class="on-solid" x="665" y="42" text-anchor="middle">get_ticket_price</text>
+  <line class="line dashed" x1="115" y1="54" x2="115" y2="404" />
+  <line class="line dashed" x1="395" y1="54" x2="395" y2="404" />
+  <line class="line dashed" x1="665" y1="54" x2="665" y2="320" />
+
+  <text class="small" x="255" y="84" text-anchor="middle">1. send messages + tools</text>
+  <path class="arrow" d="M 117,92 H 393" />
+  <text class="small accent" x="255" y="128" text-anchor="middle">2. finish_reason = "tool_calls"</text>
+  <text class="small" x="255" y="144" text-anchor="middle">"run get_ticket_price(London)"</text>
+  <path class="arrow-accent" d="M 393,152 H 117" />
+
+  <text class="small" x="390" y="192" text-anchor="middle">3. you run the real function</text>
+  <path class="arrow" d="M 117,200 H 663" />
+  <text class="small ok" x="390" y="240" text-anchor="middle">4. returns "…is $799"</text>
+  <path class="arrow-ok" d="M 663,248 H 117" />
+
+  <text class="small" x="255" y="300" text-anchor="middle">5. send messages + assistant + tool result</text>
+  <path class="arrow" d="M 117,308 H 393" />
+  <text class="small ok" x="255" y="352" text-anchor="middle">6. "The ticket price to London is $799"</text>
+  <path class="arrow-ok" d="M 393,360 H 117" />
+  <text class="small" x="255" y="392" text-anchor="middle">finish_reason = "stop" — done</text>
+</svg>
+<figcaption>How to read it: time flows down. <strong>Step 2 is the model asking; step 6 is the model answering — the
+real work happens in your code between them.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to the tool-call round trip? Why two API calls, not one</summary>
+<p>A single question can take <em>two</em> trips to the model. On the first trip the model says "I can't answer yet — run
+this tool." You run it, add the answer to the conversation, and make a second trip; now the model has what it needs and
+replies for real. Why not let the model just run the function? Because the model lives on OpenAI's servers and your
+function lives on your machine — the model can only <em>ask</em>. That gap is the safety of the design: nothing runs
+unless your code chooses to run it.</p>
+</details>
+
+<h2>When does the model decide to call a tool?</h2>
+<p>You do not tell it to. You pass the tools on every call and let the model choose. If the question can be answered from
+what it already knows, it answers normally and the finish reason is <code>stop</code>. If it needs something a tool
+provides, it stops with <code>tool_calls</code> instead. Your code branches on that one value.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Decision: after sending a user message with tools, the model either answers directly or stops with a tool call">
+  <rect class="box" x="270" y="16" width="220" height="48" rx="8" />
+  <text class="label" x="380" y="36" text-anchor="middle">User message sent</text>
+  <text class="small" x="380" y="54" text-anchor="middle">with tools=tools</text>
+  <rect class="box box-info" x="280" y="92" width="200" height="48" rx="8" />
+  <text class="label" x="380" y="112" text-anchor="middle">Model reads it and</text>
+  <text class="small" x="380" y="130" text-anchor="middle">the tool descriptions</text>
+  <path class="arrow" d="M 380,64 V 90" />
+
+  <rect class="box box-ok" x="40" y="176" width="300" height="52" rx="8" />
+  <text class="label" x="190" y="198" text-anchor="middle">Can answer now</text>
+  <text class="small" x="190" y="216" text-anchor="middle">finish_reason = "stop" → reply text</text>
+  <rect class="box box-warn" x="420" y="176" width="300" height="52" rx="8" />
+  <text class="label" x="570" y="198" text-anchor="middle">Needs the tool</text>
+  <text class="small" x="570" y="216" text-anchor="middle">finish_reason = "tool_calls" → request</text>
+  <path class="arrow-ok" d="M 330,140 L 210,174" />
+  <path class="arrow-accent" d="M 430,140 L 550,174" />
+</svg>
+<figcaption>How to read it: one fork, decided by the model. <strong>Your code reads <code>finish_reason</code> to know
+which path happened.</strong></figcaption>
+</figure>
+
+<h2>The complete lab</h2>
+<p>Here is the whole file. It is long because it shows the project growing: first a plain chatbot with no tools, then the
+<code>get_ticket_price</code> function, then the schema, then the chat function wired to use the tool, and finally a few
+improvements. Read it top to bottom; the line-by-line tables below focus on the parts that are new today.</p>
+
+<p data-only="ts">The TypeScript port keeps the same names and the same shape. The differences are JavaScript's: calls are
+<code>await</code>ed, the tool-call loop is an <code>async</code> function, options are passed as one object, and the
+schema is typed as <code>OpenAI.Chat.ChatCompletionTool</code> so the editor checks its shape. There is no Gradio UI in
+the port — a small <code>main()</code> runs the tool once offline and then, only if a key is present, the live loop. The
+<a class="term" href="glossary.html#typescript">TypeScript</a> runs on Node with <code>tsx</code>.</p>
+
+<div class="code-tabs"><pre data-file="week2/day4.py" data-lang="py" data-tag="complete file"><code>import os
+import json
+from dotenv import load_dotenv
+from openai import OpenAI
+import gradio as gr
+
+# Initialization
+
+load_dotenv(override=True)
+
+openai_api_key = os.getenv('OPENAI_API_KEY')
+if openai_api_key:
+    print(f"OpenAI API Key exists and begins {openai_api_key[:8]}")
+else:
+    print("OpenAI API Key not set")
+    
+MODEL = "gpt-4o-mini"
+openai = OpenAI()
+
+# As an alternative, if you'd like to use Ollama instead of OpenAI
+# Check that Ollama is running for you locally (see week1/day2 exercise) then uncomment these next 2 lines
+# MODEL = "llama3.2"
+# openai = OpenAI(base_url='http://localhost:11434/v1', api_key='ollama')
+
+
+system_message = """
+You are a helpful assistant for an Airline called FlightAI.
+Give short, courteous answers, no more than 1 sentence.
+Always be accurate. If you don't know the answer, say so.
+"""
+
+def chat(message, history):
+    history = [{"role":h["role"], "content":h["content"]} for h in history]
+    messages = [{"role": "system", "content": system_message}] + history + [{"role": "user", "content": message}]
+    response = openai.chat.completions.create(model=MODEL, messages=messages)
+    return response.choices[0].message.content
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+# Let's start by making a useful function
+
+ticket_prices = {"london": "$799", "paris": "$899", "tokyo": "$1400", "berlin": "$499"}
+
+def get_ticket_price(destination_city):
+    print(f"Tool called for city {destination_city}")
+    price = ticket_prices.get(destination_city.lower(), "Unknown ticket price")
+    return f"The price of a ticket to {destination_city} is {price}"
+
+
+get_ticket_price("London")
+
+# There's a particular dictionary structure that's required to describe our function:
+
+price_function = {
+    "name": "get_ticket_price",
+    "description": "Get the price of a return ticket to the destination city.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "destination_city": {
+                "type": "string",
+                "description": "The city that the customer wants to travel to",
+            },
+        },
+        "required": ["destination_city"],
+        "additionalProperties": False
+    }
+}
+
+# And this is included in a list of tools:
+
+tools = [{"type": "function", "function": price_function}]
+
+tools
+
+def chat(message, history):
+    history = [{"role":h["role"], "content":h["content"]} for h in history]
+    messages = [{"role": "system", "content": system_message}] + history + [{"role": "user", "content": message}]
+    response = openai.chat.completions.create(model=MODEL, messages=messages, tools=tools)
+
+    if response.choices[0].finish_reason=="tool_calls":
+        message = response.choices[0].message
+        response = handle_tool_call(message)
+        messages.append(message)
+        messages.append(response)
+        response = openai.chat.completions.create(model=MODEL, messages=messages)
+    
+    return response.choices[0].message.content
+
+# We have to write that function handle_tool_call:
+
+def handle_tool_call(message):
+    tool_call = message.tool_calls[0]
+    if tool_call.function.name == "get_ticket_price":
+        arguments = json.loads(tool_call.function.arguments)
+        city = arguments.get('destination_city')
+        price_details = get_ticket_price(city)
+        response = {
+            "role": "tool",
+            "content": price_details,
+            "tool_call_id": tool_call.id
+        }
+    return response
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+def chat(message, history):
+    history = [{"role":h["role"], "content":h["content"]} for h in history]
+    messages = [{"role": "system", "content": system_message}] + history + [{"role": "user", "content": message}]
+    response = openai.chat.completions.create(model=MODEL, messages=messages, tools=tools)
+
+    if response.choices[0].finish_reason=="tool_calls":
+        message = response.choices[0].message
+        responses = handle_tool_calls(message)
+        messages.append(message)
+        messages.extend(responses)
+        response = openai.chat.completions.create(model=MODEL, messages=messages)
+    
+    return response.choices[0].message.content
+
+def handle_tool_calls(message):
+    responses = []
+    for tool_call in message.tool_calls:
+        if tool_call.function.name == "get_ticket_price":
+            arguments = json.loads(tool_call.function.arguments)
+            city = arguments.get('destination_city')
+            price_details = get_ticket_price(city)
+            responses.append({
+                "role": "tool",
+                "content": price_details,
+                "tool_call_id": tool_call.id
+            })
+    return responses
+
+gr.ChatInterface(fn=chat, type="messages").launch()
+
+def chat(message, history):
+    history = [{"role":h["role"], "content":h["content"]} for h in history]
+    messages = [{"role": "system", "content": system_message}] + history + [{"role": "user", "content": message}]
+    response = openai.chat.completions.create(model=MODEL, messages=messages, tools=tools)
+
+    while response.choices[0].finish_reason=="tool_calls":
+        message = response.choices[0].message
+        responses = handle_tool_calls(message)
+        messages.append(message)
+        messages.extend(responses)
+        response = openai.chat.completions.create(model=MODEL, messages=messages, tools=tools)
+    
+    return response.choices[0].message.content
+
+import sqlite3
+
+
+DB = "prices.db"
+
+with sqlite3.connect(DB) as conn:
+    cursor = conn.cursor()
+    cursor.execute('CREATE TABLE IF NOT EXISTS prices (city TEXT PRIMARY KEY, price REAL)')
+    conn.commit()
+
+def get_ticket_price(city):
+    print(f"DATABASE TOOL CALLED: Getting price for {city}", flush=True)
+    with sqlite3.connect(DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT price FROM prices WHERE city = ?', (city.lower(),))
+        result = cursor.fetchone()
+        return f"Ticket price to {city} is ${result[0]}" if result else "No price data available for this city"
+
+get_ticket_price("London")
+
+def set_ticket_price(city, price):
+    with sqlite3.connect(DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO prices (city, price) VALUES (?, ?) ON CONFLICT(city) DO UPDATE SET price = ?', (city.lower(), price, price))
+        conn.commit()
+
+ticket_prices = {"london":799, "paris": 899, "tokyo": 1420, "sydney": 2999}
+for city, price in ticket_prices.items():
+    set_ticket_price(city, price)
+
+get_ticket_price("Tokyo")
+
+gr.ChatInterface(fn=chat, type="messages").launch()</code></pre><pre data-file="src/day4_tools.ts" data-lang="ts" data-tag="complete file"><code>// Day 4 - Tools / OpenAI function-calling (TypeScript port of day4.py)
+// An airline assistant (FlightAI) that can look up ticket prices. The model decides
+// when it needs the tool, we run the real function, feed the result back, and let the
+// model turn it into a courteous reply.
+import "dotenv/config";
+import { pathToFileURL } from "node:url";
+import OpenAI from "openai";
+
+export const MODEL = "gpt-4o-mini";
+
+export const SYSTEM_MESSAGE =
+  "You are a helpful assistant for an Airline called FlightAI. " +
+  "Give short, courteous answers, no more than 1 sentence. " +
+  "Always be accurate. If you don't know the answer, say so.";
+
+// The "database" of ticket prices (a plain object stands in for the Python sqlite table).
+const ticketPrices: Record&lt;string, string&gt; = {
+  london: "$799",
+  paris: "$899",
+  tokyo: "$1400",
+  berlin: "$499",
+};
+
+export function getTicketPrice(destinationCity: string): string {
+  console.log(`Tool called for city ${destinationCity}`);
+  const price = ticketPrices[destinationCity.toLowerCase()] ?? "Unknown ticket price";
+  return `The price of a ticket to ${destinationCity} is ${price}`;
+}
+
+// The JSON schema that describes our function to the model.
+export const priceFunction: OpenAI.Chat.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "get_ticket_price",
+    description: "Get the price of a return ticket to the destination city.",
+    parameters: {
+      type: "object",
+      properties: {
+        destination_city: {
+          type: "string",
+          description: "The city that the customer wants to travel to",
+        },
+      },
+      required: ["destination_city"],
+      additionalProperties: false,
+    },
+  },
+};
+
+export const tools: OpenAI.Chat.ChatCompletionTool[] = [priceFunction];
+
+// Run each tool call the model requested and build the matching `tool` messages.
+export function handleToolCalls(
+  message: OpenAI.Chat.ChatCompletionMessage,
+): OpenAI.Chat.ChatCompletionToolMessageParam[] {
+  const responses: OpenAI.Chat.ChatCompletionToolMessageParam[] = [];
+  for (const toolCall of message.tool_calls ?? []) {
+    if (toolCall.type === "function" &amp;&amp; toolCall.function.name === "get_ticket_price") {
+      const args = JSON.parse(toolCall.function.arguments) as { destination_city: string };
+      const priceDetails = getTicketPrice(args.destination_city);
+      responses.push({ role: "tool", content: priceDetails, tool_call_id: toolCall.id });
+    }
+  }
+  return responses;
+}
+
+// The full tool-call loop: ask the model; while it wants tools, run them and ask again.
+export async function chat(openai: OpenAI, message: string): Promise&lt;string&gt; {
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: "system", content: SYSTEM_MESSAGE },
+    { role: "user", content: message },
+  ];
+  let response = await openai.chat.completions.create({ model: MODEL, messages, tools });
+
+  while (response.choices[0]?.finish_reason === "tool_calls") {
+    const responseMessage = response.choices[0].message;
+    messages.push(responseMessage);
+    messages.push(...handleToolCalls(responseMessage));
+    response = await openai.chat.completions.create({ model: MODEL, messages, tools });
+  }
+  return response.choices[0]?.message.content ?? "";
+}
+
+async function main(): Promise&lt;void&gt; {
+  // Offline-safe sanity check: the tool runs without any network call.
+  console.log(getTicketPrice("London"));
+  console.log("Tool schema:", JSON.stringify(priceFunction, null, 2));
+
+  if (!process.env.OPENAI_API_KEY) {
+    console.log("\nOPENAI_API_KEY not set - skipping the live tool-call loop. See .env.example.");
+    return;
+  }
+  const openai = new OpenAI();
+  const reply = await chat(openai, "How much is a ticket to Tokyo?");
+  console.log("Assistant:", reply);
+}
+
+// Only run the demo when this file is executed directly, not when imported.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err) =&gt; {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}</code></pre></div>
+
+<div data-only="py">
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1–5</td><td><code>import os, json … from openai import OpenAI … import gradio as gr</code></td><td>The imports. <code>json</code> is new and important today: the model sends the tool arguments back as a JSON <em>string</em>, so we need <code>json.loads</code> to turn it into a dictionary. <code>gradio</code> gives the chat window.</td></tr>
+<tr><td>17–18</td><td><code>MODEL = "gpt-4o-mini"</code> / <code>openai = OpenAI()</code></td><td>Picks the video's model and creates the client (it reads <code>OPENAI_API_KEY</code> from the environment). Change <code>MODEL</code> if that id is retired.</td></tr>
+<tr><td>26–30</td><td><code>system_message = """You are a helpful assistant for an Airline called FlightAI…"""</code></td><td>Sets the assistant's job and, crucially, tells it to be accurate and to say so when it does not know. That last instruction is why it refuses to guess a price before we give it the tool.</td></tr>
+<tr><td>32–38</td><td><code>def chat(message, history): … return response.choices[0].message.content</code></td><td>The baseline chatbot from Day 3, with no tools yet. It builds <code>messages</code> from the system prompt, the history, and the new message, then returns the reply. Today we extend this exact function.</td></tr>
+<tr><td>42</td><td><code>ticket_prices = {"london": "$799", "paris": "$899", "tokyo": "$1400", "berlin": "$499"}</code></td><td>The fake price list. Keys are lowercase so lookups are case-insensitive. This stands in for a real pricing database.</td></tr>
+<tr><td>44–47</td><td><code>def get_ticket_price(destination_city): … return f"The price of a ticket to {destination_city} is {price}"</code></td><td>The function we will expose as a tool. The <code>print</code> lets us watch in the terminal when the model calls it. <code>.get(city, "Unknown ticket price")</code> returns a safe default for a city it does not know, so the model can honestly say it has no price.</td></tr>
+<tr><td>50</td><td><code>get_ticket_price("London")</code></td><td>A quick manual test, proving the plain function works before any model is involved. It is still just a normal function here — not yet a "tool".</td></tr>
+<tr><td>54–68</td><td><code>price_function = { "name": …, "description": …, "parameters": { … } }</code></td><td>The JSON schema that describes the function to the model (see the schema diagram above). The <code>description</code> text and the example in it are what the model reads to decide when to call it. <code>required</code> lists the must-have arguments; <code>additionalProperties: False</code> forbids extras.</td></tr>
+<tr><td>72</td><td><code>tools = [{"type": "function", "function": price_function}]</code></td><td>Wraps the schema in the list shape the API expects. You can list many tools here; today there is one.</td></tr>
+<tr><td>79</td><td><code>response = openai.chat.completions.create(model=MODEL, messages=messages, tools=tools)</code></td><td>The one change that gives the model its power: pass <code>tools=tools</code>. Everything else is the ordinary chat call. Now the model <em>may</em> reply with a tool request instead of text.</td></tr>
+<tr><td>81–86</td><td><code>if response.choices[0].finish_reason=="tool_calls": … messages.append(message); messages.append(response); response = openai…create(model=MODEL, messages=messages)</code></td><td>The heart of the round trip. If the model asked for a tool, we grab its request <code>message</code>, run <code>handle_tool_call</code> to get the result, then append <strong>two</strong> rows — the model's request and our result — and call the model a second time so it can write the real answer. Note the second call omits <code>tools</code>: we do not expect it to call again.</td></tr>
+<tr><td>88</td><td><code>return response.choices[0].message.content</code></td><td>Returns the final text — either the direct answer (no tool needed) or the answer written after the tool result came back.</td></tr>
+<tr><td>92–93</td><td><code>def handle_tool_call(message): tool_call = message.tool_calls[0]</code></td><td>Unpacks the model's request. <code>message.tool_calls</code> is the list of tools it wants run; here we take the first.</td></tr>
+<tr><td>94–97</td><td><code>if tool_call.function.name == "get_ticket_price": arguments = json.loads(tool_call.function.arguments); city = arguments.get('destination_city'); price_details = get_ticket_price(city)</code></td><td>Checks which tool was asked for, parses the arguments string into a dictionary with <code>json.loads</code>, pulls out <code>destination_city</code>, and finally calls the real function. With more tools this would be a branch per name.</td></tr>
+<tr><td>98–102</td><td><code>response = {"role": "tool", "content": price_details, "tool_call_id": tool_call.id}</code></td><td>Builds the result message. The role is the new <code>tool</code> role; the <code>tool_call_id</code> links this result to the exact request, so the model knows which call it answers. Forgetting the id breaks the link.</td></tr>
+</table></div>
+<p>The rest of the file is two improvements, shown for completeness and summarised here. Lines 107–133 swap
+<code>handle_tool_call</code> for <code>handle_tool_calls</code> (plural): it loops over <em>every</em> tool the model
+asked for in one reply and returns a list of result messages, so a single turn can run several tools. Lines 137–149 turn
+the <code>if</code> into a <code>while</code>, so if the model asks for more tools after seeing the first results, the
+loop keeps serving them until the finish reason is no longer <code>tool_calls</code> — and it passes <code>tools</code>
+on each pass. Lines 151–183 are the repo's upgrade: the same tool reads prices from a small <code>sqlite</code> database
+instead of a dictionary, which does not change the tool-call loop at all.</p>
+</div>
+
+<div data-only="ts">
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>5–7</td><td><code>import "dotenv/config"; import { pathToFileURL } from "node:url"; import OpenAI from "openai";</code></td><td>Loads the <code>.env</code> keys as a side effect, brings in a Node helper used by the run-guard at the bottom, and imports the OpenAI SDK. No separate <code>json</code> import is needed — JavaScript has <code>JSON.parse</code> built in.</td></tr>
+<tr><td>9–14</td><td><code>export const MODEL = "gpt-4o-mini"; export const SYSTEM_MESSAGE = "You are a helpful assistant for an Airline called FlightAI. …"</code></td><td>The same model id and system prompt as Python, stored as constants and exported so tests or a server can reuse them.</td></tr>
+<tr><td>16–22</td><td><code>const ticketPrices: Record&lt;string, string&gt; = { london: "$799", … };</code></td><td>The price list. <code>Record&lt;string, string&gt;</code> is the TypeScript type for "an object whose keys and values are both strings" — a plain stand-in for the Python dictionary (and the repo's sqlite table).</td></tr>
+<tr><td>24–28</td><td><code>export function getTicketPrice(destinationCity: string): string { … return `The price of a ticket to ${destinationCity} is ${price}`; }</code></td><td>The function behind the tool. <code>?? "Unknown ticket price"</code> supplies the default when the city is missing, the twin of Python's <code>.get(city, default)</code>. The <code>: string</code> annotations let the compiler check the types.</td></tr>
+<tr><td>31–48</td><td><code>export const priceFunction: OpenAI.Chat.ChatCompletionTool = { type: "function", function: { name: "get_ticket_price", … } };</code></td><td>The identical JSON schema, typed as <code>OpenAI.Chat.ChatCompletionTool</code> so the editor flags a wrong shape before you run. The field names (<code>destination_city</code>, <code>required</code>, <code>additionalProperties</code>) match Python exactly.</td></tr>
+<tr><td>50</td><td><code>export const tools: OpenAI.Chat.ChatCompletionTool[] = [priceFunction];</code></td><td>The list of tools passed on each call — the twin of Python's <code>tools</code>.</td></tr>
+<tr><td>53–65</td><td><code>export function handleToolCalls(message): ChatCompletionToolMessageParam[] { for (const toolCall of message.tool_calls ?? []) { … } }</code></td><td>The twin of <code>handle_tool_calls</code> (plural): it loops over every requested call, parses arguments with <code>JSON.parse</code>, runs <code>getTicketPrice</code>, and pushes a <code>{ role: "tool", content, tool_call_id }</code> message for each. <code>?? []</code> guards against there being no tool calls.</td></tr>
+<tr><td>68–73</td><td><code>export async function chat(openai, message): Promise&lt;string&gt; { const messages = […]; let response = await openai.chat.completions.create({ model: MODEL, messages, tools }); }</code></td><td>Builds the messages and makes the first call with <code>tools</code>. It is <code>async</code> and the call is <code>await</code>ed because network calls are asynchronous in JavaScript.</td></tr>
+<tr><td>75–81</td><td><code>while (response.choices[0]?.finish_reason === "tool_calls") { messages.push(responseMessage); messages.push(...handleToolCalls(responseMessage)); response = await openai…create({ model: MODEL, messages, tools }); }</code></td><td>The full loop (matching the Python <code>while</code> version): while the model keeps asking for tools, append its request and the results, then call again. The spread <code>...handleToolCalls(...)</code> adds every result message. When the finish reason changes, the loop ends and the final text is returned.</td></tr>
+<tr><td>84–96</td><td><code>async function main() { console.log(getTicketPrice("London")); … if (!process.env.OPENAI_API_KEY) { … return; } const openai = new OpenAI(); const reply = await chat(openai, "How much is a ticket to Tokyo?"); }</code></td><td>A small runner. It first calls the tool directly (no network) as an offline check, prints the schema, and only runs the live loop if a key is set. This is how the port was verified without a key.</td></tr>
+<tr><td>99–104</td><td><code>if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) { main().catch(…); }</code></td><td>Runs <code>main()</code> only when the file is executed directly, not when another file imports it — so the React app and the server can import <code>chat</code> and the schema without triggering the demo.</td></tr>
+</table></div>
+</div>
+
+<h2>The message list grows by two rows</h2>
+<p>The clearest way to see the trick is to watch the <code>messages</code> list. Before the round trip it ends with your
+question. After it, two rows have been added: the model's request to use the tool (an <code>assistant</code> message
+carrying <code>tool_calls</code>), and your answer to that request (a <code>tool</code> message). The model then reads
+the whole list and writes its final reply.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Before and after the round trip, the messages list gains an assistant tool-call row and a tool result row">
+  <text class="title" x="180" y="28" text-anchor="middle">Before the round trip</text>
+  <rect class="box" x="40" y="44" width="280" height="34" rx="8" />
+  <text class="small" x="180" y="66" text-anchor="middle">system — "You are FlightAI…"</text>
+  <rect class="box" x="40" y="86" width="280" height="34" rx="8" />
+  <text class="small" x="180" y="108" text-anchor="middle">user — "How much to London?"</text>
+
+  <text class="title" x="580" y="28" text-anchor="middle">After the round trip</text>
+  <rect class="box" x="440" y="44" width="280" height="30" rx="8" />
+  <text class="small" x="580" y="64" text-anchor="middle">system — "You are FlightAI…"</text>
+  <rect class="box" x="440" y="80" width="280" height="30" rx="8" />
+  <text class="small" x="580" y="100" text-anchor="middle">user — "How much to London?"</text>
+  <rect class="box box-info" x="440" y="116" width="280" height="42" rx="8" />
+  <text class="small" x="580" y="134" text-anchor="middle">assistant — tool_calls:</text>
+  <text class="small" x="580" y="150" text-anchor="middle">get_ticket_price(London)</text>
+  <rect class="box box-ok" x="440" y="164" width="280" height="42" rx="8" />
+  <text class="small" x="580" y="182" text-anchor="middle">tool — "…to London is $799"</text>
+  <text class="small" x="580" y="198" text-anchor="middle">tool_call_id links it to the request</text>
+  <rect class="box box-solid" x="440" y="212" width="280" height="34" rx="8" />
+  <text class="on-solid" x="580" y="234" text-anchor="middle">assistant — final answer</text>
+
+  <path class="arrow" d="M 324,100 H 436" />
+  <text class="small accent" x="380" y="270" text-anchor="middle">two new rows added, then the model is asked again</text>
+</svg>
+<figcaption>How to read it: the same list, before and after. <strong>The <code>assistant</code> request and the
+<code>tool</code> result are both appended, in that order, before the second call.</strong></figcaption>
+</figure>
+
+<h2>What makes this "agentic"</h2>
+<p>The <code>while</code> loop is the seed of an agent. On each pass the model can ask for tools, see the results, and
+decide what to do next — including asking for more tools — until it is ready to answer. The model is now steering a
+little loop in your program, choosing actions based on what it learns. That feedback loop, model to tool to model, is
+exactly what grows into the agents of later weeks.</p>
+
+<details class="primer">
+<summary>New to agents? How a tool loop becomes one</summary>
+<p>An <a class="term" href="glossary.html#agent">agent</a> is a model placed inside a loop where it can take actions and
+react to their results, working toward a goal over several steps instead of one reply. Today's <code>while</code> loop
+is the smallest possible version: ask the model, run any tools it wants, feed the results back, repeat until it is done.
+Add more tools, memory, and planning and you have the agentic systems the course builds later. The important shift is
+that the model is no longer just answering — it is <em>deciding what to do next</em>.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Code structure of day4: the chat loop uses tools and handle_tool_calls, which calls get_ticket_price">
+  <rect class="box box-info" x="300" y="20" width="160" height="50" rx="8" />
+  <text class="label" x="380" y="42" text-anchor="middle">chat()</text>
+  <text class="small" x="380" y="60" text-anchor="middle">the round-trip loop</text>
+  <rect class="box" x="40" y="120" width="200" height="50" rx="8" />
+  <text class="mono" x="140" y="142" text-anchor="middle">tools / priceFunction</text>
+  <text class="small" x="140" y="160" text-anchor="middle">the JSON schema</text>
+  <rect class="box" x="290" y="120" width="180" height="50" rx="8" />
+  <text class="mono" x="380" y="142" text-anchor="middle">handle_tool_calls()</text>
+  <text class="small" x="380" y="160" text-anchor="middle">unpacks the request</text>
+  <rect class="box box-ok" x="540" y="120" width="190" height="50" rx="8" />
+  <text class="mono" x="635" y="142" text-anchor="middle">get_ticket_price()</text>
+  <text class="small" x="635" y="160" text-anchor="middle">the real function</text>
+  <path class="arrow" d="M 320,70 L 180,118" />
+  <text class="small" x="230" y="100" text-anchor="middle">passed to the model</text>
+  <path class="arrow" d="M 380,70 V 118" />
+  <text class="small" x="470" y="100" text-anchor="middle">called on tool_calls</text>
+  <path class="arrow" d="M 470,146 H 538" />
+  <text class="small" x="505" y="190" text-anchor="middle">runs it</text>
+</svg>
+<figcaption>How to read it: arrows show who uses whom. <strong><code>chat()</code> hands the schema to the model and, when
+the model asks, routes the request through <code>handle_tool_calls()</code> to the real function.</strong></figcaption>
+</figure>
+
+<div class="callout ok">
+<strong>What you should see</strong>
+<p>We did <strong>not</strong> run the live API loop here — it needs a paid key — so the assistant's exact wording cannot
+be shown. What we <strong>did</strong> run, offline and in TypeScript, is the tool logic itself: calling
+<code>getTicketPrice("London")</code> returned <code>The price of a ticket to London is $799</code>, and the schema
+printed in the expected shape. The TypeScript project also <strong>type-checks and builds</strong> (<code>tsc</code>
+clean, <code>vite build</code> succeeds). Following the course, the live chat should behave like this:</p>
+<ul>
+<li>Ask "how much is a ticket to London?" and the terminal prints <code>Tool called for city London</code> (the model
+chose to call the tool), then the assistant replies with <strong>$799</strong>.</li>
+<li>Paris returns <strong>$899</strong>, Tokyo <strong>$1400</strong>, Berlin <strong>$499</strong> — the four cities in
+the price list.</li>
+<li>Ask about a city that is not listed (the instructor tries "Timbuktu") and the tool returns "Unknown ticket price",
+so the assistant honestly says it does not have that price — because the system prompt told it not to guess.</li>
+</ul>
+<p>Before any tool is added, the same assistant refuses to quote a price at all ("I don't have real-time pricing"),
+which is the contrast the lab is built to show.</p>
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes</strong>
+<ul>
+<li><strong>Schema and function out of step.</strong> The <code>name</code> in the schema must match the name your code
+checks (<code>get_ticket_price</code>), and the property names (<code>destination_city</code>) must match the keys you
+read with <code>json.loads</code> / <code>JSON.parse</code>. A mismatch means your <code>if</code> never fires, or the
+argument comes back <code>None</code>/<code>undefined</code>.</li>
+<li><strong>Forgetting to send the tool result back.</strong> You must append <em>both</em> the assistant's request and
+the <code>tool</code> result, then call the model again. Skip the second call and you return the model's request object
+instead of an answer; skip the result row and the model has nothing to work with.</li>
+<li><strong>Dropping the <code>tool_call_id</code>.</strong> The result message must carry the same
+<code>tool_call_id</code> as the request, or the API cannot match the result to the call and rejects the message.</li>
+<li><strong>Infinite tool loops.</strong> With the <code>while</code> version, if your tool always leaves the model
+wanting more (for example it returns an error every time), the loop never ends. Guard real loops with a maximum number
+of rounds.</li>
+<li><strong>Expecting the model to run your code.</strong> It cannot. It only asks; your program runs the function.
+Nothing happens unless your <code>handle_tool_call(s)</code> actually calls it.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A <a class="term" href="glossary.html#tool">tool</a> is one of your functions plus a plain-English description; OpenAI
+<a class="term" href="glossary.html#function-calling">function calling</a> lets the model ask for it to be run.</li>
+<li>You describe a tool with a <a class="term" href="glossary.html#json-schema">JSON schema</a> (name, description,
+parameters) and pass it as <code>tools=tools</code> on the chat call.</li>
+<li>The model never runs code. It replies with <code>finish_reason == "tool_calls"</code>, a
+<a class="term" href="glossary.html#tool-call">tool call</a> asking you to run the function with given arguments.</li>
+<li>Your code runs the real function and appends two rows — the assistant's request and a <code>tool</code> result
+(linked by <code>tool_call_id</code>) — then calls the model again so it can write the final answer.</li>
+<li>In the lab, <code>get_ticket_price("London")</code> returns <strong>$799</strong> (verified offline in the TypeScript
+port), and the airline assistant quotes real prices only through the tool.</li>
+<li>Wrapping this in a <code>while</code> loop lets the model call tools repeatedly — the first small step toward an
+<a class="term" href="glossary.html#agent">agent</a>.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="09-w2d3.html"><small>← Previous · Step 09</small>Week 2 · Day 3 — Chatbots with History and Context</a>
+<a class="next" href="11-w2d5.html"><small>Next · Step 11 →</small>Week 2 · Day 5 — Multimodal: Images and Audio</a>
+</nav>
+</main>
+</body>
+</html>

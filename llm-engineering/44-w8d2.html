@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>44 · Week 8 · Day 2 — Deploying the Pricer and the Ensemble</title>
+<meta name="description" content="Deploy the fine-tuned model to the cloud (Modal) as a service, then combine several pricing models - frontier, your fine-tuned model, and a RAG pricer - into one ensemble estimate.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 44/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 44 of 48 · Week 8 · Day 2 · 9 lessons</div>
+  <h1>Week 8 · Day 2 — Deploying the Pricer and the Ensemble</h1>
+  <p class="lead">Deploy the fine-tuned model to the cloud (Modal) as a service, then combine several pricing models - frontier, your fine-tuned model, and a RAG pricer - into one ensemble estimate.</p>
+  <span class="video-link extra">Companion to Ed Donner&#x27;s course · uv setup · Python + TypeScript/React · code verified against the repo</span>
+</section>
+<p>The instructor calls this the toughest day of the whole course, so take it slowly. Two big things happen.
+First, the fine-tuned open-source pricer you trained last week stops living only on your machine: you deploy
+it to the cloud with <a class="term" href="glossary.html#modal">Modal</a> so any Python code can call it like
+a normal function, while the real work runs on a cloud GPU. Second, you stop relying on a single model. You
+build an <a class="term" href="glossary.html#ensemble">ensemble</a> &#8212; several different pricing models
+whose guesses are combined into one estimate that is steadier than any of them alone.</p>
+
+<p>The project behind all of this is "The Price is Right": an autonomous system that watches for online deals,
+estimates what each item is really worth, and sends a push notification when something looks like a bargain.
+The piece we assemble today is the price estimator. It will draw on three very different pricers at once: a
+<a class="term" href="glossary.html#rag">RAG</a>-based frontier pricer, your deployed fine-tuned specialist,
+and a machine-learning model built on vector embeddings.</p>
+
+<h2>Why deploy the model at all</h2>
+
+<p>Last week's fine-tuned model is just weights sitting on a GPU during a notebook session. The moment the
+notebook closes, it is gone, and nothing else can reach it. For a real system &#8212; an
+<a class="term" href="glossary.html#agent">agent</a> that runs on a schedule and prices hundreds of deals
+&#8212; you need the model to be <em>always reachable</em>. That means turning it into a <strong>service</strong>:
+code that lives in the cloud, waits for requests, runs the model on a GPU when asked, and returns an answer.</p>
+
+<p>The clever part of Modal is that, from your side, calling that cloud service looks almost exactly like
+calling a local function. You write a small piece of ordinary Python; behind the scenes it reaches out to
+your model running on a GPU in the cloud, and you pay only for the seconds it actually runs.</p>
+
+<details class="primer">
+<summary>New to Modal? What it is and why it matters</summary>
+<p><a class="term" href="glossary.html#modal">Modal</a> is a cloud platform for running Python code &#8212;
+including code that needs a GPU &#8212; without you managing any servers. You describe, in Python, what your
+code needs (a GPU, certain libraries, your model file) and Modal builds that environment in the cloud and runs
+your function there on demand. There are other platforms that do similar things; the course uses Modal because
+it is simple and the code stays pure Python. The key idea for today: you deploy your fine-tuned pricer once,
+and from then on any program can call it remotely.</p>
+</details>
+
+<details class="primer">
+<summary>New to serverless? What "pay only for what you use" means</summary>
+<p><a class="term" href="glossary.html#serverless">Serverless</a> does not mean there is no server &#8212; it
+means <em>you</em> never rent, start, or shut down one. You hand the platform your code; it starts a machine
+when a request arrives, runs your code, and stops the machine when there is nothing to do. You are billed for
+the exact time your code ran, not for a GPU idling all month. The trade-off is the <strong>cold start</strong>:
+the first call after a quiet period has to wake a machine and load your model, so it is slow; later calls,
+while the machine is still warm, are fast.</p>
+</details>
+
+<details class="primer">
+<summary>New to "deploying a model as a service"? The shape of it</summary>
+<p>A <strong>service</strong> is code that runs continuously (or wakes on demand) and answers requests. To turn
+a model into a service you wrap it: load the weights once when the service starts, expose a function like
+<code>price(description)</code> that runs the model and returns a number, and give the whole thing a name so
+callers can find it. In this course that wrapper is a separate file, <code>pricer_service.py</code>, which you
+publish to Modal with a single <code>modal deploy</code> command. After that the service has a stable name
+(<code>pricer-service</code>) and a class (<code>Pricer</code>), and the notebook simply looks it up by those
+names and calls it.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Local Python code on your laptop calls a deployed pricer service running on a GPU in the Modal cloud">
+  <rect class="zone" x="16" y="30" width="330" height="190" rx="8"/>
+  <text x="181" y="52" text-anchor="middle" class="title">Your laptop</text>
+  <rect class="box" x="44" y="70" width="274" height="54" rx="8"/>
+  <text x="181" y="94" text-anchor="middle" class="small">notebook / agent code (Python)</text>
+  <text x="181" y="112" text-anchor="middle" class="mono small">pricer.price.remote(text)</text>
+  <text x="181" y="150" text-anchor="middle" class="small">looks and feels like a</text>
+  <text x="181" y="168" text-anchor="middle" class="small">normal local function call</text>
+  <text x="181" y="198" text-anchor="middle" class="small">no GPU needed here</text>
+  <rect class="zone" x="414" y="30" width="330" height="190" rx="8"/>
+  <text x="579" y="52" text-anchor="middle" class="title">Modal cloud</text>
+  <rect class="box box-solid" x="442" y="70" width="274" height="60" rx="8"/>
+  <text x="579" y="94" text-anchor="middle" class="on-solid small">pricer-service &#183; class Pricer</text>
+  <text x="579" y="114" text-anchor="middle" class="on-solid small">fine-tuned model on a GPU</text>
+  <rect class="box box-ok" x="472" y="150" width="214" height="44" rx="8"/>
+  <text x="579" y="172" text-anchor="middle" class="small">runs the model, returns $</text>
+  <text x="579" y="188" text-anchor="middle" class="small">billed per second of use</text>
+  <path class="arrow-accent" d="M 318,97 H 440"/>
+  <text x="380" y="88" text-anchor="middle" class="small">request</text>
+  <path class="arrow-ok" d="M 440,180 H 320"/>
+  <text x="380" y="210" text-anchor="middle" class="small">price comes back</text>
+</svg>
+<figcaption>Read left to right, then back. <strong>You write plain local-looking Python; Modal runs the heavy
+model on a cloud GPU and hands the price back.</strong></figcaption>
+</figure>
+
+<h2>How the service is deployed</h2>
+
+<p>The deployment itself lives in a separate file in the repo, <code>pricer_service.py</code> (it is not part
+of today's notebook, so it is described here rather than embedded). In that file you write a Modal class &#8212;
+roughly, a class decorated so Modal knows it needs a GPU and the model's libraries. A method runs once when the
+service starts to load the fine-tuned weights, and a method named <code>price</code> takes a product
+description and returns an estimate. You publish it from a terminal with:</p>
+
+<pre data-lang="ps" data-tag="illustrative"><code>modal deploy pricer_service.py</code></pre>
+
+<p>Modal builds the environment in the cloud, uploads the code, and registers the service under the name
+<code>pricer-service</code> with the class <code>Pricer</code>. From that point on it is callable from anywhere
+&#8212; including today's notebook &#8212; by looking it up with those two names. Your secrets (API keys, the
+Hugging Face token) are stored as <strong>Modal secrets</strong> in Modal's dashboard, never written into the
+code or the deployed file.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 140" role="img" aria-label="Deploy pipeline: write pricer_service.py, run modal deploy, Modal registers a named service with a GPU">
+  <rect class="box" x="16" y="48" width="180" height="54" rx="8"/>
+  <text x="106" y="70" text-anchor="middle" class="small">Write pricer_service.py</text>
+  <text x="106" y="88" text-anchor="middle" class="small">(Modal class + price method)</text>
+  <path class="arrow" d="M 196,75 H 236"/>
+  <rect class="box box-info" x="238" y="48" width="180" height="54" rx="8"/>
+  <text x="328" y="72" text-anchor="middle" class="small">Run once in terminal:</text>
+  <text x="328" y="90" text-anchor="middle" class="mono small">modal deploy</text>
+  <path class="arrow" d="M 418,75 H 458"/>
+  <rect class="box box-solid" x="460" y="48" width="284" height="54" rx="8"/>
+  <text x="602" y="70" text-anchor="middle" class="on-solid small">Named service live on Modal</text>
+  <text x="602" y="88" text-anchor="middle" class="on-solid small">pricer-service &#183; Pricer &#183; GPU ready</text>
+  <text x="380" y="28" text-anchor="middle" class="title">Deploy once, then call it forever</text>
+  <text x="380" y="128" text-anchor="middle" class="small">you deploy a single time; the notebook below only looks the service up and calls it</text>
+</svg>
+<figcaption>The deploy step is a one-off. <strong>After <code>modal deploy</code>, the pricer is a named cloud
+service that any code can reach.</strong></figcaption>
+</figure>
+
+<h2>What an ensemble is, and why combine models</h2>
+
+<p>An <a class="term" href="glossary.html#ensemble">ensemble</a> is simply several models answering the same
+question, with their answers merged into one. The intuition is the one behind "the wisdom of the crowd": each
+model has its own blind spots, but the <em>mistakes</em> tend to point in different directions, so blending the
+guesses cancels some of the error out. Today's ensemble combines three very different estimators:</p>
+
+<ol class="steps">
+<li><span class="eyebrow">Frontier + RAG</span> A <a class="term" href="glossary.html#rag">RAG</a> pricer: it
+finds the five most similar products in a 400,000-item vector store and hands them to a frontier model as
+context, so the model prices with real examples in front of it.</li>
+<li><span class="eyebrow">Specialist</span> Your fine-tuned open-source model, now deployed on Modal &#8212; the
+one that beat the frontier models last week.</li>
+<li><span class="eyebrow">Machine learning</span> A model trained on the same vector embeddings (a classic
+machine-learning regressor on modern transformer vectors), giving a completely independent opinion.</li>
+</ol>
+
+<p>The combiner then produces one number from the three. There are two common ways, and this is the key
+Video-vs-repo difference on this page (see the callout): the video <em>learns</em> a weighted blend with a
+linear regression, while the notebook file embedded below uses a simple fixed weighted average.</p>
+
+<details class="primer">
+<summary>New to ensembles? Why three mediocre models can beat one good one</summary>
+<p>Imagine three friends guessing the price of a gadget. One always guesses a bit high, one tends to anchor on
+similar products, one reasons from raw specs. Any single guess can be well off, but their average is usually
+closer than most individuals, because their errors partly cancel. An <a class="term" href="glossary.html#ensemble">ensemble</a>
+does the same with models. It matters most when the models are <em>different</em> from each other &#8212;
+different training, different data, different method &#8212; because then they fail in different ways. Here the
+three pricers could hardly be more different, which is exactly what makes combining them worthwhile.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Three pricers feed their estimates into a combiner that outputs one blended price">
+  <text x="380" y="26" text-anchor="middle" class="title">The ensemble pricer</text>
+  <rect class="box box-info" x="20" y="48" width="210" height="60" rx="8"/>
+  <text x="125" y="72" text-anchor="middle" class="small">Frontier + RAG pricer</text>
+  <text x="125" y="92" text-anchor="middle" class="small">similar products as context</text>
+  <rect class="box box-ok" x="20" y="120" width="210" height="60" rx="8"/>
+  <text x="125" y="144" text-anchor="middle" class="small">Specialist (fine-tuned)</text>
+  <text x="125" y="164" text-anchor="middle" class="small">deployed on Modal</text>
+  <rect class="box box2" x="20" y="192" width="210" height="46" rx="8"/>
+  <text x="125" y="220" text-anchor="middle" class="small">ML model on embeddings</text>
+  <rect class="box box-solid" x="330" y="104" width="180" height="70" rx="8"/>
+  <text x="420" y="134" text-anchor="middle" class="on-solid">Combiner</text>
+  <text x="420" y="154" text-anchor="middle" class="on-solid small">weighted blend</text>
+  <rect class="box" x="590" y="104" width="150" height="70" rx="8"/>
+  <text x="665" y="134" text-anchor="middle">One price</text>
+  <text x="665" y="154" text-anchor="middle" class="small">steadier estimate</text>
+  <path class="arrow" d="M 230,78 H 300 V 122 H 328"/>
+  <path class="arrow" d="M 230,150 H 328"/>
+  <path class="arrow" d="M 230,215 H 300 V 158 H 328"/>
+  <path class="arrow-accent" d="M 510,139 H 588"/>
+</svg>
+<figcaption>Three independent opinions, one answer. <strong>Because the three pricers work in different ways,
+blending them smooths out each one's particular mistakes.</strong></figcaption>
+</figure>
+
+<h2>Inside the RAG pricer</h2>
+
+<p>The frontier pricer uses <a class="term" href="glossary.html#rag">retrieval-augmented generation</a>, built
+here by hand rather than with a framework. Each of the 400,000 training products is already stored in a Chroma
+vector database as an embedding. To price a new item, the code embeds the item, asks Chroma for the five
+nearest products, and writes those five (with their real prices) into the prompt as context. The frontier model
+then prices the item with concrete, similar examples in front of it &#8212; a strong hint that pushes its guess
+much closer than pricing blind.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="RAG pricing flow: embed the item, query Chroma for five similar products, build a prompt, ask the frontier model, extract the price">
+  <rect class="box" x="12" y="60" width="120" height="50" rx="8"/>
+  <text x="72" y="82" text-anchor="middle" class="small">New item</text>
+  <text x="72" y="100" text-anchor="middle" class="small">description</text>
+  <path class="arrow" d="M 132,85 H 158"/>
+  <rect class="box box-info" x="160" y="60" width="120" height="50" rx="8"/>
+  <text x="220" y="82" text-anchor="middle" class="small">Embed &amp; query</text>
+  <text x="220" y="100" text-anchor="middle" class="small">Chroma store</text>
+  <path class="arrow" d="M 280,85 H 306"/>
+  <rect class="box box2" x="308" y="60" width="130" height="50" rx="8"/>
+  <text x="373" y="82" text-anchor="middle" class="small">5 similar products</text>
+  <text x="373" y="100" text-anchor="middle" class="small">+ their prices</text>
+  <path class="arrow" d="M 438,85 H 464"/>
+  <rect class="box" x="466" y="60" width="130" height="50" rx="8"/>
+  <text x="531" y="82" text-anchor="middle" class="small">Build prompt</text>
+  <text x="531" y="100" text-anchor="middle" class="small">with context</text>
+  <path class="arrow-accent" d="M 596,85 H 622"/>
+  <rect class="box box-solid" x="624" y="60" width="124" height="50" rx="8"/>
+  <text x="686" y="82" text-anchor="middle" class="on-solid small">Frontier model</text>
+  <text x="686" y="100" text-anchor="middle" class="on-solid small">returns price</text>
+  <text x="380" y="28" text-anchor="middle" class="title">How the RAG pricer estimates one item</text>
+  <text x="380" y="150" text-anchor="middle" class="small">retrieval gives the model a head start: it sees real prices of similar products before it guesses</text>
+</svg>
+<figcaption>Left to right. <strong>RAG does not teach the model prices; it <em>shows</em> it similar ones at
+question time, which is why it fits this problem so well.</strong></figcaption>
+</figure>
+
+<h2>The serverless request flow</h2>
+
+<p>When the ensemble asks the specialist for a price, that single line of Python triggers a round-trip to the
+cloud. It helps to picture the steps, because they explain both why the very first call is slow and why the
+rest are quick.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Sequence diagram of a serverless call to Modal: request, cold start, load model, run on GPU, return, then scale down">
+  <text x="130" y="24" text-anchor="middle" class="title">Your code</text>
+  <text x="500" y="24" text-anchor="middle" class="title">Modal cloud GPU</text>
+  <line class="line" x1="130" y1="34" x2="130" y2="250"/>
+  <line class="line" x1="500" y1="34" x2="500" y2="250"/>
+  <path class="arrow-accent" d="M 134,58 H 496"/>
+  <text x="315" y="52" text-anchor="middle" class="small">1. price.remote(description)</text>
+  <rect class="box box-warn" x="520" y="72" width="224" height="46" rx="8"/>
+  <text x="632" y="94" text-anchor="middle" class="small">2. cold start: wake a machine</text>
+  <text x="632" y="110" text-anchor="middle" class="small">load the fine-tuned model (slow, once)</text>
+  <rect class="box box-ok" x="520" y="128" width="224" height="40" rx="8"/>
+  <text x="632" y="152" text-anchor="middle" class="small">3. run the model on the GPU</text>
+  <path class="arrow-ok" d="M 496,190 H 134"/>
+  <text x="315" y="184" text-anchor="middle" class="small">4. estimated price returned</text>
+  <rect class="box" x="520" y="206" width="224" height="40" rx="8"/>
+  <text x="632" y="230" text-anchor="middle" class="small">5. idle, then scale down to zero</text>
+  <text x="130" y="230" text-anchor="middle" class="small">pays only for 2&#8211;3</text>
+</svg>
+<figcaption>Time flows down. <strong>Step 2 is the cold start that makes the first call slow; once warm, later
+calls skip it. When traffic stops, Modal scales to zero so you stop paying.</strong></figcaption>
+</figure>
+
+<div class="callout">
+<strong>Not run here</strong>
+<p>Nothing on this page was executed on this machine. The code is the course's own, and running it needs a
+deployed Modal service, a populated 400,000-item Chroma vector store, a frontier-model API key, and the
+fine-tuned weights. Treat the code as a faithful copy of the lab to run yourself, not as output captured here.
+The prices in the diagrams are illustrative.</p>
+</div>
+
+<h2>The full program</h2>
+
+<p>Here is the complete notebook file. It builds the vector store, visualizes it, defines the RAG pricer,
+connects to the deployed specialist, loads the machine-learning pricer, and finally defines the ensemble. Read
+it once top to bottom; the line-by-line tables below focus on the three parts that matter most today &#8212;
+calling the deployed model, the RAG pricer, and the ensemble combiner.</p>
+
+<pre data-file="week8/day2.py" data-lang="py" data-tag="complete file"><code># imports
+
+import os
+import logging
+from dotenv import load_dotenv
+from huggingface_hub import login
+import numpy as np
+import re
+from sentence_transformers import SentenceTransformer
+import chromadb
+from sklearn.manifold import TSNE
+import plotly.graph_objects as go
+from litellm import completion
+from tqdm.notebook import tqdm
+from agents.evaluator import evaluate
+from agents.items import Item
+
+# environment
+
+load_dotenv(override=True)
+DB = "products_vectorstore"
+
+# Log in to HuggingFace
+# If you don't have a HuggingFace account, you can set one up for free at www.huggingface.co
+# And then add the HF_TOKEN to your .env file as explained in the project README
+
+hf_token = os.environ['HF_TOKEN']
+login(token=hf_token, add_to_git_credential=False)
+
+LITE_MODE = False
+
+username = "ed-donner"
+dataset = f"{username}/items_lite" if LITE_MODE else f"{username}/items_full"
+
+train, val, test = Item.from_hub(dataset)
+
+print(f"Loaded {len(train):,} training items, {len(val):,} validation items, {len(test):,} test items")
+
+client = chromadb.PersistentClient(path=DB)
+
+encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+
+# Pass in a list of texts, get back a numpy array of vectors
+
+vector = encoder.encode(["A proficient AI engineer who has almost reached the finale of AI Engineering Core Track!"])[0]
+print(vector.shape)
+vector
+
+# Check if the collection exists; if not, create it
+
+collection_name = "products"
+existing_collection_names = [collection.name for collection in client.list_collections()]
+
+if collection_name not in existing_collection_names:
+    collection = client.create_collection(collection_name)
+    for i in tqdm(range(0, len(train), 1000)):
+        documents = [item.summary for item in train[i: i+1000]]
+        vectors = encoder.encode(documents).astype(float).tolist()
+        metadatas = [{"category": item.category, "price": item.price} for item in train[i: i+1000]]
+        ids = [f"doc_{j}" for j in range(i, i+1000)]
+        ids = ids[:len(documents)]
+        collection.add(ids=ids, documents=documents, embeddings=vectors, metadatas=metadatas)
+
+collection = client.get_or_create_collection(collection_name)
+
+# It is very fun turning this up to 800_000 and seeing the full dataset visualized,
+# but it almost crashes my box every time so do that at your own risk!! 10_000 is safe!
+
+MAXIMUM_DATAPOINTS = 10_000
+
+CATEGORIES = ['Appliances', 'Automotive', 'Cell_Phones_and_Accessories', 'Electronics','Musical_Instruments', 'Office_Products', 'Tools_and_Home_Improvement', 'Toys_and_Games']
+COLORS = ['cyan', 'blue', 'brown', 'orange', 'yellow', 'green' , 'purple', 'red']
+
+# Prework
+result = collection.get(include=['embeddings', 'documents', 'metadatas'], limit=MAXIMUM_DATAPOINTS)
+vectors = np.array(result['embeddings'])
+documents = result['documents']
+categories = [metadata['category'] for metadata in result['metadatas']]
+colors = [COLORS[CATEGORIES.index(c)] for c in categories]
+
+# Let's try a 2D chart
+# TSNE stands for t-distributed Stochastic Neighbor Embedding - it's a common technique for reducing dimensionality of data
+
+tsne = TSNE(n_components=2, random_state=42)
+reduced_vectors = tsne.fit_transform(vectors)
+
+# Create the 2D scatter plot
+fig = go.Figure(data=[go.Scatter(
+    x=reduced_vectors[:, 0],
+    y=reduced_vectors[:, 1],
+    mode='markers',
+    marker=dict(size=4, color=colors, opacity=0.7),
+    text=[f"Category: {c}&lt;br&gt;Text: {d[:50]}..." for c, d in zip(categories, documents)],
+    hoverinfo='text'
+)])
+
+fig.update_layout(
+    title='2D Chroma Vectorstore Visualization',
+    scene=dict(xaxis_title='x', yaxis_title='y'),
+    width=1200,
+    height=800,
+    margin=dict(r=20, b=10, l=10, t=40)
+)
+
+fig.show()
+
+# Let's try 3D!
+
+tsne = TSNE(n_components=3, random_state=42)
+reduced_vectors = tsne.fit_transform(vectors)
+
+# Create the 3D scatter plot
+fig = go.Figure(data=[go.Scatter3d(
+    x=reduced_vectors[:, 0],
+    y=reduced_vectors[:, 1],
+    z=reduced_vectors[:, 2],
+    mode='markers',
+    marker=dict(size=2, color=colors, opacity=0.7),
+    text=[f"Category: {c}&lt;br&gt;Text: {d[:50]}..." for c, d in zip(categories, documents)],
+    hoverinfo='text'
+)])
+
+fig.update_layout(
+    title='3D Chroma Vector Store Visualization',
+    scene=dict(xaxis_title='x', yaxis_title='y', zaxis_title='z'),
+    width=1200,
+    height=800,
+    margin=dict(r=20, b=10, l=10, t=40)
+)
+
+fig.show()
+
+test[0]
+
+def vector(item):
+    return encoder.encode(item.summary)
+
+def find_similars(item):
+    vec = vector(item)
+    results = collection.query(query_embeddings=vec.astype(float).tolist(), n_results=5)
+    documents = results['documents'][0][:]
+    prices = [m['price'] for m in results['metadatas'][0][:]]
+    return documents, prices
+
+find_similars(test[0])
+
+# We need to give some context to GPT-5.1 by selecting 5 products with similar descriptions
+
+def make_context(similars, prices):
+    message = "For context, here are some other items that might be similar to the item you need to estimate.\n\n"
+    for similar, price in zip(similars, prices):
+        message += f"Potentially related product:\n{similar}\nPrice is ${price:.2f}\n\n"
+    return message
+
+documents, prices = find_similars(test[0])
+print(make_context(documents, prices))
+
+def messages_for(item, similars, prices):
+    message = f"Estimate the price of this product. Respond with the price, no explanation\n\n{item.summary}\n\n"
+    message += make_context(similars, prices)
+    return [{"role": "user", "content": message}]
+
+documents, prices = find_similars(test[0])
+print(messages_for(test[0], documents, prices)[0]['content'])
+
+# The function for gpt-5.1
+
+def gpt_5__1_rag(item):
+    documents, prices = find_similars(item)
+    response = completion(model="gpt-5.1", messages=messages_for(item, documents, prices), seed=42)
+    return response.choices[0].message.content
+
+# How much does our favorite distortion pedal cost?
+
+test[0].price
+
+# Let's do this!!
+
+gpt_5__1_rag(test[0])
+
+evaluate(gpt_5__1_rag, test)
+
+import modal
+Pricer = modal.Cls.from_name("pricer-service", "Pricer")
+pricer = Pricer()
+
+def specialist(item):
+    return pricer.price.remote(item.summary)
+
+
+def get_price(reply):
+    reply = reply.replace("$", "").replace(",", "")
+    match = re.search(r"[-+]?\d*\.\d+|\d+", reply)
+    return float(match.group()) if match else 0
+
+
+from agents.deep_neural_network import DeepNeuralNetworkInference
+
+runner = DeepNeuralNetworkInference()
+runner.setup()
+runner.load("deep_neural_network.pth")
+
+def deep_neural_network(item):
+    return runner.inference(item.summary)
+
+def ensemble(item):
+    price1 = get_price(gpt_5__1_rag(item))
+    price2 = specialist(item)
+    price3 = deep_neural_network(item)
+    return price1 * 0.8 + price2 * 0.1 + price3 * 0.1
+
+
+evaluate(ensemble, test)
+
+root = logging.getLogger()
+root.setLevel(logging.INFO)
+
+from agents.frontier_agent import FrontierAgent
+
+agent = FrontierAgent(collection)
+agent.price("Quadcast HyperX condenser mic, connects via usb-c to your computer for crystal clear audio")
+
+agent.price("Shure MV7+ professional podcaster microphone with usb-c and XLR outputs")
+
+from agents.neural_network_agent import NeuralNetworkAgent
+agent = NeuralNetworkAgent()
+
+
+agent.price("Shure MV7+ professional podcaster microphone with usb-c and XLR outputs")
+
+from agents.ensemble_agent import EnsembleAgent
+agent = EnsembleAgent(collection)
+
+agent.price("Shure MV7+ professional podcaster microphone with usb-c and XLR outputs")</code></pre>
+
+<p>The earlier part of the file (lines 1&#8211;131) is setup you have met before: it imports the libraries,
+logs in to Hugging Face, loads the training and test data, builds the Chroma vector store from the product
+descriptions using a sentence-transformer embedding, and draws the 2D and 3D scatter plots that let you
+<em>see</em> similar products clustering together. Those plots are an intuition-building exercise, not part of
+the pricer. The pricing logic starts at line 135.</p>
+
+<h3>Line by line</h3>
+
+<p>Calling the deployed model. This is the whole point of the Modal deployment: four short lines connect to the
+cloud service and wrap it in a local-looking function.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>183</td><td><code>import modal</code></td><td>Brings in the Modal client library so this notebook can reach services you deployed to the Modal cloud.</td></tr>
+<tr><td>184</td><td><code>Pricer = modal.Cls.from_name("pricer-service", "Pricer")</code></td><td>Looks up the deployed service by name. The first argument is the app name (<code>pricer-service</code>), the second is the class inside it (<code>Pricer</code>). This does not run anything yet &#8212; it just gives you a handle to the remote class. The names must match exactly what <code>modal deploy</code> registered.</td></tr>
+<tr><td>185</td><td><code>pricer = Pricer()</code></td><td>Creates an instance of the remote class. You use it like an ordinary object, but its methods actually execute in the cloud.</td></tr>
+<tr><td>187&#8211;188</td><td><code>def specialist(item):</code> / <code>return pricer.price.remote(item.summary)</code></td><td>Wraps the remote call in a plain function. <code>item.summary</code> is the product description. The crucial part is <code>.remote</code>: it tells Modal to run the <code>price</code> method <em>on the cloud GPU</em> and bring back the result, rather than trying to run it locally. Drop <code>.remote</code> and the call has nowhere to run.</td></tr>
+<tr><td>191&#8211;194</td><td><code>def get_price(reply):</code> &#8230; <code>re.search(...)</code></td><td>A tiny helper that pulls a number out of a model's text reply. It strips <code>$</code> and commas, finds the first number with a regular expression, and returns it as a float (or <code>0</code> if none is found). The frontier model replies with text, so its answer must be parsed; the specialist already returns a number, so it does not need this.</td></tr>
+</table></div>
+
+<p>The RAG pricer. These functions find similar products and turn them into a prompt for the frontier model.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>13</td><td><code>from litellm import completion</code></td><td>Imports <code>completion</code> from LiteLLM, a thin wrapper that calls many providers' models through one function. The video called OpenAI directly; this file uses LiteLLM instead (see Video vs repo).</td></tr>
+<tr><td>135&#8211;136</td><td><code>def vector(item):</code> / <code>return encoder.encode(item.summary)</code></td><td>Turns a product's text into an embedding vector using the sentence-transformer loaded earlier. This is the same model used to fill the vector store, so new items land in the same space as the stored ones.</td></tr>
+<tr><td>138&#8211;140</td><td><code>def find_similars(item):</code> &#8230; <code>collection.query(query_embeddings=..., n_results=5)</code></td><td>Embeds the item, then asks the Chroma collection for the five nearest stored products. The embedding is converted to plain Python floats in a list because that is the form Chroma's query expects.</td></tr>
+<tr><td>141&#8211;143</td><td><code>documents = results['documents'][0][:]</code> / <code>prices = [m['price'] for m in results['metadatas'][0][:]]</code></td><td>Unpacks the query result into two lists: the text of the five similar products and their real prices (kept in each item's metadata). These become the context.</td></tr>
+<tr><td>149&#8211;153</td><td><code>def make_context(similars, prices):</code> &#8230;</td><td>Builds the context string: a short intro line, then each similar product followed by <code>Price is $&#8230;</code>. This is the "here are comparable items" block that gives the model its head start.</td></tr>
+<tr><td>158&#8211;161</td><td><code>def messages_for(item, similars, prices):</code> &#8230;</td><td>Assembles the final chat message: an instruction to estimate the price and reply with the price only, the item's own description, then the context block. It returns the list-of-dicts shape every chat model expects.</td></tr>
+<tr><td>168&#8211;171</td><td><code>def gpt_5__1_rag(item):</code> &#8230; <code>completion(model="gpt-5.1", messages=..., seed=42)</code></td><td>The RAG pricer itself: find similar products, build the messages, and call the frontier model. <code>seed=42</code> asks for repeatable output; the reply text is returned and later passed through <code>get_price</code>. (The video used <code>gpt-4o-mini</code> here.)</td></tr>
+</table></div>
+
+<p>The ensemble combiner. This loads the third pricer and blends all three into one estimate.</p>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>197</td><td><code>from agents.deep_neural_network import DeepNeuralNetworkInference</code></td><td>Imports the third pricer &#8212; a machine-learning model that prices from the embedding vectors. In the repo it is packaged as a reusable class in the <code>agents</code> folder.</td></tr>
+<tr><td>199&#8211;201</td><td><code>runner = DeepNeuralNetworkInference()</code> / <code>runner.setup()</code> / <code>runner.load("deep_neural_network.pth")</code></td><td>Creates the model runner, prepares it (loads the embedding model), and loads the saved weights from disk. Loading pre-trained weights means you skip the slow training step every run.</td></tr>
+<tr><td>203&#8211;204</td><td><code>def deep_neural_network(item):</code> / <code>return runner.inference(item.summary)</code></td><td>Wraps the third pricer in a plain function, matching the shape of <code>specialist</code> and <code>gpt_5__1_rag</code> so the ensemble can call all three the same way.</td></tr>
+<tr><td>206&#8211;209</td><td><code>def ensemble(item):</code> / <code>price1 = get_price(gpt_5__1_rag(item))</code> / <code>price2 = specialist(item)</code> / <code>price3 = deep_neural_network(item)</code></td><td>The combiner. It gets one estimate from each pricer: the RAG frontier price (parsed from text with <code>get_price</code>), the deployed specialist's price, and the machine-learning price.</td></tr>
+<tr><td>210</td><td><code>return price1 * 0.8 + price2 * 0.1 + price3 * 0.1</code></td><td>Blends the three into one number with fixed weights &#8212; 80% to the RAG frontier pricer, 10% each to the other two. This is a <em>weighted average</em>. The video instead <em>learns</em> the weights with a linear regression (see Video vs repo); the weights here are a simple hand-set version of the same idea.</td></tr>
+<tr><td>213</td><td><code>evaluate(ensemble, test)</code></td><td>Runs the course's test harness on the ensemble across the test set, so you can compare its accuracy against each individual pricer.</td></tr>
+</table></div>
+
+<p>The tail of the file (lines 215&#8211;234) shows the production form of the same ideas: the repo packages
+each pricer as an agent class &#8212; <code>FrontierAgent</code>, <code>NeuralNetworkAgent</code> and
+<code>EnsembleAgent</code> &#8212; so the finished system can create them and call <code>.price(...)</code>
+without the loose notebook functions. The <code>EnsembleAgent</code> is the same combiner wrapped in a class.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Illustrative bar chart suggesting the ensemble error is close to the best single model, with other models having larger error">
+  <text x="380" y="24" text-anchor="middle" class="title">Error by pricer (lower is better) &#8212; illustrative</text>
+  <line class="line" x1="150" y1="40" x2="150" y2="196"/>
+  <line class="line" x1="150" y1="196" x2="720" y2="196"/>
+  <text x="40" y="66" class="label">ML model</text>
+  <rect class="box-bad" x="150" y="54" width="470" height="22" rx="4"/>
+  <text x="40" y="104" class="label">RAG frontier</text>
+  <rect class="box-warn" x="150" y="92" width="300" height="22" rx="4"/>
+  <text x="40" y="142" class="label">Specialist</text>
+  <rect class="box-ok" x="150" y="130" width="150" height="22" rx="4"/>
+  <text x="40" y="180" class="label">Ensemble</text>
+  <rect class="box-ok" x="150" y="168" width="168" height="22" rx="4"/>
+  <text x="380" y="220" text-anchor="middle" class="small">shapes only, not measured here: the ensemble lands near the best single model and is typically steadier</text>
+</svg>
+<figcaption>Illustrative, not measured on this machine. <strong>An ensemble rarely beats the single best model by
+a lot; its value is a more reliable estimate across many different items.</strong> The instructor found it a
+hair worse on his noisy test set and left tuning it as a challenge.</figcaption>
+</figure>
+
+<div class="callout ok">
+<strong>What you should see</strong>
+<p>After deploying, <code>modal deploy pricer_service.py</code> prints that the service is deployed and shows a
+dashboard link. In the notebook, the RAG pricer returns a price close to the true one on a test item, and
+<code>evaluate</code> draws a chart with many green points. The ensemble's first run is slow &#8212; a few
+minutes while Modal warms up the specialist &#8212; then a few seconds per item after that. Its overall score
+lands very close to the specialist's; do not be surprised if it is not dramatically better.</p>
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes and real costs</strong>
+<ul>
+<li><strong>Cold starts feel like a hang.</strong> The first <code>.remote</code> call after a quiet period has
+to wake a machine and load the model &#8212; that can take minutes. It is not frozen; later calls are fast.</li>
+<li><strong>A running GPU service costs money.</strong> Serverless bills per second, but a service that never
+scales down, or one you set to stay warm, keeps a GPU running and billing. Check Modal's dashboard and tear
+down services you are not using.</li>
+<li><strong>Keep secrets out of the code.</strong> Never paste API keys or your Hugging Face token into
+<code>pricer_service.py</code> or the notebook. Store them as Modal secrets (and in your local <code>.env</code>),
+so they are never committed to git or baked into the deployed file.</li>
+<li><strong>Wrong service name.</strong> <code>modal.Cls.from_name</code> must use the exact app and class names
+from the deploy, or the lookup fails. A typo here is the most common error.</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Video vs repo</strong>
+<ul>
+<li><strong>The third pricer.</strong> The video builds a <em>random forest</em> (a traditional machine-learning
+model) on the embeddings. The repo file embedded here uses a <em>deep neural network</em> instead
+(<code>DeepNeuralNetworkInference</code>, <code>NeuralNetworkAgent</code>). The role is identical: a
+non-LLM opinion trained on the same vectors.</li>
+<li><strong>How the combiner is built.</strong> The video trains a <em>linear regression</em> over the model
+outputs &#8212; and even adds the minimum and maximum of the three as extra inputs &#8212; letting the data
+pick the weights. The embedded <code>ensemble</code> function uses a fixed weighted average
+(<code>0.8 / 0.1 / 0.1</code>). Same idea, simpler form; the production <code>EnsembleAgent</code> keeps the
+learned-weights approach.</li>
+<li><strong>Frontier model and SDK.</strong> The video calls <code>gpt-4o-mini</code> through the OpenAI client;
+this file calls <code>gpt-5.1</code> through <code>litellm</code>. Model names are values you swap as providers
+retire them.</li>
+<li><strong>No LangChain.</strong> Both deliberately build the RAG pipeline by hand (embed, query Chroma, build
+the prompt) rather than using LangChain, so you can see exactly what happens under the hood.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>A fine-tuned model is only useful to a real system if it is <em>reachable</em>; <a class="term" href="glossary.html#modal">Modal</a> turns it into a cloud service you call like a local function.</li>
+<li>You deploy once with <code>modal deploy pricer_service.py</code>; the notebook then connects with <code>modal.Cls.from_name("pricer-service", "Pricer")</code> and calls <code>pricer.price.remote(...)</code> to run the model on a cloud GPU.</li>
+<li><a class="term" href="glossary.html#serverless">Serverless</a> means you pay only for the seconds your code runs; the price is a <strong>cold start</strong> on the first call, after which calls are fast.</li>
+<li>An <a class="term" href="glossary.html#ensemble">ensemble</a> combines three different pricers &#8212; a <a class="term" href="glossary.html#rag">RAG</a> frontier pricer, the deployed specialist, and a machine-learning model &#8212; into one steadier estimate.</li>
+<li>The RAG pricer finds five similar products in a 400,000-item Chroma store and feeds them to the frontier model as context, built by hand without LangChain.</li>
+<li>The combiner blends the three estimates: a fixed weighted average in this file, a learned linear regression in the video. The result is reliable rather than dramatically more accurate.</li>
+<li>Keep keys in Modal secrets and your <code>.env</code>, watch for idle GPU costs, and remember this code was not run here &#8212; it needs the deployed service, the vector store, and keys.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="43-w8d1.html"><small>← Previous · Step 43</small>Week 8 · Day 1 — The Agent System and Structured Outputs</a>
+<a class="next" href="45-w8d3.html"><small>Next · Step 45 →</small>Week 8 · Day 3 — Structured Outputs and the Scanner Agent</a>
+</nav>
+</main>
+</body>
+</html>

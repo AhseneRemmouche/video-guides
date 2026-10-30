@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>42 · Week 7 · Project Build — The Open-Source Pricer, Step by Step</title>
+<meta name="description" content="Fine-tune an open-source model with QLoRA in Python + uv (on a Colab/GPU), then point the Week 6 React pricer demo at your fine-tuned model&#x27;s endpoint.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">LLM Engineering · Course Guide</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 42/48</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 42 of 48 · Week 7 · Project build</div>
+  <h1>Week 7 · Project Build — The Open-Source Pricer, Step by Step</h1>
+  <p class="lead">Fine-tune an open-source model with QLoRA in Python + uv (on a Colab/GPU), then point the Week 6 React pricer demo at your fine-tuned model&#x27;s endpoint.</p>
+  <span class="video-link extra">Build it yourself · Python + uv (QLoRA on a GPU) and the pricer demo UI</span>
+</section>
+<p>This is the Week 7 project. By the end of it you will have taken a free, open-weights language model,
+taught it one narrow skill - estimating the price of a product from its description - and ended up with
+something that holds its own against a frontier model many times its size. The technique is
+<a class="term" href="glossary.html#qlora">QLoRA</a>: you freeze the big base model in a compressed
+4-bit form and train only a tiny set of extra weights on top. The whole training run happens in Python
+(managed by <a class="term" href="glossary.html#uv">uv</a>) on a <a class="term" href="glossary.html#gpu">GPU</a>,
+which is the honest, non-negotiable part of this week - you cannot do real fine-tuning on a laptop CPU.</p>
+
+<p>Then comes the satisfying bit. You do <strong>not</strong> build a new user interface. You reuse the exact
+<a class="term" href="glossary.html#react">React</a> product-pricer demo you built in Week 6 and simply point it at
+your freshly fine-tuned model instead of a hosted frontier model. Same screen, same button, new brain. This page
+is the two-track build guide that ties the week together; the full, line-by-line code lives on the day pages.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Overview: a Python training stack produces an adapter, which is served and driven by the TypeScript demo stack">
+  <text x="380" y="26" text-anchor="middle" class="title">Two stacks, one pipeline</text>
+  <rect class="zone" x="12" y="44" width="366" height="122" rx="8"/>
+  <text x="195" y="64" text-anchor="middle" class="label">Track A - Python + uv on a GPU</text>
+  <rect class="zone" x="382" y="44" width="366" height="122" rx="8"/>
+  <text x="565" y="64" text-anchor="middle" class="label">Track B - Node + TypeScript</text>
+
+  <rect class="box" x="24" y="82" width="164" height="66" rx="8"/>
+  <text x="106" y="110" text-anchor="middle">Colab / GPU</text>
+  <text x="106" y="128" text-anchor="middle" class="small">train QLoRA adapter</text>
+
+  <rect class="box" x="202" y="82" width="164" height="66" rx="8"/>
+  <text x="284" y="110" text-anchor="middle">Adapter on the</text>
+  <text x="284" y="128" text-anchor="middle" class="small">Hugging Face Hub</text>
+
+  <rect class="box" x="398" y="82" width="164" height="66" rx="8"/>
+  <text x="480" y="110" text-anchor="middle">Served model</text>
+  <text x="480" y="128" text-anchor="middle" class="small">OpenAI endpoint</text>
+
+  <rect class="box box-ok" x="576" y="82" width="164" height="66" rx="8"/>
+  <text x="658" y="110" text-anchor="middle">React pricer demo</text>
+  <text x="658" y="128" text-anchor="middle" class="small">(week6-ts)</text>
+
+  <path class="arrow" d="M 188,115 H 200"/>
+  <path class="arrow" d="M 366,115 H 396"/>
+  <path class="arrow" d="M 562,115 H 574"/>
+</svg>
+<figcaption>How to read it: the training work (left) produces one small file, the adapter, which is published to
+the Hub. The demo (right) never changes - it just talks to wherever that model is served.
+<strong>Train once in Python, reuse the Week 6 UI.</strong></figcaption>
+</figure>
+
+<h2>Build it step by step</h2>
+
+<p>There are two tracks. <strong>Track A</strong> is the real work of the week: fine-tune the model in Python on
+a GPU. <strong>Track B</strong> is short and honest - it reuses the Week 6 React app and points it at the model
+you just trained. Do Track A first; Track B has nothing to talk to until the adapter exists.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="Build order across both tracks: train, save the adapter, serve the model, point the demo">
+  <text x="380" y="26" text-anchor="middle" class="title">Build order (do these in order)</text>
+  <rect class="box" x="16" y="50" width="168" height="58" rx="8"/>
+  <text x="100" y="74" text-anchor="middle">1. Train</text>
+  <text x="100" y="92" text-anchor="middle" class="small">Track A, on a GPU</text>
+  <path class="arrow" d="M 186,79 H 202"/>
+  <rect class="box" x="204" y="50" width="168" height="58" rx="8"/>
+  <text x="288" y="74" text-anchor="middle">2. Save adapter</text>
+  <text x="288" y="92" text-anchor="middle" class="small">to the Hub</text>
+  <path class="arrow" d="M 374,79 H 390"/>
+  <rect class="box" x="392" y="50" width="168" height="58" rx="8"/>
+  <text x="476" y="74" text-anchor="middle">3. Serve model</text>
+  <text x="476" y="92" text-anchor="middle" class="small">OpenAI endpoint</text>
+  <path class="arrow" d="M 562,79 H 578"/>
+  <rect class="box box-ok" x="580" y="50" width="164" height="58" rx="8"/>
+  <text x="662" y="74" text-anchor="middle">4. Point the demo</text>
+  <text x="662" y="92" text-anchor="middle" class="small">Track B, week6-ts</text>
+</svg>
+<figcaption>Four stages, strictly in order. <strong>Steps 1-2 are Track A; steps 3-4 are Track B.</strong> Nothing in
+Track B works until the adapter from step 2 exists.</figcaption>
+</figure>
+
+<h3>Track A - Python + uv (QLoRA on a GPU)</h3>
+
+<p>This track trains the model. Every step says what to type and what you should see. The full, explained code for
+each file is on the day pages - here we only list the moves in order. You need a GPU: a free
+<a class="term" href="glossary.html#google-colab">Google Colab</a> T4 is enough for a small run, and an A100 is
+what the instructor uses for the full three-epoch run.</p>
+
+<div class="callout warn"><strong>You need a GPU - this is the honest part.</strong> QLoRA still runs the forward and
+backward passes of an 8-billion-parameter model. That needs a CUDA GPU with roughly 15GB of memory (a Colab T4) for a
+small batch, and more for the instructor's settings. A normal laptop CPU cannot do this in any reasonable time. None of
+Track A was run on this machine - there is no GPU here - so the Python files are reconstructed standard QLoRA code,
+shown exactly so you can run them on Colab.</div>
+
+<ol class="steps">
+<li><span class="eyebrow">Open a GPU notebook</span> Open a new notebook on
+<a class="term" href="glossary.html#google-colab">Google Colab</a> and switch the runtime to a GPU
+(<em>Runtime → Change runtime type → T4 GPU</em>). You can also run locally if your own machine has a CUDA GPU.
+Confirm the GPU is visible:
+<pre data-lang="py" data-tag="illustrative"><code>import torch
+print(torch.cuda.is_available(), torch.cuda.get_device_name(0))</code></pre>
+You should see <code>True</code> and a device name such as <code>Tesla T4</code>.</li>
+
+<li><span class="eyebrow">Add the libraries</span> These are the packages every day of the week uses. Running locally with
+<a class="term" href="glossary.html#uv">uv</a>, add them to your project:
+<pre data-lang="sh"><code>uv add transformers peft trl bitsandbytes accelerate datasets wandb huggingface-hub</code></pre>
+<code>transformers</code> loads the base model, <a class="term" href="glossary.html#peft">peft</a> provides the
+<a class="term" href="glossary.html#lora">LoRA</a> adapters, <code>trl</code> gives the trainer, and
+<a class="term" href="glossary.html#bitsandbytes">bitsandbytes</a> does the 4-bit quantization.
+<code>accelerate</code> places the model on the GPU, <code>datasets</code> loads the pricing data,
+<code>wandb</code> charts the loss, and <code>huggingface-hub</code> logs you in and stores the result.
+On Colab the same names install with <code>%pip install</code> at the top of the notebook.</li>
+
+<li><span class="eyebrow">Log in to Hugging Face</span> Llama is a <em>gated</em> model: you must accept Meta's licence on
+the model page (<code>meta-llama/Meta-Llama-3.1-8B</code>) once, with the same account as your token. Create a token at
+<code>huggingface.co/settings/tokens</code>, store it as a Colab secret named <code>HF_TOKEN</code>, then log in:
+<pre data-lang="py" data-tag="illustrative"><code>from huggingface_hub import login
+login(hf_token, add_to_git_credential=True)</code></pre>
+Without this you get a <code>401</code>/gated-repo error when the model tries to download.</li>
+
+<li><span class="eyebrow">Load the base model in 4-bit</span> This is the Day 1 setup. You describe the 4-bit
+quantization with a <code>BitsAndBytesConfig</code> (<code>nf4</code>, double-quant, <code>bfloat16</code> compute) and
+load the base with it:
+<pre data-lang="py" data-tag="illustrative"><code>base_model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL, quantization_config=quant_config, device_map="auto",
+)</code></pre>
+You should see a memory footprint of about <code>5,591.5 MB</code> - the whole 8B model squeezed into roughly 5.6GB.
+The full file and a line-by-line walk-through are on <a href="37-w7d1.html">Day 1</a>.</li>
+
+<li><span class="eyebrow">Load the pricing dataset</span> Reuse the dataset you curated in Week 6 and pushed to the
+<a class="term" href="glossary.html#qlora">Hub</a> (swap in your own username if you uploaded your own copy):
+<pre data-lang="py" data-tag="illustrative"><code>dataset = load_dataset("ed-donner/pricer-data")
+train, test = dataset["train"], dataset["test"]</code></pre>
+Each training row has a <code>text</code> field that ends in <code>Price is $NNN</code> and a numeric
+<code>price</code>. The test rows stop at <code>Price is $</code> so the model has to predict the number.</li>
+
+<li><span class="eyebrow">Set the LoRA config and launch training</span> This is Day 3. You attach small
+<a class="term" href="glossary.html#lora">LoRA</a> matrices to the attention projections, build TRL's trainer with a
+completion-only collator (so the model is scored only on the price token), and start the run:
+<pre data-lang="py" data-tag="illustrative"><code>lora_config = LoraConfig(
+    r=32, lora_alpha=64,
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    lora_dropout=0.1, bias="none", task_type="CAUSAL_LM",
+)
+trainer = SFTTrainer(model=base_model, train_dataset=train,
+                     peft_config=lora_config, args=train_config, data_collator=collator)
+trainer.train()</code></pre>
+The full config, every hyperparameter, and the line-by-line explanation are on
+<a href="39-w7d3.html">Day 3</a>.</li>
+
+<li><span class="eyebrow">Watch the loss and save the adapter</span> This is Day 4. With
+<code>report_to="wandb"</code> and <code>logging_steps=50</code>, the training loss streams to
+<a class="term" href="glossary.html#weights-and-biases">Weights &amp; Biases</a> so you can watch it fall in real
+time. With <code>push_to_hub=True</code> the trainer pushes checkpoints to the Hub as it goes; at the end you push the
+final <a class="term" href="glossary.html#adapter">adapter</a>:
+<pre data-lang="py" data-tag="illustrative"><code>trainer.model.push_to_hub(PROJECT_RUN_NAME, private=True)</code></pre>
+The adapter is tiny - about 109MB next to the 5.6GB base - because you only trained the low-rank matrices. Monitoring
+and the key hyperparameters are covered on <a href="40-w7d4.html">Day 4</a>.</li>
+
+<li><span class="eyebrow">Load the adapter and evaluate</span> This is Day 5. Load the 4-bit base again, then layer your
+trained adapter on top with <code>PeftModel.from_pretrained</code>, and run the test set through the course's
+<code>Tester</code> harness:
+<pre data-lang="py" data-tag="illustrative"><code>fine_tuned_model = PeftModel.from_pretrained(base_model, FINETUNED_MODEL)</code></pre>
+You compare the average dollar error against the Week 6 baselines and the frontier models. On the instructor's full run
+the fine-tuned model lands around <code>$47</code> average error - ahead of GPT-4o at about <code>$76</code>. The full
+evaluation and the final podium are on <a href="41-w7d5.html">Day 5</a>.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="The QLoRA training pipeline: dataset and frozen base and LoRA adapters feed the SFTTrainer, which logs loss and saves the adapter">
+  <text x="380" y="26" text-anchor="middle" class="title">QLoRA training: freeze the base, train small adapters</text>
+
+  <rect class="box" x="30" y="46" width="210" height="60" rx="8"/>
+  <text x="135" y="72" text-anchor="middle">Pricing dataset</text>
+  <text x="135" y="90" text-anchor="middle" class="small">text + price (the Hub)</text>
+
+  <rect class="box box-info" x="275" y="46" width="210" height="60" rx="8"/>
+  <text x="380" y="72" text-anchor="middle">Frozen 4-bit base</text>
+  <text x="380" y="90" text-anchor="middle" class="small">Llama 3.1 8B (QLoRA)</text>
+
+  <rect class="box" x="520" y="46" width="210" height="60" rx="8"/>
+  <text x="625" y="72" text-anchor="middle">LoRA adapters</text>
+  <text x="625" y="90" text-anchor="middle" class="small">q/k/v/o_proj (trained)</text>
+
+  <rect class="box-solid" x="230" y="150" width="300" height="64" rx="8"/>
+  <text x="380" y="178" text-anchor="middle" class="on-solid">SFTTrainer (TRL)</text>
+  <text x="380" y="197" text-anchor="middle" class="on-solid small">trains only the adapters</text>
+
+  <path class="arrow" d="M 135,106 V 130 H 298 V 148"/>
+  <path class="arrow" d="M 380,106 V 148"/>
+  <path class="arrow" d="M 625,106 V 130 H 462 V 148"/>
+
+  <rect class="box" x="150" y="254" width="200" height="56" rx="8"/>
+  <text x="250" y="278" text-anchor="middle">Loss to W&amp;B</text>
+  <text x="250" y="296" text-anchor="middle" class="small">logged every 50 steps</text>
+
+  <rect class="box box-ok" x="410" y="254" width="220" height="56" rx="8"/>
+  <text x="520" y="278" text-anchor="middle">Adapter to the Hub</text>
+  <text x="520" y="296" text-anchor="middle" class="small">pushed on every save</text>
+
+  <path class="arrow" d="M 380,214 V 234 H 250 V 252"/>
+  <path class="arrow-ok" d="M 380,214 V 234 H 520 V 252"/>
+</svg>
+<figcaption>How to read it: three inputs meet in the trainer, but the 8B base stays <strong>frozen</strong> - only the
+small LoRA adapters change. The output you keep is the adapter, a file of about 109MB.</figcaption>
+</figure>
+
+<h3>Track B - the React demo (Node + TypeScript)</h3>
+
+<p>Be clear with yourself about what this track is: it is <strong>not</strong> a new build. It is the same
+<a class="term" href="glossary.html#node">Node</a> + <a class="term" href="glossary.html#typescript">TypeScript</a>
+product-pricer you wrote in Week 6, reused unchanged. All you do is serve your fine-tuned model behind an endpoint
+that speaks the OpenAI protocol, and tell the server to use it. Keep this short - it really is just a redirect.</p>
+
+<ol class="steps">
+<li><span class="eyebrow">Get the Week 6 demo</span> Reuse the Week 6 project folder, <code>week6-ts/</code>. If you are
+starting fresh, open it and install its dependencies with <a class="term" href="glossary.html#npm">npm</a>:
+<pre data-lang="sh"><code>cd week6-ts
+npm install</code></pre>
+Nothing in the app's code needs to change for this week.</li>
+
+<li><span class="eyebrow">Serve your fine-tuned model</span> Put your model (the 4-bit base with your adapter, merged or
+loaded as a LoRA) behind an <strong>OpenAI-compatible</strong> endpoint. Any of these work: a vLLM server, a Hugging
+Face inference endpoint, or <code>ollama</code> run locally. Each exposes an OpenAI-style route at
+<code>/v1</code> - for example Ollama serves it at <code>http://localhost:11434/v1</code>.</li>
+
+<li><span class="eyebrow">Point the server at it</span> The server reads three values from <code>week6-ts/.env</code>.
+The OpenAI JavaScript SDK automatically honours <code>OPENAI_BASE_URL</code>, so you do not touch any code - you only
+set environment variables:
+<pre data-lang="env"><code>OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_API_KEY=not-needed-for-local
+FINE_TUNED_MODEL=your-fine-tuned-model-id</code></pre>
+<code>FINE_TUNED_MODEL</code> is the id your endpoint advertises; <code>OPENAI_API_KEY</code> can be any non-empty
+string for a local server. The server's <code>priceModel()</code> picks up <code>FINE_TUNED_MODEL</code> and the SDK
+sends the request to your base URL instead of OpenAI's.</li>
+
+<li><span class="eyebrow">Build and run it</span> Build the React front end once, then start the API and the web server
+in two terminals:
+<pre data-lang="sh"><code>npm run build
+npm run api
+npm run web</code></pre>
+<code>npm run api</code> starts the Hono server (it prints the port it is listening on); <code>npm run web</code>
+serves the React page. Open the page, paste a product description, and click <strong>Estimate price</strong> - the
+number now comes from <em>your</em> model.</li>
+
+<li><span class="eyebrow">Same UI as Week 6</span> The screen is identical to Week 6 because it is literally the same
+app. The only difference is which model answered.</li>
+</ol>
+
+<figure class="shot"><img src="img/ts-week6-ui.png" alt="The Week 6 React product-pricer app: a product description box and an Estimate price button showing a dollar amount" width="1100" height="800" loading="lazy"><figcaption>The reused demo (week6-ts/): describe a product, press <strong>Estimate price</strong>, and the fine-tuned
+open-source model returns a dollar amount. Illustration - the UI shell; a live price needs the model served and the
+<code>.env</code> values set.</figcaption></figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Track B flow: the adapter is served behind an OpenAI-compatible endpoint, called by the Hono server, shown in the React UI">
+  <text x="380" y="26" text-anchor="middle" class="title">From adapter to a working demo</text>
+
+  <rect class="box" x="16" y="58" width="170" height="68" rx="8"/>
+  <text x="101" y="86" text-anchor="middle">Base + adapter</text>
+  <text x="101" y="104" text-anchor="middle" class="small">pulled from the Hub</text>
+
+  <rect class="box box-info" x="206" y="58" width="170" height="68" rx="8"/>
+  <text x="291" y="86" text-anchor="middle">Serve (OpenAI /v1)</text>
+  <text x="291" y="104" text-anchor="middle" class="small">vLLM / Ollama / HF</text>
+
+  <rect class="box" x="396" y="58" width="170" height="68" rx="8"/>
+  <text x="481" y="86" text-anchor="middle">Hono server</text>
+  <text x="481" y="104" text-anchor="middle" class="small">POST /api/price</text>
+
+  <rect class="box box-ok" x="586" y="58" width="158" height="68" rx="8"/>
+  <text x="665" y="86" text-anchor="middle">React UI</text>
+  <text x="665" y="104" text-anchor="middle" class="small">web/src/App.tsx</text>
+
+  <path class="arrow" d="M 186,92 H 204"/>
+  <path class="arrow" d="M 376,92 H 394"/>
+  <path class="arrow" d="M 566,92 H 584"/>
+
+  <rect class="zone" x="206" y="150" width="360" height="48" rx="8"/>
+  <text x="386" y="170" text-anchor="middle" class="label">.env: OPENAI_BASE_URL + FINE_TUNED_MODEL</text>
+  <text x="386" y="188" text-anchor="middle" class="small">the OpenAI SDK reads the base URL for you</text>
+  <path class="line dashed" d="M 291,150 V 128"/>
+  <path class="line dashed" d="M 481,150 V 128"/>
+</svg>
+<figcaption>How to read it: your model sits behind a standard OpenAI-style endpoint, so the Week 6 server talks to it
+with no code change. <strong>Two <code>.env</code> values do all the redirecting.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see.</strong> In Track A, a falling loss curve in Weights &amp; Biases and
+an adapter repo appearing on your Hugging Face account. In Track B, the familiar Week 6 page returning a price - this
+time estimated by your own fine-tuned model. The React demo was type-checked and built successfully; like Week 6 it was
+not run live against a model here.</div>
+
+<h2>What you built</h2>
+
+<p>You fine-tuned an open-weights model for one real task and wired it into a working product, across two stacks that
+never had to know much about each other. Track A did the learning; Track B did the showing.</p>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>You trained a <a class="term" href="glossary.html#qlora">QLoRA</a> adapter on a GPU: freeze Llama 3.1 8B in 4-bit
+with <a class="term" href="glossary.html#bitsandbytes">bitsandbytes</a>, add small
+<a class="term" href="glossary.html#lora">LoRA</a> matrices with <a class="term" href="glossary.html#peft">peft</a>,
+and train only those with TRL's <code>SFTTrainer</code>.</li>
+<li>Track A steps: GPU notebook, <code>uv add</code> the libraries, Hugging Face login for gated Llama, load the 4-bit
+base, load the pricing dataset, configure LoRA + launch training, watch the loss in Weights &amp; Biases and push the
+adapter to the Hub, then load the adapter and evaluate.</li>
+<li>The result is a tiny <a class="term" href="glossary.html#adapter">adapter</a> (about 109MB) that, on the full run,
+reaches roughly <code>$47</code> average error - ahead of GPT-4o.</li>
+<li>Track B reuses the Week 6 React + Node + TypeScript demo unchanged: serve your model behind an OpenAI-compatible
+endpoint, set <code>OPENAI_BASE_URL</code> and <code>FINE_TUNED_MODEL</code> in <code>.env</code>, then
+<code>npm run api</code> and <code>npm run web</code>.</li>
+<li>Full code and explanations: <a href="37-w7d1.html">Day 1</a>, <a href="39-w7d3.html">Day 3</a>,
+<a href="40-w7d4.html">Day 4</a> and <a href="41-w7d5.html">Day 5</a>.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="41-w7d5.html"><small>← Previous · Step 41</small>Week 7 · Day 5 — Does It Beat the Frontier?</a>
+<a class="next" href="43-w8d1.html"><small>Next · Step 43 →</small>Week 8 · Day 1 — The Agent System and Structured Outputs</a>
+</nav>
+</main>
+</body>
+</html>
