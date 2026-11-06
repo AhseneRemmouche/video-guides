@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>13 · Load Balancing</title>
+<meta name="description" content="Load-balancing algorithms, health checks, hardware/software/cloud balancers, and what to do when a balancer fails.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">System Design Concepts &amp; Interview Prep</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 13/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 13 of 14 · 42:31</div>
+  <h1>Load Balancing</h1>
+  <p class="lead">Load-balancing algorithms, health checks, hardware/software/cloud balancers, and what to do when a balancer fails.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=F2FmTdLtb_4&amp;t=2551s" target="_blank" rel="noopener">▶ Watch this part (42:31)</a>
+</section>
+<p class="lead">When one server can no longer handle every request on its own, you add more servers &mdash; and then you need something to decide which server each request should go to. That something is a <a class="term" href="glossary.html#load-balancer">load balancer</a>. This page explains what it does, the main algorithms it uses to pick a server, how it avoids sending traffic to broken servers, the forms it comes in, and why the balancer itself must not become the weak link.</p>
+
+<h2>What a load balancer is</h2>
+<p>A load balancer sits in front of a pool of servers and spreads incoming traffic across them so that no single server bears too much load (at 42:31). By sharing the work out, it increases both the <em>capacity</em> of the application (more requests handled per second) and its <em>reliability</em> (if one server is busy, others pick up the slack). A load balancer is a specific kind of <a class="term" href="glossary.html#reverse-proxy">reverse proxy</a>: it stands in front of your servers, and clients only ever talk to it, never to the servers directly.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="A load balancer receiving requests from three clients and forwarding them to three servers">
+  <text x="20" y="26" class="title">One entry point, many servers</text>
+  <rect class="box" x="20" y="60" width="110" height="36" rx="8"/>
+  <text x="75" y="83" text-anchor="middle">Client A</text>
+  <rect class="box" x="20" y="112" width="110" height="36" rx="8"/>
+  <text x="75" y="135" text-anchor="middle">Client B</text>
+  <rect class="box" x="20" y="164" width="110" height="36" rx="8"/>
+  <text x="75" y="187" text-anchor="middle">Client C</text>
+  <rect class="box-solid" x="300" y="100" width="160" height="56" rx="8"/>
+  <text x="380" y="133" text-anchor="middle" class="on-solid">Load balancer</text>
+  <rect class="box2" x="620" y="52" width="120" height="36" rx="8"/>
+  <text x="680" y="75" text-anchor="middle">Server 1</text>
+  <rect class="box2" x="620" y="112" width="120" height="36" rx="8"/>
+  <text x="680" y="135" text-anchor="middle">Server 2</text>
+  <rect class="box2" x="620" y="172" width="120" height="36" rx="8"/>
+  <text x="680" y="195" text-anchor="middle">Server 3</text>
+  <path class="arrow" d="M130,78 L297,120"/>
+  <path class="arrow" d="M130,130 L297,130"/>
+  <path class="arrow" d="M130,182 L297,140"/>
+  <path class="arrow-accent" d="M460,120 L617,74"/>
+  <path class="arrow-accent" d="M460,130 L617,130"/>
+  <path class="arrow-accent" d="M460,140 L617,186"/>
+</svg>
+<figcaption>Every request lands on the load balancer first; it forwards each one to a server in the pool. <strong>Clients see one address &#8212; the balancer hides the whole pool behind it.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to the idea of a pool of servers? What it means</summary><p>A "pool" is just the group of identical servers running copies of the same application. Each copy can serve any request, because they all read and write the same shared database. Adding a server to the pool adds capacity; removing one (say, for maintenance) removes capacity. The load balancer's whole job is to decide, for each arriving request, which member of the pool should answer it.</p></details>
+
+<h2>The algorithms: how it picks a server</h2>
+<p>There is no single "best" way to choose a server. The right choice depends on whether your servers are equally powerful, how long requests take, and whether a user must keep talking to the same server. The presenter walks through the common strategies (at 42:54).</p>
+
+<h3>Round robin</h3>
+<p>The simplest strategy. Each server in the pool gets a request in a sequential, rotating order; when the last server is reached, it loops back to the first (at 42:54). Round robin works well when the servers have similar specifications and the load is spread evenly, because it makes no attempt to measure how busy each server is &mdash; it just takes turns.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Five requests handed out in rotating order across three servers, then looping back to the first">
+  <text x="20" y="26" class="title">Round robin: take turns, then loop back</text>
+  <rect class="box" x="20" y="48" width="100" height="34" rx="8"/>
+  <text x="70" y="70" text-anchor="middle">Req 1</text>
+  <rect class="box" x="165" y="48" width="100" height="34" rx="8"/>
+  <text x="215" y="70" text-anchor="middle">Req 2</text>
+  <rect class="box" x="310" y="48" width="100" height="34" rx="8"/>
+  <text x="360" y="70" text-anchor="middle">Req 3</text>
+  <rect class="box" x="455" y="48" width="100" height="34" rx="8"/>
+  <text x="505" y="70" text-anchor="middle">Req 4</text>
+  <rect class="box" x="600" y="48" width="100" height="34" rx="8"/>
+  <text x="650" y="70" text-anchor="middle">Req 5</text>
+  <rect class="box2" x="60" y="150" width="140" height="38" rx="8"/>
+  <text x="130" y="174" text-anchor="middle">Server 1</text>
+  <rect class="box2" x="310" y="150" width="140" height="38" rx="8"/>
+  <text x="380" y="174" text-anchor="middle">Server 2</text>
+  <rect class="box2" x="560" y="150" width="140" height="38" rx="8"/>
+  <text x="630" y="174" text-anchor="middle">Server 3</text>
+  <path class="arrow" d="M70,82 L128,148"/>
+  <path class="arrow" d="M215,82 L378,148"/>
+  <path class="arrow" d="M360,82 L628,148"/>
+  <path class="arrow-accent" d="M505,82 L134,148"/>
+  <path class="arrow-accent" d="M650,82 L384,148"/>
+</svg>
+<figcaption>Requests 1&#8211;3 go to servers 1&#8211;3 in order; request 4 loops back to server 1 (highlighted). <strong>Simple and fair &#8212; but it assumes every server is equally capable and every request is equally heavy.</strong></figcaption>
+</figure>
+
+<h3>Least connections and least response time</h3>
+<p>The least-connections algorithm directs each new request to the server with the fewest active connections (at 43:16). It suits longer tasks, or cases where the load is not evenly distributed, because it reacts to how busy each server actually is rather than blindly rotating. The least-response-time algorithm goes further: it chooses the server with both the lowest response time and the fewest active connections (at 43:16), aiming to give each request the fastest possible answer.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Two panels comparing least connections and least response time, each picking the best server">
+  <rect class="zone" x="15" y="40" width="355" height="160" rx="8"/>
+  <text x="30" y="62" class="title">Least connections</text>
+  <rect class="box" x="35" y="78" width="150" height="34" rx="8"/>
+  <text x="110" y="100" text-anchor="middle">Server 1 &#183; 8 conns</text>
+  <rect class="box-ok" x="35" y="120" width="150" height="34" rx="8"/>
+  <text x="110" y="142" text-anchor="middle">Server 2 &#183; 2 conns</text>
+  <rect class="box" x="35" y="162" width="150" height="30" rx="8"/>
+  <text x="110" y="182" text-anchor="middle">Server 3 &#183; 5 conns</text>
+  <path class="arrow-ok" d="M300,135 L187,137"/>
+  <text x="300" y="131" class="small ok">new request</text>
+  <rect class="zone" x="390" y="40" width="355" height="160" rx="8"/>
+  <text x="405" y="62" class="title">Least response time</text>
+  <rect class="box" x="410" y="78" width="150" height="34" rx="8"/>
+  <text x="485" y="100" text-anchor="middle">Server 1 &#183; 120 ms</text>
+  <rect class="box" x="410" y="120" width="150" height="34" rx="8"/>
+  <text x="485" y="142" text-anchor="middle">Server 2 &#183; 90 ms</text>
+  <rect class="box-ok" x="410" y="162" width="150" height="30" rx="8"/>
+  <text x="485" y="182" text-anchor="middle">Server 3 &#183; 40 ms</text>
+  <path class="arrow-ok" d="M675,177 L562,177"/>
+  <text x="672" y="173" class="small ok">new request</text>
+</svg>
+<figcaption>Numbers are illustrative. Left: pick the server with the fewest open connections. Right: pick the fastest to respond. <strong>Both watch the real state of the pool instead of just taking turns.</strong></figcaption>
+</figure>
+
+<h3>Weighted and geographic</h3>
+<p>Real pools are rarely made of identical machines. The weighted variants &mdash; weighted round robin or weighted least connections &mdash; assign each server a weight based on its capacity or performance, so a server with more CPU or more RAM is handed more requests (at 44:02). The geographic algorithm instead routes each request to the server closest to the user, or to a specific region (at 44:24); it is useful for global services where reducing latency is the priority.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Bar chart: a weighted load balancer sends a larger share of requests to higher-capacity servers">
+  <text x="20" y="26" class="title">Weighted: bigger servers get a bigger share</text>
+  <text x="20" y="50" class="small">Share of requests by server weight (illustrative)</text>
+  <line class="line" x1="150" y1="64" x2="150" y2="186"/>
+  <line class="line" x1="150" y1="186" x2="730" y2="186"/>
+  <text x="140" y="92" text-anchor="end" class="label">A (weight 1)</text>
+  <rect class="box2" x="150" y="74" width="97" height="26" rx="6"/>
+  <text x="257" y="92" class="small">17%</text>
+  <text x="140" y="132" text-anchor="end" class="label">B (weight 3)</text>
+  <rect class="box-solid" x="150" y="114" width="285" height="26" rx="6"/>
+  <text x="445" y="132" class="small">50%</text>
+  <text x="140" y="172" text-anchor="end" class="label">C (weight 2)</text>
+  <rect class="box2" x="150" y="154" width="190" height="26" rx="6"/>
+  <text x="350" y="172" class="small">33%</text>
+</svg>
+<figcaption>Percentages are illustrative. A server weighted 3 receives three times the traffic of a server weighted 1. <strong>Weights let one pool mix big and small machines without overloading the small ones.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Geographic load balancing routes each user to the nearest regional data centre">
+  <text x="20" y="26" class="title">Geographic: route to the nearest region</text>
+  <rect class="box" x="20" y="58" width="150" height="36" rx="8"/>
+  <text x="95" y="81" text-anchor="middle" class="small">User in Europe</text>
+  <rect class="box" x="20" y="150" width="150" height="36" rx="8"/>
+  <text x="95" y="173" text-anchor="middle" class="small">User in Asia</text>
+  <rect class="box-solid" x="300" y="100" width="160" height="46" rx="8"/>
+  <text x="380" y="128" text-anchor="middle" class="on-solid">Geo load balancer</text>
+  <rect class="box-ok" x="585" y="52" width="155" height="38" rx="8"/>
+  <text x="662" y="76" text-anchor="middle" class="small">EU data centre</text>
+  <rect class="box-ok" x="585" y="150" width="155" height="38" rx="8"/>
+  <text x="662" y="174" text-anchor="middle" class="small">Asia data centre</text>
+  <path class="arrow" d="M170,80 L298,114"/>
+  <path class="arrow" d="M170,166 L298,134"/>
+  <path class="arrow-ok" d="M460,116 L583,74"/>
+  <path class="arrow-ok" d="M460,132 L583,166"/>
+</svg>
+<figcaption>Each user is sent to the closest region, so the request travels the shortest distance. <strong>Geographic routing trades perfect balance for lower latency on a global service.</strong></figcaption>
+</figure>
+
+<h3>IP hashing and consistent hashing</h3>
+<p>Some applications need a client to keep talking to the <em>same</em> server &mdash; for example when that server is holding the user's session in memory. IP hashing achieves this: it runs the client's IP address through a hash function, and the result decides which server receives the request (at 43:38). Because the same IP always hashes to the same value, that client consistently reaches the same server &mdash; this is called session persistence.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="A client IP address is run through a hash function that always maps it to the same server">
+  <text x="20" y="26" class="title">IP hashing: same client, same server</text>
+  <rect class="box" x="20" y="80" width="155" height="48" rx="8"/>
+  <text x="97" y="100" text-anchor="middle" class="small">Client IP</text>
+  <text x="97" y="118" text-anchor="middle" class="mono">203.0.113.5</text>
+  <rect class="box-solid" x="255" y="82" width="150" height="44" rx="8"/>
+  <text x="330" y="109" text-anchor="middle" class="on-solid">hash(IP)</text>
+  <rect class="box2" x="560" y="38" width="180" height="38" rx="8"/>
+  <text x="650" y="62" text-anchor="middle">Server 1</text>
+  <rect class="box-ok" x="560" y="94" width="180" height="38" rx="8"/>
+  <text x="650" y="118" text-anchor="middle">Server 2</text>
+  <rect class="box2" x="560" y="150" width="180" height="38" rx="8"/>
+  <text x="650" y="174" text-anchor="middle">Server 3</text>
+  <path class="arrow" d="M175,104 H253"/>
+  <path class="arrow-ok" d="M405,108 L558,113"/>
+  <text x="430" y="150" class="small ok">this IP always maps to server 2</text>
+</svg>
+<figcaption>The same IP always hashes to the same value, so the client always lands on the same server. <strong>That is session persistence (&#8220;sticky sessions&#8221;) &#8212; useful when a server holds your session in memory.</strong></figcaption>
+</figure>
+<p>Consistent hashing is a more advanced relative. Imagine a hash space drawn as a circle whose end wraps around to the beginning &mdash; a "hash ring" (at 44:24). Both the servers (nodes) and the keys are hashed onto the ring, and a key is served by the next node going around the circle. This keeps a client on the same server, and &mdash; importantly &mdash; when one node is added or removed, only a small slice of keys has to move, instead of reshuffling everything.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="A hash ring with four server nodes and a key that is served by the next node clockwise">
+  <text x="20" y="26" class="title">Consistent hashing: a ring of nodes</text>
+  <path class="line" d="M380,60 a90,90 0 1,0 0.1,0"/>
+  <circle class="dot-info" cx="380" cy="60" r="7"/>
+  <text x="380" y="48" text-anchor="middle" class="label">Node 1</text>
+  <circle class="dot-info" cx="470" cy="150" r="7"/>
+  <text x="520" y="154" text-anchor="middle" class="label">Node 2</text>
+  <circle class="dot-info" cx="380" cy="240" r="7"/>
+  <text x="380" y="232" text-anchor="middle" class="label">Node 3</text>
+  <circle class="dot-info" cx="290" cy="150" r="7"/>
+  <text x="243" y="154" text-anchor="middle" class="label">Node 4</text>
+  <circle class="dot-warn" cx="444" cy="86" r="6"/>
+  <text x="470" y="92" class="small warn">key k</text>
+  <path class="arrow-accent" d="M449,92 L468,145"/>
+  <text x="560" y="205" class="small">key k lands between nodes,</text>
+  <text x="560" y="220" class="small">served by the next node clockwise</text>
+</svg>
+<figcaption>Servers and keys both sit on the same ring. A key is handled by the first node clockwise from it. <strong>Add or drop a node and only the keys near it move &#8212; the rest stay put.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to "session persistence"? Why a client gets stuck to one server</summary><p>If a server keeps information about you in its own memory &mdash; your shopping cart, your logged-in session &mdash; then your next request must come back to that same server, or your cart looks empty. Routing you to a fixed server (by hashing your IP, for example) is called session persistence or "sticky sessions". The cleaner long-term fix is to store session data in a shared place (like a database or <a class="term" href="glossary.html#redis">Redis</a>) so any server can serve you, but sticky routing is a common stopgap.</p></details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="A quick guide matching each load-balancing situation to the algorithm that fits it">
+  <text x="20" y="26" class="title">Which algorithm fits the situation</text>
+  <rect class="box" x="20" y="44" width="350" height="26" rx="8"/>
+  <text x="32" y="62" class="small">Servers equal, load even</text>
+  <rect class="box-info" x="470" y="44" width="270" height="26" rx="8"/>
+  <text x="482" y="62" class="small">Round robin</text>
+  <path class="arrow" d="M370,57 H468"/>
+  <rect class="box" x="20" y="78" width="350" height="26" rx="8"/>
+  <text x="32" y="96" class="small">Long or uneven requests</text>
+  <rect class="box-info" x="470" y="78" width="270" height="26" rx="8"/>
+  <text x="482" y="96" class="small">Least connections</text>
+  <path class="arrow" d="M370,91 H468"/>
+  <rect class="box" x="20" y="112" width="350" height="26" rx="8"/>
+  <text x="32" y="130" class="small">Need the fastest reply</text>
+  <rect class="box-info" x="470" y="112" width="270" height="26" rx="8"/>
+  <text x="482" y="130" class="small">Least response time</text>
+  <path class="arrow" d="M370,125 H468"/>
+  <rect class="box" x="20" y="146" width="350" height="26" rx="8"/>
+  <text x="32" y="164" class="small">Servers differ in power</text>
+  <rect class="box-info" x="470" y="146" width="270" height="26" rx="8"/>
+  <text x="482" y="164" class="small">Weighted</text>
+  <path class="arrow" d="M370,159 H468"/>
+  <rect class="box" x="20" y="180" width="350" height="26" rx="8"/>
+  <text x="32" y="198" class="small">Client must stay on one server</text>
+  <rect class="box-info" x="470" y="180" width="270" height="26" rx="8"/>
+  <text x="482" y="198" class="small">IP / consistent hashing</text>
+  <path class="arrow" d="M370,193 H468"/>
+  <rect class="box" x="20" y="214" width="350" height="26" rx="8"/>
+  <text x="32" y="232" class="small">Global users, cut latency</text>
+  <rect class="box-info" x="470" y="214" width="270" height="26" rx="8"/>
+  <text x="482" y="232" class="small">Geographic</text>
+  <path class="arrow" d="M370,227 H468"/>
+</svg>
+<figcaption>Read each row left to right: the situation on the left, the algorithm that fits on the right. <strong>Interviewers want the match and the reason, not just a list of algorithm names.</strong></figcaption>
+</figure>
+
+<h2>Health checks: only send traffic to healthy servers</h2>
+<p>A pool is only useful if the balancer knows which members are actually working. An essential feature of load balancers is the continuous health checking of servers, so traffic is only directed to servers that are online and responsive (at 44:47). If a server fails a health check, the balancer stops sending requests to it until it comes back online &mdash; so a single crashed server causes no visible errors for users.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="A load balancer skipping a server that failed its health check and routing only to healthy servers">
+  <text x="20" y="26" class="title">A failed check takes a server out of rotation</text>
+  <rect class="box-solid" x="40" y="90" width="150" height="54" rx="8"/>
+  <text x="115" y="122" text-anchor="middle" class="on-solid">Load balancer</text>
+  <rect class="box-ok" x="560" y="40" width="170" height="38" rx="8"/>
+  <text x="645" y="64" text-anchor="middle">Server 1 &#183; healthy</text>
+  <rect class="box-bad" x="560" y="106" width="170" height="38" rx="8"/>
+  <text x="645" y="130" text-anchor="middle">Server 2 &#183; down</text>
+  <rect class="box-ok" x="560" y="172" width="170" height="38" rx="8"/>
+  <text x="645" y="196" text-anchor="middle">Server 3 &#183; healthy</text>
+  <path class="arrow-ok" d="M190,108 L558,62"/>
+  <path class="line dashed" d="M190,117 L558,125"/>
+  <text x="330" y="112" class="small bad">health check failed</text>
+  <path class="arrow-ok" d="M190,126 L558,188"/>
+</svg>
+<figcaption>Server 2 failed its check, so the balancer routes only to servers 1 and 3 (dashed line = no traffic). <strong>Health checks turn a dead server into a non-event instead of an outage.</strong></figcaption>
+</figure>
+
+<h2>The forms a load balancer comes in</h2>
+<p>Load balancers are not always a box you buy. They come as hardware appliances, software you install, managed cloud services, and virtual appliances (at 45:11).</p>
+<ul>
+<li><strong>Hardware:</strong> dedicated appliances such as F5 BIG-IP (known for high performance and features like global server load balancing) and Citrix, formerly NetScaler.</li>
+<li><strong>Software:</strong> open-source programs you run yourself, such as HAProxy (for TCP and HTTP applications) and Nginx (a web server that also works as a load balancer and reverse proxy).</li>
+<li><strong>Cloud:</strong> managed services like AWS Elastic Load Balancing, Azure Load Balancer, and Google Cloud Load Balancer &mdash; the provider runs the balancer for you.</li>
+<li><strong>Virtual:</strong> software-defined appliances such as VMware Avi, deployable on-premises or in the cloud.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Four kinds of load balancer: hardware, software, cloud, and virtual, with examples">
+  <text x="20" y="26" class="title">Four forms of load balancer</text>
+  <rect class="box" x="15" y="44" width="175" height="120" rx="8"/>
+  <text x="102" y="68" text-anchor="middle" class="accent">Hardware</text>
+  <text x="102" y="94" text-anchor="middle" class="small">F5 BIG-IP</text>
+  <text x="102" y="114" text-anchor="middle" class="small">Citrix (NetScaler)</text>
+  <text x="102" y="146" text-anchor="middle" class="small">appliance you buy</text>
+  <rect class="box" x="205" y="44" width="175" height="120" rx="8"/>
+  <text x="292" y="68" text-anchor="middle" class="accent">Software</text>
+  <text x="292" y="94" text-anchor="middle" class="small">HAProxy</text>
+  <text x="292" y="114" text-anchor="middle" class="small">Nginx</text>
+  <text x="292" y="146" text-anchor="middle" class="small">you install and run</text>
+  <rect class="box" x="395" y="44" width="175" height="120" rx="8"/>
+  <text x="482" y="68" text-anchor="middle" class="accent">Cloud</text>
+  <text x="482" y="94" text-anchor="middle" class="small">AWS ELB &#183; Azure LB</text>
+  <text x="482" y="114" text-anchor="middle" class="small">Google Cloud LB</text>
+  <text x="482" y="146" text-anchor="middle" class="small">managed for you</text>
+  <rect class="box" x="585" y="44" width="160" height="120" rx="8"/>
+  <text x="665" y="68" text-anchor="middle" class="accent">Virtual</text>
+  <text x="665" y="94" text-anchor="middle" class="small">VMware Avi</text>
+  <text x="665" y="124" text-anchor="middle" class="small">software-defined</text>
+  <text x="665" y="146" text-anchor="middle" class="small">on-prem or cloud</text>
+</svg>
+<figcaption>The same job, delivered four ways. <strong>Cloud load balancers are the usual default today &#8212; you get a balancer without owning the hardware.</strong></figcaption>
+</figure>
+
+<h2>Do not let the balancer become the single point of failure</h2>
+<p>Here is the catch. If every request must pass through the load balancer, then the balancer itself is a single point of failure: if it goes down, all of the servers behind it become unreachable, even though they are perfectly healthy (at 46:44). The fix is to build <a class="term" href="glossary.html#redundancy">redundancy</a> and <a class="term" href="glossary.html#fault-tolerance">fault tolerance</a> into the balancing layer too.</p>
+<ul>
+<li><strong>Redundant balancers in pairs:</strong> run more than one load balancer, often in a pair. If one fails, the other takes over &mdash; a technique called failover (at 47:06).</li>
+<li><strong>Health-check the balancers themselves:</strong> monitor the balancers continuously, so problems are detected early, before they cause a real disruption (at 47:06).</li>
+<li><strong>Auto-scaling and self-healing:</strong> modern infrastructure can detect a failed balancer and automatically replace it with a new instance, with no manual intervention (at 47:30).</li>
+<li><strong>DNS failover:</strong> reroute traffic away from the IP address of a failed balancer to a pre-configured standby IP &mdash; a second balancer ready to take over (at 47:30).</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="An active load balancer and a standby balancer; when the active one fails, the standby takes over the traffic">
+  <text x="20" y="26" class="title">Redundant pair: failover to a standby</text>
+  <rect class="box" x="30" y="60" width="120" height="40" rx="8"/>
+  <text x="90" y="85" text-anchor="middle">Clients</text>
+  <rect class="box-bad" x="250" y="48" width="180" height="46" rx="8"/>
+  <text x="340" y="76" text-anchor="middle">Active LB &#183; failed</text>
+  <rect class="box-ok" x="250" y="150" width="180" height="46" rx="8"/>
+  <text x="340" y="178" text-anchor="middle">Standby LB &#183; takes over</text>
+  <rect class="box2" x="560" y="40" width="170" height="36" rx="8"/>
+  <text x="645" y="63" text-anchor="middle">Server 1</text>
+  <rect class="box2" x="560" y="106" width="170" height="36" rx="8"/>
+  <text x="645" y="129" text-anchor="middle">Server 2</text>
+  <rect class="box2" x="560" y="172" width="170" height="36" rx="8"/>
+  <text x="645" y="195" text-anchor="middle">Server 3</text>
+  <path class="line dashed" d="M150,78 L248,72"/>
+  <path class="arrow-ok" d="M150,86 L248,170"/>
+  <path class="line dashed" d="M340,150 L340,100"/>
+  <text x="352" y="128" class="small">heartbeat</text>
+  <path class="arrow-ok" d="M430,168 L558,62"/>
+  <path class="arrow-ok" d="M430,173 L558,124"/>
+  <path class="arrow-ok" d="M430,178 L558,186"/>
+</svg>
+<figcaption>Two balancers share a heartbeat. When the active one dies, the standby takes over the clients and the servers keep serving. <strong>Make the thing that protects your servers redundant too.</strong></figcaption>
+</figure>
+
+<details class="primer"><summary>New to "single point of failure"? Why one box can sink the whole system</summary><p>A single point of failure (SPOF) is any one component whose failure stops the entire system, no matter how healthy everything else is. A lone load balancer is a classic SPOF: ten healthy servers are useless if the one door in front of them is locked. Removing SPOFs means duplicating the critical parts so there is always a backup ready &mdash; that is what redundancy and failover buy you.</p></details>
+
+<div class="callout ok"><strong>In an interview, say this</strong><p>"A load balancer spreads traffic across a pool to raise capacity and reliability, and I pick the algorithm to fit the workload &mdash; round robin for equal servers, least connections for uneven or long requests, weighted when machines differ in power, and IP or consistent hashing when a client must stay on one server. It uses health checks so traffic only reaches healthy servers. And because the balancer is itself a single point of failure, I run a redundant pair with failover." Naming the trade-off behind each algorithm is what interviewers are listening for.</p></div>
+
+<div class="callout warn"><strong>Common mistake</strong><p>Adding a load balancer and then forgetting that you have just created a new single point of failure. A lone balancer in front of ten servers means one crash takes down all ten. Always pair it with redundancy (a standby balancer and failover). A second common slip is choosing round robin for servers of very different sizes &mdash; the small ones get overloaded while the big ones idle; use a weighted algorithm instead.</p></div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>A <strong>load balancer</strong> is a reverse proxy that spreads traffic across a pool of servers, raising capacity and reliability; clients see only the balancer.</li>
+<li><strong>Round robin</strong> takes turns (equal servers); <strong>least connections</strong> and <strong>least response time</strong> watch how busy or fast each server is; <strong>weighted</strong> accounts for different-sized machines; <strong>geographic</strong> routes to the nearest region.</li>
+<li><strong>IP hashing</strong> and <strong>consistent hashing</strong> keep a client on the same server (session persistence); consistent hashing moves only a few keys when the pool changes.</li>
+<li><strong>Health checks</strong> route traffic only to servers that are online and responsive.</li>
+<li>Load balancers come as <strong>hardware</strong> (F5, Citrix), <strong>software</strong> (HAProxy, Nginx), <strong>cloud</strong> (AWS ELB, Azure, GCP), and <strong>virtual</strong> (VMware Avi).</li>
+<li>The balancer is itself a <strong>single point of failure</strong> &mdash; fix it with redundant pairs and failover, health checks on the balancers, auto-scaling/self-healing, and DNS failover to a standby IP.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="12-cdns-and-proxies.html"><small>← Previous · Step 12</small>CDNs &amp; Proxy Servers</a>
+<a class="next" href="14-databases.html"><small>Next · Step 14 →</small>Databases: Types, Scaling &amp; Performance</a>
+</nav>
+</main>
+</body>
+</html>

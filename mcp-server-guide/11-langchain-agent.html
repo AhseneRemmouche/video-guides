@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 · A LangChain Agent over MCP</title>
+<meta name="description" content="Build langchain_client.py: load the MCP tools into a LangChain agent you can chat with.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Build an MCP Server from Scratch</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 11/12</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 11 of 12 · 64:30</div>
+  <h1>A LangChain Agent over MCP</h1>
+  <p class="lead">Build langchain_client.py: load the MCP tools into a LangChain agent you can chat with.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=hZ-Pb8JkPEw&amp;t=3870s" target="_blank" rel="noopener">▶ Watch this part (64:30)</a>
+</section>
+<p class="intro">In <a class="term" href="glossary.html#mcp-client">step 10</a> you called your MCP tools by hand, one function at a time. In this step you hand the same tools to an <a class="term" href="glossary.html#llm">LLM</a> and let it decide which one to call. You build <code>langchain_client.py</code>: a small chat loop where you type a request in plain English, a <a class="term" href="glossary.html#langchain">LangChain</a> <a class="term" href="glossary.html#agent">agent</a> picks the right MCP tool, runs it against your task database, and replies. The server does not change at all. Only the client gets smarter.</p>
+
+<h2>What this step adds</h2>
+<p>So far every client knew exactly which tool to run. A real assistant does not. You say "add a task to buy milk" and the assistant has to work out, on its own, that this means calling <code>create_task</code>. That decision is what an <a class="term" href="glossary.html#llm">LLM</a> is good at. We give the model a list of our MCP tools and a short <a class="term" href="glossary.html#system-prompt">system prompt</a>, and it chooses and fills in the tool calls for us (demo at <strong>74:00&#8211;77:00</strong>).</p>
+
+<h2>Concepts the presenter explains</h2>
+<ul>
+<li><strong>Same tools, new driver (at 64:30).</strong> The <a class="term" href="glossary.html#mcp-adapter">MCP adapter</a> fetches the exact same three tools (<code>create_task</code>, <code>list_tasks</code>, <code>update_task_status</code>) your FastMCP client used. The difference is who calls them: before it was your code, now it is the model.</li>
+<li><strong>An agent is a loop (at 70:00).</strong> An agent is the LLM plus the tools plus a loop. The model reads your message, may ask to run a tool, sees the tool's result, and then either runs another tool or writes the final answer. <a class="term" href="glossary.html#create-agent">create_agent</a> builds that loop for you.</li>
+<li><strong>Memory with a thread (at 72:00).</strong> A <a class="term" href="glossary.html#checkpointer">checkpointer</a> saves the conversation so the agent remembers earlier turns. Each conversation is tagged with a <a class="term" href="glossary.html#thread-id">thread id</a>.</li>
+<li><strong>Tools are the boundary (at 77:00&#8211;77:34).</strong> The agent can only do what its tools allow. Ask it to change a task's <em>description</em> and it cannot, because there is no tool for that. This is the whole point of MCP: tools define exactly what a client may do.</li>
+</ul>
+
+<details class="primer"><summary>New to a LangChain agent? What it is and why it matters</summary>
+<p>A plain <a class="term" href="glossary.html#llm">LLM</a> only produces text. An <a class="term" href="glossary.html#agent">agent</a> wraps the model with a set of <a class="term" href="glossary.html#mcp-tool">tools</a> and a loop so it can act, not just talk. When you ask a question, the model can reply with "please run tool X with these arguments". The agent runs the tool, feeds the result back to the model, and repeats until the model is done and writes a normal answer. <a class="term" href="glossary.html#langchain">LangChain</a> is the library that gives us this agent; <a class="term" href="glossary.html#langgraph">LangGraph</a> provides the memory piece underneath.</p>
+</details>
+
+<h2>Build the file</h2>
+<ol class="steps">
+<li>Make sure your MCP server is still running from the earlier step. In one terminal: <kbd>uv run python -m mcp_server.server</kbd>. It must be listening on <code>http://127.0.0.1:8000/mcp</code> before the agent can fetch the tools.</li>
+<li>Create a new file at <code>src/mcp_server/langchain_client.py</code> next to <code>client.py</code>.</li>
+<li>Put your OpenAI key in <code>.env</code> as <code>OPENAI_API_KEY=sk-...</code>. The call to <code>load_dotenv()</code> reads it so the model can authenticate. See the primer on API keys below.</li>
+<li>Type the file below, then run it in a second terminal: <kbd>uv run python -m mcp_server.langchain_client</kbd>.</li>
+</ol>
+
+<p>An <a class="term" href="glossary.html#api-key">API key</a> is a secret that proves to <a class="term" href="glossary.html#openai-api">OpenAI</a> the request is yours, so they can run the model and bill the right account. Keep it out of your code and out of Git: it lives in the <a class="term" href="glossary.html#env-file">.env file</a> (which <code>.gitignore</code> hides), and <a class="term" href="glossary.html#dotenv">python-dotenv</a>'s <code>load_dotenv()</code> loads it at startup. The LangChain OpenAI model reads <code>OPENAI_API_KEY</code> from there automatically; you never pass the key in code.</p>
+
+<h2>The complete file</h2>
+<p>This is the whole client. It connects to the running server, turns the MCP tools into LangChain tools, builds the agent, and runs a chat loop until you type <code>Q</code>.</p>
+
+<pre data-file="src/mcp_server/langchain_client.py" data-lang="py" data-tag="complete file"><code>import asyncio
+from uuid import uuid4
+
+from dotenv import load_dotenv
+from langchain.agents import create_agent
+from langchain.mcp import MCPAdapter
+from langchain.messages import HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+
+load_dotenv()
+
+mcp_adapter = MCPAdapter("http://127.0.0.1:8000/mcp")
+
+
+async def main():
+    async with mcp_adapter:
+        tools = await mcp_adapter.list_tools()
+        agent = create_agent(
+            model="gpt-4o-mini",
+            tools=tools,
+            system_prompt="You are a helpful assistant for managing tasks",
+            checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": str(uuid4())}}
+        human_question = "can you help me?"
+        while human_question != "Q":
+            result = await agent.ainvoke(
+                {"messages": [HumanMessage(content=human_question)]},
+                config=config,
+            )
+            print("AI response:", result["messages"][-1].text)
+            human_question = input("type your message ('Q' to quit): ")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import asyncio</code></td><td>Loads Python's built-in <a class="term" href="glossary.html#asyncio">asyncio</a> library. We need it at the bottom to start our <a class="term" href="glossary.html#async">async</a> program with <code>asyncio.run(...)</code>. It is part of the standard library, so you do not install it.</td></tr>
+<tr><td>2</td><td><code>from uuid import uuid4</code></td><td>Imports <code>uuid4</code>, which makes a brand-new random <a class="term" href="glossary.html#uuid">UUID</a>. We use it to give this conversation a unique <a class="term" href="glossary.html#thread-id">thread id</a>. Also standard library.</td></tr>
+<tr><td>4</td><td><code>from dotenv import load_dotenv</code></td><td>Brings in <a class="term" href="glossary.html#dotenv">python-dotenv</a>'s loader so we can read the OpenAI key from the <a class="term" href="glossary.html#env-file">.env file</a>.</td></tr>
+<tr><td>5</td><td><code>from langchain.agents import create_agent</code></td><td>Imports the LangChain 1.x agent builder, <a class="term" href="glossary.html#create-agent">create_agent</a>. It wires the model, the tools and the memory into one ready-to-run agent.</td></tr>
+<tr><td>6</td><td><code>from langchain.mcp import MCPAdapter</code></td><td>Imports the <a class="term" href="glossary.html#mcp-adapter">MCP adapter</a> that connects to an MCP server and exposes its tools as LangChain tools. Note: <code>langchain.mcp</code> is a <strong>beta module built into LangChain</strong>, not the separate <code>langchain-mcp-adapters</code> package. The editor may underline this line as unresolved and you may see a beta warning when it runs, but it works. (See the "Video vs setup" callout.)</td></tr>
+<tr><td>7</td><td><code>from langchain.messages import HumanMessage</code></td><td>Imports the <a class="term" href="glossary.html#human-message">HumanMessage</a> class. Agents take a list of message objects, not raw strings; this one marks text as coming from the user.</td></tr>
+<tr><td>8</td><td><code>from langgraph.checkpoint.memory import InMemorySaver</code></td><td>Imports <code>InMemorySaver</code>, a <a class="term" href="glossary.html#checkpointer">checkpointer</a> that keeps the conversation in memory so the agent remembers earlier turns. (It is <code>InMemorySaver</code>, not <code>MemorySaver</code>.)</td></tr>
+<tr><td>10</td><td><code>load_dotenv()</code></td><td>Reads <code>.env</code> and loads its values (including <code>OPENAI_API_KEY</code>) into the environment. Without this, the model cannot authenticate and the call fails.</td></tr>
+<tr><td>12</td><td><code>mcp_adapter = MCPAdapter("http://127.0.0.1:8000/mcp")</code></td><td>Creates the adapter pointed at your running server's <a class="term" href="glossary.html#endpoint">endpoint</a>. This is the same URL the FastMCP client used; the adapter will fetch the tool list from here.</td></tr>
+<tr><td>15</td><td><code>async def main():</code></td><td>Defines the main <a class="term" href="glossary.html#coroutine">coroutine</a>. It is <code>async</code> because talking to the server and the model is done with <a class="term" href="glossary.html#await">await</a>.</td></tr>
+<tr><td>16</td><td><code>async with mcp_adapter:</code></td><td>Opens the adapter as an async context manager: it connects to the server on entry and cleanly closes the connection when the block ends, even if an error happens.</td></tr>
+<tr><td>17</td><td><code>tools = await mcp_adapter.list_tools()</code></td><td>Asks the server for its tools and returns them as LangChain tool objects. These are the same <code>create_task</code>, <code>list_tasks</code> and <code>update_task_status</code> tools you built earlier.</td></tr>
+<tr><td>18&#8211;23</td><td><code>agent = create_agent(...)</code></td><td>Builds the agent. <code>model="gpt-4o-mini"</code> picks the OpenAI model; <code>tools=tools</code> gives it the MCP tools; <code>system_prompt=...</code> sets its job; <code>checkpointer=InMemorySaver()</code> gives it memory. See the lines below for each argument.</td></tr>
+<tr><td>19</td><td><code>model="gpt-4o-mini",</code></td><td>The <a class="term" href="glossary.html#llm">LLM</a> that will read your messages and choose tools. A small, cheap OpenAI model is plenty for this demo.</td></tr>
+<tr><td>20</td><td><code>tools=tools,</code></td><td>Hands the list of MCP tools to the agent. This list is the agent's entire set of abilities; if a tool is not here, the agent cannot do it.</td></tr>
+<tr><td>21</td><td><code>system_prompt="You are a helpful assistant for managing tasks",</code></td><td>The <a class="term" href="glossary.html#system-prompt">system prompt</a> tells the model who it is and what it is for, before any user message. It steers the model toward using the task tools.</td></tr>
+<tr><td>22</td><td><code>checkpointer=InMemorySaver(),</code></td><td>Plugs in memory. With a checkpointer, each turn is saved so the next turn can see the earlier ones. Without it, the agent would forget everything between messages.</td></tr>
+<tr><td>24</td><td><code>config = {"configurable": {"thread_id": str(uuid4())}}</code></td><td>Builds the run config. The <a class="term" href="glossary.html#thread-id">thread_id</a> names this conversation so the checkpointer can file its memory under it. A fresh random UUID means a fresh conversation each run.</td></tr>
+<tr><td>25</td><td><code>human_question = "can you help me?"</code></td><td>Seeds the loop with a first message so the agent speaks first. The loop keeps running as long as this is not <code>"Q"</code>.</td></tr>
+<tr><td>26</td><td><code>while human_question != "Q":</code></td><td>The chat loop. It repeats until you type <code>Q</code> to quit.</td></tr>
+<tr><td>27&#8211;30</td><td><code>result = await agent.ainvoke(...)</code></td><td>Runs the agent for one turn. <code>ainvoke</code> is the async version of invoke; we <a class="term" href="glossary.html#await">await</a> it. We pass the message list and the config (with the thread id) so memory works.</td></tr>
+<tr><td>28</td><td><code>{"messages": [HumanMessage(content=human_question)]},</code></td><td>The input: a list with one <a class="term" href="glossary.html#human-message">HumanMessage</a> carrying the user's text. The agent adds the model's replies and any tool results to this list internally.</td></tr>
+<tr><td>29</td><td><code>config=config,</code></td><td>Passes the config so this turn is saved under the same thread id as the previous turns.</td></tr>
+<tr><td>31</td><td><code>print("AI response:", result["messages"][-1].text)</code></td><td>Prints the agent's final answer. The result holds the full message list; <code>[-1]</code> is the last message (the model's reply) and <code>.text</code> is its text.</td></tr>
+<tr><td>32</td><td><code>human_question = input("type your message ('Q' to quit): ")</code></td><td>Reads your next line from the keyboard. Typing <code>Q</code> ends the loop on the next check.</td></tr>
+<tr><td>35&#8211;36</td><td><code>if __name__ == "__main__":<br>&#160;&#160;&#160;&#160;asyncio.run(main())</code></td><td>Starts the program when you run the file directly. <code>asyncio.run</code> creates the <a class="term" href="glossary.html#event-loop">event loop</a> and runs <code>main()</code> to completion. Without it the coroutine would never actually run.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to create_agent? What it is and why it matters</summary>
+<p><a class="term" href="glossary.html#create-agent">create_agent</a> is a one-call helper in LangChain 1.x that assembles a working agent. You give it a model, a list of tools, an optional <a class="term" href="glossary.html#system-prompt">system prompt</a>, and an optional <a class="term" href="glossary.html#checkpointer">checkpointer</a>, and it returns an object you can <code>ainvoke</code>. Behind the scenes it builds the "think, maybe call a tool, look at the result, repeat" loop. You do not write that loop yourself.</p>
+</details>
+
+<details class="primer"><summary>New to a system prompt? What it is and why it matters</summary>
+<p>A <a class="term" href="glossary.html#system-prompt">system prompt</a> is a short instruction that sits above the whole conversation and tells the model what role to play. It is not something the user types; you set it once when you build the agent. Here <code>"You are a helpful assistant for managing tasks"</code> nudges the model to treat requests as task operations and to reach for the task tools.</p>
+</details>
+
+<details class="primer"><summary>New to a checkpointer and memory? What it is and why it matters</summary>
+<p>By default an agent forgets everything the moment a turn ends. A <a class="term" href="glossary.html#checkpointer">checkpointer</a> fixes that: it saves the message history after each turn and reloads it before the next one, filed under a <a class="term" href="glossary.html#thread-id">thread id</a>. <code>InMemorySaver</code> keeps that history in the program's memory, so it lasts while the program runs but is gone when you stop it. The thread id is how one conversation is kept separate from another; use the same id to continue a chat, a new id to start fresh.</p>
+</details>
+
+<details class="primer"><summary>New to tool calling? What it is and why it matters</summary>
+<p><a class="term" href="glossary.html#tool-calling">Tool calling</a> is how a model takes action. Instead of only writing text, the model can reply with a structured request: "call <code>create_task</code> with title 'buy milk'". The agent runs that function and hands the result back to the model, which then writes a normal answer. The model never touches your database directly; it only asks, and your <a class="term" href="glossary.html#mcp-tool">MCP tools</a> do the work. That is exactly why the tool list is a safety boundary.</p>
+</details>
+
+<h2>Diagrams</h2>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="The agent loop: a user message goes to the agent, the LLM decides on a tool, the MCP tool runs against the database, and an answer comes back">
+<text x="20" y="28" class="title">The agent loop, one turn</text>
+<rect x="20" y="50" width="120" height="48" rx="8" class="box"/>
+<text x="80" y="79" text-anchor="middle">You (message)</text>
+<rect x="180" y="50" width="130" height="48" rx="8" class="box-info"/>
+<text x="245" y="72" text-anchor="middle">LangChain</text>
+<text x="245" y="88" text-anchor="middle">agent</text>
+<rect x="350" y="50" width="130" height="48" rx="8" class="box-info"/>
+<text x="415" y="72" text-anchor="middle">LLM decides:</text>
+<text x="415" y="88" text-anchor="middle" class="mono">which tool?</text>
+<rect x="520" y="50" width="130" height="48" rx="8" class="box2"/>
+<text x="585" y="72" text-anchor="middle">MCP tool</text>
+<text x="585" y="88" text-anchor="middle" class="small">create / list / update</text>
+<rect x="520" y="140" width="130" height="48" rx="8" class="box-solid"/>
+<text x="585" y="169" text-anchor="middle" class="on-solid">SQLite DB</text>
+<rect x="180" y="140" width="300" height="48" rx="8" class="box-ok"/>
+<text x="330" y="169" text-anchor="middle">Agent writes the final answer back to you</text>
+<path class="arrow" d="M140,74 H178"/>
+<path class="arrow" d="M310,74 H348"/>
+<path class="arrow" d="M480,74 H518"/>
+<path class="arrow" d="M585,98 V138"/>
+<path class="arrow-ok" d="M520,164 H482"/>
+<path class="arrow-ok" d="M180,150 H150 V98"/>
+</svg>
+<figcaption>Read left to right, then back along the green path. The model only <em>chooses</em> the tool; the MCP tool is what actually touches the database. <strong>You never hard-code which tool runs.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Same MCP tools, two different callers: the step 10 client calls them by hand, the step 11 agent lets the model choose">
+<text x="20" y="28" class="title">Who picks the tool?</text>
+<rect x="20" y="50" width="330" height="140" rx="8" class="zone"/>
+<text x="185" y="74" text-anchor="middle" class="label">Step 10: FastMCP client</text>
+<rect x="45" y="92" width="280" height="40" rx="8" class="box"/>
+<text x="185" y="116" text-anchor="middle" class="small mono">your code: call_tool("create_task", ...)</text>
+<text x="185" y="160" text-anchor="middle" class="small">You decide the tool and the arguments.</text>
+<rect x="410" y="50" width="330" height="140" rx="8" class="zone"/>
+<text x="575" y="74" text-anchor="middle" class="label">Step 11: LangChain agent</text>
+<rect x="435" y="92" width="280" height="40" rx="8" class="box-info"/>
+<text x="575" y="116" text-anchor="middle" class="small mono">model chooses the tool + arguments</text>
+<text x="575" y="160" text-anchor="middle" class="small">You decide the goal; the LLM decides the tool.</text>
+</svg>
+<figcaption>The server and its three tools are identical in both. <strong>Only the client changed: a human caller became a model caller.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Asking the agent to change a task description fails because there is no such tool">
+<text x="20" y="28" class="title">No tool, no action</text>
+<rect x="20" y="48" width="200" height="48" rx="8" class="box"/>
+<text x="120" y="70" text-anchor="middle" class="small">"change this task's</text>
+<text x="120" y="86" text-anchor="middle" class="small">description"</text>
+<rect x="280" y="48" width="180" height="48" rx="8" class="box-info"/>
+<text x="370" y="77" text-anchor="middle">LLM checks its tools</text>
+<rect x="520" y="30" width="220" height="30" rx="8" class="box-ok"/>
+<text x="630" y="50" text-anchor="middle" class="small mono">create_task</text>
+<rect x="520" y="66" width="220" height="30" rx="8" class="box-ok"/>
+<text x="630" y="86" text-anchor="middle" class="small mono">list_tasks</text>
+<rect x="520" y="102" width="220" height="30" rx="8" class="box-ok"/>
+<text x="630" y="122" text-anchor="middle" class="small mono">update_task_status</text>
+<rect x="520" y="150" width="220" height="40" rx="8" class="box-bad"/>
+<text x="630" y="166" text-anchor="middle" class="small">update_description</text>
+<text x="630" y="182" text-anchor="middle" class="small bad">does not exist</text>
+<path class="arrow" d="M220,72 H278"/>
+<path class="arrow" d="M460,72 H518"/>
+<path class="arrow-bad" d="M460,80 H500 V170 H518"/>
+<text x="150" y="150" class="small warn">The agent politely says it can't &#8212; there is no tool for it.</text>
+</svg>
+<figcaption>The agent can only do what its tool list allows (demo at 77:00&#8211;77:34). <strong>Tools are the boundary: adding or removing a tool is how you control what any client may do.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Memory via thread id: turns saved under the same thread id let the agent remember earlier messages">
+<text x="20" y="28" class="title">Memory via thread_id</text>
+<rect x="20" y="48" width="150" height="44" rx="8" class="box"/>
+<text x="95" y="75" text-anchor="middle" class="small">Turn 1: "add buy milk"</text>
+<rect x="300" y="48" width="150" height="44" rx="8" class="box"/>
+<text x="375" y="75" text-anchor="middle" class="small">Turn 2: "list my tasks"</text>
+<rect x="580" y="48" width="160" height="44" rx="8" class="box"/>
+<text x="660" y="75" text-anchor="middle" class="small">Turn 3: "mark it done"</text>
+<rect x="20" y="130" width="720" height="44" rx="8" class="box-solid"/>
+<text x="380" y="152" text-anchor="middle" class="on-solid">InMemorySaver, filed under one thread_id</text>
+<text x="380" y="168" text-anchor="middle" class="on-solid small">each turn can see all the earlier ones</text>
+<path class="arrow" d="M95,92 V128"/>
+<path class="arrow" d="M375,92 V128"/>
+<path class="arrow" d="M660,92 V128"/>
+<path class="arrow" d="M170,70 H298"/>
+<path class="arrow" d="M450,70 H578"/>
+</svg>
+<figcaption>Every turn is saved under the same <span class="mono">thread_id</span>, so "mark it done" can refer to the task from turn 1. <strong>A new thread_id would start a conversation with no memory of the old one.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>The program prints an opening <code>AI response:</code> line, then waits at <code>type your message ('Q' to quit):</code>. Ask it to add a task ("add a task to buy milk"), and the agent calls <code>create_task</code>; your <code>data/tasks.db</code> gains a new row. Ask it to list tasks and it calls <code>list_tasks</code> and reads them back. Type <code>Q</code> to stop. We verified the full loop runs and the agent's tool call really writes to the database. In our test we used a fake model so no key was needed; with a real OpenAI key the model itself chooses which tool to call, exactly as in the video.</p></div>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+<li><strong>Server not running.</strong> The adapter fetches tools over HTTP. If the server is not listening on <code>http://127.0.0.1:8000/mcp</code>, <code>list_tools()</code> fails. Start the server first, in its own terminal.</li>
+<li><strong>Missing or wrong API key.</strong> No <code>OPENAI_API_KEY</code> in <code>.env</code> (or a typo) means the model call is rejected. Check the key and that <code>load_dotenv()</code> runs before the agent is used.</li>
+<li><strong>Forgetting <code>await</code>.</strong> <code>agent.ainvoke(...)</code> is async. Call it without <code>await</code> (or without <code>asyncio.run</code> at the bottom) and you get <code>RuntimeWarning: coroutine '...' was never awaited</code> and nothing happens.</li>
+<li><strong>Expecting a missing tool to work.</strong> Asking the agent to edit a description will not work &#8212; there is no such tool. That is correct behaviour, not a bug.</li>
+</ul></div>
+
+<div class="callout"><strong>Video vs setup</strong>
+<p>The import <code>from langchain.mcp import MCPAdapter</code> uses a <strong>beta module built into LangChain</strong>, not the separate <code>langchain-mcp-adapters</code> package on PyPI (that package is currently broken against the 2.x <a class="term" href="glossary.html#mcp">MCP</a> library). Your editor (Pylance) may underline <code>langchain.mcp</code> as unresolved and you may see a <code>LangChainBetaWarning</code> at runtime. Both are expected; the code runs. There is no public repo for this project, so the code here was transcribed from the video and then run locally to confirm it works.</p></div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>The <a class="term" href="glossary.html#mcp-adapter">MCP adapter</a> fetches the same three tools as before and hands them to an agent.</li>
+<li><a class="term" href="glossary.html#create-agent">create_agent</a> builds the model + tools + loop so the <a class="term" href="glossary.html#llm">LLM</a> chooses which tool to call.</li>
+<li>A <a class="term" href="glossary.html#checkpointer">checkpointer</a> plus a <a class="term" href="glossary.html#thread-id">thread id</a> give the conversation memory across turns.</li>
+<li>The agent can only do what its tools allow &#8212; no description tool means no description edits. Tools are the boundary.</li>
+<li>Run needs the server up and an <a class="term" href="glossary.html#api-key">OpenAI API key</a>; the loop runs until you type <code>Q</code>.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="10-client-calls.html"><small>← Previous · Step 10</small>Calling Tools from the Client</a>
+<a class="next" href="12-bonus-codex.html"><small>Next · Step 12 →</small>Bonus: Use Your MCP from Codex</a>
+</nav>
+</main>
+</body>
+</html>

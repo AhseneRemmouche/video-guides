@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>08 · Secure Management: SSH Tunnel &amp; Backups</title>
+<meta name="description" content="Reach the Meilisearch dashboard safely over an SSH tunnel and automate backups with a scheduled script.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Deploy, Secure &amp; Automate Full-Stack Web Apps</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 08/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 08 of 19 · 247:50</div>
+  <h1>Secure Management: SSH Tunnel &amp; Backups</h1>
+  <p class="lead">Reach the Meilisearch dashboard safely over an SSH tunnel and automate backups with a scheduled script.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wY5pQOTsGaA&amp;t=14870s" target="_blank" rel="noopener">▶ Watch this part (247:50)</a>
+</section>
+<p>Meilisearch is running in production, hidden behind your firewall. Two jobs remain to make it safe to operate day to day. First, protect the data: if the server crashes or the database is corrupted, you could lose everything, so you schedule automatic <a class="term" href="glossary.html#backup">backups</a>. Second, make it manageable: port 7700 is blocked from the internet, which is great for security but awkward when you want a visual dashboard. The trick is an <a class="term" href="glossary.html#ssh-tunnel">SSH tunnel</a> &#8212; you reach the locked-down engine without opening a single public port (at 245:47).</p>
+
+<div class="callout"><strong>Security note.</strong> The whole point of this step is to manage a private service without weakening the firewall. Opening port 7700 to the world just to use an admin dashboard would be a bad trade. Instead you ride your existing, already-allowed SSH connection, and close it the moment you are done.</div>
+
+<h2>Part 1 &#8212; Schedule automatic backups</h2>
+
+<p>Right now your data lives on the edge: one disk failure and it is gone. The fix is to have Meilisearch take a <strong>snapshot</strong> on a timer. A snapshot is an exact copy of the database that acts as a safety net (at 216:14). You turn this on by adding two flags to the same systemd unit file you wrote in the last step.</p>
+
+<details class="primer"><summary>New to backups? Snapshots, and how this differs from cron</summary><p>A backup is simply a spare copy of your data you can restore from after something goes wrong. On Linux, people often schedule recurring jobs with <a class="term" href="glossary.html#cron">cron</a>, the classic time-based scheduler. Here you do not need cron at all: Meilisearch has its own built-in timer. You tell it how many seconds to wait between snapshots with <code>--schedule-snapshot</code>, and it quietly writes a fresh copy on that schedule. Fewer moving parts, one less thing to configure.</p></details>
+
+<pre data-lang="bash" data-tag="server"><code>sudo nano /etc/systemd/system/meilisearch.service</code></pre>
+
+<p>Add <code>--schedule-snapshot</code> and <code>--snapshot-dir</code> to the <code>ExecStart</code> command so the final block looks exactly like this (at 248:13).</p>
+
+<pre data-lang="ini" data-tag="/etc/systemd/system/meilisearch.service"><code>ExecStart=/usr/local/bin/meilisearch \
+  --db-path "/var/lib/meilisearch/data" \
+  --dump-dir "/var/lib/meilisearch/dumps" \
+  --schedule-snapshot 86400 \
+  --snapshot-dir "/var/lib/meilisearch/snapshots"</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>ExecStart=/usr/local/bin/meilisearch \</code></td><td>The command systemd runs to launch the engine. The <code>\</code> continues it onto the next lines.</td></tr>
+<tr><td>2</td><td><code>--db-path "/var/lib/meilisearch/data" \</code></td><td>Where the live database is stored. Unchanged from the last step.</td></tr>
+<tr><td>3</td><td><code>--dump-dir "/var/lib/meilisearch/dumps" \</code></td><td>Where dumps (migration files) are written. Unchanged.</td></tr>
+<tr><td>4</td><td><code>--schedule-snapshot 86400 \</code></td><td>Take a snapshot every 86,400 seconds, which is exactly 24 hours (at 248:37). Lower it to <code>3600</code> for hourly backups if your data changes a lot.</td></tr>
+<tr><td>5</td><td><code>--snapshot-dir "/var/lib/meilisearch/snapshots"</code></td><td>Where to save the snapshot files, kept inside the system user's own directory so permissions stay tidy.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Backup timeline: a snapshot is written every 86400 seconds and only the most recent one is kept">
+  <path class="line" d="M40,70 H720"/>
+  <path class="arrow" d="M700,70 H720"/>
+
+  <circle cx="120" cy="70" r="6" class="dot-ok"/>
+  <text x="120" y="52" text-anchor="middle" class="small">snap</text>
+  <text x="120" y="96" text-anchor="middle" class="small">day 1</text>
+
+  <circle cx="300" cy="70" r="6" class="dot-ok"/>
+  <text x="300" y="52" text-anchor="middle" class="small">snap</text>
+  <text x="300" y="96" text-anchor="middle" class="small">day 2</text>
+
+  <circle cx="480" cy="70" r="6" class="dot-ok"/>
+  <text x="480" y="52" text-anchor="middle" class="small">snap</text>
+  <text x="480" y="96" text-anchor="middle" class="small">day 3</text>
+
+  <circle cx="660" cy="70" r="7" class="dot-info"/>
+  <text x="660" y="52" text-anchor="middle" class="small">snap</text>
+  <text x="660" y="96" text-anchor="middle" class="small">day 4 (kept)</text>
+
+  <text x="210" y="124" text-anchor="middle" class="small">&#8592; 86,400 s (24 h) &#8594;</text>
+  <text x="640" y="140" text-anchor="middle" class="small">only the most recent snapshot is kept</text>
+</svg>
+<figcaption>Every 24 hours Meilisearch writes a fresh snapshot. <strong>Only the latest is kept, so backups never slowly fill the disk.</strong> Numbers are illustrative of the default schedule.</figcaption>
+</figure>
+
+<p>Save and exit. The snapshots folder does not exist yet, so create it and give it to the <code>meilisearch</code> user (at 249:00).</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo mkdir -p /var/lib/meilisearch/snapshots
+sudo chown -R meilisearch:meilisearch /var/lib/meilisearch/snapshots</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo mkdir -p /var/lib/meilisearch/snapshots</code></td><td>Creates the folder the engine will write backups into. <code>-p</code> makes parents as needed and does not error if it exists.</td></tr>
+<tr><td>2</td><td><code>sudo chown -R meilisearch:meilisearch /var/lib/meilisearch/snapshots</code></td><td>Gives the folder to the service user so it has permission to write snapshot files. Without this the scheduled backup would fail silently.</td></tr>
+</table></div>
+
+<p>Reload systemd and restart to apply the new backup policy.</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo systemctl daemon-reload
+sudo systemctl restart meilisearch</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> After the first interval, a snapshot file appears in <code>/var/lib/meilisearch/snapshots</code>. From now on Meilisearch quietly saves a safe copy every day with no further action from you.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Restore flow: if the database is lost, the most recent snapshot rebuilds it">
+  <rect x="20" y="60" width="150" height="54" rx="8" class="box-bad"/>
+  <text x="95" y="84" text-anchor="middle" class="small">database lost</text>
+  <text x="95" y="102" text-anchor="middle" class="small">or corrupted</text>
+
+  <rect x="250" y="60" width="160" height="54" rx="8" class="box-info"/>
+  <text x="330" y="84" text-anchor="middle" class="small">latest snapshot</text>
+  <text x="330" y="102" text-anchor="middle" class="small mono">snapshots/</text>
+
+  <rect x="490" y="60" width="150" height="54" rx="8" class="box"/>
+  <text x="565" y="84" text-anchor="middle" class="small">restore with</text>
+  <text x="565" y="102" text-anchor="middle" class="small mono">--import-snapshot</text>
+
+  <rect x="660" y="60" width="90" height="54" rx="8" class="box-ok"/>
+  <text x="705" y="84" text-anchor="middle" class="small">data</text>
+  <text x="705" y="102" text-anchor="middle" class="small">back</text>
+
+  <path class="arrow" d="M170,87 H248"/>
+  <path class="arrow" d="M410,87 H488"/>
+  <path class="arrow-ok" d="M640,87 H658"/>
+  <text x="330" y="146" text-anchor="middle" class="small">the safety net you scheduled above</text>
+</svg>
+<figcaption>If the worst happens, the most recent snapshot rebuilds the database. <strong>A backup you never tested is only a hope; knowing the restore path turns it into a plan.</strong></figcaption>
+</figure>
+
+<h2>Part 2 &#8212; Reach the dashboard through an SSH tunnel</h2>
+
+<p>Because UFW blocks port 7700, nobody on the internet can reach Meilisearch &#8212; including you. To inspect documents or tweak settings with a GUI without poking a hole in the firewall, you use SSH tunneling again, the same technique you used to preview the front-end build earlier (at 247:50).</p>
+
+<details class="primer"><summary>New to SSH tunnels? What local port forwarding means</summary><p>An SSH tunnel is a secure, encrypted pipe built on top of your normal SSH connection. With <strong>local <a class="term" href="glossary.html#port-forwarding">port forwarding</a></strong> you tell SSH: "listen on a port on my laptop, and forward anything that arrives there, through the encrypted connection, to a port on the server." Your browser talks to <code>localhost</code> on your laptop; the request travels the pipe and comes out at the server's port 7700 as if it were local. Nothing new is exposed to the internet, because the traffic rides inside the SSH connection (port 22) that is already allowed.</p></details>
+
+<p>Run this on your <strong>local computer</strong> (not on the server) and leave the window open (at 250:35).</p>
+
+<pre data-lang="bash" data-tag="local machine"><code>ssh -L 7700:127.0.0.1:7700 my-website</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>ssh</code></td><td>Opens a normal SSH connection to the server &#8212; the same encrypted channel you log in with.</td></tr>
+<tr><td>1</td><td><code>-L</code></td><td>Turns on <strong>local</strong> port forwarding. It is what makes this a tunnel rather than a plain login.</td></tr>
+<tr><td>1</td><td><code>7700</code> (first)</td><td>The port to open <strong>on your laptop</strong>. Traffic you send to <code>localhost:7700</code> enters the tunnel here.</td></tr>
+<tr><td>1</td><td><code>127.0.0.1</code></td><td>The address to connect to <strong>from the server's side</strong> of the tunnel. <code>127.0.0.1</code> means "the server itself," where Meilisearch is listening.</td></tr>
+<tr><td>1</td><td><code>7700</code> (second)</td><td>The port <strong>on the server</strong> to forward to &#8212; Meilisearch's port.</td></tr>
+<tr><td>1</td><td><code>my-website</code></td><td>The SSH alias for your server, from the config file you set up earlier.</td></tr>
+</table></div>
+
+<p>If you never set up an SSH config alias, use the full connection string instead.</p>
+
+<pre data-lang="bash" data-tag="local machine"><code>ssh -L 7700:127.0.0.1:7700 -i ~/.ssh/&lt;YOUR_KEY_NAME&gt; &lt;YOUR_USERNAME&gt;@&lt;YOUR_DROPLET_IP&gt;</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="SSH local port forwarding: the laptop port 7700 forwards through an encrypted SSH pipe to the server's 127.0.0.1 port 7700">
+  <rect x="20" y="40" width="200" height="130" rx="8" class="zone"/>
+  <text x="120" y="62" text-anchor="middle" class="title">Your laptop</text>
+  <rect x="40" y="80" width="160" height="40" rx="8" class="box"/>
+  <text x="120" y="104" text-anchor="middle" class="small mono">localhost:7700</text>
+  <text x="120" y="150" text-anchor="middle" class="small">browser / GUI</text>
+
+  <rect x="540" y="40" width="200" height="130" rx="8" class="zone"/>
+  <text x="640" y="62" text-anchor="middle" class="title">Your server</text>
+  <rect x="560" y="80" width="160" height="40" rx="8" class="box-info"/>
+  <text x="640" y="104" text-anchor="middle" class="small mono">127.0.0.1:7700</text>
+  <text x="640" y="150" text-anchor="middle" class="small">Meilisearch</text>
+
+  <rect x="270" y="78" width="220" height="44" rx="8" class="box-ok"/>
+  <text x="380" y="96" text-anchor="middle" class="small">encrypted SSH pipe</text>
+  <text x="380" y="112" text-anchor="middle" class="small">(rides port 22)</text>
+
+  <path class="arrow" d="M200,100 H268"/>
+  <path class="arrow-ok" d="M490,100 H558"/>
+</svg>
+<figcaption>Local port forwarding in one picture: your laptop's <span class="mono">localhost:7700</span> is wired, through the encrypted SSH pipe, to the server's <span class="mono">127.0.0.1:7700</span>. <strong>Traffic never leaves the SSH connection, so nothing new is exposed.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Why no public port is opened: the internet is blocked on port 7700 but the tunnel rides inside the already-allowed SSH port 22">
+  <rect x="20" y="30" width="150" height="60" rx="8" class="box"/>
+  <text x="95" y="58" text-anchor="middle" class="small">internet</text>
+  <text x="95" y="76" text-anchor="middle" class="small">(attacker)</text>
+
+  <rect x="300" y="20" width="440" height="190" rx="8" class="zone"/>
+  <text x="320" y="42" class="title">UFW firewall</text>
+
+  <rect x="330" y="56" width="180" height="40" rx="8" class="box-bad"/>
+  <text x="420" y="80" text-anchor="middle" class="small">:7700 &#8212; blocked</text>
+
+  <rect x="330" y="120" width="180" height="40" rx="8" class="box-ok"/>
+  <text x="420" y="144" text-anchor="middle" class="small">:22 SSH &#8212; allowed</text>
+
+  <rect x="560" y="120" width="160" height="40" rx="8" class="box-info"/>
+  <text x="640" y="144" text-anchor="middle" class="small">tunnel &#8594; :7700</text>
+
+  <path class="arrow-bad" d="M170,70 H328"/>
+  <path class="arrow-ok" d="M170,140 H328"/>
+  <path class="arrow" d="M510,140 H558"/>
+
+  <text x="420" y="196" text-anchor="middle" class="small">you reach 7700 through 22, not around the firewall</text>
+</svg>
+<figcaption>Port 7700 stays shut to the world. Your tunnel enters through port 22, which is already open for SSH, and is forwarded inside. <strong>No new firewall rule, no new attack surface.</strong></figcaption>
+</figure>
+
+<h3>Connect the visual dashboard</h3>
+
+<p>With the tunnel open, use the open-source tool <strong>meilisearch-ui</strong> to manage your indexes visually, without installing anything on the server. Go to <code>https://meilisearch-ui.vercel.app/</code> and click "Add Instance" (at 252:12).</p>
+
+<ol class="steps">
+<li><strong>Name</strong>: a descriptive label, for example <code>Production DB</code>.</li>
+<li><strong>Host</strong>: <code>http://127.0.0.1:7700</code> &#8212; this hits your local tunnel, which forwards to the server.</li>
+<li><strong>API Key</strong>: your production master key.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Illustration of the meilisearch-ui Add Instance form with Name, Host and API Key fields">
+  <rect x="180" y="20" width="400" height="200" rx="8" class="ui-window"/>
+  <rect x="180" y="20" width="400" height="34" rx="8" class="ui-chrome"/>
+  <text x="200" y="42" class="small">Add Instance</text>
+
+  <text x="210" y="84" class="small">Name</text>
+  <rect x="210" y="92" width="340" height="30" rx="8" class="ui-field"/>
+  <text x="224" y="112" class="small mono">Production DB</text>
+
+  <text x="210" y="140" class="small">Host</text>
+  <rect x="210" y="148" width="340" height="30" rx="8" class="ui-field"/>
+  <text x="224" y="168" class="small mono">http://127.0.0.1:7700</text>
+
+  <text x="420" y="140" class="small">API Key</text>
+  <rect x="210" y="186" width="220" height="28" rx="8" class="ui-field"/>
+  <text x="224" y="205" class="small mono">&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;</text>
+  <rect x="450" y="186" width="100" height="28" rx="8" class="ui-button"/>
+  <text x="500" y="205" text-anchor="middle" class="small on-solid">Add</text>
+</svg>
+<figcaption>Illustration (simplified) of the connection form. <strong>The host is <span class="mono">127.0.0.1:7700</span> &#8212; your laptop end of the tunnel &#8212; not the server's public IP.</strong></figcaption>
+</figure>
+
+<div class="callout"><strong>Security note.</strong> Wondering why a secure <code>https://</code> site can talk to an insecure <code>http://</code> host without the browser blocking it? Modern browsers make a built-in exception for <code>127.0.0.1</code> and <code>localhost</code>, so local development and tunneling work without SSL errors (at 252:12).</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Full request path from the dashboard in the browser through the tunnel to Meilisearch and back">
+  <rect x="20" y="40" width="150" height="50" rx="8" class="box"/>
+  <text x="95" y="62" text-anchor="middle" class="small">meilisearch-ui</text>
+  <text x="95" y="80" text-anchor="middle" class="small">in your browser</text>
+
+  <rect x="210" y="40" width="150" height="50" rx="8" class="box"/>
+  <text x="285" y="62" text-anchor="middle" class="small mono">localhost:7700</text>
+  <text x="285" y="80" text-anchor="middle" class="small">(laptop)</text>
+
+  <rect x="400" y="40" width="150" height="50" rx="8" class="box-ok"/>
+  <text x="475" y="68" text-anchor="middle" class="small">SSH tunnel</text>
+
+  <rect x="590" y="40" width="150" height="50" rx="8" class="box-info"/>
+  <text x="665" y="62" text-anchor="middle" class="small">Meilisearch</text>
+  <text x="665" y="80" text-anchor="middle" class="small mono">:7700 (server)</text>
+
+  <path class="arrow" d="M170,65 H208"/>
+  <path class="arrow" d="M360,65 H398"/>
+  <path class="arrow" d="M550,65 H588"/>
+
+  <path class="arrow-ok" d="M665,90 V150 H95 V92"/>
+  <text x="380" y="168" text-anchor="middle" class="small ok">response returns through the same encrypted pipe</text>
+</svg>
+<figcaption>Read left to right: the dashboard talks to your laptop's port 7700, the tunnel carries it to the server, Meilisearch answers, and the reply comes back the same way. <strong>Every byte stayed inside the encrypted SSH pipe.</strong></figcaption>
+</figure>
+
+<h3>Close the tunnel when you are done</h3>
+
+<p>When you finish managing data, close the terminal running the SSH command or press <kbd>Ctrl</kbd>+<kbd>C</kbd>. That instantly breaks the tunnel and cuts off access (at 254:57). Because the whole session happened inside the encrypted pipe, the data was never exposed to the public internet.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Tunnel lifecycle: open the tunnel, manage data, then Ctrl+C closes it and access ends">
+  <rect x="20" y="60" width="160" height="50" rx="8" class="box-ok"/>
+  <text x="100" y="82" text-anchor="middle" class="small">tunnel open</text>
+  <text x="100" y="100" text-anchor="middle" class="small mono">ssh -L running</text>
+
+  <rect x="250" y="60" width="160" height="50" rx="8" class="box-info"/>
+  <text x="330" y="82" text-anchor="middle" class="small">manage data</text>
+  <text x="330" y="100" text-anchor="middle" class="small">via dashboard</text>
+
+  <rect x="480" y="60" width="130" height="50" rx="8" class="box-warn"/>
+  <text x="545" y="82" text-anchor="middle" class="small">Ctrl+C or</text>
+  <text x="545" y="100" text-anchor="middle" class="small">close window</text>
+
+  <rect x="660" y="60" width="90" height="50" rx="8" class="box-bad"/>
+  <text x="705" y="82" text-anchor="middle" class="small">no access</text>
+  <text x="705" y="100" text-anchor="middle" class="small">(private)</text>
+
+  <path class="arrow" d="M180,85 H248"/>
+  <path class="arrow" d="M410,85 H478"/>
+  <path class="arrow" d="M610,85 H658"/>
+</svg>
+<figcaption>The tunnel exists only while you keep it open. <strong>Close it and the engine is sealed off again &#8212; it still runs, but nothing from outside can reach it.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes.</strong> "Address already in use" when you run <code>ssh -L</code> usually means a local Meilisearch is still running on port 7700 (at 251:01) &#8212; stop it and retry. Running the <code>ssh -L</code> command on the server instead of your laptop (it must run locally). Setting the dashboard host to the server's public IP instead of <code>127.0.0.1:7700</code>, which bypasses the tunnel and fails.</div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>You scheduled daily snapshots with <code>--schedule-snapshot 86400</code> and <code>--snapshot-dir</code>, so Meilisearch backs itself up without cron.</li>
+<li>Only the most recent snapshot is kept, so backups never fill the disk, and a snapshot is your restore path if data is lost.</li>
+<li>You reached the private engine with an SSH tunnel (<code>ssh -L 7700:127.0.0.1:7700 my-website</code>), local port forwarding that rides your existing SSH connection.</li>
+<li>You connected the meilisearch-ui dashboard to <code>http://127.0.0.1:7700</code> &#8212; the laptop end of the tunnel &#8212; with your production master key.</li>
+<li>No public port was ever opened: the firewall stayed closed and the traffic stayed inside the encrypted pipe.</li>
+<li>Closing the terminal breaks the tunnel instantly, sealing the engine off from the outside world again.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="07-self-hosting-meilisearch.html"><small>← Previous · Step 07</small>Self-Hosting Meilisearch</a>
+<a class="next" href="09-domains-dns-https.html"><small>Next · Step 09 →</small>Domains, DNS &amp; HTTPS</a>
+</nav>
+</main>
+</body>
+</html>

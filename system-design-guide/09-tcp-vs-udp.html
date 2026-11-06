@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 · Transport Layer: TCP vs UDP</title>
+<meta name="description" content="How data actually moves: reliable TCP vs fast UDP, the handshake, and which to pick.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">System Design Explained</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 09/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 09 of 14 · Part 2 · API design</div>
+  <h1>Transport Layer: TCP vs UDP</h1>
+  <p class="lead">How data actually moves: reliable TCP vs fast UDP, the handshake, and which to pick.</p>
+  <span class="video-link extra">Concept · explained from the video</span>
+</section>
+<p>Most developers build and call <a class="term" href="glossary.html#api">APIs</a> every day, but rarely stop to think about what actually carries their requests across the internet (at 57:44). When your <a class="term" href="glossary.html#client">client</a> sends a request to a <a class="term" href="glossary.html#server">server</a>, the message is broken into small pieces and handed to a lower level of the network to deliver. That lower level is the <strong>transport layer</strong>, and it offers two very different ways to move data: TCP and UDP. This page explains both, so you can pick the right one for the kind of API you are designing.</p>
+
+<p>In the <a class="term" href="glossary.html#osi-model">OSI model</a> the protocols we use to design APIs &#8212; HTTP, HTTPS, WebSocket, AMQP and gRPC &#8212; all live at the top, in the <em>application layer</em> (at 58:07). They do not deliver bytes themselves. They sit on top of the <em>transport layer</em>, which is where <a class="term" href="glossary.html#tcp">TCP</a> and <a class="term" href="glossary.html#udp">UDP</a> do the real work of moving data from one machine to another. Both move data, but they make opposite trade-offs: TCP is reliable but slower, UDP is fast but makes no promises.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="The network stack, showing the application layer sitting on top of the transport layer where TCP and UDP live">
+  <text x="380" y="24" text-anchor="middle" class="title">Where TCP and UDP sit in the stack</text>
+  <rect x="120" y="44" width="520" height="56" rx="8" class="box box-info"/>
+  <text x="380" y="66" text-anchor="middle" class="label">Application layer</text>
+  <text x="380" y="86" text-anchor="middle" class="small">HTTP &#183; HTTPS &#183; WebSocket &#183; AMQP &#183; gRPC</text>
+  <path class="arrow" d="M 380,100 V 128"/>
+  <text x="470" y="120" text-anchor="middle" class="small">hands data down</text>
+  <rect x="120" y="130" width="520" height="70" rx="8" class="box box-solid"/>
+  <text x="380" y="152" text-anchor="middle" class="label on-solid">Transport layer</text>
+  <rect x="150" y="160" width="220" height="30" rx="8" class="box"/>
+  <text x="260" y="180" text-anchor="middle" class="label">TCP &#8212; reliable, ordered</text>
+  <rect x="390" y="160" width="220" height="30" rx="8" class="box"/>
+  <text x="500" y="180" text-anchor="middle" class="label">UDP &#8212; fast, no guarantee</text>
+  <path class="arrow" d="M 380,200 V 228"/>
+  <rect x="120" y="230" width="520" height="48" rx="8" class="box2"/>
+  <text x="380" y="250" text-anchor="middle" class="label">Network &#183; Data link &#183; Physical layers</text>
+  <text x="380" y="268" text-anchor="middle" class="small">carry the actual bits across cables and radio</text>
+</svg>
+<figcaption>The protocols you design APIs with sit at the top; they rely on TCP or UDP underneath to deliver the bytes. <strong>Choosing TCP or UDP is a decision made below your API, but it shapes how your API behaves.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to packets? What they are and why data is split up</summary>
+<p>When you send data over the internet it is almost never sent as one big lump. It is cut into many small pieces called <em>packets</em>, and each packet travels separately across the network before being reassembled at the other end (at 58:54). Large data &#8212; a file, a web page, a video frame &#8212; might be split into many chunks. The transport layer is responsible for how those packets are sent, and for what happens when one is lost or arrives in the wrong order.</p>
+</details>
+
+<h2>TCP: reliable, connection-based delivery</h2>
+
+<p>TCP stands for Transmission Control Protocol (at 58:54). A good way to picture it is sending a parcel with a tracking number, a delivery receipt, and a required signature. When you send data, it is usually split into several chunks &#8212; say three &#8212; and TCP <strong>guarantees delivery</strong> of all of them. If a packet is lost on the way, TCP resends it. If packets arrive out of order, TCP puts them back in the right order before handing them to your application (at 59:17).</p>
+
+<p>TCP is also <strong>connection-based</strong>. Before any data is sent, the client and server perform a three-way <a class="term" href="glossary.html#handshake">handshake</a> to establish a connection (at 59:17). Only once that connection exists do they start exchanging data. All of this checking, resending and reordering adds <strong>overhead</strong>, which makes TCP slower &#8212; but it is accurate and reliable. That is why APIs that handle payments, authentication, user data and email always use TCP (at 60:03).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 280" role="img" aria-label="The TCP three-way handshake: client sends SYN, server replies SYN-ACK, client replies ACK, then the connection is open">
+  <text x="380" y="24" text-anchor="middle" class="title">TCP three-way handshake</text>
+  <rect x="70" y="44" width="150" height="40" rx="8" class="box"/>
+  <text x="145" y="69" text-anchor="middle" class="label">Client</text>
+  <rect x="540" y="44" width="150" height="40" rx="8" class="box"/>
+  <text x="615" y="69" text-anchor="middle" class="label">Server</text>
+  <line class="line dashed" x1="145" y1="84" x2="145" y2="250"/>
+  <line class="line dashed" x1="615" y1="84" x2="615" y2="250"/>
+  <path class="arrow" d="M 150,110 H 608"/>
+  <text x="380" y="104" text-anchor="middle" class="small">1. SYN &#8212; &#8220;can we talk?&#8221;</text>
+  <path class="arrow" d="M 610,152 H 152"/>
+  <text x="380" y="146" text-anchor="middle" class="small">2. SYN-ACK &#8212; &#8220;yes, and can you hear me?&#8221;</text>
+  <path class="arrow" d="M 150,194 H 608"/>
+  <text x="380" y="188" text-anchor="middle" class="small">3. ACK &#8212; &#8220;yes, I hear you&#8221;</text>
+  <rect x="235" y="214" width="290" height="34" rx="8" class="box box-ok"/>
+  <text x="380" y="235" text-anchor="middle" class="label">Connection established &#8212; data can flow</text>
+</svg>
+<figcaption>Three short messages set up the connection before any real data moves. <strong>TCP spends time on a handshake first so that everything sent afterwards is tracked and reliable.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="TCP reordering and resending packets: out-of-order packets are put back in order and a lost packet is resent after a timeout">
+  <text x="380" y="24" text-anchor="middle" class="title">TCP reorders and resends packets</text>
+  <text x="140" y="58" text-anchor="middle" class="label">Arrive out of order</text>
+  <rect x="70" y="70" width="40" height="34" rx="8" class="box"/><text x="90" y="92" text-anchor="middle" class="label">1</text>
+  <rect x="120" y="70" width="40" height="34" rx="8" class="box"/><text x="140" y="92" text-anchor="middle" class="label">3</text>
+  <rect x="170" y="70" width="40" height="34" rx="8" class="box"/><text x="190" y="92" text-anchor="middle" class="label">2</text>
+  <path class="arrow" d="M 230,87 H 300"/>
+  <text x="265" y="78" text-anchor="middle" class="small">reorder</text>
+  <text x="430" y="58" text-anchor="middle" class="label">Delivered in order</text>
+  <rect x="320" y="70" width="40" height="34" rx="8" class="box box-ok"/><text x="340" y="92" text-anchor="middle" class="label">1</text>
+  <rect x="370" y="70" width="40" height="34" rx="8" class="box box-ok"/><text x="390" y="92" text-anchor="middle" class="label">2</text>
+  <rect x="420" y="70" width="40" height="34" rx="8" class="box box-ok"/><text x="440" y="92" text-anchor="middle" class="label">3</text>
+  <line class="line" x1="40" y1="134" x2="720" y2="134"/>
+  <text x="200" y="166" text-anchor="middle" class="label">Packet 2 is lost in transit</text>
+  <rect x="70" y="178" width="40" height="34" rx="8" class="box"/><text x="90" y="200" text-anchor="middle" class="label">1</text>
+  <rect x="120" y="178" width="40" height="34" rx="8" class="box box-bad"/><text x="140" y="200" text-anchor="middle" class="label bad">2</text>
+  <rect x="170" y="178" width="40" height="34" rx="8" class="box"/><text x="190" y="200" text-anchor="middle" class="label">3</text>
+  <path class="arrow-accent" d="M 230,195 H 470"/>
+  <text x="350" y="186" text-anchor="middle" class="small">after a timeout, resend 2</text>
+  <rect x="490" y="178" width="200" height="34" rx="8" class="box box-ok"/>
+  <text x="590" y="200" text-anchor="middle" class="label">all 3 delivered</text>
+</svg>
+<figcaption>Out-of-order packets are reordered, and a lost packet is resent after a timeout. <strong>TCP never gives up on a packet &#8212; nothing is lost, which is why it costs more time.</strong></figcaption>
+</figure>
+
+<h2>UDP: fast, connectionless delivery</h2>
+
+<p>UDP stands for User Datagram Protocol (at 60:03). It is fast and efficient, but the trade-off is that it does <strong>not</strong> guarantee that every packet arrives. If you send four packets and one is lost, UDP simply moves on &#8212; it will not resend it, and there is no delivery guarantee (at 60:03). There is also no handshake, no connection and no tracking. Because it skips all that work, UDP has <strong>less overhead</strong> and much faster transmission (at 60:26).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="UDP sends datagrams with no handshake; a lost one is simply skipped and never resent">
+  <text x="380" y="24" text-anchor="middle" class="title">UDP: fire and forget, no handshake</text>
+  <rect x="40" y="44" width="130" height="40" rx="8" class="box"/>
+  <text x="105" y="69" text-anchor="middle" class="label">Client</text>
+  <rect x="590" y="44" width="130" height="40" rx="8" class="box-solid"/>
+  <text x="655" y="69" text-anchor="middle" class="label on-solid">Server</text>
+  <line class="line dashed" x1="105" y1="84" x2="105" y2="210"/>
+  <line class="line dashed" x1="655" y1="84" x2="655" y2="210"/>
+  <path class="arrow-ok" d="M 110,110 H 648"/>
+  <text x="380" y="104" text-anchor="middle" class="small">datagram 1 &#8212; delivered</text>
+  <path class="arrow-bad" d="M 110,146 H 430"/>
+  <circle class="dot-bad" cx="446" cy="146" r="6"/>
+  <text x="380" y="140" text-anchor="middle" class="small bad">datagram 2 &#8212; lost, never resent</text>
+  <path class="arrow-ok" d="M 110,182 H 648"/>
+  <text x="380" y="176" text-anchor="middle" class="small">datagram 3 &#8212; delivered</text>
+  <text x="380" y="226" text-anchor="middle" class="small">No handshake, no acknowledgement, no resend &#8212; the stream just keeps moving.</text>
+</svg>
+<figcaption>UDP never sets up a connection and never chases a lost packet. <strong>Dropping datagram 2 costs nothing in time &#8212; the next one is already on its way.</strong></figcaption>
+</figure>
+
+<p>That sounds risky, but for some uses it is exactly right. In a video call, if someone's connection lags for a moment, you do not want the old, delayed audio resent to you &#8212; you are talking to them <em>now</em> (at 60:49). A dropped packet is fine; you move on to the next one. So UDP is the go-to for video calls, live streams and online games, where low <a class="term" href="glossary.html#latency">latency</a> matters far more than perfect delivery, and high <a class="term" href="glossary.html#throughput">throughput</a> keeps the stream smooth (at 61:12).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="A video call plays frames in real time; a dropped frame is skipped so the conversation stays live">
+  <text x="380" y="24" text-anchor="middle" class="title">Why a video call prefers UDP</text>
+  <line class="line" x1="40" y1="150" x2="720" y2="150"/>
+  <text x="380" y="176" text-anchor="middle" class="small">time &#8594; (you are talking now, not three seconds ago)</text>
+  <rect x="60" y="70" width="90" height="60" rx="8" class="box-ok"/><text x="105" y="104" text-anchor="middle" class="small">frame 1</text>
+  <rect x="170" y="70" width="90" height="60" rx="8" class="box-ok"/><text x="215" y="104" text-anchor="middle" class="small">frame 2</text>
+  <rect x="280" y="70" width="90" height="60" rx="8" class="box-bad"/><text x="325" y="98" text-anchor="middle" class="small">frame 3</text><text x="325" y="116" text-anchor="middle" class="small">lost</text>
+  <rect x="390" y="70" width="90" height="60" rx="8" class="box-ok"/><text x="435" y="104" text-anchor="middle" class="small">frame 4</text>
+  <rect x="500" y="70" width="90" height="60" rx="8" class="box-ok"/><text x="545" y="104" text-anchor="middle" class="small">frame 5</text>
+  <rect x="610" y="70" width="90" height="60" rx="8" class="box-ok"/><text x="655" y="104" text-anchor="middle" class="small">frame 6</text>
+  <path class="arrow-accent" d="M 325,132 V 148"/>
+  <text x="325" y="60" text-anchor="middle" class="small bad">skip, do not resend</text>
+</svg>
+<figcaption>Frame 3 is lost, so the call simply shows frame 4 next. <strong>Resending stale audio or video would arrive too late to help &#8212; fresh data beats complete data.</strong></figcaption>
+</figure>
+
+<div class="callout ok"><strong>In an interview, say:</strong> &#8220;TCP trades speed for reliability; UDP trades reliability for speed. I pick TCP when every byte must arrive &#8212; payments, auth, email &#8212; and UDP when fresh data matters more than complete data &#8212; live video, streaming, games.&#8221;</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 320" role="img" aria-label="Side-by-side comparison of TCP and UDP across connection, delivery, ordering, speed, overhead and typical uses">
+  <text x="380" y="24" text-anchor="middle" class="title">TCP vs UDP at a glance</text>
+  <rect x="40" y="44" width="340" height="256" rx="8" class="zone"/>
+  <rect x="380" y="44" width="340" height="256" rx="8" class="zone"/>
+  <text x="210" y="68" text-anchor="middle" class="label accent">TCP &#8212; reliable, slower</text>
+  <text x="550" y="68" text-anchor="middle" class="label accent">UDP &#8212; fast, risky</text>
+  <text x="60" y="104" class="small">Connection</text>
+  <text x="360" y="104" text-anchor="end" class="label ok">3-way handshake first</text>
+  <text x="400" y="104" class="small">Connection</text>
+  <text x="700" y="104" text-anchor="end" class="label bad">none (connectionless)</text>
+  <text x="60" y="140" class="small">Delivery</text>
+  <text x="360" y="140" text-anchor="end" class="label ok">guaranteed, resends lost</text>
+  <text x="400" y="140" class="small">Delivery</text>
+  <text x="700" y="140" text-anchor="end" class="label bad">no guarantee</text>
+  <text x="60" y="176" class="small">Ordering</text>
+  <text x="360" y="176" text-anchor="end" class="label ok">reorders packets</text>
+  <text x="400" y="176" class="small">Ordering</text>
+  <text x="700" y="176" text-anchor="end" class="label bad">no reordering</text>
+  <text x="60" y="212" class="small">Speed</text>
+  <text x="360" y="212" text-anchor="end" class="label warn">slower, more overhead</text>
+  <text x="400" y="212" class="small">Speed</text>
+  <text x="700" y="212" text-anchor="end" class="label ok">faster, less overhead</text>
+  <text x="60" y="256" class="small">Good for</text>
+  <text x="360" y="248" text-anchor="end" class="small">payments, auth,</text>
+  <text x="360" y="266" text-anchor="end" class="small">user data, email</text>
+  <text x="400" y="256" class="small">Good for</text>
+  <text x="700" y="248" text-anchor="end" class="small">video calls, live</text>
+  <text x="700" y="266" text-anchor="end" class="small">streams, games</text>
+</svg>
+<figcaption>The same jobs, opposite choices. <strong>Read every TCP strength as a UDP cost, and every UDP speed-up as a dropped TCP guarantee.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Bar chart comparing relative overhead of TCP and UDP per exchange, illustrative">
+  <text x="380" y="24" text-anchor="middle" class="title">Relative overhead per exchange (illustrative)</text>
+  <line class="line" x1="110" y1="210" x2="710" y2="210"/>
+  <text x="104" y="70" text-anchor="end" class="small">more</text>
+  <text x="104" y="206" text-anchor="end" class="small">less</text>
+  <rect x="220" y="62" width="130" height="148" class="box-warn"/>
+  <text x="285" y="52" text-anchor="middle" class="label warn">high</text>
+  <text x="285" y="120" text-anchor="middle" class="small">handshake,</text>
+  <text x="285" y="138" text-anchor="middle" class="small">acks, resend,</text>
+  <text x="285" y="156" text-anchor="middle" class="small">reordering</text>
+  <text x="285" y="230" text-anchor="middle" class="label">TCP</text>
+  <rect x="470" y="182" width="130" height="28" class="box-ok"/>
+  <text x="535" y="172" text-anchor="middle" class="label ok">low</text>
+  <text x="535" y="230" text-anchor="middle" class="label">UDP</text>
+  <text x="535" y="156" text-anchor="middle" class="small">just a small header</text>
+</svg>
+<figcaption>TCP does far more work per exchange than UDP. <strong>Every reliability feature TCP adds is extra processing that UDP simply skips (values illustrative).</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="TCP header carries many control fields while UDP header carries only four">
+  <text x="380" y="24" text-anchor="middle" class="title">What each header carries (why TCP costs more)</text>
+  <rect x="30" y="44" width="350" height="212" rx="8" class="zone"/>
+  <text x="205" y="66" text-anchor="middle" class="label accent">TCP segment header</text>
+  <rect x="50" y="78" width="310" height="24" rx="8" class="box"/><text x="205" y="94" text-anchor="middle" class="small">source &#38; destination port</text>
+  <rect x="50" y="108" width="310" height="24" rx="8" class="box-info"/><text x="205" y="124" text-anchor="middle" class="small">sequence number</text>
+  <rect x="50" y="138" width="310" height="24" rx="8" class="box-info"/><text x="205" y="154" text-anchor="middle" class="small">acknowledgement number</text>
+  <rect x="50" y="168" width="310" height="24" rx="8" class="box-info"/><text x="205" y="184" text-anchor="middle" class="small">flags: SYN / ACK / FIN</text>
+  <rect x="50" y="198" width="310" height="24" rx="8" class="box-info"/><text x="205" y="214" text-anchor="middle" class="small">window size</text>
+  <rect x="50" y="228" width="310" height="24" rx="8" class="box"/><text x="205" y="244" text-anchor="middle" class="small">checksum</text>
+  <rect x="400" y="44" width="330" height="212" rx="8" class="zone"/>
+  <text x="565" y="66" text-anchor="middle" class="label accent">UDP datagram header</text>
+  <rect x="420" y="78" width="290" height="24" rx="8" class="box"/><text x="565" y="94" text-anchor="middle" class="small">source &#38; destination port</text>
+  <rect x="420" y="108" width="290" height="24" rx="8" class="box"/><text x="565" y="124" text-anchor="middle" class="small">length</text>
+  <rect x="420" y="138" width="290" height="24" rx="8" class="box"/><text x="565" y="154" text-anchor="middle" class="small">checksum</text>
+  <rect x="420" y="176" width="290" height="70" rx="8" class="box-ok"/>
+  <text x="565" y="206" text-anchor="middle" class="small">That is all &#8212; no sequence,</text>
+  <text x="565" y="224" text-anchor="middle" class="small">ack or window fields to process.</text>
+</svg>
+<figcaption>The extra TCP fields are what let it track, acknowledge and reorder every byte. <strong>UDP's header is tiny, so there is far less to build, send and check.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to latency and throughput? Two ways to measure &#8220;fast&#8221;</summary>
+<p><strong>Latency</strong> is the delay before data starts arriving &#8212; how long one message takes to make the trip. <strong>Throughput</strong> is how much data you can push through per second once it is flowing. A live video call needs <em>low latency</em> so the conversation feels instant; a large download cares more about <em>high throughput</em>. UDP's lack of handshakes and resends keeps latency low, which is why real-time media prefers it.</p>
+</details>
+
+<h2>How to choose</h2>
+
+<p>The choice comes down to one question (at 62:19): do you need the connection to be safe and reliable, or do you need it to be fast and lightweight while tolerating some loss? If every piece of data must arrive, choose TCP &#8212; banking, email, payments. If speed matters most and the odd lost packet is acceptable, choose UDP &#8212; video streaming and gaming (at 62:41). Note that <a class="term" href="glossary.html#http">HTTP</a>, the protocol behind REST APIs, runs on top of TCP &#8212; so most ordinary web APIs are reliable by default.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Common application protocols grouped by whether they run over TCP or UDP">
+  <text x="380" y="24" text-anchor="middle" class="title">Which protocols ride on TCP, which on UDP</text>
+  <rect x="30" y="44" width="350" height="180" rx="8" class="zone"/>
+  <text x="205" y="66" text-anchor="middle" class="label ok">Runs on TCP (reliable)</text>
+  <rect x="50" y="80" width="150" height="30" rx="8" class="box"/><text x="125" y="100" text-anchor="middle" class="small">HTTP / HTTPS</text>
+  <rect x="210" y="80" width="150" height="30" rx="8" class="box"/><text x="285" y="100" text-anchor="middle" class="small">WebSocket</text>
+  <rect x="50" y="118" width="150" height="30" rx="8" class="box"/><text x="125" y="138" text-anchor="middle" class="small">Email (SMTP)</text>
+  <rect x="210" y="118" width="150" height="30" rx="8" class="box"/><text x="285" y="138" text-anchor="middle" class="small">gRPC (HTTP/2)</text>
+  <rect x="50" y="156" width="310" height="30" rx="8" class="box-ok"/><text x="205" y="176" text-anchor="middle" class="small">REST APIs are reliable by default</text>
+  <rect x="400" y="44" width="330" height="180" rx="8" class="zone"/>
+  <text x="565" y="66" text-anchor="middle" class="label warn">Runs on UDP (fast)</text>
+  <rect x="420" y="80" width="140" height="30" rx="8" class="box"/><text x="490" y="100" text-anchor="middle" class="small">Video calls</text>
+  <rect x="570" y="80" width="140" height="30" rx="8" class="box"/><text x="640" y="100" text-anchor="middle" class="small">Live streams</text>
+  <rect x="420" y="118" width="140" height="30" rx="8" class="box"/><text x="490" y="138" text-anchor="middle" class="small">Online games</text>
+  <rect x="570" y="118" width="140" height="30" rx="8" class="box"/><text x="640" y="138" text-anchor="middle" class="small">DNS lookups</text>
+  <rect x="420" y="156" width="290" height="30" rx="8" class="box-warn"/><text x="565" y="176" text-anchor="middle" class="small">loss is tolerable, speed wins</text>
+</svg>
+<figcaption>The application protocols from earlier lessons each sit on one transport. <strong>Pick the protocol and you have usually picked TCP or UDP with it.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Decision tree: if every packet must arrive choose TCP, otherwise if speed matters more than perfect delivery choose UDP">
+  <text x="380" y="24" text-anchor="middle" class="title">Which one should I use?</text>
+  <rect x="230" y="44" width="300" height="50" rx="8" class="box box-info"/>
+  <text x="380" y="66" text-anchor="middle" class="label">Must every packet arrive,</text>
+  <text x="380" y="84" text-anchor="middle" class="label">in the right order?</text>
+  <path class="arrow-ok" d="M 300,94 L 190,140"/>
+  <text x="215" y="122" text-anchor="middle" class="small ok">yes</text>
+  <path class="arrow" d="M 460,94 L 570,140"/>
+  <text x="545" y="122" text-anchor="middle" class="small warn">no, speed matters more</text>
+  <rect x="70" y="142" width="240" height="78" rx="8" class="box box-ok"/>
+  <text x="190" y="166" text-anchor="middle" class="label">Choose TCP</text>
+  <text x="190" y="188" text-anchor="middle" class="small">payments, auth,</text>
+  <text x="190" y="206" text-anchor="middle" class="small">user data, email</text>
+  <rect x="450" y="142" width="240" height="78" rx="8" class="box box-warn"/>
+  <text x="570" y="166" text-anchor="middle" class="label">Choose UDP</text>
+  <text x="570" y="188" text-anchor="middle" class="small">video calls, live</text>
+  <text x="570" y="206" text-anchor="middle" class="small">streams, games</text>
+</svg>
+<figcaption>Start from the need for reliability, not from the need for speed. <strong>Reliability first points to TCP; speed-with-acceptable-loss points to UDP.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="TCP has a setup handshake and a teardown around the data; UDP just sends data">
+  <text x="380" y="24" text-anchor="middle" class="title">Connection lifecycle: TCP vs UDP</text>
+  <text x="60" y="72" text-anchor="start" class="label accent">TCP</text>
+  <rect x="110" y="50" width="150" height="34" rx="8" class="box-info"/><text x="185" y="72" text-anchor="middle" class="small">1. handshake</text>
+  <rect x="300" y="50" width="150" height="34" rx="8" class="box-ok"/><text x="375" y="72" text-anchor="middle" class="small">2. data transfer</text>
+  <rect x="490" y="50" width="150" height="34" rx="8" class="box-info"/><text x="565" y="72" text-anchor="middle" class="small">3. teardown</text>
+  <path class="arrow" d="M 260,67 H 298"/>
+  <path class="arrow" d="M 450,67 H 488"/>
+  <text x="375" y="108" text-anchor="middle" class="small">setup and teardown surround every TCP conversation</text>
+  <line class="line dashed" x1="40" y1="128" x2="720" y2="128"/>
+  <text x="60" y="172" text-anchor="start" class="label accent">UDP</text>
+  <rect x="110" y="150" width="530" height="34" rx="8" class="box-ok"/><text x="375" y="172" text-anchor="middle" class="small">data transfer only &#8212; no setup, no teardown</text>
+</svg>
+<figcaption>TCP wraps the data in a setup and a shutdown; UDP sends straight away. <strong>Those extra steps are part of the price TCP pays for reliability.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistake:</strong> assuming &#8220;faster is always better&#8221; and reaching for UDP. For payments or login, a lost or reordered packet can corrupt data or drop a request silently &#8212; there is nothing to resend it. Only use UDP when losing the occasional packet genuinely does not matter.</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>TCP and UDP are <strong>transport-layer</strong> protocols; the API protocols (HTTP, WebSocket, gRPC) sit above them in the OSI model.</li>
+<li><strong>TCP</strong> is connection-based (three-way handshake: SYN, SYN-ACK, ACK), guarantees delivery, resends lost packets and reorders them &#8212; reliable but with more overhead.</li>
+<li><strong>UDP</strong> is connectionless, with no handshake, no delivery guarantee and no reordering &#8212; faster and lighter, but packets can be lost.</li>
+<li>Choose <strong>TCP</strong> when every byte must arrive (payments, auth, user data, email); choose <strong>UDP</strong> when speed matters and some loss is fine (video calls, live streams, games).</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="08-api-protocols.html"><small>← Previous · Step 08</small>API Protocols: HTTP, WebSocket, AMQP &amp; gRPC</a>
+<a class="next" href="10-rest-api-design.html"><small>Next · Step 10 →</small>Designing RESTful APIs</a>
+</nav>
+</main>
+</body>
+</html>

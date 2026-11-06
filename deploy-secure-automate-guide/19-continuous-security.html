@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>19 · Continuous Security &amp; Maintenance</title>
+<meta name="description" content="Ban abusive IPs, manage disk space and log retention, and keep the production server healthy over time.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Deploy, Secure &amp; Automate Full-Stack Web Apps</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 19/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 19 of 19 · 612:00</div>
+  <h1>Continuous Security &amp; Maintenance</h1>
+  <p class="lead">Ban abusive IPs, manage disk space and log retention, and keep the production server healthy over time.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wY5pQOTsGaA&amp;t=36720s" target="_blank" rel="noopener">▶ Watch this part (612:00)</a>
+</section>
+<p class="intro">Your server is now observed (lesson 17) and load-tested (lesson 18). This final lesson turns that visibility into action: you will <a class="term" href="glossary.html#ip-ban">ban abusive IP addresses</a> that your traffic reports expose, stop log files and caches from filling the disk, keep a full year of useful traffic history, and schedule a deep overnight security scan so the <a class="term" href="glossary.html#production">production</a> system stays hardened long after launch day. Then we wrap up the whole course.</p>
+
+<h2>What "continuous security" means</h2>
+<p>A deployment is never "finished". New bots probe your <a class="term" href="glossary.html#server">server</a> every hour, disks slowly fill, and new code can quietly re-introduce <a class="term" href="glossary.html#vulnerability">vulnerabilities</a>. Continuous security is the habit of watching, cleaning, and re-scanning on a schedule instead of only once. In the video this is the last subchapter of Module 6 (at 613:08), and it closes three loose ends: blocking persistent attackers, managing disk and <a class="term" href="glossary.html#log-retention">log retention</a>, and automating a heavy security scan that is too slow to run on every commit.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 420" role="img" aria-label="Flow from automated bot requests through Nginx logs and GoAccess to a firewall ban">
+<rect class="box-bad" x="180" y="12" width="400" height="48" rx="8"/>
+<text x="380" y="31" text-anchor="middle">1 &#183; Automated bots request /wp-login.php,</text>
+<text x="380" y="48" text-anchor="middle">/admin/config.php and other files you do not have</text>
+<path class="arrow" d="M380,60 V80"/>
+<rect class="box" x="180" y="80" width="400" height="48" rx="8"/>
+<text x="380" y="99" text-anchor="middle">2 &#183; Nginx safely answers 404,</text>
+<text x="380" y="116" text-anchor="middle">but still records every hit in the access log</text>
+<path class="arrow" d="M380,128 V148"/>
+<rect class="box-info" x="180" y="148" width="400" height="48" rx="8"/>
+<text x="380" y="167" text-anchor="middle">3 &#183; GoAccess exports the hosts panel</text>
+<text x="380" y="184" text-anchor="middle">to /web_app/goaccess.json</text>
+<path class="arrow" d="M380,196 V216"/>
+<rect class="box2" x="180" y="216" width="400" height="48" rx="8"/>
+<text x="380" y="235" text-anchor="middle">4 &#183; find_bad_actors.py ranks the top IPs</text>
+<text x="380" y="252" text-anchor="middle">by total hits and traffic share</text>
+<path class="arrow" d="M380,264 V284"/>
+<rect class="box-warn" x="180" y="284" width="400" height="48" rx="8"/>
+<text x="380" y="303" text-anchor="middle">5 &#183; One IP = 35.84% of all traffic:</text>
+<text x="380" y="320" text-anchor="middle">a clear outlier, not a human</text>
+<path class="arrow arrow-ok" d="M380,332 V352"/>
+<rect class="box-ok" x="180" y="352" width="400" height="50" rx="8"/>
+<text x="380" y="372" text-anchor="middle">6 &#183; sudo ufw deny from that IP &#8594;</text>
+<text x="380" y="389" text-anchor="middle">packets dropped at the network edge</text>
+</svg>
+<figcaption>How to read it: the data you already collect becomes the evidence to act on. <strong>You never guess &#8212; you ban only clear outliers that the numbers expose.</strong></figcaption>
+</figure>
+
+<h2>Part 1 &#183; Ban abusive IP addresses</h2>
+<p>Open your <a class="term" href="glossary.html#goaccess">GoAccess</a> dashboard and look at the <strong>Requested files (URLs)</strong> panel (at 582:31). You will see requests for paths like <code>/wp-login.php</code> or <code>.env</code> that do not exist on a <a class="term" href="glossary.html#fastapi">FastAPI</a> + Vue site. These come from bots scanning the internet for weak servers. <a class="term" href="glossary.html#nginx">Nginx</a> drops them with a 404, but they still waste bandwidth and clutter your <a class="term" href="glossary.html#log">logs</a>, so persistent offenders should be blocked completely (at 584:27).</p>
+
+<details class="primer"><summary>New to bots and scanners? What they are and why they matter</summary>
+<p>Most "attacks" on a small site are not targeted. They are automated programs that crawl every IP address on the internet, requesting well-known vulnerable files (old WordPress logins, leaked <code>.env</code> secrets, admin panels). If your site ever leaks such a file, they grab it. Because your stack has none of those files, the scans fail &#8212; but one determined scanner can still send thousands of requests. Blocking it at the firewall stops the noise before it reaches your application.</p>
+</details>
+
+<h3>Find the top offenders</h3>
+<p>Rather than reading thousands of log lines by hand, export the dashboard as JSON and let a short Python script rank the busiest IPs (at 585:37).</p>
+
+<ol class="steps">
+<li>Export today's GoAccess statistics into a raw data file instead of HTML.</li>
+<li>Create a small diagnostic script in your project root.</li>
+<li>Run it to print the top traffic sources with their share of all hits.</li>
+</ol>
+
+<pre data-lang="bash" data-tag="export JSON"><code>sudo goaccess /var/log/nginx/&lt;your_domain&gt;-access.log -o /web_app/goaccess.json --log-format=COMBINED</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo goaccess</code></td><td>Runs GoAccess with admin rights, which it needs to read the protected Nginx log directory.</td></tr>
+<tr><td>1</td><td><code>/var/log/nginx/&lt;your_domain&gt;-access.log</code></td><td>The input: your site's access log. Replace <code>&lt;your_domain&gt;</code> with your real domain.</td></tr>
+<tr><td>1</td><td><code>-o /web_app/goaccess.json</code></td><td>Writes the output to a file. The <code>.json</code> extension tells GoAccess to emit JSON data (not the HTML dashboard) so a script can read it.</td></tr>
+<tr><td>1</td><td><code>--log-format=COMBINED</code></td><td>Tells GoAccess which log layout to parse. COMBINED is Nginx's standard format, with the client IP, request line and status code.</td></tr>
+</table></div>
+
+<pre data-lang="bash" data-tag="create the script"><code>nano /web_app/find_bad_actors.py</code></pre>
+
+<pre data-lang="python" data-tag="find_bad_actors.py"><code>import json
+import sys
+
+try:
+    with open('/web_app/goaccess.json', 'r') as f:
+        data = json.load(f)
+except FileNotFoundError:
+    print("Error: Could not find goaccess.json file.")
+    sys.exit(1)
+
+hosts = data.get('hosts', {}).get('data', [])
+
+print(f"{'IP Address':&lt;20} {'Total Hits':&lt;15} {'Traffic Share':&lt;15}")
+print("-" * 50)
+
+for host in hosts[:10]:
+    ip = host.get('data')
+    hits = host.get('hits', {}).get('count', 0)
+    percent = host.get('hits', {}).get('percent', "0.00%")
+    print(f"{ip:&lt;20} {hits:&lt;15} {percent:&lt;15}")
+
+print("-" * 50)
+print("Review Checklist:")
+print("Look for severe traffic imbalances (outliers). If the top IP has")
+print("thousands of hits while others have fewer than 50, block it.")</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1&#8211;2</td><td><code>import json</code> / <code>import sys</code></td><td>Load the JSON parser (to read GoAccess output) and <code>sys</code> (to exit cleanly on error).</td></tr>
+<tr><td>4&#8211;6</td><td><code>with open(...) as f: data = json.load(f)</code></td><td>Open the exported file and turn its JSON text into a Python dictionary. <code>with</code> closes the file automatically.</td></tr>
+<tr><td>7&#8211;9</td><td><code>except FileNotFoundError:</code> &#8230; <code>sys.exit(1)</code></td><td>If the JSON file is missing (you forgot to export it), print a clear message and stop with exit code 1 instead of crashing.</td></tr>
+<tr><td>11</td><td><code>hosts = data.get('hosts', {}).get('data', [])</code></td><td>Reach into the JSON for the "hosts" panel, then its "data" list of IP records. <code>.get(&#8230;, default)</code> avoids errors if a key is absent.</td></tr>
+<tr><td>13&#8211;14</td><td><code>print(f"{'IP Address':&lt;20} &#8230;")</code></td><td>Print a left-aligned header row. <code>:&lt;20</code> pads each column to a fixed width so the table lines up.</td></tr>
+<tr><td>16</td><td><code>for host in hosts[:10]:</code></td><td>Loop over only the top 10 IPs (the list is already sorted by hits), which is enough to spot an outlier.</td></tr>
+<tr><td>17&#8211;19</td><td><code>ip = &#8230;</code> / <code>hits = &#8230;</code> / <code>percent = &#8230;</code></td><td>Pull the IP address, its hit count, and its share of total traffic out of each record.</td></tr>
+<tr><td>20</td><td><code>print(f"{ip:&lt;20} {hits:&lt;15} {percent:&lt;15}")</code></td><td>Print one aligned row per IP.</td></tr>
+<tr><td>22&#8211;25</td><td><code>print("Review Checklist:") &#8230;</code></td><td>Print a reminder of how to judge the output: ban an IP only when it dwarfs the others.</td></tr>
+</table></div>
+
+<pre data-lang="bash" data-tag="run the parser"><code>python3 /web_app/find_bad_actors.py</code></pre>
+
+<pre data-lang="text" data-tag="example output"><code>IP Address           Total Hits      Traffic Share
+--------------------------------------------------
+45.148.10.246        5542            35.84%
+4.230.26.9           370             2.39%
+4.189.112.79         252             1.63%
+--------------------------------------------------</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Bar chart of traffic share showing one IP dominating">
+<text x="10" y="20" class="title">Traffic share by IP (from the example report)</text>
+<text x="10" y="52" class="mono small">45.148.10.246</text>
+<rect class="box-bad" x="150" y="40" width="430" height="18" rx="4"/>
+<text x="590" y="53" class="label bad">35.84%</text>
+<text x="10" y="88" class="mono small">4.230.26.9</text>
+<rect class="box-info" x="150" y="76" width="29" height="18" rx="4"/>
+<text x="189" y="89" class="label">2.39%</text>
+<text x="10" y="124" class="mono small">4.189.112.79</text>
+<rect class="box-info" x="150" y="112" width="20" height="18" rx="4"/>
+<text x="180" y="125" class="label">1.63%</text>
+<line class="line dashed" x1="150" y1="150" x2="580" y2="150"/>
+<text x="150" y="168" class="small">Bar length is proportional to each IP's share of all requests.</text>
+</svg>
+<figcaption>How to read it: the top bar is more than ten times longer than the next. <strong>That gap &#8212; not a fixed number &#8212; is what marks a bot.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+<li>Do not ban blindly. The video warns (at 585:13) to look for extreme imbalances only. A list where the top IP has a few hundred hits and the rest have dozens is normal human traffic.</li>
+<li>Banning your own IP by mistake locks you out of the website (not SSH, but still annoying). Double-check the address before you block it.</li>
+</ul></div>
+
+<h3>Block the attacker at the firewall</h3>
+<p>Once you have a clear outlier, drop it with <a class="term" href="glossary.html#ufw">UFW</a> (at 588:26). This blocks the attacker at the network layer, so their packets never reach Nginx or your app. (This is the same <a class="term" href="glossary.html#firewall">firewall</a> you configured in lesson 03, where <a class="term" href="glossary.html#fail2ban">Fail2Ban</a> already auto-bans SSH brute-force attempts; here you add a manual rule for a web scanner.)</p>
+
+<pre data-lang="bash" data-tag="ban one IP"><code>sudo ufw deny from 45.148.10.246 to any</code></pre>
+<pre data-lang="bash" data-tag="confirm the rule"><code>sudo ufw status</code></pre>
+
+<pre data-lang="text" data-tag="firewall status"><code>Status: active
+
+To                         Action      From
+--                         ------      ----
+Nginx Full                 ALLOW       Anywhere
+OpenSSH                    ALLOW       Anywhere
+Anywhere                   DENY        45.148.10.246
+Nginx Full (v6)            ALLOW       Anywhere (v6)
+OpenSSH (v6)               ALLOW       Anywhere (v6)             </code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo ufw deny</code></td><td>Adds a firewall rule that rejects traffic. <code>deny</code> drops the packets silently.</td></tr>
+<tr><td>1</td><td><code>from 45.148.10.246</code></td><td>Applies the rule only to that source IP address &#8212; the outlier you identified.</td></tr>
+<tr><td>1</td><td><code>to any</code></td><td>Blocks the IP from reaching any port or service on your server, not just one.</td></tr>
+<tr><td>2</td><td><code>sudo ufw status</code></td><td>Prints the live rule table so you can confirm the <code>DENY</code> line now lists your banned IP.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Decision: ban an IP only when it is an extreme outlier">
+<rect class="box" x="300" y="12" width="160" height="44" rx="8"/>
+<text x="380" y="31" text-anchor="middle">Top IP in the report</text>
+<text x="380" y="48" text-anchor="middle" class="small">thousands of hits?</text>
+<path class="arrow arrow-bad" d="M330,56 L150,100"/>
+<path class="arrow arrow-ok" d="M430,56 L610,100"/>
+<text x="230" y="82" class="small bad">yes, far above the rest</text>
+<text x="500" y="82" class="small ok">no, similar to others</text>
+<rect class="box-bad" x="40" y="100" width="220" height="48" rx="8"/>
+<text x="150" y="119" text-anchor="middle" class="on-solid">sudo ufw deny from IP</text>
+<text x="150" y="136" text-anchor="middle" class="small">block it at the edge</text>
+<rect class="box-ok" x="500" y="100" width="220" height="48" rx="8"/>
+<text x="610" y="119" text-anchor="middle">Leave it alone</text>
+<text x="610" y="136" text-anchor="middle" class="small">normal visitor &#8212; keep watching</text>
+</svg>
+<figcaption>How to read it: the firewall ban is a scalpel, not a hammer. <strong>Block only the extreme outlier; legitimate visitors stay allowed.</strong></figcaption>
+</figure>
+
+<h2>Part 2 &#183; Manage disk usage</h2>
+<p>Load tests, backups, and software caches all write files that grow quietly. If a Linux disk ever hits 100% full, services can no longer write and your database can crash. Before deleting anything, find where the space is going (at 605:17) with <strong>NCDU</strong>, an interactive disk-usage browser that is far easier than raw <code>du -h</code>.</p>
+
+<pre data-lang="bash" data-tag="install ncdu"><code>sudo apt install ncdu -y</code></pre>
+<pre data-lang="bash" data-tag="scan the whole disk"><code>sudo ncdu /</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo apt install ncdu -y</code></td><td>Installs NCDU (NCurses Disk Usage). <code>-y</code> auto-confirms the install prompt.</td></tr>
+<tr><td>2</td><td><code>sudo ncdu /</code></td><td>Scans from the root directory <code>/</code> (everything). <code>sudo</code> lets it read every folder. The result is a tree sorted by size.</td></tr>
+</table></div>
+
+<p>Move with the arrow keys, press <kbd>Enter</kbd> to open a folder, <kbd>?</kbd> for help, and <kbd>d</kbd> to delete a highlighted item you are sure about (for example an old <code>pip</code> cache). Press <kbd>q</kbd> to quit (at 607:40).</p>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>A list topped by your biggest folders &#8212; typically system libraries, your Python environment, and your web app. In the video the droplet shows about 6.2&#160;GB used (at 606:30). Do not delete system or runtime folders; only remove caches and old backups you recognise.</p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Disk usage before and after the monthly cleanup, illustrative">
+<text x="10" y="20" class="title">Disk space: before vs after cleanup (illustrative)</text>
+<text x="120" y="210" text-anchor="middle" class="label">Before</text>
+<rect class="box-warn" x="70" y="48" width="100" height="40"/>
+<text x="120" y="73" text-anchor="middle" class="small">pip / pnpm cache</text>
+<rect class="box-warn" x="70" y="88" width="100" height="34"/>
+<text x="120" y="110" text-anchor="middle" class="small">old journal logs</text>
+<rect class="box-info" x="70" y="122" width="100" height="30"/>
+<text x="120" y="142" text-anchor="middle" class="small">app</text>
+<rect class="box" x="70" y="152" width="100" height="36"/>
+<text x="120" y="174" text-anchor="middle" class="small">free</text>
+<path class="arrow arrow-ok" d="M210,120 H300"/>
+<text x="255" y="112" text-anchor="middle" class="small ok">cleanup</text>
+<text x="470" y="210" text-anchor="middle" class="label">After</text>
+<rect class="box-info" x="420" y="122" width="100" height="30"/>
+<text x="470" y="142" text-anchor="middle" class="small">app</text>
+<rect class="box-ok" x="420" y="48" width="100" height="104"/>
+<text x="470" y="100" text-anchor="middle" class="small">free space</text>
+<text x="560" y="70" class="small">apt-get clean removes package caches.</text>
+<text x="560" y="92" class="small">journalctl vacuum trims old logs.</text>
+<text x="560" y="114" class="small">pip &amp; pnpm stores are deleted.</text>
+<text x="560" y="136" class="small">The app itself is untouched.</text>
+</svg>
+<figcaption>How to read it: cleanup reclaims the caches and stale logs, not your application. <strong>Routine clearing keeps free space from slowly vanishing.</strong></figcaption>
+</figure>
+
+<h2>Part 3 &#183; Log retention policy</h2>
+<p>Two kinds of logs pull in opposite directions. System logs from the <code>systemd-journald</code> <a class="term" href="glossary.html#daemon">daemon</a> can grow to 10% of your disk by default &#8212; too much on a small server, so you cap them. Nginx access logs, by contrast, are valuable fuel for your traffic charts, so you keep them longer. Setting both limits is your <a class="term" href="glossary.html#log-retention">log retention</a> policy (at 608:02).</p>
+
+<h3>Cap the systemd journal</h3>
+<pre data-lang="bash" data-tag="edit journald config"><code>sudo nano /etc/systemd/journald.conf</code></pre>
+<p>Find the line <code>#SystemMaxUse=</code>, remove the <code>#</code>, and set a hard limit:</p>
+<pre data-lang="ini" data-tag="/etc/systemd/journald.conf"><code>SystemMaxUse=100M</code></pre>
+<pre data-lang="bash" data-tag="apply the change"><code>sudo systemctl restart systemd-journald</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>SystemMaxUse=100M</code></td><td>Tells the journal daemon to use at most 100&#160;MB on disk. Once reached, it deletes the oldest entries first. Removing the leading <code>#</code> is what activates the setting.</td></tr>
+<tr><td>1</td><td><code>sudo systemctl restart systemd-journald</code></td><td>Restarts the logging service so it re-reads the config and enforces the new limit immediately.</td></tr>
+</table></div>
+
+<h3>Keep a year of Nginx logs</h3>
+<p>By default Ubuntu rotates Nginx logs daily but deletes them after 14 days, so you lose your traffic history every two weeks (at 609:13). Raise the retention to 365 days.</p>
+<pre data-lang="bash" data-tag="edit logrotate"><code>sudo nano /etc/logrotate.d/nginx</code></pre>
+<p>Find the line <code>rotate 14</code> and change it to <code>365</code>:</p>
+<pre data-lang="nginx" data-tag="/etc/logrotate.d/nginx"><code>/var/log/nginx/*.log {
+        daily
+        missingok
+        rotate 365
+        compress
+        delaycompress
+        notifempty
+        create 0640 www-data adm
+        sharedscripts
+        # ...
+}</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>/var/log/nginx/*.log {</code></td><td>The policy applies to every Nginx log file.</td></tr>
+<tr><td>2</td><td><code>daily</code></td><td>Rotate (start a fresh file) once a day.</td></tr>
+<tr><td>3</td><td><code>missingok</code></td><td>Do not error if a log file is temporarily absent.</td></tr>
+<tr><td>4</td><td><code>rotate 365</code></td><td>Keep 365 old daily files before deleting &#8212; a full year of history. This is the one value you change.</td></tr>
+<tr><td>5&#8211;6</td><td><code>compress</code> / <code>delaycompress</code></td><td>Gzip old logs to save space, but wait one cycle so yesterday's file stays readable for tools.</td></tr>
+<tr><td>7</td><td><code>notifempty</code></td><td>Skip rotation when the log is empty.</td></tr>
+<tr><td>8</td><td><code>create 0640 www-data adm</code></td><td>After rotating, create the new log file with safe permissions and the right owner/group.</td></tr>
+<tr><td>9</td><td><code>sharedscripts</code></td><td>Run post-rotate scripts once for all matched files, not once per file.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to log rotation? Why it exists</summary>
+<p>A log file that is never rotated grows forever and eventually fills the disk. "Rotation" means: once a day, rename the current log, start a fresh empty one, compress the old ones, and delete files older than the limit. <code>logrotate</code> does this automatically. Your only choice is how many days of history to keep &#8212; small for noisy system logs, large for the traffic logs you actually analyse.</p>
+</details>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<p>Keeping 365 days of Nginx logs on a very small disk, or on a site with huge traffic, can itself fill the disk. The video (at 609:38) says to confirm you have room first. If space is tight, choose a smaller number like 90.</p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Log retention timeline before and after, 14 days versus 365 days">
+<text x="10" y="20" class="title">Nginx log retention: default vs new policy</text>
+<text x="10" y="56" class="label">rotate 14</text>
+<rect class="box-warn" x="110" y="42" width="60" height="22" rx="4"/>
+<text x="140" y="57" text-anchor="middle" class="small">14 days</text>
+<line class="line dashed" x1="170" y1="53" x2="700" y2="53"/>
+<text x="440" y="48" text-anchor="middle" class="small bad">history deleted every two weeks</text>
+<text x="10" y="112" class="label">rotate 365</text>
+<rect class="box-ok" x="110" y="98" width="590" height="22" rx="4"/>
+<text x="405" y="113" text-anchor="middle" class="small on-solid">365 days of traffic history kept</text>
+<text x="110" y="150" class="small">Each block spans the days of data you can still analyse in GoAccess.</text>
+</svg>
+<figcaption>How to read it: the longer bar is a full year of evidence for your traffic charts. <strong>Set retention to match how far back you want to look.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Two log policies: cap system journal, keep Nginx logs">
+<rect class="zone" x="20" y="30" width="340" height="150" rx="8"/>
+<text x="190" y="52" text-anchor="middle" class="title">System journal</text>
+<rect class="box-warn" x="60" y="70" width="260" height="40" rx="8"/>
+<text x="190" y="94" text-anchor="middle">SystemMaxUse=100M</text>
+<text x="190" y="140" text-anchor="middle" class="small">Noisy, low value &#8212; keep it small</text>
+<text x="190" y="160" text-anchor="middle" class="small">so it never eats the disk.</text>
+<rect class="zone" x="400" y="30" width="340" height="150" rx="8"/>
+<text x="570" y="52" text-anchor="middle" class="title">Nginx access logs</text>
+<rect class="box-info" x="440" y="70" width="260" height="40" rx="8"/>
+<text x="570" y="94" text-anchor="middle">rotate 365</text>
+<text x="570" y="140" text-anchor="middle" class="small">Valuable traffic data &#8212; keep a</text>
+<text x="570" y="160" text-anchor="middle" class="small">full year for your dashboards.</text>
+</svg>
+<figcaption>How to read it: one policy shrinks, the other preserves. <strong>Cap the logs you never read; keep the logs you analyse.</strong></figcaption>
+</figure>
+
+<h3>Automate a monthly cleanup</h3>
+<p>To keep the server tidy without remembering to do it, write a small script and run it on a schedule with <a class="term" href="glossary.html#cron">cron</a> (at 610:23).</p>
+<pre data-lang="bash" data-tag="create the script"><code>sudo nano /usr/local/bin/monthly_cleanup.sh</code></pre>
+<pre data-lang="bash" data-tag="/usr/local/bin/monthly_cleanup.sh"><code>#!/bin/bash
+# Enforce immediate termination if any step encounters an unhandled error
+set -e
+
+echo "Starting automated system cleanup routine"
+
+apt-get clean
+apt-get autoremove -y
+
+journalctl --vacuum-time=2d
+
+rm -rf /home/*/.cache/pip
+rm -rf /home/*/.local/share/pnpm/store
+
+echo "System cleanup completed successfully."</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>#!/bin/bash</code></td><td>The shebang: run this file with the Bash shell.</td></tr>
+<tr><td>3</td><td><code>set -e</code></td><td>Stop immediately if any command fails, so a half-finished cleanup never leaves the system in a bad state.</td></tr>
+<tr><td>5</td><td><code>echo "Starting &#8230;"</code></td><td>Writes a start marker to the log so you can confirm the job ran.</td></tr>
+<tr><td>7</td><td><code>apt-get clean</code></td><td>Deletes downloaded <code>.deb</code> package files that apt no longer needs.</td></tr>
+<tr><td>8</td><td><code>apt-get autoremove -y</code></td><td>Removes orphaned dependencies left behind by uninstalled packages. <code>-y</code> auto-confirms.</td></tr>
+<tr><td>10</td><td><code>journalctl --vacuum-time=2d</code></td><td>Deletes system journal entries older than 2 days, reclaiming log space.</td></tr>
+<tr><td>12&#8211;13</td><td><code>rm -rf /home/*/.cache/pip</code> / <code>&#8230;/pnpm/store</code></td><td>Clears the Python <code>pip</code> and Node <code>pnpm</code> download caches for every user. These rebuild on demand, so removing them is safe.</td></tr>
+<tr><td>15</td><td><code>echo "System cleanup completed &#8230;"</code></td><td>Writes an end marker so you can see the run finished cleanly.</td></tr>
+</table></div>
+
+<pre data-lang="bash" data-tag="make it executable"><code>sudo chmod +x /usr/local/bin/monthly_cleanup.sh</code></pre>
+<pre data-lang="bash" data-tag="schedule it"><code>sudo crontab -e</code></pre>
+<p>Add this line at the bottom of the cron file:</p>
+<pre data-lang="text" data-tag="root crontab entry"><code>0 3 1 * * /usr/local/bin/monthly_cleanup.sh &gt;&gt; /var/log/cleanup.log 2&gt;&amp;1</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>chmod +x &#8230;monthly_cleanup.sh</code></td><td>Marks the script as executable so cron can run it.</td></tr>
+<tr><td>1</td><td><code>0 3 1 * *</code></td><td>The cron schedule: minute 0, hour 3, day-of-month 1, any month, any weekday &#8212; i.e. 3:00&#160;AM on the 1st of every month.</td></tr>
+<tr><td>1</td><td><code>/usr/local/bin/monthly_cleanup.sh</code></td><td>The command to run at that time.</td></tr>
+<tr><td>1</td><td><code>&gt;&gt; /var/log/cleanup.log 2&gt;&amp;1</code></td><td>Appends normal output to a log file, and <code>2&gt;&amp;1</code> sends error output to the same place, so you can check what happened.</td></tr>
+</table></div>
+
+<details class="primer"><summary>New to cron? How a schedule line works</summary>
+<p>Cron runs commands at fixed times. Each line starts with five time fields &#8212; minute, hour, day-of-month, month, day-of-week &#8212; followed by the command. A <code>*</code> means "every". So <code>0 3 1 * *</code> reads left to right as "at 3:00, on the 1st, every month, regardless of weekday". You edit the schedule with <code>crontab -e</code>; use <code>sudo</code> for the root user's crontab.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Maintenance cadence: hourly, daily, monthly and as-needed tasks">
+<text x="10" y="20" class="title">Your maintenance calendar</text>
+<rect class="box-info" x="20" y="36" width="350" height="56" rx="8"/>
+<text x="34" y="60" class="label">Hourly &#8212; cron</text>
+<text x="34" y="80" class="small">Rebuild the GoAccess dashboard from live + .gz logs</text>
+<rect class="box2" x="390" y="36" width="350" height="56" rx="8"/>
+<text x="404" y="60" class="label">Daily 06:00 UTC &#8212; GitHub Actions</text>
+<text x="404" y="80" class="small">Full OWASP ZAP deep security scan</text>
+<rect class="box" x="20" y="104" width="350" height="56" rx="8"/>
+<text x="34" y="128" class="label">Monthly 03:00, 1st &#8212; cron</text>
+<text x="34" y="148" class="small">monthly_cleanup.sh clears caches &amp; old logs</text>
+<rect class="box-warn" x="390" y="104" width="350" height="56" rx="8"/>
+<text x="404" y="128" class="label">As needed &#8212; you</text>
+<text x="404" y="148" class="small">Review traffic, run ncdu, ban outlier IPs</text>
+<rect class="box-ok" x="20" y="172" width="720" height="40" rx="8"/>
+<text x="380" y="196" text-anchor="middle">Together: observed, cleaned and re-scanned &#8212; without daily effort</text>
+</svg>
+<figcaption>How to read it: each task has a cadence, and most are automated. <strong>You only step in for the one judgement call: banning outliers.</strong></figcaption>
+</figure>
+
+<h2>Part 4 &#183; Ongoing hardening: a nightly deep security scan</h2>
+<p>In Module 5 you practised <a class="term" href="glossary.html#shift-left">shifting security left</a> &#8212; a fast, lightweight <a class="term" href="glossary.html#owasp-zap">OWASP ZAP</a> API check ran on every pull request. A full <a class="term" href="glossary.html#dast">Dynamic Application Security Testing</a> (DAST) scan, which crawls the whole live front end and fuzzes every input, is far too slow for that (6&#8211;30 minutes). The fix is a separate scheduled <a class="term" href="glossary.html#workflow">workflow</a> that boots the entire stack overnight and runs the heavy scan (at 613:08, 614:40).</p>
+
+<details class="primer"><summary>New to DAST? How it differs from the earlier scans</summary>
+<p>Earlier scans were static (SAST, reading your source code) or checked only the API definition. DAST is dynamic: it treats your running site like a real attacker would, clicking links, submitting forms, and probing for cross-site scripting, SQL injection and broken access control. Because it needs the <em>whole</em> app running &#8212; Meilisearch, FastAPI and the built Vue front end &#8212; and tries thousands of payloads, it is thorough but slow, which is exactly why it runs on a schedule rather than on every commit.</p>
+</details>
+
+<p>Create the workflow file at <code>.github/workflows/daily-deep-security-scan.yml</code> (at 616:40). This runs via <a class="term" href="glossary.html#github-actions">GitHub Actions</a>:</p>
+
+<pre data-lang="yaml" data-tag=".github/workflows/daily-deep-security-scan.yml"><code>name: Daily deep security scan (DAST)
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  deep_scan:
+    name: Full OWASP ZAP scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MEILISEARCH_MASTER_KEY: "aStrongMasterKeyForTestingPurposes"
+      MEILISEARCH_URL: "http://localhost:7700"
+      MEILISEARCH_INDEX_NAME: "articles_test"
+      ENVIRONMENT: "development"
+      MEILISEARCH_DOWNLOAD_MAX_RETRIES: "3"
+      MEILISEARCH_DOWNLOAD_RETRY_DELAY: "5"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: pip install -r requirements.txt
+
+      - name: Download Meilisearch binary
+        working-directory: ./backend
+        run: |
+          MAX_RETRIES="${MEILISEARCH_DOWNLOAD_MAX_RETRIES}"
+          RETRY_DELAY="${MEILISEARCH_DOWNLOAD_RETRY_DELAY}"
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i of $MAX_RETRIES to download Meilisearch..."
+            if curl -L https://install.meilisearch.com | sh; then
+              echo "Meilisearch downloaded successfully!"
+              chmod +x meilisearch
+              break
+            else
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Download failed. Retrying in $RETRY_DELAY seconds..."
+                sleep $RETRY_DELAY
+              else
+                echo "Download failed after $MAX_RETRIES attempts"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Start Meilisearch
+        working-directory: ./backend
+        run: |
+          ./meilisearch --master-key="${MEILISEARCH_MASTER_KEY}" &amp;
+          echo "Waiting for Meilisearch to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:7700/health | grep -q "available"; then
+              echo "Meilisearch is ready!"
+              break
+            fi
+            echo "Attempt $i: Meilisearch not ready yet..."
+            sleep 1
+          done
+          if ! curl -s http://localhost:7700/health | grep -q "available"; then
+            echo "Meilisearch failed to start after 30 attempts"
+            exit 1
+          fi
+
+      - name: Start backend server
+        working-directory: ./backend
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8000 &amp;
+          echo "Waiting for backend to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8000/api/health | grep -q "ok"; then
+              echo "Backend is ready!"
+              break
+            fi
+            echo "Attempt $i: Backend not ready yet..."
+            sleep 1
+          done
+          if ! curl -s http://localhost:8000/api/health | grep -q "ok"; then
+            echo "Backend failed to start after 30 attempts"
+            exit 1
+          fi
+        env:
+          MEILISEARCH_URL: ${{ env.MEILISEARCH_URL }}
+          MEILISEARCH_MASTER_KEY: ${{ env.MEILISEARCH_MASTER_KEY }}
+          MEILISEARCH_INDEX_NAME: ${{ env.MEILISEARCH_INDEX_NAME }}
+          ENVIRONMENT: ${{ env.ENVIRONMENT }}
+
+      - name: Seed test data
+        working-directory: ./backend
+        run: python -m tests.test_data
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: pnpm install
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: pnpm build
+
+      - name: Start frontend (Production preview)
+        working-directory: ./frontend
+        run: |
+          nohup pnpm preview --host &amp;
+          echo "Waiting for frontend to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8080/ | grep -q "&lt;title&gt;Imad Saddik&lt;/title&gt;"; then
+              echo "Frontend is ready!"
+              break
+            fi
+            echo "Attempt $i: Frontend not ready yet..."
+            sleep 1
+          done
+          if ! curl -s http://localhost:8080/ | grep -q "&lt;title&gt;Imad Saddik&lt;/title&gt;"; then
+            echo "Frontend failed to start after 30 attempts"
+            exit 1
+          fi
+
+      - name: Run ZAP full scan
+        uses: zaproxy/action-full-scan@v0.13.0
+        with:
+          target: "http://localhost:8080"
+          rules_file_name: ".github/zap-rules.tsv"
+          allow_issue_writing: false
+          fail_action: true</code></pre>
+
+<p>This file is long, but it only differs from the pull-request scan in a few key places. The handbook highlights four (at 617:02). Here they are with what each does.</p>
+
+<h3>1 &#183; Run on a schedule</h3>
+<pre data-lang="yaml" data-tag="trigger"><code>on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:</code></pre>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2&#8211;3</td><td><code>schedule: - cron: "0 6 * * *"</code></td><td>Starts a fresh runner every day at 06:00 UTC. The five cron fields mean minute 0, hour 6, any day, month and weekday.</td></tr>
+<tr><td>4</td><td><code>workflow_dispatch:</code></td><td>Also lets you launch the scan by hand from the Actions tab &#8212; handy for testing without waiting for 6&#160;AM (at 622:32).</td></tr>
+</table></div>
+
+<h3>2 &#183; Fail fast if it hangs</h3>
+<pre data-lang="yaml" data-tag="timeout"><code>    timeout-minutes: 30</code></pre>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>timeout-minutes: 30</code></td><td>Cancels the job if it runs longer than 30 minutes, so a stuck install or scan never ties up a runner forever (at 617:52). Raise it if your app has many endpoints.</td></tr>
+</table></div>
+
+<h3>3 &#183; Serve a production build, not the dev server</h3>
+<pre data-lang="yaml" data-tag="production preview"><code>      - name: Start frontend (Production preview)
+        working-directory: ./frontend
+        run: |
+          nohup pnpm preview --host &amp;</code></pre>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>4</td><td><code>nohup pnpm preview --host &amp;</code></td><td>Runs the compiled production build (from <code>pnpm build</code>) in the background. <code>pnpm preview</code> mirrors what Nginx serves in production, unlike the hot-reloading <code>pnpm dev</code>. <code>nohup</code> keeps it alive; <code>&amp;</code> frees the shell to continue (at 619:24).</td></tr>
+</table></div>
+
+<h3>4 &#183; Run the full ZAP scan</h3>
+<pre data-lang="yaml" data-tag="ZAP full scan"><code>      - name: Run ZAP full scan
+        uses: zaproxy/action-full-scan@v0.13.0
+        with:
+          target: "http://localhost:8080"
+          rules_file_name: ".github/zap-rules.tsv"</code></pre>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>uses: zaproxy/action-full-scan@v0.13.0</code></td><td>The <em>full</em> scan action (the PR pipeline used the lighter <code>action-api-scan</code>). It spins up an active crawler and fuzzer (at 620:09). Check the version for updates.</td></tr>
+<tr><td>4</td><td><code>target: "http://localhost:8080"</code></td><td>Points the scanner at the running front end &#8212; it browses the site like a user would.</td></tr>
+<tr><td>5</td><td><code>rules_file_name: ".github/zap-rules.tsv"</code></td><td>Reuses your rule file so known false alarms (such as missing headers that Nginx adds in production) are ignored, while real issues like XSS and SQL injection still fail the build.</td></tr>
+</table></div>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>After merging and triggering the workflow manually, a single job runs through installing Python, downloading and seeding Meilisearch, starting the backend, building and previewing the front end, and finally the ZAP scan. In the video it passes in about 6 minutes (at 624:07) &#8212; roughly three times the lightweight PR scan, which is why it stays off the commit path.</p>
+</div>
+
+<div class="callout warn"><strong>Security note</strong>
+<p>The master key in the workflow (<code>aStrongMasterKeyForTestingPurposes</code>) is a throwaway value for an ephemeral test runner only. Never put your real production Meilisearch master key, or any live secret, in a workflow file &#8212; use GitHub encrypted secrets for anything that matters.</p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Nightly deep scan pipeline stages">
+<rect class="box2" x="12" y="40" width="112" height="56" rx="8"/>
+<text x="68" y="64" text-anchor="middle" class="small">cron</text>
+<text x="68" y="80" text-anchor="middle" class="small">06:00 UTC</text>
+<path class="arrow" d="M124,68 H138"/>
+<rect class="box" x="138" y="40" width="112" height="56" rx="8"/>
+<text x="194" y="64" text-anchor="middle" class="small">Start</text>
+<text x="194" y="80" text-anchor="middle" class="small">Meilisearch</text>
+<path class="arrow" d="M250,68 H264"/>
+<rect class="box" x="264" y="40" width="112" height="56" rx="8"/>
+<text x="320" y="64" text-anchor="middle" class="small">Start FastAPI</text>
+<text x="320" y="80" text-anchor="middle" class="small">+ seed data</text>
+<path class="arrow" d="M376,68 H390"/>
+<rect class="box" x="390" y="40" width="118" height="56" rx="8"/>
+<text x="449" y="64" text-anchor="middle" class="small">Build + preview</text>
+<text x="449" y="80" text-anchor="middle" class="small">Vue front end</text>
+<path class="arrow" d="M508,68 H522"/>
+<rect class="box-info" x="522" y="40" width="112" height="56" rx="8"/>
+<text x="578" y="64" text-anchor="middle" class="small">OWASP ZAP</text>
+<text x="578" y="80" text-anchor="middle" class="small">full scan</text>
+<path class="arrow arrow-accent" d="M634,68 H648"/>
+<rect class="box-ok" x="648" y="40" width="100" height="56" rx="8"/>
+<text x="698" y="64" text-anchor="middle" class="small">Pass or</text>
+<text x="698" y="80" text-anchor="middle" class="small">fail build</text>
+<text x="12" y="126" class="small">The scan needs the whole stack running, so each stage waits for the previous service to report healthy.</text>
+</svg>
+<figcaption>How to read it: the workflow rebuilds production in a clean runner, then scans it. <strong>A failed stage stops the pipeline &#8212; so drift is caught overnight, not by users.</strong></figcaption>
+</figure>
+
+<h2>The hardened architecture, start to finish</h2>
+<p>Everything across the six modules now fits together into one defended system. This is the full picture you have built.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 430" role="img" aria-label="The complete hardened production architecture built across the course">
+<rect class="box" x="12" y="36" width="120" height="50" rx="8"/>
+<text x="72" y="60" text-anchor="middle" class="small">User /</text>
+<text x="72" y="76" text-anchor="middle" class="small">Browser</text>
+<path class="arrow" d="M132,61 H168"/>
+<rect class="box-info" x="170" y="36" width="140" height="50" rx="8"/>
+<text x="240" y="58" text-anchor="middle" class="small">Cloudflare CDN</text>
+<text x="240" y="76" text-anchor="middle" class="small">edge cache + TLS</text>
+<path class="arrow" d="M310,61 H366"/>
+<rect class="box-bad" x="12" y="150" width="120" height="48" rx="8"/>
+<text x="72" y="170" text-anchor="middle" class="on-solid small">Banned IP</text>
+<text x="72" y="187" text-anchor="middle" class="small">(bot / scanner)</text>
+<path class="arrow arrow-bad" d="M132,174 H338"/>
+<text x="250" y="166" text-anchor="middle" class="small bad">dropped</text>
+<line class="line" x1="346" y1="166" x2="358" y2="182"/>
+<line class="line" x1="358" y1="166" x2="346" y2="182"/>
+<rect class="zone" x="350" y="12" width="398" height="406" rx="8"/>
+<text x="549" y="30" text-anchor="middle" class="small">DigitalOcean droplet &#183; Ubuntu 24.04</text>
+<rect class="box-warn" x="368" y="44" width="362" height="34" rx="8"/>
+<text x="549" y="66" text-anchor="middle">UFW + Fail2Ban firewall</text>
+<path class="arrow" d="M549,78 V100"/>
+<rect class="box" x="368" y="100" width="362" height="40" rx="8"/>
+<text x="549" y="124" text-anchor="middle">Nginx :443 reverse proxy (HTTPS)</text>
+<path class="arrow" d="M478,140 V165"/>
+<path class="arrow" d="M660,140 V165"/>
+<text x="478" y="158" text-anchor="middle" class="small">unix socket</text>
+<rect class="box" x="368" y="165" width="220" height="46" rx="8"/>
+<text x="478" y="193" text-anchor="middle" class="small">Gunicorn + uvicorn workers</text>
+<rect class="box" x="606" y="165" width="124" height="46" rx="8"/>
+<text x="668" y="186" text-anchor="middle" class="small">Vue dist</text>
+<text x="668" y="202" text-anchor="middle" class="small">(static files)</text>
+<path class="arrow" d="M478,211 V238"/>
+<rect class="box" x="368" y="238" width="220" height="40" rx="8"/>
+<text x="478" y="262" text-anchor="middle" class="small">FastAPI application</text>
+<rect class="box-info" x="606" y="232" width="124" height="52" rx="8"/>
+<text x="668" y="254" text-anchor="middle" class="small">Meilisearch</text>
+<text x="668" y="270" text-anchor="middle" class="small">(dedicated user)</text>
+<path class="arrow" d="M588,258 H606"/>
+<path class="arrow" d="M478,278 V310"/>
+<rect class="box-ok" x="368" y="310" width="362" height="42" rx="8"/>
+<text x="549" y="335" text-anchor="middle" class="small">Backups &#183; cron cleanup &#183; GoAccess logs &#183; nightly ZAP scan</text>
+<text x="368" y="380" class="small">Requests flow in from the top; attackers are stopped at the firewall; maintenance runs at the bottom.</text>
+</svg>
+<figcaption>How to read it: one request path, wrapped in layers of defence. <strong>This single picture is the whole course &#8212; from a bare server to a hardened, self-maintaining system.</strong></figcaption>
+</figure>
+
+<h2>Course wrap-up</h2>
+<p>Congratulations &#8212; you have taken a full-stack app from code on your laptop to a hardened, self-sustaining production system (at 625:18). Looking back over the journey:</p>
+<ul>
+<li><strong>Modules 1 &amp; 2:</strong> you hardened SSH (no root login, no passwords), built a firewall, and ran the app behind Nginx with a Gunicorn/uvicorn process tree over a Unix socket.</li>
+<li><strong>Modules 3 &amp; 4:</strong> you isolated Meilisearch under its own user, reached its dashboard safely through an SSH tunnel, added a domain with auto-renewing Let's Encrypt HTTPS, and put Cloudflare's CDN in front (at 626:12).</li>
+<li><strong>Modules 5 &amp; 6:</strong> you built an automated pipeline &#8212; pre-commit hooks, CI tests, security scans, atomic deploys with rollback &#8212; then made the live system observable, reliable under load, and continuously secured (at 627:46).</li>
+</ul>
+<p>Your stack is now observable, automated, and systematically protected. You removed password and root SSH logins, your certificates renew themselves, Gunicorn replaces any worker that dies for zero-downtime, and a bad deploy rolls back automatically (at 628:09). You can build, launch, and scale new features with confidence (at 628:56).</p>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Turn GoAccess data into action: export JSON, rank IPs with <code>find_bad_actors.py</code>, and <code>sudo ufw deny</code> only the clear outliers.</li>
+<li>Find disk hogs with <code>ncdu /</code>; delete only caches and old backups you recognise.</li>
+<li>Set a log retention policy: cap the systemd journal at <code>100M</code>, keep Nginx logs for <code>365</code> days, and automate a monthly cleanup via cron.</li>
+<li>Schedule a heavy OWASP ZAP full scan nightly with GitHub Actions &#8212; too slow for every commit, but essential for catching drift.</li>
+<li>Continuous security is a cadence, not a one-off: hourly, daily, monthly, and as-needed tasks keep the system hardened over time.</li>
+<li>You finished the course with a complete, defended, self-maintaining full-stack deployment.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="18-reliability-locust.html"><small>← Previous · Step 18</small>Reliability: Load Testing with Locust</a>
+<a class="next" href="index.html"><small>Done →</small>All steps</a>
+</nav>
+</main>
+</body>
+</html>

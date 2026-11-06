@@ -1,0 +1,771 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16 · Continuous Delivery &amp; Rollback</title>
+<meta name="description" content="Deploy automatically from the pipeline with a zero-downtime atomic release and a rollback path.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Deploy, Secure &amp; Automate Full-Stack Web Apps</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 16/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 16 of 19 · 520:00</div>
+  <h1>Continuous Delivery &amp; Rollback</h1>
+  <p class="lead">Deploy automatically from the pipeline with a zero-downtime atomic release and a rollback path.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wY5pQOTsGaA&amp;t=31200s" target="_blank" rel="noopener">▶ Watch this part (520:00)</a>
+</section>
+<p class="intro">You have tested your code and scanned it for vulnerabilities. The last step is to actually ship it: move everything to your DigitalOcean production server. This lesson builds a <a class="term" href="glossary.html#continuous-delivery">continuous delivery</a> workflow that compiles the frontend, backs up your live data, transfers the new code over <a class="term" href="glossary.html#ssh">SSH</a>, swaps the Python environment safely, and restarts the services &#8212; all from a button in <a class="term" href="glossary.html#github-actions">GitHub Actions</a> (at 479:59).</p>
+
+<p>There is one deliberate difference from the test pipeline: deployment does not happen automatically. Even with great tests, you want a human to approve before live code is overwritten (at 480:22). You will also build a <a class="term" href="glossary.html#rollback">rollback</a> step, so if an install fails halfway the old environment is instantly restored and your site stays up. Done right, the whole update is <a class="term" href="glossary.html#zero-downtime">zero-downtime</a>: users never see an error while you ship.</p>
+
+<p>The deployment <a class="term" href="glossary.html#workflow">workflow</a> does five things in order (at 480:22):</p>
+<ol class="steps">
+<li>Compile the Vue frontend into static files Nginx can serve.</li>
+<li>Back up the live SQLite database and the Meilisearch search engine.</li>
+<li>Safely transfer the new code and built frontend to the server with <code>rsync</code>.</li>
+<li>Perform an atomic swap of the Python virtual environment, rolling back if it fails.</li>
+<li>Restart the backend and reload the web server, verifying each one.</li>
+</ol>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 150" role="img" aria-label="The five stages of the deploy workflow in order: build, backup, rsync, atomic venv swap, restart and reload">
+<text x="380" y="24" text-anchor="middle" class="title">The deploy workflow, end to end</text>
+<rect x="18" y="50" width="130" height="56" rx="8" class="box-info"/>
+<text x="83" y="74" text-anchor="middle" class="small">1. Build</text>
+<text x="83" y="92" text-anchor="middle" class="small">frontend</text>
+<rect x="166" y="50" width="130" height="56" rx="8" class="box"/>
+<text x="231" y="74" text-anchor="middle" class="small">2. Back up</text>
+<text x="231" y="92" text-anchor="middle" class="small">DB + search</text>
+<rect x="314" y="50" width="130" height="56" rx="8" class="box"/>
+<text x="379" y="74" text-anchor="middle" class="small">3. Rsync</text>
+<text x="379" y="92" text-anchor="middle" class="small">files to server</text>
+<rect x="462" y="50" width="140" height="56" rx="8" class="box-warn"/>
+<text x="532" y="74" text-anchor="middle" class="small">4. Atomic</text>
+<text x="532" y="92" text-anchor="middle" class="small">venv swap</text>
+<rect x="620" y="50" width="122" height="56" rx="8" class="box-ok"/>
+<text x="681" y="74" text-anchor="middle" class="small">5. Restart</text>
+<text x="681" y="92" text-anchor="middle" class="small">+ reload</text>
+<path class="arrow" d="M 148,78 H 164"/>
+<path class="arrow" d="M 296,78 H 312"/>
+<path class="arrow" d="M 444,78 H 460"/>
+<path class="arrow" d="M 602,78 H 618"/>
+</svg>
+<figcaption>Each stage protects the one after it: back up before you touch anything, swap atomically so a failure rolls back, and verify the server before declaring success. <strong>This order is what makes the deploy safe to run on live traffic.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to continuous delivery? How it differs from CI</summary>
+<p>Continuous integration (CI) checks every change: it lints, tests, and scans your code so you know it is correct. Continuous delivery (CD) is the next step: it takes code that already passed CI and ships it to a real server. Here CD is kept separate from CI and triggered by hand, so a person consciously decides when to go live (at 478:00). CI runs on every push; CD runs when you click the button.</p>
+</details>
+
+<h2>Step 1: Build the frontend into a shippable artifact</h2>
+
+<p>Nginx serves plain static files, so the Vue code must be compiled first (at 480:47). This reusable workflow builds the frontend and uploads the result as an artifact that the deploy job can download later, because the two jobs run on different machines (at 481:34).</p>
+
+<ol class="steps">
+<li>Create <code>.github/workflows/frontend-build.yml</code> with the workflow below.</li>
+<li>Add it to <code>ci.yml</code> (shown next) so it runs after the end-to-end tests.</li>
+</ol>
+
+<pre data-lang="yaml" data-tag=".github/workflows/frontend-build.yml"><code>name: Frontend build
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: frontend-build
+          path: frontend/dist
+          retention-days: 1
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1&#8211;4</td><td><code>name: Frontend build / on: workflow_call:</code></td><td>A reusable template, callable from the main pipeline and from the deploy workflow.</td></tr>
+<tr><td>6&#8211;12</td><td><code>jobs: build: ... working-directory: ./frontend</code></td><td>One job that runs every command inside <code>./frontend</code>.</td></tr>
+<tr><td>14&#8211;27</td><td><code>Check out ... Set up pnpm ... Set up Node.js (cache: "pnpm")</code></td><td>Downloads the repo and installs the Node toolchain with caching, same as your other frontend jobs.</td></tr>
+<tr><td>29&#8211;33</td><td><code>run: pnpm install / run: pnpm build</code></td><td>Installs dependencies, then compiles Vue into static HTML, CSS, and JS. If the build has a syntax or dependency error, the job fails here (at 481:34).</td></tr>
+<tr><td>35&#8211;40</td><td><code>Upload build artifacts ... path: frontend/dist, retention-days: 1</code></td><td>Saves the compiled <code>dist</code> folder as an artifact. The deploy job, on a different runner, downloads it later. Kept only 1 day because each deploy builds a fresh copy (at 481:57).</td></tr>
+</table></div>
+
+<p>Add the job to <code>ci.yml</code> so the full pipeline builds the frontend after the end-to-end tests pass (at 482:21):</p>
+
+<pre data-lang="yaml" data-tag="ci.yml (addition)"><code># ...
+
+jobs:
+  frontend-build:
+    name: Frontend
+    needs: e2e-tests
+    uses: ./.github/workflows/frontend-build.yml
+
+  # ...
+</code></pre>
+
+<h2>Step 2: Prepare the server &#8212; backups and passwordless permissions</h2>
+
+<p>Before GitHub can deploy, the server needs two things: a way to trim old backups so the disk never fills, and permission to restart services without a password prompt (at 485:09).</p>
+
+<p>First, the rolling-backup cleaner. It keeps a fixed number of recent backups and deletes the rest. Create it on the server:</p>
+
+<pre data-lang="bash" data-tag="on the server"><code>sudo nano /usr/local/bin/clean_backups.sh</code></pre>
+
+<pre data-lang="bash" data-tag="/usr/local/bin/clean_backups.sh"><code>#!/bin/bash
+
+# 1. Get the number of backups to keep from the first argument
+# ${1:-5} means: "Use argument 1, but if it is empty, default to 5"
+KEEP_COUNT=${1:-5}
+
+# 2. Calculate the offset for tail
+# If we want to keep 5, we need to start deleting from the 6th file.
+# So Offset = Keep Count + 1
+OFFSET=$((KEEP_COUNT + 1))
+
+echo "Starting cleanup. Retention policy: Keep last $KEEP_COUNT files."
+
+clean_old_files() {
+  TARGET_DIR=$1
+  if [ -d "$TARGET_DIR" ]; then
+    echo "Cleaning $TARGET_DIR"
+    cd "$TARGET_DIR" || exit
+    ls -tp | grep -v '/$' | tail -n +$OFFSET | xargs -I {} rm -- "{}"
+  else
+    echo "Directory $TARGET_DIR does not exist. Skipping."
+  fi
+}
+
+clean_old_files "/web_app/backups"
+clean_old_files "/var/lib/meilisearch/dumps"
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>#!/bin/bash</code></td><td>The shebang: run this file with bash.</td></tr>
+<tr><td>5</td><td><code>KEEP_COUNT=${1:-5}</code></td><td>Reads how many backups to keep from the first argument, defaulting to 5 if none is given (at 485:09).</td></tr>
+<tr><td>10</td><td><code>OFFSET=$((KEEP_COUNT + 1))</code></td><td>To keep 5 files you start deleting from the 6th, so the offset is keep-count plus one (at 486:19).</td></tr>
+<tr><td>14&#8211;23</td><td><code>clean_old_files() { ... }</code></td><td>A function that cleans one folder. It checks the folder exists, moves into it, and removes the old files.</td></tr>
+<tr><td>19</td><td><code>ls -tp | grep -v '/$' | tail -n +$OFFSET | xargs -I {} rm -- "{}"</code></td><td>Lists files newest-first (<code>-t</code>) with a slash after folders (<code>-p</code>); <code>grep -v '/$'</code> drops folders; <code>tail -n +$OFFSET</code> keeps only the ones past the retention count; <code>xargs ... rm</code> deletes each (at 485:56).</td></tr>
+<tr><td>25&#8211;26</td><td><code>clean_old_files "/web_app/backups" ... "/var/lib/meilisearch/dumps"</code></td><td>Runs the cleaner on both the SQLite backup folder and the Meilisearch dump folder (at 485:09).</td></tr>
+</table></div>
+
+<p>Make it executable:</p>
+<pre data-lang="bash" data-tag="on the server"><code>sudo chmod +x /usr/local/bin/clean_backups.sh</code></pre>
+
+<p>Now the permissions. The deploy job must restart Nginx and Supervisor and run the backup cleaner, all with <code>sudo</code>. A pipeline cannot type a password, so grant those exact commands passwordless (at 487:32). Open the sudoers file safely:</p>
+
+<pre data-lang="bash" data-tag="on the server"><code>sudo visudo</code></pre>
+
+<p>Add this line at the very bottom, replacing the username with your own:</p>
+
+<pre data-lang="text" data-tag="sudoers (bottom of file)"><code>&lt;your_username&gt; ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /usr/bin/systemctl reload nginx, /usr/bin/supervisorctl restart all, /usr/bin/supervisorctl status all, /usr/local/bin/clean_backups.sh
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>&lt;your_username&gt; ALL=(ALL) NOPASSWD: ...</code></td><td>Lets your user run only this short, named list of commands without a password. Everything else still demands one (at 488:21).</td></tr>
+<tr><td>&#8212;</td><td><code>/usr/sbin/nginx, /usr/bin/systemctl reload nginx</code></td><td>Allows testing and reloading the web server during deploy.</td></tr>
+<tr><td>&#8212;</td><td><code>/usr/bin/supervisorctl restart all, ... status all</code></td><td>Allows restarting the backend and checking it is running.</td></tr>
+<tr><td>&#8212;</td><td><code>/usr/local/bin/clean_backups.sh</code></td><td>Allows the deploy to trim old backups.</td></tr>
+</table></div>
+
+<div class="callout">
+<strong>Security note</strong>
+<p>Passwordless sudo on a tight, explicit list is a safety feature, not a hole. Even if someone stole your automated SSH key, they could only reload Nginx, restart Supervisor, or clean backups. Any other <code>sudo</code> command still demands a password and is blocked (at 488:47). Never grant blanket <code>NOPASSWD: ALL</code>.</p>
+</div>
+
+<h2>Step 3: Protect live data with an rsync exclude file</h2>
+
+<p>The deploy uses <code>rsync</code> to copy files to the server. By default <code>rsync --delete</code> makes the server match the repository exactly &#8212; so anything on the server but not in GitHub (your live database, your backups) would be deleted (at 489:58). An exclude file tells <code>rsync</code> what to leave alone.</p>
+
+<ol class="steps">
+<li>Create <code>rsync_exclude.txt</code> in your project root on your local computer.</li>
+<li>Commit and push it to <code>master</code>.</li>
+</ol>
+
+<pre data-lang="text" data-tag="rsync_exclude.txt"><code>*.pyc
+
+.env
+.git/
+.github/
+.gitignore
+.DS_Store
+
+rsync_exclude.txt
+backups/
+
+frontend/node_modules/
+frontend/dist/analytics.html
+
+backend/venv/
+backend/__pycache__/
+backend/logs/
+backend/gunicorn_start
+backend/gunicorn.sock
+backend/gunicorn.ctl
+backend/visitors.db
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>*.pyc</code></td><td>Skips compiled Python files; they are regenerated on the server.</td></tr>
+<tr><td>3</td><td><code>.env</code></td><td>Never overwrite the server's real secrets with your local test values (at 490:20).</td></tr>
+<tr><td>4&#8211;7</td><td><code>.git/ .github/ .gitignore .DS_Store</code></td><td>Repository and OS metadata that has no place on the server.</td></tr>
+<tr><td>9&#8211;10</td><td><code>rsync_exclude.txt / backups/</code></td><td>Keep the exclude file itself and the server's backup folder untouched (at 490:44).</td></tr>
+<tr><td>12&#8211;13</td><td><code>frontend/node_modules/ / frontend/dist/analytics.html</code></td><td>Local dependencies are never uploaded; the server builds its own. The analytics page is generated on the server, so do not overwrite it.</td></tr>
+<tr><td>15&#8211;22</td><td><code>backend/venv/ ... backend/visitors.db ... gunicorn.sock ...</code></td><td>Protects the server's virtual environment, logs, Gunicorn socket and control files, and above all the live <code>visitors.db</code> SQLite database from being deleted (at 531:06).</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Without an exclude file rsync deletes the live database and backups; with one it keeps them">
+<text x="380" y="24" text-anchor="middle" class="title">Why rsync needs an exclude file</text>
+<text x="195" y="52" text-anchor="middle" class="bad">Without exclude</text>
+<rect x="40" y="64" width="140" height="40" rx="8" class="box2"/>
+<text x="110" y="88" text-anchor="middle" class="small">GitHub repo</text>
+<rect x="210" y="64" width="150" height="40" rx="8" class="box-bad"/>
+<text x="285" y="82" text-anchor="middle" class="small">Server made to</text>
+<text x="285" y="97" text-anchor="middle" class="small">match exactly</text>
+<path class="arrow-bad" d="M 180,84 H 208"/>
+<text x="285" y="124" text-anchor="middle" class="bad small">visitors.db + backups DELETED</text>
+<text x="575" y="52" text-anchor="middle" class="ok">With exclude</text>
+<rect x="420" y="64" width="140" height="40" rx="8" class="box2"/>
+<text x="490" y="88" text-anchor="middle" class="small">GitHub repo</text>
+<rect x="590" y="64" width="150" height="40" rx="8" class="box-ok"/>
+<text x="665" y="82" text-anchor="middle" class="small">Code updated,</text>
+<text x="665" y="97" text-anchor="middle" class="small">data kept</text>
+<path class="arrow-ok" d="M 560,84 H 588"/>
+<text x="665" y="124" text-anchor="middle" class="ok small">visitors.db + backups SAFE</text>
+<rect x="150" y="160" width="460" height="60" rx="8" class="box-info"/>
+<text x="380" y="185" text-anchor="middle" class="small">ARGS: "-avzr --delete --exclude-from='rsync_exclude.txt'"</text>
+<text x="380" y="206" text-anchor="middle" class="small">--delete removes extra files; --exclude-from spares the listed ones</text>
+</svg>
+<figcaption><code>--delete</code> is what keeps the server tidy, and also what makes it dangerous. <strong>The exclude file is the safety catch that saves your live data.</strong></figcaption>
+</figure>
+
+<h2>Step 4: GitHub environments, the approval gate, and secrets</h2>
+
+<p>The pipeline needs a safe way to log in to the server, plus a human checkpoint. A GitHub <em>environment</em> named <code>production</code> with a required reviewer gives you the approval gate (at 491:06), and repository <em>secrets</em> store the login details (at 492:15).</p>
+
+<ol class="steps">
+<li>In your repo, go to <strong>Settings &#8594; Environments &#8594; New environment</strong>, name it <code>production</code>, and configure it.</li>
+<li>Check <strong>Required reviewers</strong>, add yourself, and save. Now every deploy pauses for approval (at 491:29).</li>
+<li>Go to <strong>Settings &#8594; Secrets and variables &#8594; Actions</strong> and add four secrets: <code>DIGITAL_OCEAN_HOST_IP</code>, <code>DIGITAL_OCEAN_USERNAME</code>, <code>MEILISEARCH_MASTER_KEY</code>, and <code>DIGITAL_OCEAN_SSH_KEY</code> (at 492:15).</li>
+<li>If you do not have a dedicated deploy key, create one with no passphrase, put the public half on the server, and paste the private half into the secret.</li>
+</ol>
+
+<pre data-lang="bash" data-tag="local terminal"><code>ssh-keygen -t rsa -b 4096 -f ~/.ssh/github_actions_key -C "github_actions"</code></pre>
+
+<pre data-lang="bash" data-tag="copy the public key, then paste it on the server"><code>cat ~/.ssh/github_actions_key.pub</code></pre>
+
+<pre data-lang="bash" data-tag="on the server"><code>nano ~/.ssh/authorized_keys</code></pre>
+
+<pre data-lang="bash" data-tag="local terminal: private key goes into the GitHub secret"><code>cat ~/.ssh/github_actions_key</code></pre>
+
+<details class="primer">
+<summary>Why no passphrase on this key?</summary>
+<p>A passphrase protects a key by asking for it each time it is used. That is good for a human, but a pipeline runs unattended &#8212; if the key had a passphrase, the deploy would freeze waiting for someone to type it (at 493:04). So this one dedicated automation key is created with no passphrase, and its power is limited by the tight passwordless-sudo list you set earlier.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The SSH key pair: the private key is stored as a GitHub secret, the public key sits in the server's authorized_keys">
+<text x="380" y="24" text-anchor="middle" class="title">One deploy key, two halves</text>
+<rect x="40" y="55" width="280" height="110" rx="8" class="box"/>
+<text x="180" y="78" text-anchor="middle" class="label">GitHub</text>
+<rect x="65" y="95" width="230" height="50" rx="8" class="box-warn"/>
+<text x="180" y="117" text-anchor="middle" class="small">Secret: DIGITAL_OCEAN_SSH_KEY</text>
+<text x="180" y="134" text-anchor="middle" class="small">github_actions_key (private)</text>
+<rect x="440" y="55" width="280" height="110" rx="8" class="box"/>
+<text x="580" y="78" text-anchor="middle" class="label">DigitalOcean server</text>
+<rect x="465" y="95" width="230" height="50" rx="8" class="box-ok"/>
+<text x="580" y="117" text-anchor="middle" class="small">~/.ssh/authorized_keys</text>
+<text x="580" y="134" text-anchor="middle" class="small">github_actions_key.pub (public)</text>
+<path class="arrow-accent" d="M 320,120 H 438"/>
+<text x="379" y="110" text-anchor="middle" class="small">SSH login</text>
+<text x="379" y="188" text-anchor="middle" class="small">The private key never leaves GitHub; the public key only lets that one key in.</text>
+</svg>
+<figcaption>The private key lives only in the encrypted secret; its matching public key sits on the server. <strong>This is how the pipeline proves who it is without a password.</strong></figcaption>
+</figure>
+
+<h2>Step 5: The deployment workflow</h2>
+
+<p>Now the deploy itself. Because deployment is kept separate from the test pipeline, it uses a manual trigger (at 495:04). The file is long, but it is the five stages you already know: build, back up with polling, rsync, atomic venv swap, and verified restart/reload. Create <code>.github/workflows/deploy.yml</code>:</p>
+
+<pre data-lang="yaml" data-tag=".github/workflows/deploy.yml"><code>name: Manual deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build frontend
+    uses: ./.github/workflows/frontend-build.yml
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://imadsaddik.com
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: frontend-build
+          path: ./frontend/dist
+
+      - name: Create backups (SQLite &amp; Meilisearch)
+        uses: appleboy/ssh-action@v1.2.4
+        env:
+          MEILISEARCH_KEY: ${{ secrets.MEILISEARCH_MASTER_KEY }}
+        with:
+          host: ${{ secrets.DIGITAL_OCEAN_HOST_IP }}
+          username: ${{ secrets.DIGITAL_OCEAN_USERNAME }}
+          key: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
+          envs: MEILISEARCH_KEY
+          script: |
+            set -e
+
+            BACKEND_DIR="/web_app/backend"
+            BACKUP_DIR="/web_app/backups"
+            BACKUP_RETENTION_COUNT=5
+            TIMESTAMP=$(date +%Y%m%d%H%M%S)
+
+            mkdir -p $BACKUP_DIR
+
+            echo "Backing up SQLite database..."
+            if [ -f "$BACKEND_DIR/visitors.db" ]; then
+              cp "$BACKEND_DIR/visitors.db" "$BACKUP_DIR/visitors_$TIMESTAMP.db"
+              echo "SQLite backup created successfully."
+            else
+              echo "Warning: No SQLite database found in $BACKEND_DIR"
+            fi
+
+            echo "Triggering Meilisearch dump..."
+            if [ -z "$MEILISEARCH_KEY" ]; then
+              echo "Error: MEILISEARCH_KEY secret is empty."
+              exit 1
+            fi
+
+            DUMP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST 'http://127.0.0.1:7700/dumps' \
+              -H "Authorization: Bearer $MEILISEARCH_KEY")
+            HTTP_CODE=$(echo "$DUMP_RESPONSE" | tail -n1)
+            RESPONSE_BODY=$(echo "$DUMP_RESPONSE" | sed '$d')
+
+            if [ "$HTTP_CODE" -ge 200 ] &amp;&amp; [ "$HTTP_CODE" -lt 300 ]; then
+              echo "Meilisearch dump request accepted (HTTP $HTTP_CODE)."
+
+              TASK_UID=$(echo "$RESPONSE_BODY" | grep -o '"taskUid":[0-9]*' | cut -d':' -f2)
+              if [ -z "$TASK_UID" ]; then
+                echo "Error: Could not extract taskUid from response."
+                echo "Response: $RESPONSE_BODY"
+                exit 1
+              fi
+
+              echo "Dump task created with UID: $TASK_UID"
+              echo "Waiting for dump to complete..."
+
+              # Poll task status until completion (max 60 seconds)
+              MAX_ATTEMPTS=30
+              ATTEMPT=0
+              while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+                TASK_RESPONSE=$(curl -s "http://127.0.0.1:7700/tasks/$TASK_UID" \
+                  -H "Authorization: Bearer $MEILISEARCH_KEY")
+                TASK_STATUS=$(echo "$TASK_RESPONSE" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+
+                if [ "$TASK_STATUS" = "succeeded" ]; then
+                  echo "Meilisearch dump completed successfully."
+                  break
+                elif [ "$TASK_STATUS" = "failed" ]; then
+                  echo "Error: Meilisearch dump task failed."
+                  echo "Task response: $TASK_RESPONSE"
+                  exit 1
+                else
+                  # Status is "enqueued" or "processing"
+                  ATTEMPT=$((ATTEMPT + 1))
+                  sleep 2
+                fi
+              done
+
+              if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+                echo "Error: Meilisearch dump timed out after 60 seconds."
+                echo "Last task status: $TASK_STATUS"
+                exit 1
+              fi
+            else
+              echo "Error: Meilisearch dump request failed with HTTP $HTTP_CODE"
+              echo "Response: $RESPONSE_BODY"
+              exit 1
+            fi
+
+            echo "Cleaning old backups..."
+            sudo /usr/local/bin/clean_backups.sh $BACKUP_RETENTION_COUNT
+            echo "Backup process finished successfully."
+
+      - name: Rsync files to droplet
+        uses: easingthemes/ssh-deploy@v5.1.0
+        with:
+          SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
+          REMOTE_HOST: ${{ secrets.DIGITAL_OCEAN_HOST_IP }}
+          REMOTE_USER: ${{ secrets.DIGITAL_OCEAN_USERNAME }}
+          SOURCE: "./"
+          TARGET: "/web_app/"
+          ARGS: "-avzr --delete --exclude-from='rsync_exclude.txt'"
+
+      - name: Create backend .env file
+        uses: appleboy/ssh-action@v1.2.4
+        env:
+          MEILISEARCH_KEY: ${{ secrets.MEILISEARCH_MASTER_KEY }}
+        with:
+          host: ${{ secrets.DIGITAL_OCEAN_HOST_IP }}
+          username: ${{ secrets.DIGITAL_OCEAN_USERNAME }}
+          key: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
+          envs: MEILISEARCH_KEY
+          script: |
+            echo "Creating backend .env file..."
+            cat &gt; /web_app/backend/.env &lt;&lt;EOF
+            MEILISEARCH_URL=http://127.0.0.1:7700
+            MEILISEARCH_INDEX_NAME=articles
+            MEILISEARCH_MASTER_KEY=$MEILISEARCH_KEY
+            ENVIRONMENT=production
+            EOF
+
+      - name: Install Python dependencies (atomic venv swap)
+        uses: appleboy/ssh-action@v1.2.4
+        with:
+          host: ${{ secrets.DIGITAL_OCEAN_HOST_IP }}
+          username: ${{ secrets.DIGITAL_OCEAN_USERNAME }}
+          key: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
+          script: |
+            set -e
+
+            BACKEND_DIR="/web_app/backend"
+            cd $BACKEND_DIR
+
+            echo "Backing up current venv..."
+            if [ -d "venv" ]; then
+              mv venv venv_backup
+              echo "Current venv backed up to venv_backup."
+            fi
+
+            echo "Creating new virtual environment..."
+            python3 -m venv venv
+
+            echo "Installing Python dependencies..."
+            source venv/bin/activate
+            if pip install -r requirements.txt; then
+              echo "Python dependencies installed successfully."
+            else
+              echo "Error: Failed to install Python dependencies."
+              echo "Rolling back to previous venv..."
+              deactivate
+              rm -rf venv
+              if [ -d "venv_backup" ]; then
+                mv venv_backup venv
+                echo "Rollback complete."
+              fi
+              exit 1
+            fi
+            deactivate
+
+            # Clean up backup after successful deploy
+            if [ -d "venv_backup" ]; then
+              rm -rf venv_backup
+              echo "Cleaned up venv_backup."
+            fi
+
+            echo "Virtual environment setup completed successfully."
+
+      - name: Restart backend service
+        uses: appleboy/ssh-action@v1.2.4
+        with:
+          host: ${{ secrets.DIGITAL_OCEAN_HOST_IP }}
+          username: ${{ secrets.DIGITAL_OCEAN_USERNAME }}
+          key: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "Restarting FastAPI backend service..."
+            if sudo supervisorctl restart all; then
+              echo "FastAPI backend restarted successfully."
+            else
+              echo "Error: Failed to restart FastAPI backend."
+              exit 1
+            fi
+
+            # Verify the service is running
+            sleep 5
+            if sudo supervisorctl status all | grep -q "RUNNING"; then
+              echo "FastAPI backend is running."
+            else
+              echo "Error: FastAPI backend failed to start properly."
+              sudo supervisorctl status all
+              exit 1
+            fi
+
+      - name: Reload Nginx
+        uses: appleboy/ssh-action@v1.2.4
+        with:
+          host: ${{ secrets.DIGITAL_OCEAN_HOST_IP }}
+          username: ${{ secrets.DIGITAL_OCEAN_USERNAME }}
+          key: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "Testing Nginx configuration..."
+            if sudo nginx -t; then
+              echo "Nginx configuration is valid."
+            else
+              echo "Error: Nginx configuration test failed."
+              exit 1
+            fi
+
+            echo "Reloading Nginx..."
+            if sudo nginx -t; then
+              echo "Configuration OK. Reloading Nginx..."
+              sudo systemctl reload nginx
+            else
+              echo "Nginx configuration test failed! Not reloading."
+              exit 1
+            fi
+
+            echo "Deployment complete!"
+</code></pre>
+
+<h3>Line by line: the manual trigger and approval gate</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3&#8211;4</td><td><code>on: workflow_dispatch:</code></td><td>Adds a "Run workflow" button to the Actions page. The deploy only runs when you click it (at 495:29).</td></tr>
+<tr><td>7&#8211;9</td><td><code>build: ... uses: ./.github/workflows/frontend-build.yml</code></td><td>Reuses the build workflow to compile a fresh frontend before deploying (at 495:53).</td></tr>
+<tr><td>11&#8211;17</td><td><code>deploy: needs: build ... environment: name: production</code></td><td>The deploy waits for the build, then enters the <code>production</code> environment. Because that environment has a required reviewer, GitHub pauses here and emails you for approval (at 516:19).</td></tr>
+<tr><td>20&#8211;27</td><td><code>Check out ... Download frontend artifact (path: ./frontend/dist)</code></td><td>Downloads the compiled frontend that the build job produced, ready to ship (at 496:16).</td></tr>
+</table></div>
+
+<h3>Line by line: safe backups with polling</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>29&#8211;37</td><td><code>Create backups ... uses: appleboy/ssh-action@v1.2.4</code></td><td>Uses the SSH action to run a script on the server. It logs in with the key (not a password), passing the Meilisearch key through <code>envs</code> (at 498:13).</td></tr>
+<tr><td>41&#8211;46</td><td><code>BACKEND_DIR / BACKUP_DIR / TIMESTAMP ... mkdir -p $BACKUP_DIR</code></td><td>Sets up paths and a unique timestamp, and creates the backup folder (<code>-p</code> skips it if it already exists) (at 500:35).</td></tr>
+<tr><td>48&#8211;54</td><td><code>if [ -f "$BACKEND_DIR/visitors.db" ]; then cp ... visitors_$TIMESTAMP.db</code></td><td>Copies the live SQLite database to a timestamped backup, or warns if none exists (at 502:06).</td></tr>
+<tr><td>62&#8211;65</td><td><code>DUMP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST '.../dumps' ...)</code></td><td>Asks Meilisearch to create a dump, capturing both the body and the HTTP status code in one call (at 503:39).</td></tr>
+<tr><td>67&#8211;70</td><td><code>if [ "$HTTP_CODE" -ge 200 ] &amp;&amp; [ "$HTTP_CODE" -lt 300 ] ... TASK_UID=...</code></td><td>If the request was accepted, extract the dump's task id so progress can be tracked (at 508:48).</td></tr>
+<tr><td>83&#8211;100</td><td><code>while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do ... TASK_STATUS ... "succeeded"</code></td><td>Polls the task every 2 seconds, up to 30 times, and only moves on once the dump reports <code>succeeded</code> &#8212; so you never deploy on top of an unfinished backup (at 512:44).</td></tr>
+<tr><td>113&#8211;115</td><td><code>sudo /usr/local/bin/clean_backups.sh $BACKUP_RETENTION_COUNT</code></td><td>Trims old backups to the last five, using the passwordless script from Step 2 (at 513:30).</td></tr>
+</table></div>
+
+<h3>Line by line: rsync, env file, atomic swap, restart, reload</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>117&#8211;125</td><td><code>Rsync files to droplet ... ARGS: "-avzr --delete --exclude-from='rsync_exclude.txt'"</code></td><td>Copies the repo to <code>/web_app/</code>. <code>--delete</code> keeps the server tidy; <code>--exclude-from</code> reads your exclude file so live data survives (at 489:36).</td></tr>
+<tr><td>127&#8211;143</td><td><code>Create backend .env file ... cat &gt; /web_app/backend/.env &lt;&lt;EOF ...</code></td><td>Writes the production <code>.env</code> on the server from the secret, with <code>ENVIRONMENT=production</code>. A here-document (<code>&lt;&lt;EOF</code>) writes several lines at once (at 527:09).</td></tr>
+<tr><td>157&#8211;161</td><td><code>if [ -d "venv" ]; then mv venv venv_backup</code></td><td>Renames the current virtual environment aside before building a new one &#8212; the first half of the atomic swap (at 530:18).</td></tr>
+<tr><td>163&#8211;169</td><td><code>python3 -m venv venv ... if pip install -r requirements.txt; then</code></td><td>Builds a fresh environment and installs dependencies. On success it continues (at 533:29).</td></tr>
+<tr><td>170&#8211;180</td><td><code>else ... rm -rf venv ... mv venv_backup venv ... exit 1</code></td><td>The rollback: if the install fails, delete the broken new environment and restore the old one, so the site keeps running the whole time (at 533:51).</td></tr>
+<tr><td>183&#8211;187</td><td><code>if [ -d "venv_backup" ]; then rm -rf venv_backup</code></td><td>After a successful deploy, the old backup is no longer needed, so it is cleaned up (at 534:15).</td></tr>
+<tr><td>200&#8211;216</td><td><code>sudo supervisorctl restart all ... sleep 5 ... status all | grep -q "RUNNING"</code></td><td>Restarts the backend, waits 5 seconds, and confirms Supervisor reports it <code>RUNNING</code>; otherwise it fails loudly (at 539:04).</td></tr>
+<tr><td>227&#8211;242</td><td><code>if sudo nginx -t; then ... sudo systemctl reload nginx</code></td><td>Tests the Nginx config first and only reloads if it is valid, so a typo can never take the site down (at 540:15).</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 330" role="img" aria-label="Sequence of the deploy job: GitHub Actions connects over SSH to the server and runs backup, rsync, env file, venv swap, restart, and reload in turn">
+<text x="380" y="24" text-anchor="middle" class="title">Deploy sequence: Actions to server over SSH</text>
+<rect x="60" y="44" width="200" height="34" rx="8" class="box-info"/>
+<text x="160" y="66" text-anchor="middle" class="label">GitHub Actions</text>
+<rect x="500" y="44" width="200" height="34" rx="8" class="box2"/>
+<text x="600" y="66" text-anchor="middle" class="label">DigitalOcean server</text>
+<line class="line dashed" x1="160" y1="78" x2="160" y2="305"/>
+<line class="line dashed" x1="600" y1="78" x2="600" y2="305"/>
+<path class="arrow-accent" d="M 162,100 H 498"/>
+<text x="360" y="94" text-anchor="middle" class="small">1. SSH: back up SQLite + Meilisearch dump (poll)</text>
+<path class="arrow-accent" d="M 162,135 H 498"/>
+<text x="360" y="129" text-anchor="middle" class="small">2. rsync code + dist (--delete, exclude file)</text>
+<path class="arrow-accent" d="M 162,170 H 498"/>
+<text x="360" y="164" text-anchor="middle" class="small">3. SSH: write production .env</text>
+<path class="arrow-accent" d="M 162,205 H 498"/>
+<text x="360" y="199" text-anchor="middle" class="small">4. SSH: atomic venv swap (rollback on fail)</text>
+<path class="arrow-accent" d="M 162,240 H 498"/>
+<text x="360" y="234" text-anchor="middle" class="small">5. SSH: supervisorctl restart + verify RUNNING</text>
+<path class="arrow-accent" d="M 162,275 H 498"/>
+<text x="360" y="269" text-anchor="middle" class="small">6. SSH: nginx -t then reload nginx</text>
+<text x="360" y="300" text-anchor="middle" class="ok small">site is live with the new version</text>
+</svg>
+<figcaption>Time flows downward. Every arrow is a separate SSH step the pipeline runs on the server. <strong>Backups come first and verification comes last, so nothing ships unchecked.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="The atomic virtual environment swap: rename old venv, build new one, keep it on success or restore the old one on failure">
+<text x="380" y="24" text-anchor="middle" class="title">Atomic venv swap and rollback</text>
+<rect x="290" y="44" width="180" height="42" rx="8" class="box"/>
+<text x="380" y="63" text-anchor="middle" class="small">mv venv venv_backup</text>
+<text x="380" y="79" text-anchor="middle" class="small">keep the old one aside</text>
+<path class="arrow" d="M 380,86 V 108"/>
+<rect x="290" y="108" width="180" height="42" rx="8" class="box"/>
+<text x="380" y="127" text-anchor="middle" class="small">python3 -m venv venv</text>
+<text x="380" y="143" text-anchor="middle" class="small">pip install -r requirements</text>
+<path class="arrow-ok" d="M 380,150 L 180,186"/>
+<path class="arrow-bad" d="M 380,150 L 580,186"/>
+<rect x="60" y="188" width="240" height="60" rx="8" class="box-ok"/>
+<text x="180" y="212" text-anchor="middle" class="small">Success: rm -rf venv_backup</text>
+<text x="180" y="230" text-anchor="middle" class="small">new venv stays live</text>
+<rect x="460" y="188" width="260" height="60" rx="8" class="box-bad"/>
+<text x="590" y="208" text-anchor="middle" class="small">Failure: rm -rf venv,</text>
+<text x="590" y="225" text-anchor="middle" class="small">mv venv_backup venv, exit 1</text>
+<text x="590" y="242" text-anchor="middle" class="small">old venv restored, site stays up</text>
+<text x="380" y="275" text-anchor="middle" class="small">The live environment is only ever replaced by one that fully installed.</text>
+</svg>
+<figcaption>The new environment is built alongside the old one, not on top of it. <strong>If anything fails, the proven old environment is moved straight back &#8212; that is the rollback.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="A human approval gate pauses the pipeline between build and deploy until a reviewer approves">
+<text x="380" y="24" text-anchor="middle" class="title">The human approval gate</text>
+<rect x="30" y="56" width="150" height="54" rx="8" class="box-info"/>
+<text x="105" y="80" text-anchor="middle" class="small">Build frontend</text>
+<text x="105" y="97" text-anchor="middle" class="small">(automatic)</text>
+<rect x="260" y="56" width="200" height="54" rx="8" class="box-warn"/>
+<text x="360" y="80" text-anchor="middle" class="small">Pause: Review</text>
+<text x="360" y="97" text-anchor="middle" class="small">deployments &#8594; Approve</text>
+<rect x="540" y="56" width="190" height="54" rx="8" class="box-ok"/>
+<text x="635" y="80" text-anchor="middle" class="small">Deploy to</text>
+<text x="635" y="97" text-anchor="middle" class="small">production server</text>
+<path class="arrow" d="M 180,83 H 258"/>
+<path class="arrow-ok" d="M 460,83 H 538"/>
+<text x="635" y="140" text-anchor="middle" class="small">No one can ship to production without a reviewer clicking approve.</text>
+</svg>
+<figcaption>GitHub halts between build and deploy and emails your reviewers. <strong>The required-reviewer rule on the <code>production</code> environment is what enforces this pause.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Zero-downtime timeline: the old version keeps serving traffic until the new backend restart, which takes only moments">
+<text x="380" y="24" text-anchor="middle" class="title">Zero-downtime: users never see an error</text>
+<line class="line" x1="40" y1="110" x2="720" y2="110"/>
+<rect x="40" y="70" width="430" height="34" rx="8" class="box-ok"/>
+<text x="255" y="92" text-anchor="middle" class="small">Old version keeps serving (backup, rsync, build new venv)</text>
+<rect x="470" y="70" width="80" height="34" rx="8" class="box-warn"/>
+<text x="510" y="92" text-anchor="middle" class="small">restart</text>
+<rect x="550" y="70" width="170" height="34" rx="8" class="box-ok"/>
+<text x="635" y="92" text-anchor="middle" class="small">New version live</text>
+<text x="510" y="130" text-anchor="middle" class="small">brief switch</text>
+<text x="380" y="152" text-anchor="middle" class="small">Nothing is taken down until the new venv is ready; only the final restart swaps versions.</text>
+</svg>
+<figcaption>Almost all the work happens while the old version is still answering requests. <strong>Only the quick final restart switches over, so visitors stay served throughout (at 547:02).</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Backup retention: five timestamped backups are kept and the sixth, oldest, is deleted">
+<text x="380" y="24" text-anchor="middle" class="title">Rolling backups: keep the last five</text>
+<rect x="40" y="60" width="110" height="46" rx="8" class="box-bad"/>
+<text x="95" y="80" text-anchor="middle" class="small">oldest</text>
+<text x="95" y="97" text-anchor="middle" class="small">deleted</text>
+<rect x="170" y="60" width="104" height="46" rx="8" class="box-ok"/>
+<text x="222" y="87" text-anchor="middle" class="small">keep</text>
+<rect x="284" y="60" width="104" height="46" rx="8" class="box-ok"/>
+<text x="336" y="87" text-anchor="middle" class="small">keep</text>
+<rect x="398" y="60" width="104" height="46" rx="8" class="box-ok"/>
+<text x="450" y="87" text-anchor="middle" class="small">keep</text>
+<rect x="512" y="60" width="104" height="46" rx="8" class="box-ok"/>
+<text x="564" y="87" text-anchor="middle" class="small">keep</text>
+<rect x="626" y="60" width="104" height="46" rx="8" class="box-ok"/>
+<text x="678" y="80" text-anchor="middle" class="small">newest</text>
+<text x="678" y="97" text-anchor="middle" class="small">keep</text>
+<text x="380" y="140" text-anchor="middle" class="small">Each deploy adds one backup; clean_backups.sh removes everything past the fifth.</text>
+</svg>
+<figcaption>Backups accumulate on every deploy, so the cleaner caps them at five per folder. <strong>You always have recent restore points without the disk filling up (at 519:56).</strong></figcaption>
+</figure>
+
+<h2>Step 6: Trigger your first deployment</h2>
+
+<ol class="steps">
+<li>Open a pull request with your new files, let CI pass, and merge into <code>master</code> (at 515:05).</li>
+<li>Go to the <strong>Actions</strong> tab, pick <strong>Manual deploy</strong> in the sidebar, click <strong>Run workflow</strong> on the <code>master</code> branch (at 515:56).</li>
+<li>When the build finishes, the run pauses. Click <strong>Review deployments</strong>, select <strong>production</strong>, and <strong>Approve and deploy</strong> (at 516:45).</li>
+<li>Watch the logs: GitHub backs up your data, rsyncs the code, swaps the venv, restarts the backend, and reloads Nginx (at 517:10).</li>
+</ol>
+
+<div class="callout ok">
+<strong>What you should see</strong>
+<p>The build job produces the artifact, then the run waits for your approval. After you approve, the backup step logs "SQLite backup created successfully" and the Meilisearch dump id, then rsync, the venv swap ("Virtual environment setup completed successfully"), the backend reporting <code>RUNNING</code>, and finally "Deployment complete!". Your change (the presenter's was a year label of 2026) appears live on the site (at 547:02).</p>
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes</strong>
+<ul>
+<li>Leaving a command out of the sudoers list. The presenter's first deploy failed because <code>supervisorctl status all</code> and <code>nginx -t</code> were missing from the passwordless list, so sudo demanded a password and the step froze (at 542:38, 544:36). List every exact command the pipeline runs.</li>
+<li>Forgetting to add the server-only files (socket, logs, scripts) to <code>rsync_exclude.txt</code>; without them <code>--delete</code> wipes those files on the server (at 531:06).</li>
+<li>Giving the automation SSH key a passphrase &#8212; the deploy will hang waiting for input (at 493:04).</li>
+<li>Building one giant workflow at once. Add one step, run it, fix failures, then add the next (at 547:26).</li>
+</ul>
+</div>
+
+<div class="callout">
+<strong>Security note</strong>
+<p>Two layers protect production: the required-reviewer approval gate stops anyone from deploying by mistake (at 491:29), and the tight passwordless-sudo list limits what a stolen key could ever do (at 488:47). Keep the real <code>MEILISEARCH_MASTER_KEY</code> only in GitHub Secrets and the server's own <code>.env</code> &#8212; never print it in logs or commit it.</p>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Continuous delivery ships code that already passed CI; here it is a separate, manually triggered workflow with a human approval gate.</li>
+<li>The deploy runs five stages over SSH: build the frontend, back up the database and search engine (polling until the dump succeeds), rsync the files, atomically swap the Python environment, and restart the backend and reload Nginx with verification.</li>
+<li>The atomic swap renames the old environment aside, builds a new one, and on any failure restores the old one &#8212; that is the rollback that keeps the site up.</li>
+<li><code>rsync_exclude.txt</code> stops <code>--delete</code> from erasing live data; a tight passwordless-sudo list and a passphrase-free deploy key let the pipeline act without hanging, while staying locked down.</li>
+<li>Because almost all the work happens while the old version still serves traffic, the final switch is quick and the update is effectively zero-downtime.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="15-advanced-testing-dast.html"><small>← Previous · Step 15</small>Advanced Testing &amp; DAST</a>
+<a class="next" href="17-observability.html"><small>Next · Step 17 →</small>Observability: GoAccess &amp; btop</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>18 · Reliability: Load Testing with Locust</title>
+<meta name="description" content="Simulate concurrent users with Locust to find how much traffic your server can handle before it struggles.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Deploy, Secure &amp; Automate Full-Stack Web Apps</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 18/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 18 of 19 · 590:25</div>
+  <h1>Reliability: Load Testing with Locust</h1>
+  <p class="lead">Simulate concurrent users with Locust to find how much traffic your server can handle before it struggles.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wY5pQOTsGaA&amp;t=35425s" target="_blank" rel="noopener">▶ Watch this part (590:25)</a>
+</section>
+<p>Watching a quiet, idle server over SSH tells you it works, but not how it behaves when real users arrive all at once. You do not want to discover that your app crashes under pressure on the day it goes viral. In this lesson you will deliberately stress your live backend from your laptop using Locust, read the numbers it reports, and find the point where your server starts to struggle. Then you will add the long-term safeguards that keep a small server reliable: disk analysis, log retention, and an automated cleanup routine.</p>
+
+<p><a class="term" href="glossary.html#load-testing">Load testing</a> means simulating many users hitting your site at the same time so you can measure how it copes before your real visitors do. <a class="term" href="glossary.html#locust">Locust</a> is an open-source tool, written in Python, that lets you describe a user's behaviour in a small script and then run hundreds of copies of that user at once (at 590:25).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Locust running on a laptop drives many simulated users across the internet to the production server stack">
+  <rect x="20" y="60" width="150" height="90" rx="8" class="box-info"/>
+  <text x="95" y="86" text-anchor="middle" class="small">your laptop</text>
+  <text x="95" y="104" text-anchor="middle" class="small">Locust</text>
+  <text x="95" y="126" text-anchor="middle" class="small">50 virtual users</text>
+  <rect x="230" y="78" width="120" height="54" rx="8" class="box"/>
+  <text x="290" y="100" text-anchor="middle" class="small">internet</text>
+  <text x="290" y="118" text-anchor="middle" class="small">&#43; Cloudflare</text>
+  <rect x="410" y="40" width="330" height="130" rx="8" class="zone"/>
+  <text x="575" y="34" text-anchor="middle" class="small">production server</text>
+  <rect x="425" y="55" width="90" height="44" rx="8" class="box"/>
+  <text x="470" y="81" text-anchor="middle" class="small">Nginx</text>
+  <rect x="525" y="55" width="100" height="44" rx="8" class="box"/>
+  <text x="575" y="75" text-anchor="middle" class="small">Gunicorn</text>
+  <text x="575" y="91" text-anchor="middle" class="small">workers</text>
+  <rect x="635" y="55" width="90" height="44" rx="8" class="box"/>
+  <text x="680" y="81" text-anchor="middle" class="small">FastAPI</text>
+  <rect x="525" y="112" width="200" height="40" rx="8" class="box-info"/>
+  <text x="625" y="137" text-anchor="middle" class="small">Meilisearch</text>
+  <path class="arrow" d="M170,105 H226"/>
+  <path class="arrow" d="M350,105 H420"/>
+</svg>
+<figcaption>Load comes from your laptop and travels the same path a real user would. <strong>Test the real production URL, never localhost.</strong></figcaption>
+</figure>
+
+<h2>What the presenter explains</h2>
+<p>You write a Python script that defines what a user does: browse the homepage, pause a few seconds, then fire a heavy search query (at 591:40). Locust spawns many such users and reports two key numbers in real time: <a class="term" href="glossary.html#rps">requests per second</a> (how much work your server is doing) and response time in milliseconds (how slow each request feels). You raise the number of users until failures appear, which tells you your capacity. Crucially, you always run the test from your own computer, never from the server, because a test running on the server would steal the very CPU you are trying to measure.</p>
+
+<details class="primer">
+<summary>New to load testing? Why simulate users at all</summary>
+<p>When you click around your own site, you are one user making one request at a time. Real traffic is dozens or hundreds of people acting at once, competing for the same CPU, memory, and database. Load testing recreates that crowd on demand so you can see the breaking point in a safe 10-minute test instead of during a real traffic surge. The output is a capacity number you can trust, like "my server handles about 16 requests per second before it strains".</p>
+</details>
+
+<h2>Install Locust on your laptop</h2>
+<div class="callout warn"><strong>Run it from your laptop, not the server</strong>
+<p>A large load test consumes a lot of CPU. Running it on the production server would compete with your app and distort every measurement. Activate your local Python virtual environment first, then install Locust there.</p>
+</div>
+
+<pre data-lang="bash" data-tag="install"><code>pip install locust</code></pre>
+
+<h2>Write the test scenario</h2>
+<p>Create a file named <code>locustfile.py</code> inside your local project at <code>backend/tests/load/</code>. It describes a realistic mix of user actions, weighted so the heaviest operation (search) runs most often.</p>
+
+<pre data-lang="python" data-tag="verbatim"><code>import random
+
+
+from locust import FastHttpUser, between, task
+
+class WebsiteUser(FastHttpUser):
+    # Simulate a realistic human delay between tasks (1 to 5 seconds)
+    wait_time = between(1, 5)
+
+    search_queries = ["inkscape", "python", "meilisearch", "astronomy", "elasticsearch"]
+    article_types = ["blog-post", "course-post", "astronomy-post"]
+    sort_fields = ["date", "popularity", "engagement", "claps"]
+    sort_orders = ["asc", "desc"]
+
+    @task(1)
+    def get_article_claps_count(self):
+        article_name = "ElasticsearchChangeHeapSize"
+        endpoint = f"/api/articles/{article_name}/claps-count"
+        self.client.get(endpoint, name="/articles/[name]/claps-count")
+
+    @task(4)
+    def view_homepage(self):
+        self.client.get("/", name="/")
+
+    @task(7)
+    def get_latest_articles(self):
+        endpoint = "/api/articles/latest"
+        article_type = random.choice(self.article_types)
+        payload = {"articleType": article_type}
+        self.client.post(endpoint, json=payload, name=endpoint)
+
+    @task(7)
+    def get_recommendations(self):
+        endpoint = "/api/articles/recommendations"
+        payload = {
+            "articleType": "blog-post",
+            "documentNameToIgnore": "ElasticsearchChangeHeapSize",
+            "documentTags": ["elasticsearch"],
+        }
+        self.client.post(endpoint, json=payload, name=endpoint)
+
+    @task(10)
+    def search_articles(self):
+        endpoint = "/api/search"
+        query = random.choice(self.search_queries)
+        article_type = random.choice(self.article_types)
+        sort_field = random.choice(self.sort_fields)
+        sort_order = random.choice(self.sort_orders)
+
+        payload = {
+            "query": query,
+            "articleType": article_type,
+            "size": 10,
+            "sortBy": {"field": sort_field, "order": sort_order},
+        }
+        self.client.post(endpoint, json=payload, name=endpoint)</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import random</code></td><td>Lets each simulated user pick a random search term, article type, and sort order, so the traffic looks varied instead of identical.</td></tr>
+<tr><td>4</td><td><code>from locust import FastHttpUser, between, task</code></td><td>Imports the fast user base class, the <code>between</code> helper for wait times, and the <code>task</code> decorator that marks an action.</td></tr>
+<tr><td>6</td><td><code>class WebsiteUser(FastHttpUser):</code></td><td>Defines one simulated visitor. Locust will create many copies of this class during a test.</td></tr>
+<tr><td>8</td><td><code>wait_time = between(1, 5)</code></td><td>Each virtual user pauses a random 1 to 5 seconds between actions, imitating a real person reading the page rather than hammering non-stop.</td></tr>
+<tr><td>10&#8211;13</td><td><code>search_queries = [...]</code> and the other lists</td><td>Pools of realistic values the tasks draw from at random, so searches and sorts vary across users.</td></tr>
+<tr><td>15&#8211;18</td><td><code>@task(1)</code> ... <code>get_article_claps_count</code></td><td>The lightest task, weight 1. A simple <code>GET</code> for one article's clap count. The <code>name=</code> groups all such requests under one label in the report.</td></tr>
+<tr><td>20&#8211;22</td><td><code>@task(4)</code> ... <code>view_homepage</code></td><td>Loads the homepage, weight 4. Weights are relative: this runs 4 times as often as the weight-1 task.</td></tr>
+<tr><td>24&#8211;28</td><td><code>@task(7)</code> ... <code>get_latest_articles</code></td><td>A <code>POST</code> for the latest articles of a random type, weight 7.</td></tr>
+<tr><td>30&#8211;37</td><td><code>@task(7)</code> ... <code>get_recommendations</code></td><td>A <code>POST</code> asking for recommendations, weight 7, with a fixed example payload.</td></tr>
+<tr><td>39&#8211;53</td><td><code>@task(10)</code> ... <code>search_articles</code></td><td>The heaviest and most frequent task, weight 10. It builds a full search payload with a random query and sort, hitting <code>/api/search</code> &#8212; the route that stresses Meilisearch most.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Relative weights of the five Locust tasks, showing search as the most frequent action">
+  <text x="380" y="22" text-anchor="middle" class="title">How often each task runs (relative weights)</text>
+  <text x="200" y="52" class="small">search_articles</text>
+  <rect x="210" y="40" width="300" height="16" class="box-bad"/>
+  <text x="520" y="53" class="small">10</text>
+  <text x="200" y="80" class="small">get_latest_articles</text>
+  <rect x="210" y="68" width="210" height="16" class="box-warn"/>
+  <text x="430" y="81" class="small">7</text>
+  <text x="200" y="108" class="small">get_recommendations</text>
+  <rect x="210" y="96" width="210" height="16" class="box-warn"/>
+  <text x="430" y="109" class="small">7</text>
+  <text x="200" y="136" class="small">view_homepage</text>
+  <rect x="210" y="124" width="120" height="16" class="box-info"/>
+  <text x="340" y="137" class="small">4</text>
+  <text x="200" y="164" class="small">get_article_claps_count</text>
+  <rect x="210" y="152" width="30" height="16" class="box"/>
+  <text x="250" y="165" class="small">1</text>
+</svg>
+<figcaption>Higher weight means Locust picks that task more often. <strong>The mix is deliberately search-heavy to stress your most expensive endpoint.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>Why FastHttpUser instead of HttpUser?</summary>
+<p>Locust offers two base classes. The standard <code>HttpUser</code> uses Python's familiar <code>requests</code> library. <code>FastHttpUser</code> uses a faster, C-based HTTP client (<code>geventhttpclient</code>) that needs far less CPU on your laptop. That lets one machine simulate many more users &#8212; up to 5 to 6 times as many on normal laptop hardware &#8212; which is why the script inherits from it.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Comparison of HttpUser and FastHttpUser showing FastHttpUser supports far more simulated users per laptop">
+  <rect x="40" y="50" width="300" height="90" rx="8" class="box"/>
+  <text x="190" y="76" text-anchor="middle">HttpUser</text>
+  <text x="190" y="98" text-anchor="middle" class="small">Python requests library</text>
+  <text x="190" y="118" text-anchor="middle" class="small">more CPU per user &#8594; fewer users</text>
+  <rect x="420" y="50" width="300" height="90" rx="8" class="box-ok"/>
+  <text x="570" y="76" text-anchor="middle">FastHttpUser</text>
+  <text x="570" y="98" text-anchor="middle" class="small">C-based geventhttpclient</text>
+  <text x="570" y="118" text-anchor="middle" class="small ok">up to 5&#8211;6&#215; more users per laptop</text>
+  <path class="arrow" d="M340,95 H416"/>
+</svg>
+<figcaption>Same test, lighter client. <strong>FastHttpUser lets a single laptop generate a much bigger crowd.</strong></figcaption>
+</figure>
+
+<h2>Run the test</h2>
+<ol class="steps">
+<li>Move into the folder that holds <code>locustfile.py</code> and start Locust.</li>
+<li>Open the web interface it prints, on port 8089.</li>
+<li>Fill in users, spawn rate, and your production host, then start.</li>
+</ol>
+
+<pre data-lang="bash" data-tag="start"><code>locust</code></pre>
+
+<pre data-lang="text" data-tag="output"><code>Starting web interface at http://0.0.0.0:8089, press enter to open your default browser.</code></pre>
+
+<p>Open <code>http://localhost:8089</code> in your browser and fill in the start form:</p>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Field / command</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>locust</code></td><td>Starts Locust. With no arguments it finds <code>locustfile.py</code> in the current folder, so you must run it from <code>backend/tests/load/</code>.</td></tr>
+<tr><td>2</td><td>Number of users: <code>50</code></td><td>The peak number of simultaneous simulated visitors. For a minimal server, 50 concurrent users is already a substantial load.</td></tr>
+<tr><td>3</td><td>Spawn rate: <code>5</code></td><td>How many new users Locust adds per second until it reaches 50, giving a gradual ramp-up rather than an instant shock.</td></tr>
+<tr><td>4</td><td>Host: <code>https://&lt;your_domain&gt;.com</code></td><td>Your real production domain. Every request in the script is sent relative to this address.</td></tr>
+</table></div>
+
+<p>Click <strong>Start</strong>. Locust begins spawning users and the live charts fill in.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Simplified Locust start form with fields for number of users, spawn rate, and host">
+  <text x="380" y="24" text-anchor="middle" class="small">Illustration (simplified)</text>
+  <rect x="180" y="34" width="400" height="130" rx="8" class="ui-window"/>
+  <rect x="180" y="34" width="400" height="26" rx="8" class="ui-chrome"/>
+  <text x="200" y="52" class="small">Start new load test</text>
+  <text x="205" y="84" class="small">Number of users</text>
+  <rect x="380" y="72" width="180" height="20" rx="8" class="ui-field"/>
+  <text x="390" y="87" class="small mono">50</text>
+  <text x="205" y="114" class="small">Spawn rate</text>
+  <rect x="380" y="102" width="180" height="20" rx="8" class="ui-field"/>
+  <text x="390" y="117" class="small mono">5</text>
+  <text x="205" y="144" class="small">Host</text>
+  <rect x="380" y="132" width="180" height="20" rx="8" class="ui-field"/>
+  <text x="390" y="147" class="small mono">https://...</text>
+</svg>
+<figcaption>Three fields set the whole test: how many, how fast, and against what. <strong>Host must be your production URL.</strong></figcaption>
+</figure>
+
+<h2>Read the results</h2>
+<p>While your laptop drives traffic, watch two places at once (at 598:10):</p>
+<ul>
+<li><strong>The Locust dashboard</strong> &#8212; track RPS and the <strong>Failures</strong> column. <code>502 Bad Gateway</code> errors mean Nginx is timing out because your FastAPI/Gunicorn queue is full.</li>
+<li><strong>btop on the server</strong> &#8212; in a separate SSH terminal, watch your CPU cores and swap. If CPU locks at 100&#37;, your Gunicorn worker cluster is saturated.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Two panels to watch during a load test: the Locust dashboard on the laptop and btop on the server">
+  <rect x="30" y="40" width="330" height="110" rx="8" class="box-info"/>
+  <text x="195" y="66" text-anchor="middle">Locust dashboard (laptop)</text>
+  <text x="195" y="90" text-anchor="middle" class="small">RPS climbing?</text>
+  <text x="195" y="110" text-anchor="middle" class="small">Failures column &#8594; 502s?</text>
+  <text x="195" y="132" text-anchor="middle" class="small">response-time chart</text>
+  <rect x="400" y="40" width="330" height="110" rx="8" class="box-warn"/>
+  <text x="565" y="66" text-anchor="middle">btop (server)</text>
+  <text x="565" y="90" text-anchor="middle" class="small">CPU cores at 100&#37;?</text>
+  <text x="565" y="110" text-anchor="middle" class="small">swap filling up?</text>
+  <text x="565" y="132" text-anchor="middle" class="small">gunicorn / meilisearch load</text>
+</svg>
+<figcaption>Locust tells you what users feel; btop tells you why. <strong>Read them side by side.</strong></figcaption>
+</figure>
+
+<div class="callout"><strong>Security note</strong>
+<p>Do not run load tests continuously for hours against a cloud instance. Your provider may read a massive, sustained traffic spike as an attack or an outgoing denial-of-service event and flag or suspend your account. Run the test for 5 to 10 minutes, gather your numbers, then click <strong>Stop</strong>.</p>
+</div>
+
+<h2>Understand the numbers</h2>
+<p>After about 5 minutes against a minimal cloud instance, the summary looks like this:</p>
+
+<pre data-lang="text" data-tag="example results"><code>Type     Name                            # reqs      # fails    Avg (ms)   Max (ms)    RPS
+--------------------------------------------------------------------------------------------
+GET      /                                 1124           0         64        210   3.20
+POST     /api/articles/latest              1945           0         78        340   5.50
+POST     /api/search                       2499           0         72       1100   7.10
+--------------------------------------------------------------------------------------------
+Total                                      5568           0         71       1100  15.80</code></pre>
+
+<p>The server sustained nearly 16 RPS with zero failures &#8212; roughly 1.3 million requests per day if kept up. Average response time stayed around 75&#160;ms. The occasional spike to 1100&#160;ms on <code>/api/search</code> is normal <a class="term" href="glossary.html#latency">tail latency</a>: brief, rare slow requests caused by background work like log writes or garbage collection. As long as your median and 95th-percentile times stay low, the site feels fast.</p>
+
+<details class="primer">
+<summary>New to RPS, throughput and latency?</summary>
+<p><strong>RPS</strong> (requests per second) and <a class="term" href="glossary.html#throughput">throughput</a> both describe how much work your server gets done per unit of time &#8212; the higher, the more traffic you can serve. <strong>Latency</strong> is the delay for a single request, measured in milliseconds &#8212; the lower, the snappier the site feels. They trade off: as you push throughput up, latency eventually rises because requests start queueing. The goal is the highest RPS you can reach while latency stays acceptable.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Illustrative line chart of requests per second rising with more users then flattening at the server limit">
+  <text x="380" y="22" text-anchor="middle" class="title">RPS vs number of users (illustrative)</text>
+  <line class="line" x1="60" y1="190" x2="720" y2="190"/>
+  <line class="line" x1="60" y1="45" x2="60" y2="190"/>
+  <text x="34" y="120" text-anchor="middle" class="small">RPS</text>
+  <path class="line" d="M60,190 L192,145 L324,107 L456,85 L588,74 L720,70"/>
+  <circle class="dot-info" cx="192" cy="145" r="4"/>
+  <circle class="dot-info" cx="324" cy="107" r="4"/>
+  <circle class="dot-info" cx="456" cy="85" r="4"/>
+  <circle class="dot-bad" cx="720" cy="70" r="4"/>
+  <text x="705" y="60" text-anchor="middle" class="small bad">plateau &#8776; 16</text>
+  <text x="93" y="205" text-anchor="middle" class="small">10</text>
+  <text x="225" y="205" text-anchor="middle" class="small">20</text>
+  <text x="357" y="205" text-anchor="middle" class="small">30</text>
+  <text x="489" y="205" text-anchor="middle" class="small">40</text>
+  <text x="621" y="205" text-anchor="middle" class="small">50</text>
+  <text x="380" y="230" text-anchor="middle" class="small">number of users &#8212; numbers are illustrative</text>
+</svg>
+<figcaption>RPS rises with users, then flattens when the server is maxed out. <strong>The flat part is your throughput ceiling.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Illustrative line chart of response time where the median stays flat while the 95th percentile spikes under load">
+  <text x="380" y="22" text-anchor="middle" class="title">Response time under load (illustrative)</text>
+  <line class="line" x1="60" y1="190" x2="720" y2="190"/>
+  <line class="line" x1="60" y1="45" x2="60" y2="190"/>
+  <text x="30" y="120" text-anchor="middle" class="small">ms</text>
+  <path class="line dashed" d="M60,178 L192,174 L324,170 L456,166 L588,162 L720,158"/>
+  <text x="150" y="168" class="small ok">p50 (median)</text>
+  <path class="line" d="M60,176 L192,168 L324,160 L456,150 L540,120 L588,70 L636,150 L720,140"/>
+  <text x="560" y="62" text-anchor="middle" class="small bad">p95 spike</text>
+  <text x="93" y="205" text-anchor="middle" class="small">10</text>
+  <text x="225" y="205" text-anchor="middle" class="small">20</text>
+  <text x="357" y="205" text-anchor="middle" class="small">30</text>
+  <text x="489" y="205" text-anchor="middle" class="small">40</text>
+  <text x="621" y="205" text-anchor="middle" class="small">50</text>
+  <text x="380" y="230" text-anchor="middle" class="small">number of users &#8212; numbers are illustrative</text>
+</svg>
+<figcaption>The median (p50) stays flat and fast; a rare 95th-percentile (p95) spike is normal tail latency. <strong>Judge health by p50 and p95, not the single worst request.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 260" role="img" aria-label="Decision flow for finding the breaking point by raising users and watching for failures or saturation">
+  <text x="380" y="22" text-anchor="middle" class="title">Find the breaking point</text>
+  <rect x="280" y="36" width="200" height="40" rx="8" class="box"/>
+  <text x="380" y="61" text-anchor="middle" class="small">run test at N users</text>
+  <rect x="280" y="104" width="200" height="40" rx="8" class="box-info"/>
+  <text x="380" y="122" text-anchor="middle" class="small">watch failures, RPS,</text>
+  <text x="380" y="138" text-anchor="middle" class="small">CPU and swap</text>
+  <path class="arrow" d="M380,76 V100"/>
+  <rect x="280" y="172" width="200" height="44" rx="8" class="box-warn"/>
+  <text x="380" y="190" text-anchor="middle" class="small">502s, or CPU at 100&#37;,</text>
+  <text x="380" y="206" text-anchor="middle" class="small">or RPS stops rising?</text>
+  <path class="arrow" d="M380,144 V168"/>
+  <rect x="40" y="176" width="180" height="40" rx="8" class="box-ok"/>
+  <text x="130" y="194" text-anchor="middle" class="small">No &#8594; raise users,</text>
+  <text x="130" y="210" text-anchor="middle" class="small">test again</text>
+  <path class="arrow-ok" d="M280,194 H224"/>
+  <rect x="540" y="176" width="190" height="40" rx="8" class="box-bad"/>
+  <text x="635" y="194" text-anchor="middle" class="small">Yes &#8594; that N is your</text>
+  <text x="635" y="210" text-anchor="middle" class="small">limit; stop and record</text>
+  <path class="arrow-bad" d="M480,194 H536"/>
+  <path class="line dashed" d="M130,176 V96 H280"/>
+</svg>
+<figcaption>Raise the crowd until something gives, then back off. <strong>Your capacity is the user count just before failures appear.</strong></figcaption>
+</figure>
+
+<h2>Keep the server reliable over time</h2>
+<p>Load tests create logs, and logs, backups, and caches grow quietly until they fill the disk. If a Linux system hits 100&#37; disk usage, services can no longer write files and your database can crash (at 605:30). Three safeguards prevent this.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Three reliability safeguards: find big files with NCDU, cap journal size, and keep a year of Nginx logs">
+  <rect x="30" y="50" width="220" height="90" rx="8" class="box-info"/>
+  <text x="140" y="76" text-anchor="middle" class="small">1. NCDU</text>
+  <text x="140" y="98" text-anchor="middle" class="small">find what fills</text>
+  <text x="140" y="116" text-anchor="middle" class="small">the disk</text>
+  <rect x="270" y="50" width="220" height="90" rx="8" class="box-warn"/>
+  <text x="380" y="76" text-anchor="middle" class="small">2. journald cap</text>
+  <text x="380" y="98" text-anchor="middle" class="small">limit system logs</text>
+  <text x="380" y="116" text-anchor="middle" class="small">to 100&#160;MB</text>
+  <rect x="510" y="50" width="220" height="90" rx="8" class="box-ok"/>
+  <text x="620" y="76" text-anchor="middle" class="small">3. Nginx rotation</text>
+  <text x="620" y="98" text-anchor="middle" class="small">keep 365 days of</text>
+  <text x="620" y="116" text-anchor="middle" class="small">traffic history</text>
+</svg>
+<figcaption>Measure first, then cap the noisy logs and preserve the valuable ones. <strong>Different logs deserve different retention.</strong></figcaption>
+</figure>
+
+<h3>Find big directories with NCDU</h3>
+<pre data-lang="bash" data-tag="install and scan"><code>sudo apt install ncdu -y
+sudo ncdu /</code></pre>
+<p>NCDU scans from the root directory and shows an interactive file tree sorted by size. Press <kbd>Enter</kbd> to open a folder, <kbd>?</kbd> for help, and <kbd>d</kbd> to delete a highlighted file you no longer need (such as an old manual backup).</p>
+
+<h3>Cap the systemd journal</h3>
+<p>By default Ubuntu lets system logs use up to 10&#37; of the disk, which can be 1&#160;GB or more. Pin it to 100&#160;MB instead.</p>
+<pre data-lang="bash" data-tag="edit config"><code>sudo nano /etc/systemd/journald.conf</code></pre>
+<p>Find the line <code>#SystemMaxUse=</code>, remove the <code>#</code>, and set the value:</p>
+<pre data-lang="text" data-tag="verbatim"><code>SystemMaxUse=100M</code></pre>
+<pre data-lang="bash" data-tag="apply"><code>sudo systemctl restart systemd-journald</code></pre>
+
+<h3>Keep a year of Nginx logs</h3>
+<p>By contrast, your Nginx access logs feed your GoAccess traffic charts, so you want to keep them. Ubuntu deletes them after only 14 days; change that to 365.</p>
+<pre data-lang="bash" data-tag="edit config"><code>sudo nano /etc/logrotate.d/nginx</code></pre>
+<p>Find <code>rotate 14</code> and change it to <code>rotate 365</code>:</p>
+<pre data-lang="nginx" data-tag="verbatim"><code>/var/log/nginx/*.log {
+        daily
+        missingok
+        rotate 365
+        compress
+        delaycompress
+        notifempty
+        create 0640 www-data adm
+        sharedscripts
+        # ...
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>/var/log/nginx/*.log {</code></td><td>The rule applies to every <code>.log</code> file in the Nginx log folder.</td></tr>
+<tr><td>2</td><td><code>daily</code></td><td>Rotate (start a fresh file) once per day.</td></tr>
+<tr><td>3</td><td><code>missingok</code></td><td>Do not error if a log file is missing; just skip it.</td></tr>
+<tr><td>4</td><td><code>rotate 365</code></td><td>Keep 365 rotated copies before deleting the oldest &#8212; a full year of history instead of 14 days.</td></tr>
+<tr><td>5&#8211;6</td><td><code>compress</code> / <code>delaycompress</code></td><td>Gzip old logs to save space, but wait one cycle before compressing the most recent one so tools can still read it.</td></tr>
+<tr><td>7</td><td><code>notifempty</code></td><td>Do not rotate a log that has no new entries.</td></tr>
+<tr><td>8</td><td><code>create 0640 www-data adm</code></td><td>After rotating, create the new log with these permissions and owner so Nginx can keep writing.</td></tr>
+<tr><td>9</td><td><code>sharedscripts</code></td><td>Run any post-rotate script once for all matched files, not once per file.</td></tr>
+</table></div>
+
+<h2>Automate monthly cleanup</h2>
+<p>Finally, a scheduled script flushes stale caches and packages so you never have to remember.</p>
+
+<pre data-lang="bash" data-tag="create script"><code>sudo nano /usr/local/bin/monthly_cleanup.sh</code></pre>
+
+<pre data-lang="bash" data-tag="verbatim"><code>#!/bin/bash
+# Enforce immediate termination if any step encounters an unhandled error
+set -e
+
+echo "Starting automated system cleanup routine"
+
+apt-get clean
+apt-get autoremove -y
+
+journalctl --vacuum-time=2d
+
+rm -rf /home/*/.cache/pip
+rm -rf /home/*/.local/share/pnpm/store
+
+echo "System cleanup completed successfully."</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>#!/bin/bash</code></td><td>The shebang: tells Linux to run this file with the bash shell.</td></tr>
+<tr><td>3</td><td><code>set -e</code></td><td>Stop the whole script immediately if any command fails, so a half-finished cleanup never hides an error.</td></tr>
+<tr><td>7</td><td><code>apt-get clean</code></td><td>Deletes downloaded package files that apt no longer needs, freeing disk.</td></tr>
+<tr><td>8</td><td><code>apt-get autoremove -y</code></td><td>Removes packages installed only as dependencies that nothing uses now; <code>-y</code> answers yes automatically.</td></tr>
+<tr><td>10</td><td><code>journalctl --vacuum-time=2d</code></td><td>Deletes systemd journal entries older than 2 days.</td></tr>
+<tr><td>12&#8211;13</td><td><code>rm -rf /home/*/.cache/pip</code> and the pnpm store</td><td>Clears the Python pip and pnpm package caches for every user, which can grow large after many builds.</td></tr>
+</table></div>
+
+<pre data-lang="bash" data-tag="make executable"><code>sudo chmod +x /usr/local/bin/monthly_cleanup.sh</code></pre>
+
+<pre data-lang="bash" data-tag="schedule"><code>sudo crontab -e</code></pre>
+
+<p>Add this line at the bottom:</p>
+
+<pre data-lang="text" data-tag="verbatim cron"><code>0 3 1 * * /usr/local/bin/monthly_cleanup.sh &gt;&gt; /var/log/cleanup.log 2&gt;&amp;1</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>0 3 1 * *</code></td><td>Run at 03:00 on the 1st day of every month &#8212; a quiet time, once a month.</td></tr>
+<tr><td>1</td><td><code>/usr/local/bin/monthly_cleanup.sh</code></td><td>The cleanup script to run.</td></tr>
+<tr><td>1</td><td><code>&gt;&gt; /var/log/cleanup.log 2&gt;&amp;1</code></td><td>Appends normal output and errors (<code>2&gt;&amp;1</code> sends error output to the same place) to a log file, so you can check later that it ran.</td></tr>
+</table></div>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>After the test, the Locust summary shows a steady RPS with 0 failures and low average response time. On the server, disk stays well under full, system logs are capped, and a year of Nginx logs is archived for GoAccess. Each month, <code>/var/log/cleanup.log</code> gains a fresh "System cleanup completed successfully." line.</p>
+</div>
+
+<div class="callout warn"><strong>Common mistakes</strong>
+<ul>
+<li>Running <code>locust</code> from the wrong folder, so it cannot find <code>locustfile.py</code>. Change into <code>backend/tests/load/</code> first.</li>
+<li>Pointing the Host field at <code>localhost</code> instead of your production domain, so you only test your laptop.</li>
+<li>Capping the Nginx logs the same way as system logs. Keep them for 365 days &#8212; they are your traffic history, not noise.</li>
+<li>Leaving a load test running for hours and tripping your provider's abuse detection.</li>
+</ul>
+</div>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>Load testing simulates a crowd so you learn your capacity before real users do &#8212; always from your laptop, never the server.</li>
+<li>A Locust <code>locustfile.py</code> describes weighted user tasks; <code>FastHttpUser</code> lets one laptop generate far more users.</li>
+<li>Read RPS and failures in Locust, and CPU and swap in btop, together: 502 errors or pinned CPU mark your limit.</li>
+<li>Tail latency (rare p95 spikes) is normal; judge health by the median and 95th percentile.</li>
+<li>Protect the disk long-term: find big files with NCDU, cap the journal at 100&#160;MB, keep Nginx logs 365 days, and run a monthly cleanup script via cron.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="17-observability.html"><small>← Previous · Step 17</small>Observability: GoAccess &amp; btop</a>
+<a class="next" href="19-continuous-security.html"><small>Next · Step 19 →</small>Continuous Security &amp; Maintenance</a>
+</nav>
+</main>
+</body>
+</html>

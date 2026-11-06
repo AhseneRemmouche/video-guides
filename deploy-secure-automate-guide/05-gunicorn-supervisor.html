@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 · Running the Backend: Gunicorn &amp; Supervisor</title>
+<meta name="description" content="Serve FastAPI with Gunicorn and uvicorn workers, and keep it running in the background with Supervisor.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Deploy, Secure &amp; Automate Full-Stack Web Apps</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 05/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 05 of 19 · 110:00</div>
+  <h1>Running the Backend: Gunicorn &amp; Supervisor</h1>
+  <p class="lead">Serve FastAPI with Gunicorn and uvicorn workers, and keep it running in the background with Supervisor.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wY5pQOTsGaA&amp;t=6600s" target="_blank" rel="noopener">▶ Watch this part (110:00)</a>
+</section>
+<p class="lead">Your backend already runs &#8212; but only while you babysit it. In the last step you started the API by hand with a single <code>uvicorn</code> command. The moment you close the terminal, log out, or the server reboots, your site goes dark. In this step you make the backend <em>production&#8209;ready</em>: a real process manager runs several worker processes for you, exposes them over a private file instead of a public port, and restarts everything automatically if it ever crashes.</p>
+
+<h2>What you will build</h2>
+<p>You will put two new tools in front of your FastAPI app. <a class="term" href="glossary.html#gunicorn">Gunicorn</a> is a robust process manager that launches and watches several <a class="term" href="glossary.html#uvicorn">Uvicorn</a> workers. <a class="term" href="glossary.html#supervisor">Supervisor</a> sits one level higher and watches Gunicorn itself, bringing it back to life after a crash or a reboot. The app will no longer listen on a network port; instead Gunicorn opens a <a class="term" href="glossary.html#unix-socket">Unix socket</a> file that only programs on the same machine (later, Nginx) can talk to.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Before and after: a single manual uvicorn process versus a supervised Gunicorn cluster">
+  <text x="190" y="24" text-anchor="middle" class="title">Before &#8212; manual</text>
+  <text x="570" y="24" text-anchor="middle" class="title">After &#8212; supervised</text>
+  <line class="line dashed" x1="380" y1="36" x2="380" y2="238"/>
+
+  <rect class="box" x="70" y="46" width="240" height="40" rx="8"/>
+  <text x="190" y="71" text-anchor="middle">your terminal (you)</text>
+  <path class="arrow" d="M190,86 V108"/>
+  <rect class="box-warn" x="70" y="110" width="240" height="44" rx="8"/>
+  <text x="190" y="130" text-anchor="middle">uvicorn main:app</text>
+  <text x="190" y="146" text-anchor="middle" class="small">1 process, port 8000</text>
+  <rect class="box-bad" x="70" y="176" width="240" height="52" rx="8"/>
+  <text x="190" y="198" text-anchor="middle" class="bad">close terminal &#8594;</text>
+  <text x="190" y="214" text-anchor="middle" class="bad">site goes down</text>
+
+  <rect class="box-solid" x="450" y="46" width="240" height="40" rx="8"/>
+  <text x="570" y="71" text-anchor="middle" class="on-solid">Supervisor (always on)</text>
+  <path class="arrow-accent" d="M570,86 V106"/>
+  <rect class="box" x="450" y="108" width="240" height="40" rx="8"/>
+  <text x="570" y="133" text-anchor="middle">Gunicorn master</text>
+  <path class="arrow" d="M510,148 V172"/>
+  <path class="arrow" d="M570,148 V172"/>
+  <path class="arrow" d="M630,148 V172"/>
+  <rect class="box-ok" x="450" y="174" width="70" height="40" rx="8"/>
+  <text x="485" y="199" text-anchor="middle" class="small">worker</text>
+  <rect class="box-ok" x="535" y="174" width="70" height="40" rx="8"/>
+  <text x="570" y="199" text-anchor="middle" class="small">worker</text>
+  <rect class="box-ok" x="620" y="174" width="70" height="40" rx="8"/>
+  <text x="655" y="199" text-anchor="middle" class="small">worker</text>
+  <text x="570" y="234" text-anchor="middle" class="small ok">survives logout &#38; reboot</text>
+</svg>
+<figcaption>How to read it: on the left, one process tied to your login; on the right, a managed cluster that outlives you. <strong>The goal of this step is to move from left to right.</strong></figcaption>
+</figure>
+
+<h2>The concepts</h2>
+<p>At <strong>(111:50)</strong> the presenter opens the slide that explains the three pieces working together: Supervisor, Gunicorn, and Uvicorn. You already met Uvicorn when you ran the app by hand, so why add two more tools?</p>
+
+<h3>Why Gunicorn and Uvicorn together</h3>
+<p>Think of a restaurant. Gunicorn is the <strong>manager</strong>: it decides how many cooks to hire, keeps an eye on them, and replaces any cook who collapses. Each Uvicorn <a class="term" href="glossary.html#worker-process">worker process</a> is a <strong>cook</strong> that actually prepares the orders. One cook can only do so much at once; several cooks handle more customers in parallel. FastAPI is asynchronous (ASGI), and Gunicorn on its own only knows how to run old&#8209;style synchronous (WSGI) apps, so you tell Gunicorn to use Uvicorn's special worker class to bridge the gap.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="Gunicorn is the manager, Uvicorn workers are the cooks that handle requests">
+  <rect class="zone" x="20" y="20" width="720" height="184" rx="8"/>
+  <text x="40" y="44" class="label">one backend, many hands</text>
+
+  <rect class="box-solid" x="300" y="56" width="160" height="46" rx="8"/>
+  <text x="380" y="78" text-anchor="middle" class="on-solid">Gunicorn</text>
+  <text x="380" y="94" text-anchor="middle" class="on-solid small">manager / master</text>
+
+  <path class="arrow" d="M330,102 L240,150"/>
+  <path class="arrow" d="M380,102 V150"/>
+  <path class="arrow" d="M430,102 L520,150"/>
+
+  <rect class="box-ok" x="140" y="152" width="160" height="44" rx="8"/>
+  <text x="220" y="174" text-anchor="middle">Uvicorn worker 1</text>
+  <text x="220" y="189" text-anchor="middle" class="small">runs your FastAPI app</text>
+  <rect class="box-ok" x="300" y="152" width="160" height="44" rx="8"/>
+  <text x="380" y="174" text-anchor="middle">Uvicorn worker 2</text>
+  <text x="380" y="189" text-anchor="middle" class="small">runs your FastAPI app</text>
+  <rect class="box-ok" x="460" y="152" width="160" height="44" rx="8"/>
+  <text x="540" y="174" text-anchor="middle">Uvicorn worker 3</text>
+  <text x="540" y="189" text-anchor="middle" class="small">runs your FastAPI app</text>
+</svg>
+<figcaption>How to read it: Gunicorn hires and supervises; the workers do the real work. <strong>More workers means more requests handled at the same time.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to processes and workers? What they are and why it matters</summary>
+<p>A <strong>process</strong> is a running copy of a program with its own slice of memory. When you ran <code>uvicorn main:app</code> you started exactly one process. A <strong>worker</strong> is simply one of several identical processes all running your app, so requests can be served in parallel instead of one at a time. The handbook suggests a starting count of <code>(2 &#215; CPU cores) + 1</code>; on a small server three workers is a safe balance.</p>
+</details>
+
+<h3>Why Supervisor</h3>
+<p>At <strong>(114:41)</strong> the presenter calls Supervisor a <em>watchdog</em> &#8212; a term from engineering for a component that hits the reset button when a system freezes. If Gunicorn or its workers crash <strong>(115:05)</strong>, Supervisor notices within seconds and starts everything again, so your API is healthy and ready for users without you logging in. Supervisor runs as a background service, a <a class="term" href="glossary.html#daemon">daemon</a>, that starts on boot.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Supervisor watches Gunicorn and restarts it after a crash">
+  <rect class="box" x="40" y="30" width="150" height="44" rx="8"/>
+  <text x="115" y="52" text-anchor="middle">RUNNING</text>
+  <text x="115" y="67" text-anchor="middle" class="small ok">serving traffic</text>
+
+  <path class="arrow-bad" d="M190,52 H320"/>
+  <text x="255" y="44" text-anchor="middle" class="small bad">worker crashes</text>
+
+  <rect class="box-bad" x="320" y="30" width="150" height="44" rx="8"/>
+  <text x="395" y="56" text-anchor="middle">STOPPED</text>
+
+  <path class="arrow" d="M470,52 H600"/>
+  <text x="535" y="44" text-anchor="middle" class="small">Supervisor detects</text>
+
+  <rect class="box-info" x="600" y="30" width="130" height="44" rx="8"/>
+  <text x="665" y="56" text-anchor="middle">RESTART</text>
+
+  <path class="arrow-ok" d="M665,74 V150 H115 V78"/>
+  <text x="390" y="168" text-anchor="middle" class="small ok">back to RUNNING automatically &#8212; no human needed</text>
+
+  <rect class="box-solid" x="240" y="186" width="280" height="34" rx="8"/>
+  <text x="380" y="208" text-anchor="middle" class="on-solid">Supervisor runs on boot &#38; never sleeps</text>
+</svg>
+<figcaption>How to read it: crash, detect, restart, repeat. <strong>Supervisor turns a crash from an outage into a blip of a few seconds.</strong></figcaption>
+</figure>
+
+<h3>The private socket</h3>
+<p>When you tested with <code>uvicorn</code> you used port 8000. In production the backend will instead listen on a Unix socket file. At <strong>(125:06)</strong> the presenter notes Nginx is not installed yet, so you test the socket directly with <code>curl</code>. A socket file is faster than a network port and more secure, because it never opens a connection to the outside world &#8212; only processes on the same machine that have permission can read it.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="A network port is open to the internet while a Unix socket is a private file on the machine">
+  <text x="190" y="24" text-anchor="middle" class="title">Network port :8000</text>
+  <text x="570" y="24" text-anchor="middle" class="title">Unix socket file</text>
+  <line class="line dashed" x1="380" y1="34" x2="380" y2="198"/>
+
+  <rect class="box-bad" x="60" y="44" width="110" height="40" rx="8"/>
+  <text x="115" y="69" text-anchor="middle" class="small">the internet</text>
+  <path class="arrow-bad" d="M170,64 H250"/>
+  <rect class="box" x="250" y="44" width="110" height="40" rx="8"/>
+  <text x="305" y="64" text-anchor="middle" class="small">your server</text>
+  <text x="305" y="78" text-anchor="middle" class="small bad">:8000 reachable</text>
+  <text x="190" y="118" text-anchor="middle" class="small warn">anyone who finds the port can knock</text>
+  <rect class="box-warn" x="60" y="134" width="300" height="48" rx="8"/>
+  <text x="210" y="155" text-anchor="middle" class="small">opens a real network connection</text>
+  <text x="210" y="171" text-anchor="middle" class="small">slower, exposed to the world</text>
+
+  <rect class="box" x="440" y="44" width="120" height="40" rx="8"/>
+  <text x="500" y="69" text-anchor="middle" class="small">Nginx (same box)</text>
+  <path class="arrow-ok" d="M560,64 H640"/>
+  <rect class="box-ok" x="620" y="44" width="110" height="40" rx="8"/>
+  <text x="675" y="64" text-anchor="middle" class="mono small">gunicorn</text>
+  <text x="675" y="78" text-anchor="middle" class="mono small">.sock</text>
+  <text x="585" y="118" text-anchor="middle" class="small ok">a file, not a port &#8212; no door to the internet</text>
+  <rect class="box-ok" x="440" y="134" width="290" height="48" rx="8"/>
+  <text x="585" y="155" text-anchor="middle" class="small">only local programs with permission</text>
+  <text x="585" y="171" text-anchor="middle" class="small">faster, private</text>
+</svg>
+<figcaption>How to read it: a port is a door on the street; a socket is a note passed inside the building. <strong>Gunicorn binds to a socket file so the API is never exposed directly.</strong></figcaption>
+</figure>
+
+<h2>Steps</h2>
+<ol class="steps">
+<li><strong>Install Gunicorn into the virtual environment.</strong> Move into the backend folder and activate the same <code>venv</code> you made earlier, then install Gunicorn <em>inside</em> it so it uses your project's Python.</li>
+<li><strong>Write the <code>gunicorn_start</code> script</strong> that tells Gunicorn exactly how to launch your app, and make it executable.</li>
+<li><strong>Install Supervisor and create a log folder</strong> owned by your user.</li>
+<li><strong>Write the Supervisor <code>.conf</code> file</strong> so Supervisor knows to run and watch your script.</li>
+<li><strong>Tell Supervisor to load the config and start the service</strong>, then confirm it is <code>RUNNING</code>.</li>
+<li><strong>Test the API through the socket</strong> with <code>curl</code>, and confirm the socket file exists.</li>
+<li><strong>Check for orphan processes</strong> and clean them up safely.</li>
+</ol>
+
+<h3>Step 1 &#8212; Install Gunicorn</h3>
+<p>At <strong>(115:28)</strong> the presenter stresses testing manually first, which you did. Now install the manager. Activate the environment so Gunicorn installs alongside your app's packages, not system&#8209;wide.</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>cd /web_app/backend
+source venv/bin/activate</code></pre>
+
+<pre data-lang="sh" data-tag="server terminal"><code>pip install gunicorn</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>cd /web_app/backend</code></td><td>Moves into the backend folder where your <code>main.py</code> and <code>venv</code> live. Gunicorn must be run from here so it can import <code>main:app</code>.</td></tr>
+<tr><td>2</td><td><code>source venv/bin/activate</code></td><td>Activates the project's virtual environment. Without this, <code>pip</code> would install Gunicorn into the system Python, and your app's packages would be invisible to it.</td></tr>
+<tr><td>3</td><td><code>pip install gunicorn</code></td><td>Downloads and installs Gunicorn <em>inside</em> the active <code>venv</code>. This keeps the manager and its workers using the exact same Python and libraries as your app.</td></tr>
+</table></div>
+
+<h3>Step 2 &#8212; Create the startup script</h3>
+<p>Create a shell script in the backend root (not inside <code>venv</code>, which may be deleted and recreated on future deploys). Open it with nano:</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code># Ensure you are in /web_app/backend
+nano gunicorn_start</code></pre>
+
+<div class="callout warn"><strong>Replace the placeholders.</strong> Swap <code>&lt;your_project_name&gt;</code> for a short name for your app (for example <code>my_blog</code>), and set <code>USER</code> and <code>GROUP</code> to match your Linux username. The example numbers and names below are from the handbook; use your own.</div>
+
+<pre data-lang="sh" data-tag="gunicorn_start"><code>#!/bin/bash
+
+NAME='&lt;your_project_name&gt;'
+APPDIR=/web_app/backend
+SOCKFILE=/web_app/backend/gunicorn.sock
+USER=&lt;your_username&gt;
+GROUP=&lt;your_username&gt;
+# Increase this if you have more traffic or a more complex app
+NUM_WORKERS=3
+TIMEOUT=120
+
+# Gunicorn needs to use Uvicorn's worker class for FastAPI
+WORKER_CLASS=uvicorn.workers.UvicornWorker
+
+# We use "*" because we are running behind Nginx via a Unix Socket.
+FORWARDED_ALLOW_IPS="*"
+
+echo "Starting $NAME"
+
+cd $APPDIR
+source venv/bin/activate
+
+# Create the run directory if it doesn't exist
+RUNDIR=$(dirname $SOCKFILE)
+test -d $RUNDIR || mkdir -p $RUNDIR
+
+# Start Gunicorn
+exec venv/bin/gunicorn main:app \
+  --name $NAME \
+  --workers $NUM_WORKERS \
+  --worker-class $WORKER_CLASS \
+  --timeout $TIMEOUT \
+  --user=$USER --group=$GROUP \
+  --bind=unix:$SOCKFILE \
+  --forwarded-allow-ips="$FORWARDED_ALLOW_IPS" \
+  --log-level=debug \
+  --log-file=-</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>#!/bin/bash</code></td><td>The shebang. Tells Linux to run this file with the Bash shell. Without it the system may not know how to execute the script.</td></tr>
+<tr><td>3</td><td><code>NAME='&lt;your_project_name&gt;'</code></td><td>A label for the process so you can spot it in tools like <code>top</code> or <code>htop</code>. Passed to Gunicorn as <code>--name</code> below.</td></tr>
+<tr><td>4</td><td><code>APPDIR=/web_app/backend</code></td><td>The folder that holds <code>main.py</code> and <code>venv</code>. Stored once as a variable so the paths below stay consistent.</td></tr>
+<tr><td>5</td><td><code>SOCKFILE=/web_app/backend/gunicorn.sock</code></td><td>The full path of the Unix socket file Gunicorn will create and listen on. Nginx will later read this exact file.</td></tr>
+<tr><td>6&#8211;7</td><td><code>USER=&lt;your_username&gt;</code> / <code>GROUP=&lt;your_username&gt;</code></td><td>The Linux user and group the workers run as. Running as your normal user, not root, limits the damage if the app is ever compromised.</td></tr>
+<tr><td>8&#8211;9</td><td><code># Increase this&#8230;</code> / <code>NUM_WORKERS=3</code></td><td>How many worker processes to launch. The rule of thumb is <code>(2 &#215; CPU cores) + 1</code>; three is a safe start on a small server.</td></tr>
+<tr><td>10</td><td><code>TIMEOUT=120</code></td><td>If a worker freezes for more than 120 seconds, Gunicorn kills and restarts it, so one bad request cannot wedge the whole server.</td></tr>
+<tr><td>12&#8211;13</td><td><code>WORKER_CLASS=uvicorn.workers.UvicornWorker</code></td><td>The bridge between Gunicorn (WSGI) and FastAPI (ASGI). Without this class Gunicorn cannot run an async app at all.</td></tr>
+<tr><td>15&#8211;16</td><td><code>FORWARDED_ALLOW_IPS="*"</code></td><td>Tells Gunicorn to trust forwarded headers from any source. Safe here because only Nginx, over the trusted local socket, ever reaches it.</td></tr>
+<tr><td>18</td><td><code>echo "Starting $NAME"</code></td><td>Prints a line to the log when the script runs, a small confirmation that start-up has begun.</td></tr>
+<tr><td>20&#8211;21</td><td><code>cd $APPDIR</code> / <code>source venv/bin/activate</code></td><td>Moves into the backend folder and activates the virtual environment so the right Python and packages are used when Gunicorn launches.</td></tr>
+<tr><td>23&#8211;25</td><td><code>RUNDIR=$(dirname $SOCKFILE)</code> / <code>test -d $RUNDIR || mkdir -p $RUNDIR</code></td><td>Works out the folder that should hold the socket and creates it only if it is missing. Prevents a crash when the directory does not yet exist.</td></tr>
+<tr><td>28</td><td><code>exec venv/bin/gunicorn main:app \</code></td><td><code>exec</code> replaces the Bash script with the Gunicorn process, so no useless shell lingers in memory. <code>main:app</code> is the FastAPI app object in <code>main.py</code>.</td></tr>
+<tr><td>29</td><td><code>--name $NAME</code></td><td>Applies the process label from <code>NAME</code> so monitoring tools show a readable name.</td></tr>
+<tr><td>30</td><td><code>--workers $NUM_WORKERS</code></td><td>Launches that many worker processes (here, 3). This is the flag that gives you parallelism.</td></tr>
+<tr><td>31</td><td><code>--worker-class $WORKER_CLASS</code></td><td>Uses <code>UvicornWorker</code> so each worker speaks ASGI and can run FastAPI. The single most important flag for an async app.</td></tr>
+<tr><td>32</td><td><code>--timeout $TIMEOUT</code></td><td>Applies the 120&#8209;second freeze limit per worker.</td></tr>
+<tr><td>33</td><td><code>--user=$USER --group=$GROUP</code></td><td>Drops the workers to your non&#8209;root user and group for safety.</td></tr>
+<tr><td>34</td><td><code>--bind=unix:$SOCKFILE</code></td><td>Tells Gunicorn to listen on the Unix socket file instead of an IP address and port. This is what makes the backend private.</td></tr>
+<tr><td>35</td><td><code>--forwarded-allow-ips="$FORWARDED_ALLOW_IPS"</code></td><td>Passes the <code>*</code> trust setting so Gunicorn honours the real client IP that Nginx forwards.</td></tr>
+<tr><td>36</td><td><code>--log-level=debug</code></td><td>Verbose logging while you set things up, so start-up details and errors are easy to read.</td></tr>
+<tr><td>37</td><td><code>--log-file=-</code></td><td>The dash means &#8220;standard output&#8221;. Gunicorn prints logs to the terminal instead of a file, so Supervisor can capture and manage them.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Map of the main gunicorn flags grouped by purpose">
+  <rect class="box" x="300" y="20" width="160" height="40" rx="8"/>
+  <text x="380" y="45" text-anchor="middle" class="mono small">gunicorn main:app</text>
+
+  <path class="arrow" d="M330,60 L160,96"/>
+  <path class="arrow" d="M370,60 L370,96"/>
+  <path class="arrow" d="M430,60 L600,96"/>
+
+  <rect class="zone" x="30" y="98" width="230" height="134" rx="8"/>
+  <text x="50" y="118" class="label">connection</text>
+  <rect class="box-info" x="44" y="128" width="200" height="34" rx="8"/>
+  <text x="144" y="149" text-anchor="middle" class="mono small">--bind=unix:...sock</text>
+  <rect class="box-info" x="44" y="168" width="200" height="34" rx="8"/>
+  <text x="144" y="189" text-anchor="middle" class="mono small">--forwarded-allow-ips</text>
+
+  <rect class="zone" x="270" y="98" width="200" height="134" rx="8"/>
+  <text x="290" y="118" class="label">workers</text>
+  <rect class="box-ok" x="284" y="128" width="172" height="34" rx="8"/>
+  <text x="370" y="149" text-anchor="middle" class="mono small">--workers 3</text>
+  <rect class="box-ok" x="284" y="168" width="172" height="34" rx="8"/>
+  <text x="370" y="189" text-anchor="middle" class="mono small">--worker-class</text>
+  <text x="370" y="222" text-anchor="middle" class="small">UvicornWorker + --timeout</text>
+
+  <rect class="zone" x="480" y="98" width="250" height="134" rx="8"/>
+  <text x="500" y="118" class="label">identity &#38; logs</text>
+  <rect class="box" x="494" y="128" width="222" height="34" rx="8"/>
+  <text x="605" y="149" text-anchor="middle" class="mono small">--name / --user / --group</text>
+  <rect class="box" x="494" y="168" width="222" height="34" rx="8"/>
+  <text x="605" y="189" text-anchor="middle" class="mono small">--log-level / --log-file=-</text>
+</svg>
+<figcaption>How to read it: the same command, flags grouped by what they control. <strong><code>--bind</code>, <code>--workers</code> and <code>--worker-class</code> are the three that make or break the setup.</strong></figcaption>
+</figure>
+
+<p>Save and exit nano (<kbd>Ctrl</kbd>+<kbd>O</kbd>, <kbd>Enter</kbd>, <kbd>Ctrl</kbd>+<kbd>X</kbd>), then make the script executable so it can run as a program:</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>chmod +x gunicorn_start</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>chmod +x gunicorn_start</code></td><td><code>chmod</code> changes file permissions; <code>+x</code> adds the &#8220;execute&#8221; bit. Without it, Linux refuses to run the file as a program and Supervisor cannot start it.</td></tr>
+</table></div>
+
+<details class="primer">
+<summary>New to Unix sockets? What <code>--bind=unix:...</code> really does</summary>
+<p>A <strong>Unix domain socket</strong> is a special file two programs on the <em>same machine</em> use to talk to each other. Instead of sending data out over the network card and back, the kernel hands it straight across, which is faster and never leaves the box. Because it is a file, normal file permissions decide who may use it &#8212; so later you can grant Nginx access and keep everyone else out.</p>
+</details>
+
+<h3>Step 3 &#8212; Install Supervisor and a log folder</h3>
+<p>At <strong>(120:45)</strong> the presenter moves from Gunicorn to Supervisor; at <strong>(121:09)</strong> he notes Supervisor is not installed by default. Install it, then make a folder it can write logs into.</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo apt install supervisor</code></pre>
+
+<pre data-lang="sh" data-tag="server terminal"><code>mkdir -p /web_app/backend/logs/</code></pre>
+
+<pre data-lang="sh" data-tag="server terminal"><code>ls -ld /web_app/backend/logs/</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo apt install supervisor</code></td><td>Installs Supervisor from Ubuntu's package manager. <code>sudo</code> is needed because installing system software requires admin rights.</td></tr>
+<tr><td>2</td><td><code>mkdir -p /web_app/backend/logs/</code></td><td>Creates the logs folder. <code>-p</code> makes any missing parent folders and does not error if the folder already exists.</td></tr>
+<tr><td>3</td><td><code>ls -ld /web_app/backend/logs/</code></td><td>Lists the folder itself (not its contents). Check the third column shows your username, not <code>root</code>.</td></tr>
+</table></div>
+
+<p>If the folder shows <code>root</code> instead of your username, fix the ownership so Supervisor (running your script as you) can write logs into it:</p>
+
+<pre data-lang="sh" data-tag="only if owned by root"><code>sudo chown &lt;your_username&gt;:&lt;your_username&gt; /web_app/backend/logs/</code></pre>
+
+<h3>Step 4 &#8212; Configure Supervisor</h3>
+<p>At <strong>(121:54)</strong> the presenter creates the config file. Supervisor reads every <code>.conf</code> file in <code>/etc/supervisor/conf.d/</code>. Create one named after your project:</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo nano /etc/supervisor/conf.d/&lt;your_project_name&gt;.conf</code></pre>
+
+<pre data-lang="ini" data-tag="/etc/supervisor/conf.d/&lt;your_project_name&gt;.conf"><code>[program:&lt;your_project_name&gt;]
+command = /web_app/backend/gunicorn_start
+user = &lt;your_username&gt;
+stdout_logfile = /web_app/backend/logs/supervisor.log
+redirect_stderr = true
+environment=LANG=en_US.UTF-8,LC_ALL=en_US.UTF-8
+stopasgroup = true
+killasgroup = true
+stopwaitsecs = 10</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Directive</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>[program:&lt;your_project_name&gt;]</code></td><td>Names this Supervisor program. The name in square brackets is how you refer to it with <code>supervisorctl</code> later.</td></tr>
+<tr><td>2</td><td><code>command = /web_app/backend/gunicorn_start</code></td><td>The exact command Supervisor runs and watches &#8212; your startup script. If it stops, Supervisor runs it again.</td></tr>
+<tr><td>3</td><td><code>user = &lt;your_username&gt;</code></td><td>Runs the script as your non&#8209;root user, matching the <code>USER</code> set in the script.</td></tr>
+<tr><td>4</td><td><code>stdout_logfile = /web_app/backend/logs/supervisor.log</code></td><td>Where Supervisor saves the program's output &#8212; the folder you just created. This is where you look when something breaks.</td></tr>
+<tr><td>5</td><td><code>redirect_stderr = true</code></td><td>Sends error output into the same log file as normal output, so you only have one file to read.</td></tr>
+<tr><td>6</td><td><code>environment=LANG=en_US.UTF-8,LC_ALL=en_US.UTF-8</code></td><td>Sets language and encoding environment variables for the process, avoiding text-encoding bugs.</td></tr>
+<tr><td>7</td><td><code>stopasgroup = true</code></td><td>When Supervisor stops the program, it signals the whole process group (master and all workers), not just the master.</td></tr>
+<tr><td>8</td><td><code>killasgroup = true</code></td><td>Same idea for a forced kill. Together with <code>stopasgroup</code>, this prevents orphaned workers lingering in the background.</td></tr>
+<tr><td>9</td><td><code>stopwaitsecs = 10</code></td><td>Gives the program up to 10 seconds to shut down cleanly before Supervisor forces it.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Where the configuration files live on the server">
+  <text x="30" y="30" class="title">File tree on the server</text>
+  <rect class="zone" x="30" y="42" width="700" height="152" rx="8"/>
+  <text x="50" y="70" class="mono small">/etc/supervisor/conf.d/</text>
+  <rect class="box-info" x="70" y="80" width="330" height="30" rx="8"/>
+  <text x="235" y="100" text-anchor="middle" class="mono small">&lt;your_project_name&gt;.conf</text>
+  <text x="420" y="100" class="small">&#8592; tells Supervisor what to run</text>
+
+  <text x="50" y="140" class="mono small">/web_app/backend/</text>
+  <rect class="box-ok" x="70" y="150" width="170" height="30" rx="8"/>
+  <text x="155" y="170" text-anchor="middle" class="mono small">gunicorn_start</text>
+  <rect class="box" x="250" y="150" width="160" height="30" rx="8"/>
+  <text x="330" y="170" text-anchor="middle" class="mono small">gunicorn.sock</text>
+  <rect class="box" x="420" y="150" width="150" height="30" rx="8"/>
+  <text x="495" y="170" text-anchor="middle" class="mono small">logs/</text>
+</svg>
+<figcaption>How to read it: the Supervisor config in <code>/etc</code> points at the script in your app folder, which creates the socket and writes into <code>logs/</code>. <strong>Config and code live in two different places on purpose.</strong></figcaption>
+</figure>
+
+<h3>Step 5 &#8212; Start the service</h3>
+<p>At <strong>(122:43)</strong> the presenter loads the new config and starts it. <code>reread</code> finds the new file; <code>update</code> applies it and starts the program.</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo supervisorctl reread
+sudo supervisorctl update</code></pre>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo supervisorctl status &lt;your_project_name&gt;</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo supervisorctl reread</code></td><td>Tells Supervisor to scan <code>conf.d/</code> and notice your new <code>.conf</code> file. It reports the program as <em>available</em> but does not start it yet.</td></tr>
+<tr><td>2</td><td><code>sudo supervisorctl update</code></td><td>Applies the changes, adding your program to the active process group and starting it.</td></tr>
+<tr><td>3</td><td><code>sudo supervisorctl status &lt;your_project_name&gt;</code></td><td>Shows the current state of your program. You are looking for <code>RUNNING</code> (or briefly <code>STARTING</code>).</td></tr>
+</table></div>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>The status line reports <code>RUNNING</code> with a process id and a growing uptime, confirmed at <strong>(123:08)</strong>:</p>
+<pre data-lang="text" data-tag="expected output"><code>&lt;your_project_name&gt;      RUNNING   pid 26928, uptime 0:00:05</code></pre>
+<p>Check the log to confirm the workers started. You should see your three workers come up:</p>
+<pre data-lang="sh" data-tag="server terminal"><code>cat /web_app/backend/logs/supervisor.log</code></pre>
+<pre data-lang="text" data-tag="supervisor.log"><code>...
+[2025-10-31 06:34:32 +0000] [26928] [DEBUG] 3 workers
+[2025-10-31 06:34:36 +0000] [26936] [INFO] Started server process [26936]
+[2025-10-31 06:34:36 +0000] [26934] [INFO] Started server process [26934]
+[2025-10-31 06:34:36 +0000] [26935] [INFO] Started server process [26935]
+[2025-10-31 06:34:36 +0000] [26935] [INFO] Waiting for application startup.
+[2025-10-31 06:34:36 +0000] [26934] [INFO] Waiting for application startup.
+[2025-10-31 06:34:36 +0000] [26936] [INFO] Waiting for application startup.
+[2025-10-31 06:34:36 +0000] [26935] [INFO] Application startup complete.
+[2025-10-31 06:34:36 +0000] [26936] [INFO] Application startup complete.
+[2025-10-31 06:34:36 +0000] [26934] [INFO] Application startup complete.</code></pre>
+</div>
+
+<h3>Step 6 &#8212; Test through the socket</h3>
+<p>Nginx is not installed yet, so you cannot visit the site in a browser. Instead, at <strong>(125:06)</strong> the presenter uses <code>curl</code> with the <code>--unix-socket</code> flag to talk to the backend through the socket file directly.</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>curl --unix-socket /web_app/backend/gunicorn.sock http://localhost/api/health</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>curl --unix-socket /web_app/backend/gunicorn.sock http://localhost/api/health</code></td><td><code>curl</code> makes an HTTP request. <code>--unix-socket</code> tells it to send the request over that socket file instead of the network. The <code>http://localhost</code> host is ignored for routing but required by the syntax; <code>/api/health</code> is the endpoint. A JSON reply like <code>{"status": "ok"}</code> proves Gunicorn is serving your app.</td></tr>
+</table></div>
+
+<p>Confirm the socket file itself exists. The first character of the permissions must be an <code>s</code>:</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>ls -l /web_app/backend/gunicorn.sock</code></pre>
+
+<pre data-lang="text" data-tag="expected output"><code>srwxr-xr-x 1 &lt;your_username&gt; &lt;your_username&gt; 0 Feb 8 13:00 /web_app/backend/gunicorn.sock
+^</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="A request travels from curl through the socket to a Gunicorn worker and back">
+  <rect class="box" x="20" y="60" width="120" height="44" rx="8"/>
+  <text x="80" y="85" text-anchor="middle" class="mono small">curl</text>
+  <path class="arrow" d="M140,82 H230"/>
+  <text x="185" y="74" text-anchor="middle" class="small">1 request</text>
+
+  <rect class="box-info" x="230" y="60" width="130" height="44" rx="8"/>
+  <text x="295" y="82" text-anchor="middle" class="mono small">gunicorn.sock</text>
+  <text x="295" y="96" text-anchor="middle" class="small">socket file</text>
+  <path class="arrow" d="M360,82 H450"/>
+  <text x="405" y="74" text-anchor="middle" class="small">2 hand off</text>
+
+  <rect class="box" x="450" y="60" width="130" height="44" rx="8"/>
+  <text x="515" y="82" text-anchor="middle">Gunicorn</text>
+  <text x="515" y="96" text-anchor="middle" class="small">master</text>
+  <path class="arrow" d="M580,82 H650"/>
+  <text x="615" y="74" text-anchor="middle" class="small">3 route</text>
+
+  <rect class="box-ok" x="650" y="60" width="90" height="44" rx="8"/>
+  <text x="695" y="82" text-anchor="middle" class="small">worker</text>
+  <text x="695" y="96" text-anchor="middle" class="small">FastAPI</text>
+
+  <path class="arrow-ok" d="M695,104 V140 H80 V106"/>
+  <text x="390" y="156" text-anchor="middle" class="small ok">4 JSON reply travels back the same way</text>
+</svg>
+<figcaption>How to read it: numbers show the order. <strong>The socket file is the single point every request passes through &#8212; which is exactly what Nginx will use next.</strong></figcaption>
+</figure>
+
+<h3>Step 7 &#8212; Spot and clean up orphan processes</h3>
+<p>At <strong>(131:06)</strong> the presenter checks the process list and finds extra workers. A healthy setup is a small family tree: Supervisor spawns one Gunicorn <strong>master</strong>, and the master spawns the <strong>workers</strong>. With <code>NUM_WORKERS=3</code> you should see <strong>4 processes</strong> total (1 master + 3 workers).</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>ps aux | grep &lt;your_project_name&gt;</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The process count formula: one master plus three workers equals four processes">
+  <rect class="box-solid" x="300" y="24" width="160" height="40" rx="8"/>
+  <text x="380" y="49" text-anchor="middle" class="on-solid">Supervisor</text>
+  <path class="arrow-accent" d="M380,64 V86"/>
+  <rect class="box" x="300" y="88" width="160" height="40" rx="8"/>
+  <text x="380" y="113" text-anchor="middle">Gunicorn master</text>
+  <text x="520" y="113" class="small">= 1 process</text>
+
+  <path class="arrow" d="M330,128 L170,162"/>
+  <path class="arrow" d="M380,128 V162"/>
+  <path class="arrow" d="M430,128 L590,162"/>
+
+  <rect class="box-ok" x="100" y="164" width="140" height="36" rx="8"/>
+  <text x="170" y="187" text-anchor="middle" class="small">worker</text>
+  <rect class="box-ok" x="310" y="164" width="140" height="36" rx="8"/>
+  <text x="380" y="187" text-anchor="middle" class="small">worker</text>
+  <rect class="box-ok" x="520" y="164" width="140" height="36" rx="8"/>
+  <text x="590" y="187" text-anchor="middle" class="small">worker</text>
+  <text x="690" y="187" class="small">= 3 workers</text>
+</svg>
+<figcaption>How to read it: Total processes = 1 master + N workers. <strong>With three workers, four is the correct number &#8212; anything extra is an orphan.</strong></figcaption>
+</figure>
+
+<p>At <strong>(131:06)</strong> the presenter finds extra &#8220;orphan&#8221; (or &#8220;zombie&#8221;) processes whose parent died, so they were adopted by the system <code>init</code> process (PID 1). They keep eating RAM while doing no work. The handbook shows them adding up to over 100MB on a tiny server. The quick fix at <strong>(133:04)</strong> kills every Gunicorn process and lets Supervisor restart a clean set &#8212; at the cost of a few seconds of downtime.</p>
+
+<div class="callout warn"><strong>Common mistakes that create orphans</strong>
+<ul>
+<li>Running <code>gunicorn_start</code> by hand to test it, then closing the terminal without stopping it.</li>
+<li>Changing the worker count (say 3 to 1) and starting the new process without killing the old one first.</li>
+</ul>
+</div>
+
+<pre data-lang="sh" data-tag="quick fix &#8212; causes brief downtime"><code># Kill every single Gunicorn process
+sudo pkill -f gunicorn
+
+# Wait for Supervisor to wake up
+sleep 5
+
+# Check again, you should see only fresh processes
+ps aux | grep &lt;your_project_name&gt;</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>sudo pkill -f gunicorn</code></td><td>Kills every process whose full command line matches <code>gunicorn</code>. <code>-f</code> matches the whole command, not just the program name. This stops the master, the workers, and every orphan at once.</td></tr>
+<tr><td>5</td><td><code>sleep 5</code></td><td>Pauses 5 seconds to give Supervisor time to notice the crash and launch a fresh master and workers.</td></tr>
+<tr><td>8</td><td><code>ps aux | grep &lt;your_project_name&gt;</code></td><td>Lists processes again so you can confirm only the fresh set (1 master + 3 workers) remains.</td></tr>
+</table></div>
+
+<p>If you cannot afford even a few seconds of downtime, remove the orphans surgically instead. At <strong>(135:21)</strong> ask Supervisor for the master's process id, then at <strong>(136:12)</strong> read the parent column to tell the good tree from the orphans.</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo supervisorctl pid &lt;your_project_name&gt;
+# Example Output: 833505</code></pre>
+
+<pre data-lang="sh" data-tag="server terminal"><code>ps -ef | grep gunicorn</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo supervisorctl pid &lt;your_project_name&gt;</code></td><td>Prints the PID of the Gunicorn master that Supervisor manages &#8212; the &#8220;good&#8221; one to keep. Memorise this number.</td></tr>
+<tr><td>1</td><td><code>ps -ef | grep gunicorn</code></td><td>Lists all Gunicorn processes in full format. <code>-e</code> selects every process; <code>-f</code> shows the <abbr>PPID</abbr> (parent process id) column that reveals the hierarchy.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Healthy workers have the master as parent while orphans have init as parent">
+  <text x="30" y="26" class="title">Read the PPID (parent) column</text>
+
+  <rect class="box-ok" x="30" y="44" width="330" height="178" rx="8"/>
+  <text x="195" y="68" text-anchor="middle" class="ok">KEEP</text>
+  <rect class="box" x="120" y="80" width="150" height="34" rx="8"/>
+  <text x="195" y="101" text-anchor="middle" class="mono small">master 833505</text>
+  <path class="arrow-ok" d="M160,114 L110,150"/>
+  <path class="arrow-ok" d="M195,114 V150"/>
+  <path class="arrow-ok" d="M230,114 L280,150"/>
+  <rect class="box-ok" x="60" y="152" width="90" height="30" rx="8"/>
+  <text x="105" y="172" text-anchor="middle" class="small">worker</text>
+  <rect class="box-ok" x="150" y="152" width="90" height="30" rx="8"/>
+  <text x="195" y="172" text-anchor="middle" class="small">worker</text>
+  <rect class="box-ok" x="240" y="152" width="90" height="30" rx="8"/>
+  <text x="285" y="172" text-anchor="middle" class="small">worker</text>
+  <text x="195" y="206" text-anchor="middle" class="small">PPID = 833505 (the master)</text>
+
+  <rect class="box-bad" x="400" y="44" width="330" height="178" rx="8"/>
+  <text x="565" y="68" text-anchor="middle" class="bad">KILL</text>
+  <rect class="box-warn" x="420" y="88" width="130" height="30" rx="8"/>
+  <text x="485" y="108" text-anchor="middle" class="mono small">pid 29492</text>
+  <rect class="box-warn" x="420" y="128" width="130" height="30" rx="8"/>
+  <text x="485" y="148" text-anchor="middle" class="mono small">pid 60096</text>
+  <rect class="box-warn" x="420" y="168" width="130" height="30" rx="8"/>
+  <text x="485" y="188" text-anchor="middle" class="mono small">pid 783416</text>
+  <rect class="box" x="600" y="128" width="110" height="34" rx="8"/>
+  <text x="655" y="149" text-anchor="middle" class="mono small">init (PID 1)</text>
+  <path class="arrow-bad" d="M550,103 H600 V128"/>
+  <path class="arrow-bad" d="M550,143 H598"/>
+  <path class="arrow-bad" d="M550,183 H600 V162"/>
+  <text x="565" y="214" text-anchor="middle" class="small">PPID = 1 &#8594; lost their parent</text>
+</svg>
+<figcaption>How to read it: the parent column tells the whole story. <strong>PPID pointing at the master = keep; PPID of 1 (init) = orphan, safe to kill.</strong></figcaption>
+</figure>
+
+<p>Kill only the orphans you identified (those whose parent is <code>1</code>), leaving the master and its real workers running:</p>
+
+<pre data-lang="sh" data-tag="use your own orphan PIDs"><code># Syntax: sudo kill &lt;pid_1&gt; &lt;pid_2&gt; &lt;pid_3&gt; ... &lt;pid_n&gt;
+sudo kill 29492 60096 783416</code></pre>
+
+<div class="callout warn"><strong>Use your own numbers.</strong> The PIDs above are from the handbook author's server. Always read the PPIDs from <em>your</em> terminal and kill only the ones whose parent is <code>1</code>. Copying these exact numbers could kill the wrong process.</div>
+
+<div class="callout"><strong>Security note</strong>
+<p>Two choices in this step harden the app. The workers run as your non&#8209;root user (<code>--user</code>/<code>--group</code>), so a compromised worker cannot touch the whole system. And binding to a Unix socket instead of a port (<code>--bind=unix:...</code>) means the backend never opens a door to the internet &#8212; the firewall you set earlier stays fully closed around it.</p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="The runtime stack so far: Supervisor over Gunicorn over Uvicorn workers over FastAPI, exposed only by a socket">
+  <rect class="zone" x="30" y="20" width="700" height="170" rx="8"/>
+  <text x="50" y="44" class="label">the backend runtime, bottom to top</text>
+
+  <rect class="box-solid" x="60" y="54" width="640" height="30" rx="8"/>
+  <text x="380" y="74" text-anchor="middle" class="on-solid">Supervisor &#8212; keeps it all alive, starts on boot</text>
+  <rect class="box" x="90" y="92" width="580" height="30" rx="8"/>
+  <text x="380" y="112" text-anchor="middle">Gunicorn master &#8212; manages the workers</text>
+  <rect class="box-ok" x="120" y="130" width="520" height="30" rx="8"/>
+  <text x="380" y="150" text-anchor="middle">Uvicorn workers (&#215;3) &#8212; run your FastAPI app</text>
+  <rect class="box-info" x="260" y="166" width="240" height="24" rx="8"/>
+  <text x="380" y="183" text-anchor="middle" class="small">exposed only via gunicorn.sock</text>
+</svg>
+<figcaption>How to read it: each layer watches the one below. <strong>The only way in is the socket file &#8212; the front door Nginx will connect to next.</strong></figcaption>
+</figure>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>You installed <strong>Gunicorn</strong> into the project's virtual environment and wrote <code>gunicorn_start</code>, which launches three <strong>Uvicorn</strong> workers bound to a private <strong>Unix socket</strong> file.</li>
+<li>The key flags: <code>--workers</code> sets parallelism, <code>--worker-class uvicorn.workers.UvicornWorker</code> lets Gunicorn run async FastAPI, and <code>--bind=unix:...</code> uses a socket instead of a port.</li>
+<li><strong>Supervisor</strong> runs and watches the script from <code>/etc/supervisor/conf.d/&lt;your_project_name&gt;.conf</code>, restarting it after crashes and reboots, with <code>stopasgroup</code>/<code>killasgroup</code> preventing orphans.</li>
+<li>You confirmed <code>RUNNING</code> status, tested the API through the socket with <code>curl --unix-socket</code>, and learned to tell healthy workers (parent = master) from orphans (parent = init/PID 1).</li>
+<li>The backend is now production&#8209;ready but still private. Next, Nginx becomes the public front door.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="04-manual-deployment.html"><small>← Previous · Step 04</small>Manual Deployment: Code, Python, Node &amp; Swap</a>
+<a class="next" href="06-nginx-reverse-proxy.html"><small>Next · Step 06 →</small>Nginx Reverse Proxy &amp; Security Headers</a>
+</nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 · Nginx Reverse Proxy &amp; Security Headers</title>
+<meta name="description" content="Put Nginx in front of the app over a Unix socket and add HTTP security headers, including a Content-Security-Policy.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Deploy, Secure &amp; Automate Full-Stack Web Apps</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 06/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 06 of 19 · 141:53</div>
+  <h1>Nginx Reverse Proxy &amp; Security Headers</h1>
+  <p class="lead">Put Nginx in front of the app over a Unix socket and add HTTP security headers, including a Content-Security-Policy.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wY5pQOTsGaA&amp;t=8513s" target="_blank" rel="noopener">▶ Watch this part (141:53)</a>
+</section>
+<p class="lead">Your backend is alive, but it is hiding behind a private socket file and your Vue.js build is just a folder of files sitting on the server. Nobody from the outside can reach either one. In this step you install a web server that becomes the public front door: it serves your frontend, forwards API calls to the backend, and &#8212; crucially &#8212; adds the security headers that tell browsers how to protect your users.</p>
+
+<h2>What you will build</h2>
+<p>You will install <a class="term" href="glossary.html#nginx">Nginx</a> and configure it as a <a class="term" href="glossary.html#reverse-proxy">reverse proxy</a>. At <strong>(141:27)</strong> the presenter frames the plan: sync the frontend and backend URLs, install Nginx, understand the dreaded <code>502 Bad Gateway</code>, then lock everything down with HTTP security headers &#8212; above all a <a class="term" href="glossary.html#content-security-policy">Content Security Policy</a>.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Nginx is the single front door that routes page requests to files and API requests to the backend socket">
+  <rect class="box" x="30" y="96" width="120" height="48" rx="8"/>
+  <text x="90" y="120" text-anchor="middle">user's</text>
+  <text x="90" y="136" text-anchor="middle">browser</text>
+  <path class="arrow" d="M150,120 H250"/>
+
+  <rect class="box-solid" x="250" y="90" width="150" height="60" rx="8"/>
+  <text x="325" y="116" text-anchor="middle" class="on-solid">Nginx</text>
+  <text x="325" y="134" text-anchor="middle" class="on-solid small">reverse proxy</text>
+
+  <path class="arrow-ok" d="M400,106 L520,56"/>
+  <text x="455" y="74" text-anchor="middle" class="small ok">a page? &#8594;</text>
+  <path class="arrow-accent" d="M400,138 L520,186"/>
+  <text x="455" y="176" text-anchor="middle" class="small accent">/api? &#8594;</text>
+
+  <rect class="box-ok" x="520" y="34" width="210" height="48" rx="8"/>
+  <text x="625" y="55" text-anchor="middle">Vue.js dist/ folder</text>
+  <text x="625" y="71" text-anchor="middle" class="small">static HTML, CSS, JS</text>
+
+  <rect class="box-info" x="520" y="160" width="210" height="52" rx="8"/>
+  <text x="625" y="182" text-anchor="middle" class="small mono">gunicorn.sock</text>
+  <text x="625" y="198" text-anchor="middle" class="small">&#8594; Gunicorn / FastAPI</text>
+</svg>
+<figcaption>How to read it: every request hits Nginx first, which decides whether it is a page or an API call. <strong>One front door, two destinations.</strong></figcaption>
+</figure>
+
+<h2>The concepts</h2>
+<h3>What a reverse proxy does</h3>
+<p>At <strong>(150:38)</strong> the presenter explains that Nginx receives every request and decides what to do with it. If the user wants a web page, Nginx reads the finished files from your Vue.js <code>dist</code> folder and sends them back. If the request starts with <code>/api</code>, Nginx forwards it through the Unix socket to Gunicorn. A &#8220;forward proxy&#8221; works on behalf of the client; a <em>reverse</em> proxy works on behalf of the server, standing in front of it.</p>
+
+<details class="primer">
+<summary>New to Nginx and reverse proxies? Why not just expose the backend?</summary>
+<p><strong>Nginx</strong> is a fast, battle&#8209;tested web server. Putting it in front of your app gives you one place to serve static files efficiently, terminate HTTPS later, add security headers, and hide the backend from the internet. A <strong>reverse proxy</strong> is simply a server that accepts public requests and quietly passes some of them to another program behind it. Your users only ever talk to Nginx; they never know Gunicorn exists.</p>
+</details>
+
+<h3>Static files versus the API</h3>
+<p>The split is the heart of the configuration. Your frontend is a pile of <a class="term" href="glossary.html#static-assets">static assets</a> &#8212; files that never change per request, so Nginx can hand them straight back. The API is dynamic: it must run code, so Nginx forwards those requests to the backend. At <strong>(152:41)</strong> the presenter walks a concrete example: a search for <code>/api/articles</code> is caught by Nginx, sent through the socket to Gunicorn, handed to the FastAPI endpoint, and the response travels all the way back.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="A decision tree: requests starting with slash api go to the backend, everything else is served as a file">
+  <rect class="box" x="300" y="20" width="160" height="44" rx="8"/>
+  <text x="380" y="42" text-anchor="middle">incoming request</text>
+  <text x="380" y="57" text-anchor="middle" class="small">Nginx inspects the URL</text>
+  <path class="arrow" d="M380,64 V94"/>
+  <rect class="box-info" x="300" y="94" width="160" height="40" rx="8"/>
+  <text x="380" y="119" text-anchor="middle">starts with /api ?</text>
+
+  <path class="arrow-ok" d="M300,114 H150 V160"/>
+  <text x="200" y="106" text-anchor="middle" class="small ok">no</text>
+  <path class="arrow-accent" d="M460,114 H610 V160"/>
+  <text x="560" y="106" text-anchor="middle" class="small accent">yes</text>
+
+  <rect class="box-ok" x="40" y="162" width="220" height="70" rx="8"/>
+  <text x="150" y="186" text-anchor="middle">location /</text>
+  <text x="150" y="204" text-anchor="middle" class="small">read file from dist/</text>
+  <text x="150" y="220" text-anchor="middle" class="small">try_files &#8594; index.html</text>
+
+  <rect class="box-info" x="500" y="162" width="220" height="70" rx="8"/>
+  <text x="610" y="186" text-anchor="middle">location /api</text>
+  <text x="610" y="204" text-anchor="middle" class="small">proxy_pass to the socket</text>
+  <text x="610" y="220" text-anchor="middle" class="small">Gunicorn runs the code</text>
+</svg>
+<figcaption>How to read it: a single yes/no question routes every request. <strong>Match <code>/api</code> and proxy it; otherwise serve a static file.</strong></figcaption>
+</figure>
+
+<h2>Prepare the frontend code</h2>
+<p>Before configuring Nginx, you make the frontend and backend behave as if they share one origin, which avoids cross&#8209;origin (CORS) headaches. This is three small edits plus a rebuild.</p>
+
+<h3>Step 1 &#8212; Use a relative API base URL</h3>
+<p>Open where you configure Axios (usually <code>main.js</code>) and point it at the current host:</p>
+
+<pre data-lang="js" data-tag="main.js"><code>// In main.js
+import axios from 'axios';
+
+axios.defaults.baseURL = "/";</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>import axios from 'axios';</code></td><td>Brings in the Axios HTTP client your Vue app uses to call the API.</td></tr>
+<tr><td>4</td><td><code>axios.defaults.baseURL = "/";</code></td><td>Sets every request to be relative to the current site. In development it hits your local server; in production it hits your domain. No hard&#8209;coded address to change between environments.</td></tr>
+</table></div>
+
+<h3>Step 2 &#8212; Proxy /api in Vite for local development</h3>
+<p>Because the base URL is now <code>/</code>, the Vue dev server must forward <code>/api</code> calls to your local FastAPI. Add a <code>server</code> block to <code>vite.config.js</code>:</p>
+
+<pre data-lang="js" data-tag="vite.config.js"><code>...
+
+export default defineConfig({
+  ...
+
+  server: {
+    port: 8080,
+    proxy: {
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+    },
+  },
+});</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>6&#8211;7</td><td><code>server: {</code> / <code>port: 8080,</code></td><td>Configures the Vite dev server to run on port 8080.</td></tr>
+<tr><td>8&#8211;9</td><td><code>proxy: {</code> / <code>"/api": {</code></td><td>Starts a proxy rule that matches any local request beginning with <code>/api</code>.</td></tr>
+<tr><td>10</td><td><code>target: "http://localhost:8000",</code></td><td>Forwards those requests to your local FastAPI server on port 8000 &#8212; mimicking what Nginx does in production.</td></tr>
+<tr><td>11</td><td><code>changeOrigin: true,</code></td><td>Rewrites the request's <code>Host</code> header to the target, so the backend sees a well&#8209;formed local request.</td></tr>
+</table></div>
+
+<div class="callout warn"><strong>Common mistake.</strong> The <code>...</code> lines are not code to paste. They mean &#8220;keep your existing config&#8221;. Only add the <code>server</code> block; do not delete your plugins or other settings.</div>
+
+<h3>Step 3 &#8212; Remove the backend CORS middleware</h3>
+<p>Since both sides now share an origin, the browser will not block requests, so the CORS workaround in FastAPI is no longer needed. Delete this whole block from <code>main.py</code>:</p>
+
+<pre data-lang="py" data-tag="remove from main.py"><code># Remove this entire block from main.py
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)</code></pre>
+
+<h3>Step 4 &#8212; Rebuild the frontend</h3>
+<p>Vue bakes the new base URL into minified files at build time, so you must rebuild. If your server has low RAM, use the memory flag from the previous step.</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>cd /web_app/frontend
+pnpm run build</code></pre>
+
+<pre data-lang="sh" data-tag="low-RAM server"><code>NODE_OPTIONS="--max-old-space-size=2048" pnpm run build</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Same relative URL works in development via Vite proxy and in production via Nginx">
+  <text x="190" y="24" text-anchor="middle" class="title">Development</text>
+  <text x="570" y="24" text-anchor="middle" class="title">Production</text>
+  <line class="line dashed" x1="380" y1="34" x2="380" y2="156"/>
+
+  <rect class="box" x="40" y="54" width="120" height="40" rx="8"/>
+  <text x="100" y="79" text-anchor="middle" class="small">browser /api</text>
+  <path class="arrow" d="M160,74 H220"/>
+  <rect class="box-info" x="220" y="54" width="130" height="40" rx="8"/>
+  <text x="285" y="75" text-anchor="middle" class="small">Vite dev proxy</text>
+  <text x="190" y="118" text-anchor="middle" class="small">&#8594; localhost:8000 (FastAPI)</text>
+
+  <rect class="box" x="420" y="54" width="120" height="40" rx="8"/>
+  <text x="480" y="79" text-anchor="middle" class="small">browser /api</text>
+  <path class="arrow" d="M540,74 H600"/>
+  <rect class="box-solid" x="600" y="54" width="130" height="40" rx="8"/>
+  <text x="665" y="79" text-anchor="middle" class="on-solid small">Nginx proxy</text>
+  <text x="575" y="118" text-anchor="middle" class="small">&#8594; gunicorn.sock (FastAPI)</text>
+</svg>
+<figcaption>How to read it: the browser always calls <code>/api</code>; only the thing doing the forwarding changes. <strong>One relative URL, identical behaviour in both worlds.</strong></figcaption>
+</figure>
+
+<h2>Install and configure Nginx</h2>
+<h3>Step 5 &#8212; Install Nginx and open the config</h3>
+<pre data-lang="sh" data-tag="server terminal"><code>sudo apt install nginx -y</code></pre>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo nano /etc/nginx/sites-available/&lt;your_project_name&gt;</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo apt install nginx -y</code></td><td>Installs Nginx. <code>-y</code> answers &#8220;yes&#8221; to the confirmation prompt automatically.</td></tr>
+<tr><td>1</td><td><code>sudo nano /etc/nginx/sites-available/&lt;your_project_name&gt;</code></td><td>Opens a new, empty site configuration in the <code>sites-available</code> folder &#8212; where configs are written before being switched on.</td></tr>
+</table></div>
+
+<h3>Step 6 &#8212; Build the config block by block</h3>
+<p>At <strong>(151:29)</strong> the presenter shows the diagram of why Nginx is needed. You assemble the file in pieces so each part is clear. First, the <code>upstream</code> block names the backend socket:</p>
+
+<pre data-lang="nginx" data-tag="upstream block"><code>upstream &lt;your_project_name&gt;_app_server {
+    server unix:/web_app/backend/gunicorn.sock fail_timeout=0;
+}</code></pre>
+
+<p>Then the <code>server</code> block listens for web traffic and the two <code>location</code> blocks route it. Here is the complete first version (security headers come later):</p>
+
+<pre data-lang="nginx" data-tag="/etc/nginx/sites-available/&lt;your_project_name&gt;"><code>upstream &lt;your_project_name&gt;_app_server {
+    server unix:/web_app/backend/gunicorn.sock fail_timeout=0;
+}
+
+server {
+    listen 80;
+    server_name &lt;your_droplet_ip&gt;;
+
+    access_log /var/log/nginx/&lt;your_project_name&gt;-access.log;
+    error_log /var/log/nginx/&lt;your_project_name&gt;-error.log;
+
+    location / {
+        root /web_app/frontend/dist;
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api {
+        proxy_pass http://&lt;your_project_name&gt;_app_server;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+        proxy_redirect off;
+    }
+}</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>upstream &lt;your_project_name&gt;_app_server {</code></td><td>Defines a named backend group you can refer to below, instead of repeating the long socket path.</td></tr>
+<tr><td>2</td><td><code>server unix:/web_app/backend/gunicorn.sock fail_timeout=0;</code></td><td>Points the group at the Unix socket Gunicorn created. <code>fail_timeout=0</code> tells Nginx never to mark the backend as &#8220;down&#8221;, so it resumes the instant Supervisor restarts Gunicorn.</td></tr>
+<tr><td>5&#8211;6</td><td><code>server {</code> / <code>listen 80;</code></td><td>Opens the main server block and listens on port 80, standard unencrypted HTTP (HTTPS comes in a later chapter).</td></tr>
+<tr><td>7</td><td><code>server_name &lt;your_droplet_ip&gt;;</code></td><td>Responds to requests for this address. You replace the IP with your domain name once you have one.</td></tr>
+<tr><td>9&#8211;10</td><td><code>access_log ...</code> / <code>error_log ...</code></td><td>Dedicated log files for this site. When something breaks, these tell you exactly what went wrong &#8212; you will use the error log to debug the 502 shortly.</td></tr>
+<tr><td>12</td><td><code>location / {</code></td><td>Matches all normal page requests (anything not caught by a more specific block).</td></tr>
+<tr><td>13</td><td><code>root /web_app/frontend/dist;</code></td><td>Tells Nginx the files live in your Vue build folder, which holds the finished HTML, CSS and JS.</td></tr>
+<tr><td>14</td><td><code>try_files $uri $uri/ /index.html;</code></td><td>Tries the exact file, then a folder, and if neither exists returns <code>index.html</code>. This lets Vue Router handle the route instead of showing a 404 &#8212; essential for a single&#8209;page app.</td></tr>
+<tr><td>17</td><td><code>location /api {</code></td><td>Catches every URL starting with <code>/api</code>. Note: no trailing slash (see the warning below).</td></tr>
+<tr><td>18</td><td><code>proxy_pass http://&lt;your_project_name&gt;_app_server;</code></td><td>Hands the request to the upstream group &#8212; that is, through the Unix socket to Gunicorn. This single line is what connects Nginx to your backend.</td></tr>
+<tr><td>19</td><td><code>proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;</code></td><td>Passes the real client IP to FastAPI. Without it, every request would look like it came from Nginx itself.</td></tr>
+<tr><td>20</td><td><code>proxy_set_header Host $http_host;</code></td><td>Forwards the original <code>Host</code> header so the backend knows which domain the user asked for.</td></tr>
+<tr><td>21</td><td><code>proxy_redirect off;</code></td><td>Stops Nginx rewriting redirect URLs from FastAPI, which could otherwise leak an internal server name instead of your public domain.</td></tr>
+</table></div>
+
+<div class="callout warn"><strong>Watch the trailing slashes.</strong> Use <code>location /api</code>, not <code>location /api/</code>: the slash can trigger a 301 redirect that drops the JSON body of POST requests, giving strange 405 or 422 errors. And never add a slash to the end of <code>proxy_pass</code> (<code>..._app_server/;</code>): Nginx would strip <code>/api</code> from the path, and your FastAPI routes that expect the <code>/api</code> prefix would all return 404.</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="A map of the four parts of the Nginx config and what each one connects to">
+  <rect class="zone" x="20" y="20" width="720" height="172" rx="8"/>
+  <text x="40" y="44" class="label">one config file, four parts</text>
+
+  <rect class="box-info" x="40" y="56" width="200" height="50" rx="8"/>
+  <text x="140" y="78" text-anchor="middle" class="mono small">upstream</text>
+  <text x="140" y="94" text-anchor="middle" class="small">names the socket</text>
+
+  <rect class="box" x="280" y="56" width="440" height="120" rx="8"/>
+  <text x="500" y="78" text-anchor="middle" class="mono small">server { listen 80 }</text>
+
+  <rect class="box-ok" x="300" y="92" width="180" height="70" rx="8"/>
+  <text x="390" y="114" text-anchor="middle" class="mono small">location /</text>
+  <text x="390" y="132" text-anchor="middle" class="small">serves dist/ files</text>
+  <text x="390" y="150" text-anchor="middle" class="small">try_files</text>
+
+  <rect class="box-info" x="510" y="92" width="190" height="70" rx="8"/>
+  <text x="605" y="114" text-anchor="middle" class="mono small">location /api</text>
+  <text x="605" y="132" text-anchor="middle" class="small">proxy_pass &#8594;</text>
+  <text x="605" y="150" text-anchor="middle" class="small">upstream socket</text>
+
+  <path class="arrow-accent" d="M605,92 C605,70 300,78 240,80"/>
+</svg>
+<figcaption>How to read it: <code>upstream</code> defines the destination; the two <code>location</code> blocks decide who goes where. <strong><code>location /api</code> is the one that reaches back to the socket via <code>proxy_pass</code>.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 320" role="img" aria-label="Sequence of a search request flowing down through Nginx, socket, Gunicorn, worker, FastAPI and back up">
+  <text x="90" y="24" text-anchor="middle" class="label">browser</text>
+  <text x="250" y="24" text-anchor="middle" class="label">Nginx</text>
+  <text x="400" y="24" text-anchor="middle" class="label">socket</text>
+  <text x="540" y="24" text-anchor="middle" class="label">Gunicorn</text>
+  <text x="690" y="24" text-anchor="middle" class="label">worker</text>
+  <line class="line dashed" x1="90" y1="32" x2="90" y2="300"/>
+  <line class="line dashed" x1="250" y1="32" x2="250" y2="300"/>
+  <line class="line dashed" x1="400" y1="32" x2="400" y2="300"/>
+  <line class="line dashed" x1="540" y1="32" x2="540" y2="300"/>
+  <line class="line dashed" x1="690" y1="32" x2="690" y2="300"/>
+
+  <path class="arrow" d="M90,56 H246"/>
+  <text x="168" y="50" text-anchor="middle" class="small">1 GET /api/articles</text>
+  <path class="arrow-accent" d="M250,92 H396"/>
+  <text x="325" y="86" text-anchor="middle" class="small">2 matches /api</text>
+  <path class="arrow" d="M400,128 H536"/>
+  <text x="470" y="122" text-anchor="middle" class="small">3 through socket</text>
+  <path class="arrow" d="M540,164 H686"/>
+  <text x="615" y="158" text-anchor="middle" class="small">4 to a worker</text>
+
+  <rect class="box-ok" x="628" y="176" width="124" height="34" rx="8"/>
+  <text x="690" y="197" text-anchor="middle" class="small">FastAPI runs</text>
+
+  <path class="arrow-ok" d="M690,224 H544"/>
+  <text x="615" y="244" text-anchor="middle" class="small">5 JSON response</text>
+  <path class="arrow-ok" d="M540,258 H404"/>
+  <path class="arrow-ok" d="M400,278 H254"/>
+  <path class="arrow-ok" d="M250,296 H94"/>
+  <text x="168" y="290" text-anchor="middle" class="small ok">6 articles shown</text>
+</svg>
+<figcaption>How to read it: time flows down, numbers show order. <strong>The same socket carries the request in and the response back out &#8212; Nginx and the browser never see Gunicorn directly.</strong></figcaption>
+</figure>
+
+<h3>Step 7 &#8212; Enable the site and open the firewall</h3>
+<p>Nginx only loads configs that are symlinked into <code>sites-enabled</code>. Remove the default page, link yours, test the syntax, and reload.</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo rm /etc/nginx/sites-enabled/default</code></pre>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo ln -s /etc/nginx/sites-available/&lt;your_project_name&gt; /etc/nginx/sites-enabled/&lt;your_project_name&gt;</code></pre>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo nginx -t
+sudo systemctl reload nginx</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo rm /etc/nginx/sites-enabled/default</code></td><td>Deletes the symlink to Nginx's placeholder welcome page so it does not clash with your site.</td></tr>
+<tr><td>1</td><td><code>sudo ln -s /etc/nginx/sites-available/... /etc/nginx/sites-enabled/...</code></td><td>Creates a symbolic link (a shortcut) that switches your config on. Keeping configs in one folder and links in another lets you enable or disable a site without deleting it.</td></tr>
+<tr><td>1</td><td><code>sudo nginx -t</code></td><td>Tests the configuration for syntax errors <em>before</em> restarting. A single typo can crash the whole web server, so always test first.</td></tr>
+<tr><td>2</td><td><code>sudo systemctl reload nginx</code></td><td>Reloads Nginx with the new config without dropping existing connections.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="A symlink in sites-enabled points back to the real config in sites-available">
+  <rect class="box" x="40" y="60" width="280" height="54" rx="8"/>
+  <text x="180" y="84" text-anchor="middle" class="mono small">sites-available/</text>
+  <text x="180" y="102" text-anchor="middle" class="small">&lt;your_project_name&gt; (real file)</text>
+
+  <rect class="box-ok" x="440" y="60" width="280" height="54" rx="8"/>
+  <text x="580" y="84" text-anchor="middle" class="mono small">sites-enabled/</text>
+  <text x="580" y="102" text-anchor="middle" class="small">&lt;your_project_name&gt; (symlink)</text>
+
+  <path class="arrow" d="M440,87 H320"/>
+  <text x="380" y="52" text-anchor="middle" class="small">ln -s points here</text>
+  <text x="380" y="140" text-anchor="middle" class="small">Nginx only reads what is in sites-enabled</text>
+</svg>
+<figcaption>How to read it: the enabled copy is just a pointer to the real file. <strong>Delete the link to disable the site; the config stays safe in sites-available.</strong></figcaption>
+</figure>
+
+<p>Your firewall still blocks web traffic. Open ports 80 and 443 with the profile Nginx registered, then confirm:</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo ufw allow 'Nginx Full'
+sudo ufw status</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo ufw allow 'Nginx Full'</code></td><td>Opens both port 80 (HTTP) and port 443 (HTTPS) at once, using the application profile Nginx added to the firewall when it installed.</td></tr>
+<tr><td>2</td><td><code>sudo ufw status</code></td><td>Lists the active firewall rules. You should see both <code>Nginx Full</code> and <code>OpenSSH</code> allowed.</td></tr>
+</table></div>
+
+<h3>Step 8 &#8212; Test, and understand the 502</h3>
+<p>Visit <code>http://&lt;your_droplet_ip&gt;</code> in a browser. The frontend loads, but at <strong>(174:09)</strong> API calls return a <code>502 Bad Gateway</code>. This is expected, and worth understanding. Check the error log:</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo cat /var/log/nginx/&lt;your_project_name&gt;-error.log</code></pre>
+
+<pre data-lang="text" data-tag="error.log"><code>connect() to unix:/web_app/backend/gunicorn.sock failed (13: Permission denied)</code></pre>
+
+<p>Gunicorn created the socket as <em>your</em> user, but Nginx runs as a separate user called <code>www-data</code>, which has no permission to open your file. Static files work because Nginx can read the <code>dist</code> folder directly; the API fails because it needs the socket. The fix is to add <code>www-data</code> to your group and let the group traverse your folders.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Mistake, symptom and fix for the 502 bad gateway permission error">
+  <rect class="box-bad" x="30" y="30" width="220" height="150" rx="8"/>
+  <text x="140" y="54" text-anchor="middle" class="bad">Mistake</text>
+  <text x="140" y="84" text-anchor="middle" class="small">socket owned by you,</text>
+  <text x="140" y="102" text-anchor="middle" class="small">Nginx runs as www-data</text>
+  <text x="140" y="130" text-anchor="middle" class="small">www-data has no</text>
+  <text x="140" y="148" text-anchor="middle" class="small">permission to open it</text>
+
+  <path class="arrow-bad" d="M250,105 H290"/>
+
+  <rect class="box-warn" x="290" y="30" width="180" height="150" rx="8"/>
+  <text x="380" y="54" text-anchor="middle" class="warn">Symptom</text>
+  <text x="380" y="92" text-anchor="middle" class="small">502 Bad Gateway</text>
+  <text x="380" y="118" text-anchor="middle" class="small">on every /api call</text>
+  <text x="380" y="150" text-anchor="middle" class="small">(frontend still loads)</text>
+
+  <path class="arrow-ok" d="M470,105 H510"/>
+
+  <rect class="box-ok" x="510" y="30" width="220" height="150" rx="8"/>
+  <text x="620" y="54" text-anchor="middle" class="ok">Fix</text>
+  <text x="620" y="88" text-anchor="middle" class="small">add www-data to your group</text>
+  <text x="620" y="116" text-anchor="middle" class="mono small">usermod -aG you www-data</text>
+  <text x="620" y="144" text-anchor="middle" class="small">+ chmod g+x on folders</text>
+  <text x="620" y="166" text-anchor="middle" class="small">then reload Nginx</text>
+</svg>
+<figcaption>How to read it: one permission gap causes a whole class of failures. <strong>A 502 on the API but a working frontend almost always means a socket permission problem.</strong></figcaption>
+</figure>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo usermod -aG &lt;your_username&gt; www-data
+getent group &lt;your_username&gt;
+chmod g+x /web_app /web_app/backend
+sudo systemctl reload nginx</code></pre>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo usermod -aG &lt;your_username&gt; www-data</code></td><td>Adds the Nginx user <code>www-data</code> to your group. <code>-aG</code> means &#8220;append to this group&#8221; without removing its other groups. This grants group&#8209;level access to the socket.</td></tr>
+<tr><td>2</td><td><code>getent group &lt;your_username&gt;</code></td><td>Prints your group's members so you can confirm <code>www-data</code> now appears at the end.</td></tr>
+<tr><td>3</td><td><code>chmod g+x /web_app /web_app/backend</code></td><td>Grants the group &#8220;execute&#8221; on these folders. On a directory, execute means &#8220;may pass through&#8221;; without it Nginx is blocked before it even reaches the socket.</td></tr>
+<tr><td>4</td><td><code>sudo systemctl reload nginx</code></td><td>Reloads Nginx so it picks up its new group membership. Refresh the browser and the 502 errors are gone.</td></tr>
+</table></div>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>After the reload, refresh your site. The Vue frontend loads <em>and</em> API calls succeed &#8212; search bars and data pages work. Your reverse proxy is now serving both halves of the app.</p>
+</div>
+
+<h2>Add security headers</h2>
+<p>At <strong>(181:52)</strong> the presenter makes the point: the firewall protects the server, but browsers have their own defences that only switch on if your server tells them to. You do that with HTTP response headers. At <strong>(182:38)</strong> he tests the baseline at SecurityHeaders.com &#8212; a fresh install scores an F.</p>
+
+<details class="primer">
+<summary>New to HTTP headers? What a <a class="term" href="glossary.html#http-header">header</a> is</summary>
+<p>Every HTTP response carries invisible metadata lines called <strong>headers</strong>, sent before the page content. Most describe the content (its type, length, cache rules). A <a class="term" href="glossary.html#security-header">security header</a> instead instructs the browser to enable a protection &#8212; for example, &#8220;never load this page inside a frame&#8221; or &#8220;only run scripts from these domains&#8221;. The server adds them with Nginx's <code>add_header</code> directive.</p>
+</details>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 120" role="img" aria-label="Security score rising from F with no headers to A with headers, illustrative">
+  <text x="30" y="30" class="title">Security grade (illustrative)</text>
+  <text x="120" y="70" text-anchor="middle" class="bad title">F</text>
+  <rect class="box-bad" x="60" y="80" width="120" height="24" rx="8"/>
+  <text x="120" y="97" text-anchor="middle" class="small">no headers</text>
+  <path class="arrow" d="M210,90 H340"/>
+  <text x="275" y="80" text-anchor="middle" class="small">add 7 headers</text>
+  <text x="450" y="70" text-anchor="middle" class="ok title">A</text>
+  <rect class="box-ok" x="390" y="80" width="120" height="24" rx="8"/>
+  <text x="450" y="97" text-anchor="middle" class="small">headers set</text>
+  <text x="560" y="96" class="small">highest score &#8212; (184:36)</text>
+</svg>
+<figcaption>How to read it: the headers below move the grade from failing to top marks. <strong>Letters are illustrative of the scanner's scale.</strong></figcaption>
+</figure>
+
+<p>Add these header lines inside the <code>server</code> block. First, transport and content protections:</p>
+
+<pre data-lang="nginx" data-tag="security headers"><code>    # HSTS (2 Years)
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+
+    # CORP (Allow sharing)
+    add_header Cross-Origin-Resource-Policy "cross-origin" always;
+
+    # Anti-Clickjacking
+    add_header X-Frame-Options "SAMEORIGIN" always;
+
+    # Stop MIME sniffing
+    add_header X-Content-Type-Options "nosniff" always;
+
+    # Privacy
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Disable unused features
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;</code></pre>
+
+<h3>Line by line: each security header</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Header</th><th>Value</th><th>What it does &amp; why</th></tr>
+<tr><td><code>Strict-Transport-Security</code></td><td><code>max-age=63072000; includeSubDomains; preload</code></td><td>HSTS. Forces the browser to use HTTPS for the next two years (63,072,000 seconds), including subdomains. It does nothing over plain HTTP today but secures the site the moment you add SSL. The <code>always</code> keyword sends the header even on error responses.</td></tr>
+<tr><td><code>Cross-Origin-Resource-Policy</code></td><td><code>cross-origin</code></td><td>CORP. Controls whether other sites may load your resources (like images). <code>cross-origin</code> allows public assets to be shared; use <code>same-origin</code> to lock them to your site only.</td></tr>
+<tr><td><code>X-Frame-Options</code></td><td><code>SAMEORIGIN</code></td><td>Prevents clickjacking by stopping other sites putting your pages in a hidden <code>&lt;iframe&gt;</code>. <code>SAMEORIGIN</code> lets only your own domain frame your content.</td></tr>
+<tr><td><code>X-Content-Type-Options</code></td><td><code>nosniff</code></td><td>Forces the browser to trust the declared file type and not &#8220;sniff&#8221; it. Blocks an attack where a malicious script is disguised as an image.</td></tr>
+<tr><td><code>Referrer-Policy</code></td><td><code>strict-origin-when-cross-origin</code></td><td>A privacy shield. When users click links to other sites, it sends only your root domain, not the full URL path, protecting their browsing details.</td></tr>
+<tr><td><code>Permissions-Policy</code></td><td><code>camera=(), microphone=(), geolocation=(), payment=()</code></td><td>A hardware lock. The empty <code>()</code> disables camera, microphone, geolocation and payment APIs, so injected code cannot reach your users' devices.</td></tr>
+</table></div>
+
+<h3>Craft a Content Security Policy</h3>
+<p>At <strong>(184:36)</strong> the presenter calls CSP the strongest defence against cross&#8209;site scripting (XSS) &#8212; and the one that takes the most work. A CSP is a strict allow&#8209;list: by default a browser runs any script a page asks for, but with a CSP it only loads scripts, styles, images and frames from the domains you name. Anything else is blocked.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="A content security policy allows your own scripts but blocks an injected script from an attacker domain">
+  <rect class="box-solid" x="300" y="20" width="160" height="44" rx="8"/>
+  <text x="380" y="42" text-anchor="middle" class="on-solid">browser</text>
+  <text x="380" y="58" text-anchor="middle" class="on-solid small">checks the CSP</text>
+
+  <path class="arrow-ok" d="M330,64 L180,120"/>
+  <path class="arrow-bad" d="M430,64 L580,120"/>
+
+  <rect class="box-ok" x="40" y="124" width="280" height="64" rx="8"/>
+  <text x="180" y="148" text-anchor="middle" class="ok">ALLOWED</text>
+  <text x="180" y="170" text-anchor="middle" class="small mono">script-src 'self'</text>
+  <text x="180" y="184" text-anchor="middle" class="small">your own /assets/app.js loads</text>
+
+  <rect class="box-bad" x="440" y="124" width="290" height="64" rx="8"/>
+  <text x="585" y="148" text-anchor="middle" class="bad">BLOCKED</text>
+  <text x="585" y="170" text-anchor="middle" class="small">injected &lt;script src="evil.example"&gt;</text>
+  <text x="585" y="184" text-anchor="middle" class="small">not on the allow-list &#8594; refused</text>
+</svg>
+<figcaption>How to read it: the browser compares each resource against the policy. <strong>Even if an attacker injects a script tag, the browser refuses to run it because its domain is not allowed.</strong></figcaption>
+</figure>
+
+<p>You build a CSP iteratively. At <strong>(193:24)</strong> the presenter stresses there is no one&#8209;size&#8209;fits&#8209;all policy: start by blocking everything, open your site, read the console errors, and relax the rules one by one until the site works with nothing extra allowed.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Iterative tightening of a CSP from blocking everything to the final working policy">
+  <rect class="box-bad" x="30" y="30" width="700" height="38" rx="8"/>
+  <text x="50" y="54" class="mono small">1  default-src 'none';</text>
+  <text x="430" y="54" class="small">everything blocked, site looks broken</text>
+  <path class="arrow" d="M380,68 V78"/>
+
+  <rect class="box-warn" x="30" y="80" width="700" height="38" rx="8"/>
+  <text x="50" y="104" class="mono small">2  default-src 'self'; script-src 'self'; style-src 'self'; ...</text>
+  <text x="520" y="104" class="small">own files load</text>
+  <path class="arrow" d="M380,118 V128"/>
+
+  <rect class="box-info" x="30" y="130" width="700" height="38" rx="8"/>
+  <text x="50" y="154" class="mono small">3  + https://fonts.googleapis.com  https://cdnjs.cloudflare.com</text>
+  <text x="620" y="154" class="small">fonts/icons</text>
+  <path class="arrow" d="M380,168 V178"/>
+
+  <rect class="box-ok" x="30" y="180" width="700" height="48" rx="8"/>
+  <text x="50" y="203" class="mono small">4  + img-src data:  + style-src 'unsafe-inline'</text>
+  <text x="50" y="220" class="small">final policy: zero console errors, site fully working</text>
+</svg>
+<figcaption>How to read it: each row loosens the previous one just enough to clear the next batch of errors. <strong>Allow the minimum that makes the site work &#8212; nothing more.</strong></figcaption>
+</figure>
+
+<p>At <strong>(201:41)</strong> the presenter adds the finished CSP to Nginx. Open the config again and add this header inside the <code>server</code> block:</p>
+
+<pre data-lang="nginx" data-tag="Content-Security-Policy"><code>add_header Content-Security-Policy "default-src 'self'; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; connect-src 'self'; frame-src 'self'; upgrade-insecure-requests;" always;</code></pre>
+
+<h3>Line by line: the CSP directives</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Directive</th><th>Value</th><th>What it does &amp; why</th></tr>
+<tr><td><code>default-src</code></td><td><code>'self'</code></td><td>The fallback for any resource type not named below. <code>'self'</code> means &#8220;only from my own domain&#8221;. Everything starts locked to your origin.</td></tr>
+<tr><td><code>font-src</code></td><td><code>'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com</code></td><td>Where fonts may load from: your site, Google Fonts' file host, and the cdnjs CDN used for icon fonts.</td></tr>
+<tr><td><code>img-src</code></td><td><code>'self' data:</code></td><td>Images from your domain, plus <code>data:</code> so inline base64/SVG images encoded in the HTML are allowed.</td></tr>
+<tr><td><code>script-src</code></td><td><code>'self'</code></td><td>Scripts only from your own domain. This is the directive that stops injected third&#8209;party scripts &#8212; the core XSS defence.</td></tr>
+<tr><td><code>style-src</code></td><td><code>'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com</code></td><td>Stylesheets from your site and the two CDNs, plus <code>'unsafe-inline'</code> to permit inline styles the app uses.</td></tr>
+<tr><td><code>connect-src</code></td><td><code>'self'</code></td><td>Limits where JavaScript may send fetch/XHR requests to your own origin &#8212; which is exactly where your <code>/api</code> calls go.</td></tr>
+<tr><td><code>frame-src</code></td><td><code>'self'</code></td><td>Only your own domain may be loaded in frames on your pages.</td></tr>
+<tr><td><code>upgrade-insecure-requests</code></td><td>(flag)</td><td>Tells the browser to automatically rewrite any <code>http://</code> request to <code>https://</code>, closing mixed&#8209;content gaps once SSL is on.</td></tr>
+</table></div>
+
+<div class="callout"><strong>Security note &#8212; <code>'unsafe-inline'</code></strong>
+<p><code>'unsafe-inline'</code> in <code>style-src</code> is a deliberate trade&#8209;off. It is acceptable when your inline styles never come from user input. But if your site has any field where users submit data, avoid it: an attacker who injects styles into your database could have them run in every visitor's browser. Prefer removing inline styles over allowing them.</p>
+</div>
+
+<p>Test and reload. At <strong>(201:41)</strong> the presenter notes a syntax slip the first time &#8212; <code>nginx -t</code> catches it before it can crash the live site.</p>
+
+<pre data-lang="sh" data-tag="server terminal"><code>sudo nginx -t
+sudo systemctl reload nginx</code></pre>
+
+<div class="callout ok"><strong>What you should see</strong>
+<p>Refresh <code>http://&lt;your_droplet_ip&gt;</code> with the browser console open: zero CSP errors, and the site works normally. Re&#8209;scan at SecurityHeaders.com and, at <strong>(184:36)</strong>, the grade jumps to an A.</p>
+</div>
+
+<h3>The complete configuration</h3>
+<p>Here is the finished file, with the <code>upstream</code>, security headers, and both <code>location</code> blocks together:</p>
+
+<pre data-lang="nginx" data-tag="/etc/nginx/sites-available/&lt;your_project_name&gt;"><code>upstream &lt;your_project_name&gt;_app_server {
+    server unix:/web_app/backend/gunicorn.sock fail_timeout=0;
+}
+
+server {
+    listen 80;
+    server_name &lt;your_droplet_ip&gt;;
+
+    access_log /var/log/nginx/&lt;your_project_name&gt;-access.log;
+    error_log /var/log/nginx/&lt;your_project_name&gt;-error.log;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header Cross-Origin-Resource-Policy "cross-origin" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+    add_header Content-Security-Policy "default-src 'self'; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; connect-src 'self'; frame-src 'self'; upgrade-insecure-requests;" always;
+
+    location / {
+        root /web_app/frontend/dist;
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api {
+        proxy_pass http://&lt;your_project_name&gt;_app_server;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+        proxy_redirect off;
+    }
+}</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="A checklist of the seven security headers now in place">
+  <rect class="zone" x="20" y="20" width="720" height="134" rx="8"/>
+  <text x="40" y="44" class="label">security headers checklist</text>
+  <circle class="dot-ok" cx="50" cy="66" r="5"/>
+  <text x="66" y="70" class="small">Strict-Transport-Security (HSTS)</text>
+  <circle class="dot-ok" cx="50" cy="90" r="5"/>
+  <text x="66" y="94" class="small">Cross-Origin-Resource-Policy</text>
+  <circle class="dot-ok" cx="50" cy="114" r="5"/>
+  <text x="66" y="118" class="small">X-Frame-Options</text>
+  <circle class="dot-ok" cx="50" cy="138" r="5"/>
+  <text x="66" y="142" class="small">X-Content-Type-Options</text>
+  <circle class="dot-ok" cx="400" cy="66" r="5"/>
+  <text x="416" y="70" class="small">Referrer-Policy</text>
+  <circle class="dot-ok" cx="400" cy="90" r="5"/>
+  <text x="416" y="94" class="small">Permissions-Policy</text>
+  <circle class="dot-ok" cx="400" cy="114" r="5"/>
+  <text x="416" y="118" class="small">Content-Security-Policy (the big one)</text>
+  <circle class="dot-info" cx="400" cy="138" r="5"/>
+  <text x="416" y="142" class="small">upgrade-insecure-requests (inside CSP)</text>
+</svg>
+<figcaption>How to read it: seven <code>add_header</code> lines, each switching on one browser defence. <strong>CSP is the one that took the most iterating and does the most work.</strong></figcaption>
+</figure>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>You prepared the frontend to use a relative API base URL, proxied <code>/api</code> in Vite for development, removed the now&#8209;unneeded CORS middleware, and rebuilt.</li>
+<li>You installed <strong>Nginx</strong> as a <strong>reverse proxy</strong>: <code>location /</code> serves the Vue <code>dist</code> files, and <code>location /api</code> uses <code>proxy_pass</code> to reach Gunicorn through the Unix socket.</li>
+<li>You enabled the site with a symlink into <code>sites-enabled</code>, opened the firewall with <code>Nginx Full</code>, and fixed the <code>502 Bad Gateway</code> by adding <code>www-data</code> to your group and granting group execute on the app folders.</li>
+<li>You added seven security headers, including a <strong>Content Security Policy</strong> built iteratively, taking the site's security grade from F to A.</li>
+<li>Your app is now live and hardened over HTTP. Next comes a real domain and HTTPS.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="05-gunicorn-supervisor.html"><small>← Previous · Step 05</small>Running the Backend: Gunicorn &amp; Supervisor</a>
+<a class="next" href="07-self-hosting-meilisearch.html"><small>Next · Step 07 →</small>Self-Hosting Meilisearch</a>
+</nav>
+</main>
+</body>
+</html>

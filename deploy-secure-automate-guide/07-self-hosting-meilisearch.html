@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>07 · Self-Hosting Meilisearch</title>
+<meta name="description" content="Install Meilisearch, run it as a dedicated user under a systemd service, and load your exported data.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Deploy, Secure &amp; Automate Full-Stack Web Apps</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 07/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 07 of 19 · 204:29</div>
+  <h1>Self-Hosting Meilisearch</h1>
+  <p class="lead">Install Meilisearch, run it as a dedicated user under a systemd service, and load your exported data.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wY5pQOTsGaA&amp;t=12269s" target="_blank" rel="noopener">▶ Watch this part (204:29)</a>
+</section>
+<p>Your app is online: Nginx serves the Vue front end and proxies the API to Gunicorn. That is enough for a plain website. But modern apps need fast, typo-tolerant search, and an ordinary SQL database is slow at full-text search and bad at spelling mistakes. The fix is a dedicated <a class="term" href="glossary.html#search-engine">search engine</a>. In this step you install <a class="term" href="glossary.html#meilisearch">Meilisearch</a> on the same server as your backend, lock it away behind your firewall so the public internet can never reach it, run it as a background service, and load your existing search data into it.</p>
+
+<p>Even if your own project does not need search, follow along. The real skill here is bigger than Meilisearch: you are learning how to deploy an internal database or background service that is completely hidden from the internet (at 205:16). That pattern works for Redis, Postgres, or anything else you self-host.</p>
+
+<div class="callout"><strong>Security note.</strong> Hosting the search engine on the same machine as the backend gives you three wins the handbook calls out: zero network latency (the API talks to it over <code>localhost</code>), no monthly bill for a managed search service, and maximum security &#8212; because Meilisearch sits behind your UFW firewall, it is invisible to the public internet.</div>
+
+<h2>Where Meilisearch sits in your stack</h2>
+
+<p>Before any commands, picture where this new piece runs. Everything happens inside the one server you already rented. The only doors open to the internet are ports 80 and 443 (web traffic) and 22 (SSH). Meilisearch listens on port <strong>7700</strong>, but that port is blocked by UFW, so only programs already on the server &#8212; your backend &#8212; can reach it.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Zone map showing Meilisearch running inside the server, reachable only over localhost and blocked from the internet by the firewall">
+  <text x="20" y="24" class="title">Internet</text>
+  <rect x="20" y="36" width="150" height="54" rx="8" class="box"/>
+  <text x="95" y="60" text-anchor="middle">Visitors</text>
+  <text x="95" y="78" text-anchor="middle" class="small">browsers worldwide</text>
+
+  <rect x="230" y="20" width="510" height="260" rx="8" class="zone"/>
+  <text x="245" y="40" class="title">Your server (UFW firewall)</text>
+
+  <rect x="250" y="56" width="110" height="46" rx="8" class="box-ok"/>
+  <text x="305" y="76" text-anchor="middle" class="small">:80 / :443</text>
+  <text x="305" y="92" text-anchor="middle" class="small">Nginx</text>
+
+  <rect x="250" y="130" width="110" height="46" rx="8" class="box"/>
+  <text x="305" y="150" text-anchor="middle" class="small">Gunicorn +</text>
+  <text x="305" y="166" text-anchor="middle" class="small">FastAPI</text>
+
+  <rect x="250" y="204" width="110" height="52" rx="8" class="box-info"/>
+  <text x="305" y="226" text-anchor="middle" class="small">Meilisearch</text>
+  <text x="305" y="242" text-anchor="middle" class="small">127.0.0.1:7700</text>
+
+  <rect x="470" y="204" width="130" height="52" rx="8" class="box2"/>
+  <text x="535" y="226" text-anchor="middle" class="small">/var/lib/</text>
+  <text x="535" y="242" text-anchor="middle" class="small">meilisearch/data</text>
+
+  <path class="arrow" d="M170,63 H248"/>
+  <path class="arrow" d="M305,102 V128"/>
+  <path class="arrow" d="M305,176 V202"/>
+  <path class="arrow" d="M360,230 H468"/>
+
+  <path class="line dashed" d="M95,90 V230 H246"/>
+  <rect x="150" y="150" width="90" height="40" rx="8" class="box-bad"/>
+  <text x="195" y="167" text-anchor="middle" class="small">:7700</text>
+  <text x="195" y="183" text-anchor="middle" class="small bad">blocked</text>
+</svg>
+<figcaption>Read top to bottom: visitors only ever touch Nginx. Meilisearch listens on <span class="mono">127.0.0.1:7700</span>, reachable by the backend over localhost. <strong>The firewall blocks port 7700, so nobody on the internet can reach the search engine directly.</strong></figcaption>
+</figure>
+
+<h2>What you will do, and in what order</h2>
+
+<p>The presenter lays out the roadmap at 206:05: install the engine, isolate it with a <a class="term" href="glossary.html#dedicated-user">dedicated system user</a>, run it as a <a class="term" href="glossary.html#systemd">systemd</a> service, give it a secret <a class="term" href="glossary.html#master-key">master key</a>, and load your data from a <a class="term" href="glossary.html#data-dump">dump</a>. Here is the whole journey on one line.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 120" role="img" aria-label="Pipeline of the six stages in this step from exporting data to connecting the backend">
+  <rect x="12" y="40" width="112" height="44" rx="8" class="box"/>
+  <text x="68" y="60" text-anchor="middle" class="small">1. Export</text>
+  <text x="68" y="76" text-anchor="middle" class="small">local dump</text>
+
+  <rect x="140" y="40" width="112" height="44" rx="8" class="box"/>
+  <text x="196" y="60" text-anchor="middle" class="small">2. Install</text>
+  <text x="196" y="76" text-anchor="middle" class="small">binary</text>
+
+  <rect x="268" y="40" width="112" height="44" rx="8" class="box"/>
+  <text x="324" y="60" text-anchor="middle" class="small">3. System</text>
+  <text x="324" y="76" text-anchor="middle" class="small">user</text>
+
+  <rect x="396" y="40" width="112" height="44" rx="8" class="box"/>
+  <text x="452" y="60" text-anchor="middle" class="small">4. Import</text>
+  <text x="452" y="76" text-anchor="middle" class="small">dump</text>
+
+  <rect x="524" y="40" width="112" height="44" rx="8" class="box"/>
+  <text x="580" y="60" text-anchor="middle" class="small">5. Run as</text>
+  <text x="580" y="76" text-anchor="middle" class="small">service</text>
+
+  <rect x="652" y="40" width="96" height="44" rx="8" class="box-ok"/>
+  <text x="700" y="60" text-anchor="middle" class="small">6. Connect</text>
+  <text x="700" y="76" text-anchor="middle" class="small">backend</text>
+
+  <path class="arrow" d="M124,62 H138"/>
+  <path class="arrow" d="M252,62 H266"/>
+  <path class="arrow" d="M380,62 H394"/>
+  <path class="arrow" d="M508,62 H522"/>
+  <path class="arrow" d="M636,62 H650"/>
+</svg>
+<figcaption>The six stages of this step. Stages 1 and 4 only apply if you have existing local data to migrate; if you seed from scratch you skip them.</figcaption>
+</figure>
+
+<details class="primer"><summary>New to search engines? What Meilisearch is and why you need one</summary><p>A search engine is a program built for one job: find matching text fast, even when the user misspells it. Meilisearch is an open-source engine written in Rust. You give it documents (for example, your articles), it builds an <a class="term" href="glossary.html#index">index</a> (a lookup structure, like the index at the back of a book), and then it answers "find me X" queries in milliseconds. An ordinary SQL database can search text too, but it was not built for it: it is slow on large text fields and cannot forgive a typo. Running a dedicated engine next to your API keeps searches instant.</p></details>
+
+<h2>Step 1 &#8212; Export your local data (Option 1)</h2>
+
+<p>There are two ways to get data into production. <strong>Option 1</strong>: export the data from the Meilisearch you already run on your laptop. <strong>Option 2</strong>: seed from scratch using the reference repo's script &#8212; if you pick that, skip straight to installing the binary. The rest of this section is Option 1.</p>
+
+<p>Meilisearch offers two kinds of backup, and the difference matters (at 215:48). A <strong>snapshot</strong> is an exact copy of the database files, good only on the same Meilisearch version. A <strong>dump</strong> is a set of instructions to rebuild the database from scratch, so it survives a move to a different machine or version. Because your laptop and server are not identical, you migrate with a dump.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Comparison of a dump versus a snapshot for moving Meilisearch data">
+  <rect x="20" y="30" width="340" height="130" rx="8" class="box-ok"/>
+  <text x="190" y="54" text-anchor="middle" class="title">Dump</text>
+  <text x="190" y="80" text-anchor="middle" class="small">A set of instructions to</text>
+  <text x="190" y="98" text-anchor="middle" class="small">rebuild the database</text>
+  <text x="190" y="124" text-anchor="middle" class="small ok">Safe across machines &amp; versions</text>
+  <text x="190" y="144" text-anchor="middle" class="small">Use this to migrate &#8594; server</text>
+
+  <rect x="400" y="30" width="340" height="130" rx="8" class="box2"/>
+  <text x="570" y="54" text-anchor="middle" class="title">Snapshot</text>
+  <text x="570" y="80" text-anchor="middle" class="small">An exact copy of the</text>
+  <text x="570" y="98" text-anchor="middle" class="small">database files</text>
+  <text x="570" y="124" text-anchor="middle" class="small warn">Same version only</text>
+  <text x="570" y="144" text-anchor="middle" class="small">Use this for daily backups</text>
+</svg>
+<figcaption>Both back up your data, but for different jobs. <strong>Migrate with a dump now; schedule snapshots for daily backups in the next step.</strong></figcaption>
+</figure>
+
+<ol class="steps">
+<li>On your <strong>local machine</strong>, with your local Meilisearch running, ask it to create a dump (at 217:00).</li>
+</ol>
+
+<pre data-lang="bash" data-tag="local machine"><code>curl -X POST 'http://localhost:7700/dumps' \
+  -H 'Authorization: Bearer &lt;YOUR_LOCAL_MASTER_KEY&gt;'</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>curl -X POST 'http://localhost:7700/dumps' \</code></td><td><code>curl</code> sends an HTTP request from the terminal. <code>-X POST</code> sets the method to POST (you are asking the server to <em>create</em> something). The URL hits your local engine's <code>/dumps</code> endpoint. The trailing <code>\</code> continues the command on the next line.</td></tr>
+<tr><td>2</td><td><code>-H 'Authorization: Bearer &lt;YOUR_LOCAL_MASTER_KEY&gt;'</code></td><td><code>-H</code> adds an HTTP header. Meilisearch is protected by a master key, so every request must carry it as a <code>Bearer</code> token. Replace the placeholder (and drop the angle brackets) with your local key.</td></tr>
+</table></div>
+
+<p>Meilisearch answers with JSON. Creating a dump is asynchronous (it runs in the background), so you get back a <code>taskUid</code> to track it (at 217:24).</p>
+
+<pre data-lang="json" data-tag="response"><code>{
+  "taskUid": 1,
+  "indexUid": null,
+  "status": "enqueued",
+  "type": "dumpCreation",
+  "enqueuedAt": "2026-03-18T10:00:00.000000Z"
+}</code></pre>
+
+<ol class="steps" start="2">
+<li>Check when the task finishes by querying it with its id (at 217:24).</li>
+</ol>
+
+<pre data-lang="bash" data-tag="local machine"><code>curl -X GET 'http://localhost:7700/tasks/&lt;YOUR_TASK_UID&gt;' \
+  -H 'Authorization: Bearer &lt;YOUR_LOCAL_MASTER_KEY&gt;'</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> When the task's <code>status</code> reads <code>succeeded</code>, a file like <code>20260318-100000.dump</code> appears in your local <code>dumps/</code> folder. That file is what you ship to the server.</div>
+
+<p>If you prefer Python to raw curl, the official SDK does the same thing. Make sure your local virtual environment is active first.</p>
+
+<pre data-lang="bash" data-tag="local machine"><code>pip install meilisearch</code></pre>
+
+<pre data-lang="python" data-tag="local machine"><code>import meilisearch
+
+meilisearch_client = meilisearch.Client("http://localhost:7700", "&lt;YOUR_LOCAL_MASTER_KEY&gt;")
+task = meilisearch_client.create_dump()
+
+meilisearch_client.wait_for_task(task.task_uid)
+print("Dump created successfully!")</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import meilisearch</code></td><td>Loads the SDK you just installed so you can call it from Python.</td></tr>
+<tr><td>3</td><td><code>meilisearch_client = meilisearch.Client("http://localhost:7700", "&lt;...&gt;")</code></td><td>Creates a client pointed at your local engine, passing the URL and the master key. Nothing happens on the server yet; this just prepares the connection.</td></tr>
+<tr><td>4</td><td><code>task = meilisearch_client.create_dump()</code></td><td>Starts the dump and returns a task object &#8212; the SDK equivalent of the curl POST above.</td></tr>
+<tr><td>6</td><td><code>meilisearch_client.wait_for_task(task.task_uid)</code></td><td>Blocks until the background task finishes, so you do not race ahead before the file exists.</td></tr>
+<tr><td>7</td><td><code>print("Dump created successfully!")</code></td><td>Confirms it is done so you know the dump file is ready.</td></tr>
+</table></div>
+
+<h2>Step 2 &#8212; Install Meilisearch on the server</h2>
+
+<p>Now move to the server. Connect with your SSH shortcut, then download the engine with its official script.</p>
+
+<pre data-lang="bash" data-tag="server"><code>ssh my-website</code></pre>
+
+<pre data-lang="bash" data-tag="server"><code>curl -L https://install.meilisearch.com | sh</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>curl -L https://install.meilisearch.com | sh</code></td><td><code>curl -L</code> downloads the install script, following any redirects (<code>-L</code>). The <code>|</code> pipes that script straight into <code>sh</code>, which runs it. The script fetches one pre-compiled binary named <code>meilisearch</code> into the current folder &#8212; self-contained, so you do not install Rust or any dependency.</td></tr>
+</table></div>
+
+<p>The binary lands in your current directory. Make it executable and move it to <code>/usr/local/bin/</code> so the command works from anywhere on the system, which you need when it runs as a service later (at 209:20).</p>
+
+<pre data-lang="bash" data-tag="server"><code>chmod +x ./meilisearch
+sudo mv ./meilisearch /usr/local/bin/</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>chmod +x ./meilisearch</code></td><td><code>chmod +x</code> marks the downloaded file as executable. Without the execute bit, Linux refuses to run it.</td></tr>
+<tr><td>2</td><td><code>sudo mv ./meilisearch /usr/local/bin/</code></td><td><code>mv</code> moves the file into <code>/usr/local/bin/</code>, a folder on every user's <code>PATH</code>. <code>sudo</code> is needed because that folder is system-owned. Now typing <code>meilisearch</code> works from any directory.</td></tr>
+</table></div>
+
+<pre data-lang="bash" data-tag="server"><code>meilisearch --version</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> A version number prints with no error. That confirms the binary is installed and on your <code>PATH</code>.</div>
+
+<h2>Step 3 &#8212; Create a dedicated system user</h2>
+
+<p>Earlier you learned never to run things as <code>root</code>. Now you go one step further and give Meilisearch its own <a class="term" href="glossary.html#dedicated-user">dedicated system user</a> (at 209:43). A system user is a "dummy" account that exists only to own files and run a background process. It has no password and cannot log in, which makes it immune to SSH brute-force attacks (at 210:30). The table below is the distinction the presenter draws on the slide.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Comparison of a standard user versus a system user across login, shell, home directory and purpose">
+  <rect x="20" y="20" width="200" height="170" rx="8" class="zone"/>
+  <text x="120" y="42" text-anchor="middle" class="title">Feature</text>
+  <text x="120" y="78" text-anchor="middle" class="small">Can log in?</text>
+  <text x="120" y="110" text-anchor="middle" class="small">Shell</text>
+  <text x="120" y="142" text-anchor="middle" class="small">Home</text>
+  <text x="120" y="174" text-anchor="middle" class="small">Purpose</text>
+
+  <rect x="232" y="20" width="252" height="170" rx="8" class="box"/>
+  <text x="358" y="42" text-anchor="middle" class="title">Standard user</text>
+  <text x="358" y="78" text-anchor="middle" class="small ok">Yes</text>
+  <text x="358" y="110" text-anchor="middle" class="small">real (e.g. /bin/bash)</text>
+  <text x="358" y="142" text-anchor="middle" class="small">/home/you</text>
+  <text x="358" y="174" text-anchor="middle" class="small">maintenance, admin</text>
+
+  <rect x="496" y="20" width="244" height="170" rx="8" class="box-info"/>
+  <text x="618" y="42" text-anchor="middle" class="title">System user</text>
+  <text x="618" y="78" text-anchor="middle" class="small bad">No</text>
+  <text x="618" y="110" text-anchor="middle" class="small">/bin/false (none)</text>
+  <text x="618" y="142" text-anchor="middle" class="small">/var/lib/...</text>
+  <text x="618" y="174" text-anchor="middle" class="small">run one service</text>
+</svg>
+<figcaption>A standard user is for a human who logs in and administers the box. A system user runs one background service and <strong>cannot be logged into at all</strong>, so there is nothing to brute-force.</figcaption>
+</figure>
+
+<pre data-lang="bash" data-tag="server"><code>sudo useradd -d /var/lib/meilisearch -s /bin/false -m -r meilisearch</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo useradd</code></td><td>The low-level command to add a user. Unlike <code>adduser</code> (used in Chapter 1), it does not prompt for a password or full name &#8212; ideal for a non-interactive service account.</td></tr>
+<tr><td>1</td><td><code>-d /var/lib/meilisearch</code></td><td>Sets the user's <strong>home directory</strong>. Instead of the default <code>/home/meilisearch</code>, it uses <code>/var/lib/meilisearch</code>, the standard Linux location for a service's data.</td></tr>
+<tr><td>1</td><td><code>-s /bin/false</code></td><td>Sets the user's <strong>shell</strong> to <code>/bin/false</code>, a dummy shell that exits immediately. This is what makes it impossible to log in as this user.</td></tr>
+<tr><td>1</td><td><code>-m</code></td><td>Tells <code>useradd</code> to actually <strong>create</strong> the home directory named by <code>-d</code>.</td></tr>
+<tr><td>1</td><td><code>-r</code></td><td>Creates a <strong>system user</strong> (a reserved, low numbered account) rather than a normal login user.</td></tr>
+<tr><td>1</td><td><code>meilisearch</code></td><td>The name of the new user. It owns the engine's files and runs its process.</td></tr>
+</table></div>
+
+<p>Now create a folder for the actual database files and make the new user own everything in its home directory.</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo mkdir -p /var/lib/meilisearch/data
+sudo chown -R meilisearch:meilisearch /var/lib/meilisearch</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo mkdir -p /var/lib/meilisearch/data</code></td><td>Creates the <code>data</code> folder where the engine stores its database. <code>-p</code> creates any missing parent folders and does not error if they already exist.</td></tr>
+<tr><td>2</td><td><code>sudo chown -R meilisearch:meilisearch /var/lib/meilisearch</code></td><td><code>chown</code> changes ownership to the <code>meilisearch</code> user and group. <code>-R</code> applies it recursively to everything inside. Without this the service would be denied access to its own files.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 180" role="img" aria-label="Isolation: the meilisearch system user owns its data directory and other users are denied">
+  <rect x="20" y="30" width="220" height="120" rx="8" class="box-info"/>
+  <text x="130" y="56" text-anchor="middle" class="title">meilisearch</text>
+  <text x="130" y="76" text-anchor="middle" class="small">(system user)</text>
+  <text x="130" y="104" text-anchor="middle" class="small ok">owns &amp; reads</text>
+  <text x="130" y="124" text-anchor="middle" class="small">no login, no shell</text>
+
+  <rect x="430" y="20" width="300" height="60" rx="8" class="box2"/>
+  <text x="580" y="45" text-anchor="middle" class="small mono">/var/lib/meilisearch/</text>
+  <text x="580" y="64" text-anchor="middle" class="small mono">data/</text>
+
+  <rect x="430" y="110" width="300" height="50" rx="8" class="box"/>
+  <text x="580" y="140" text-anchor="middle" class="small">your standard user: permission denied</text>
+
+  <path class="arrow-ok" d="M240,80 H428"/>
+  <path class="arrow-bad" d="M430,135 H242 V95"/>
+</svg>
+<figcaption>Only the <span class="mono">meilisearch</span> user can read its data folder. Even your own admin account is denied &#8212; so a leak from one account cannot reach the search data.</figcaption>
+</figure>
+
+<h2>Step 4 &#8212; Transfer and import the dump (Option 1)</h2>
+
+<p>If you seeded from scratch (Option 2), skip to Step 5. Otherwise, copy the dump up to the server. You send it to <code>/tmp/</code> first because <code>/tmp/</code> is writable by any user, whereas the locked-down <code>/var/lib/meilisearch</code> is not. Log out of SSH, then from your local terminal run <code>scp</code>.</p>
+
+<pre data-lang="bash" data-tag="local machine"><code>scp /path/to/your/local/dumps/&lt;YOUR_DUMP_FILE.dump&gt; my-website:/tmp/</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>scp</code></td><td>"Secure copy" &#8212; copies a file over the same encrypted SSH connection you log in with.</td></tr>
+<tr><td>1</td><td><code>/path/to/your/local/dumps/&lt;YOUR_DUMP_FILE.dump&gt;</code></td><td>The source: the dump file on your laptop. Replace it with the real path and filename.</td></tr>
+<tr><td>1</td><td><code>my-website:/tmp/</code></td><td>The destination: your server (via the <code>my-website</code> SSH alias) and the folder <code>/tmp/</code>. The colon separates host from path.</td></tr>
+</table></div>
+
+<p>SSH back in, move the file into the Meilisearch directory, and immediately hand ownership to the <code>meilisearch</code> user.</p>
+
+<pre data-lang="bash" data-tag="server"><code>ssh my-website</code></pre>
+
+<pre data-lang="bash" data-tag="server"><code>sudo mv /tmp/&lt;YOUR_DUMP_FILE.dump&gt; /var/lib/meilisearch/
+sudo chown meilisearch:meilisearch /var/lib/meilisearch/&lt;YOUR_DUMP_FILE.dump&gt;</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo mv /tmp/&lt;YOUR_DUMP_FILE.dump&gt; /var/lib/meilisearch/</code></td><td>Moves the dump from the temporary folder into the engine's home directory, where the service can find it.</td></tr>
+<tr><td>2</td><td><code>sudo chown meilisearch:meilisearch /var/lib/meilisearch/&lt;YOUR_DUMP_FILE.dump&gt;</code></td><td>Gives the file to the <code>meilisearch</code> user. Skip this and the service crashes: it will not have permission to read a file your admin account uploaded.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="The dump travels from your laptop to a temporary folder, then into the locked directory, then systemd imports it into the data folder">
+  <rect x="12" y="60" width="120" height="48" rx="8" class="box"/>
+  <text x="72" y="80" text-anchor="middle" class="small">laptop</text>
+  <text x="72" y="96" text-anchor="middle" class="small">.dump file</text>
+
+  <rect x="168" y="60" width="120" height="48" rx="8" class="box2"/>
+  <text x="228" y="80" text-anchor="middle" class="small mono">/tmp/</text>
+  <text x="228" y="96" text-anchor="middle" class="small">world-writable</text>
+
+  <rect x="324" y="60" width="130" height="48" rx="8" class="box-info"/>
+  <text x="389" y="80" text-anchor="middle" class="small mono">/var/lib/</text>
+  <text x="389" y="96" text-anchor="middle" class="small">owned by user</text>
+
+  <rect x="490" y="60" width="120" height="48" rx="8" class="box"/>
+  <text x="550" y="80" text-anchor="middle" class="small">systemd</text>
+  <text x="550" y="96" text-anchor="middle" class="small">--import-dump</text>
+
+  <rect x="646" y="60" width="104" height="48" rx="8" class="box-ok"/>
+  <text x="698" y="80" text-anchor="middle" class="small mono">data/</text>
+  <text x="698" y="96" text-anchor="middle" class="small">live index</text>
+
+  <path class="arrow" d="M132,84 H166"/>
+  <path class="arrow" d="M288,84 H322"/>
+  <path class="arrow" d="M454,84 H488"/>
+  <path class="arrow" d="M610,84 H644"/>
+
+  <text x="228" y="130" text-anchor="middle" class="small">scp</text>
+  <text x="389" y="130" text-anchor="middle" class="small">mv + chown</text>
+  <text x="550" y="130" text-anchor="middle" class="small">on first start</text>
+</svg>
+<figcaption>The dump's path to production: <span class="mono">scp</span> to <span class="mono">/tmp</span>, then <span class="mono">mv</span> + <span class="mono">chown</span> into the locked folder, then systemd imports it into <span class="mono">data/</span> the first time the service starts.</figcaption>
+</figure>
+
+<h2>Step 5 &#8212; Run Meilisearch as a service</h2>
+
+<p>You do not want to babysit the engine in a terminal. You want it to run in the background, start on boot, and restart if it crashes &#8212; in other words, run as a <a class="term" href="glossary.html#daemon">daemon</a>. For your FastAPI backend you used Supervisor. For Meilisearch you use systemd, Ubuntu's built-in service manager (at 222:08).</p>
+
+<details class="primer"><summary>New to systemd? What a service manager does</summary><p>systemd is the first program Linux starts when it boots, and its job is to start and watch over every other background service. You describe a service in a small text file called a <a class="term" href="glossary.html#systemd-unit">systemd unit</a> (a "unit file"). systemd reads that file and knows how to launch the program, when to start it, and what to do if it dies. You then control it with <code>systemctl start</code>, <code>stop</code>, <code>enable</code> (start on boot), and <code>status</code>.</p></details>
+
+<p>Why systemd here and Supervisor for the API? The rule of thumb (at 222:31): manage low-level infrastructure (databases, Redis, Meilisearch) with the OS's native tool, systemd; manage application code (your Python API) with a higher-level tool like Supervisor, which is easier to restart during deployments.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Layered diagram: systemd manages operating-system level services, Supervisor manages application level code">
+  <rect x="40" y="24" width="680" height="70" rx="8" class="zone"/>
+  <text x="60" y="46" class="title">Application level</text>
+  <rect x="60" y="54" width="180" height="32" rx="8" class="box"/>
+  <text x="150" y="75" text-anchor="middle" class="small">Gunicorn + FastAPI</text>
+  <rect x="540" y="54" width="160" height="32" rx="8" class="box-ok"/>
+  <text x="620" y="75" text-anchor="middle" class="small">managed by Supervisor</text>
+
+  <rect x="40" y="116" width="680" height="70" rx="8" class="zone"/>
+  <text x="60" y="138" class="title">Operating-system level</text>
+  <rect x="60" y="146" width="180" height="32" rx="8" class="box-info"/>
+  <text x="150" y="167" text-anchor="middle" class="small">Meilisearch</text>
+  <rect x="540" y="146" width="160" height="32" rx="8" class="box-ok"/>
+  <text x="620" y="167" text-anchor="middle" class="small">managed by systemd</text>
+
+  <path class="arrow" d="M240,70 H538"/>
+  <path class="arrow" d="M240,162 H538"/>
+</svg>
+<figcaption>Two layers, two managers. <strong>Low-level infrastructure like Meilisearch belongs to systemd; your application code belongs to Supervisor.</strong></figcaption>
+</figure>
+
+<h3>Create the secure environment file</h3>
+
+<p>Never hardcode the master key inside the service file &#8212; it would show up in the server's process list. Instead, put it in a protected environment file (at 224:05). Meilisearch automatically reads any variable starting with <code>MEILI_</code>.</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo mkdir -p /etc/meilisearch
+sudo nano /etc/meilisearch/env</code></pre>
+
+<pre data-lang="ini" data-tag="/etc/meilisearch/env"><code>MEILI_ENV=production
+MEILI_MASTER_KEY=&lt;YOUR_STRONG_MASTER_KEY&gt;</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>MEILI_ENV=production</code></td><td>Puts the engine in production mode, which enforces the master key and disables the development-only unprotected search preview.</td></tr>
+<tr><td>2</td><td><code>MEILI_MASTER_KEY=&lt;YOUR_STRONG_MASTER_KEY&gt;</code></td><td>Sets the master key every request must present. Replace the placeholder with a long random string (at least 16 bytes), no spaces or quotes. This is the one secret guarding your whole search engine.</td></tr>
+</table></div>
+
+<div class="callout warn"><strong>Common mistakes.</strong> Do not reuse the default development key the docs show (at 223:42) &#8212; that is only safe on your laptop. Do not wrap the key in quotes or add spaces; Meilisearch reads the value literally. And remember to delete the angle brackets around the placeholder.</div>
+
+<p>Lock the file so only the <code>meilisearch</code> user and <code>root</code> can read it.</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo chown meilisearch:meilisearch /etc/meilisearch/env
+sudo chmod 600 /etc/meilisearch/env</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo chown meilisearch:meilisearch /etc/meilisearch/env</code></td><td>Gives the file to the service user, so the engine can read its own secret.</td></tr>
+<tr><td>2</td><td><code>sudo chmod 600 /etc/meilisearch/env</code></td><td><code>600</code> means: owner can read and write, nobody else can even read. This stops other accounts from seeing the master key.</td></tr>
+</table></div>
+
+<h3>Create the systemd unit file</h3>
+
+<p>Now write the unit file that tells Ubuntu how to run Meilisearch. A unit file has three sections: <code>[Unit]</code> (what and when), <code>[Service]</code> (how to run it), and <code>[Install]</code> (how to enable it on boot).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 230" role="img" aria-label="Anatomy of the Meilisearch systemd unit file showing the Unit, Service and Install sections and their directives">
+  <rect x="20" y="20" width="230" height="190" rx="8" class="box"/>
+  <text x="135" y="42" text-anchor="middle" class="title">[Unit]</text>
+  <text x="135" y="64" text-anchor="middle" class="small">what &amp; when</text>
+  <text x="135" y="92" text-anchor="middle" class="small mono">Description=</text>
+  <text x="135" y="112" text-anchor="middle" class="small mono">After=network.target</text>
+
+  <rect x="265" y="20" width="250" height="190" rx="8" class="box-info"/>
+  <text x="390" y="42" text-anchor="middle" class="title">[Service]</text>
+  <text x="390" y="64" text-anchor="middle" class="small">how to run it</text>
+  <text x="390" y="92" text-anchor="middle" class="small mono">Type / User / Group</text>
+  <text x="390" y="112" text-anchor="middle" class="small mono">EnvironmentFile=</text>
+  <text x="390" y="132" text-anchor="middle" class="small mono">WorkingDirectory=</text>
+  <text x="390" y="152" text-anchor="middle" class="small mono">ExecStart=</text>
+  <text x="390" y="172" text-anchor="middle" class="small mono">Restart=on-failure</text>
+
+  <rect x="530" y="20" width="210" height="190" rx="8" class="box-ok"/>
+  <text x="635" y="42" text-anchor="middle" class="title">[Install]</text>
+  <text x="635" y="64" text-anchor="middle" class="small">enable on boot</text>
+  <text x="635" y="92" text-anchor="middle" class="small mono">WantedBy=</text>
+  <text x="635" y="112" text-anchor="middle" class="small mono">multi-user.target</text>
+</svg>
+<figcaption>The three sections of a unit file. <strong><code>[Service]</code> does the real work: who runs it, where the secret comes from, the exact command, and what to do on a crash.</strong></figcaption>
+</figure>
+
+<pre data-lang="bash" data-tag="server"><code>sudo nano /etc/systemd/system/meilisearch.service</code></pre>
+
+<p>If you are importing a dump (Option 1), leave the file exactly as below and replace <code>&lt;YOUR_DUMP_FILE.dump&gt;</code> with your filename. If you are seeding from scratch (Option 2), delete the two lines starting with <code>--import-dump</code> and <code>--ignore-dump-if-db-exists</code>.</p>
+
+<pre data-lang="ini" data-tag="/etc/systemd/system/meilisearch.service"><code>[Unit]
+Description=Meilisearch search engine
+After=network.target
+
+[Service]
+Type=simple
+User=meilisearch
+Group=meilisearch
+
+# Load environment variables from the secure file
+EnvironmentFile=/etc/meilisearch/env
+
+WorkingDirectory=/var/lib/meilisearch
+
+ExecStart=/usr/local/bin/meilisearch \
+  --db-path "/var/lib/meilisearch/data" \
+  --dump-dir "/var/lib/meilisearch/dumps" \
+  --import-dump "/var/lib/meilisearch/&lt;YOUR_DUMP_FILE.dump&gt;" \
+  --ignore-dump-if-db-exists
+
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>[Unit]</code></td><td>Starts the section that describes the unit and its ordering.</td></tr>
+<tr><td>2</td><td><code>Description=Meilisearch search engine</code></td><td>A human-readable name shown in <code>systemctl status</code> and logs.</td></tr>
+<tr><td>3</td><td><code>After=network.target</code></td><td>Tells Linux not to start the service until the networking stack is fully up (at 227:37).</td></tr>
+<tr><td>5</td><td><code>[Service]</code></td><td>Starts the section that defines how to run the program.</td></tr>
+<tr><td>6</td><td><code>Type=simple</code></td><td>Says the <code>ExecStart</code> command is the main process and stays in the foreground &#8212; the normal type for a long-running server.</td></tr>
+<tr><td>7&#8211;8</td><td><code>User=meilisearch</code> / <code>Group=meilisearch</code></td><td>Runs the process as the locked-down system user, not as <code>root</code>. This is the isolation you set up in Step 3.</td></tr>
+<tr><td>11</td><td><code>EnvironmentFile=/etc/meilisearch/env</code></td><td>Loads <code>MEILI_ENV</code> and <code>MEILI_MASTER_KEY</code> from your secure file, keeping the secret out of this file and the process list.</td></tr>
+<tr><td>13</td><td><code>WorkingDirectory=/var/lib/meilisearch</code></td><td>Sets the folder the process runs in, so relative paths resolve inside the service's own home.</td></tr>
+<tr><td>15&#8211;19</td><td><code>ExecStart=/usr/local/bin/meilisearch \ ...</code></td><td>The exact command systemd runs. It points to the binary, then <code>--db-path</code> (where the database lives) and <code>--dump-dir</code> (where future dumps are saved). The <code>\</code> continues the command across lines.</td></tr>
+<tr><td>18</td><td><code>--import-dump "/var/lib/meilisearch/&lt;YOUR_DUMP_FILE.dump&gt;" \</code></td><td>On first start, loads your migrated data from the dump file (at 229:38). Replace the placeholder with your filename.</td></tr>
+<tr><td>19</td><td><code>--ignore-dump-if-db-exists</code></td><td>A safety flag: skip the import if a database already exists in <code>data</code>, so a restart never wipes live data with the old dump.</td></tr>
+<tr><td>21</td><td><code>Restart=on-failure</code></td><td>If the process crashes or is killed (for example, out of memory), systemd restarts it automatically (at 230:25).</td></tr>
+<tr><td>23&#8211;24</td><td><code>[Install]</code> / <code>WantedBy=multi-user.target</code></td><td>Ties the service to the normal multi-user boot stage, so <code>enable</code> makes it start on every reboot.</td></tr>
+</table></div>
+
+<h3>Enable and start the service</h3>
+
+<p>Tell systemd to re-read its files, enable the service on boot, and start it now.</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo systemctl daemon-reload
+sudo systemctl enable meilisearch
+sudo systemctl start meilisearch</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo systemctl daemon-reload</code></td><td>Makes systemd re-scan its unit files so it notices the one you just created or changed. Forget this and systemd keeps using the old version.</td></tr>
+<tr><td>2</td><td><code>sudo systemctl enable meilisearch</code></td><td>Marks the service to start automatically on every boot.</td></tr>
+<tr><td>3</td><td><code>sudo systemctl start meilisearch</code></td><td>Starts it right now, without waiting for a reboot. On this first start it imports your dump.</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="Lifecycle of the systemd service from inactive through enabled and started to active running, with automatic restart on crash">
+  <rect x="20" y="60" width="120" height="48" rx="8" class="box"/>
+  <text x="80" y="88" text-anchor="middle" class="small">inactive</text>
+
+  <rect x="190" y="60" width="140" height="48" rx="8" class="box2"/>
+  <text x="260" y="82" text-anchor="middle" class="small">enabled</text>
+  <text x="260" y="98" text-anchor="middle" class="small">(starts on boot)</text>
+
+  <rect x="380" y="60" width="140" height="48" rx="8" class="box-info"/>
+  <text x="450" y="88" text-anchor="middle" class="small">started</text>
+
+  <rect x="570" y="60" width="170" height="48" rx="8" class="box-ok"/>
+  <text x="655" y="82" text-anchor="middle" class="small">active (running)</text>
+  <text x="655" y="98" text-anchor="middle" class="small">serving on :7700</text>
+
+  <path class="arrow" d="M140,84 H188"/>
+  <text x="164" y="52" text-anchor="middle" class="small">enable</text>
+  <path class="arrow" d="M330,84 H378"/>
+  <text x="354" y="52" text-anchor="middle" class="small">start</text>
+  <path class="arrow" d="M520,84 H568"/>
+
+  <path class="arrow-bad" d="M655,108 V140 H450 V110"/>
+  <text x="540" y="156" text-anchor="middle" class="small bad">crash &#8594; Restart=on-failure</text>
+</svg>
+<figcaption>The service goes inactive &#8594; enabled &#8594; started &#8594; active. <strong>If it crashes, <code>Restart=on-failure</code> brings it back without you touching the server.</strong></figcaption>
+</figure>
+
+<pre data-lang="bash" data-tag="server"><code>sudo systemctl status meilisearch</code></pre>
+
+<div class="callout ok"><strong>What you should see.</strong> The output shows <code>active (running)</code> (at 232:50), like this:</div>
+
+<pre data-lang="text" data-tag="status output"><code>&#9679; meilisearch.service - Meilisearch
+    Loaded: loaded (/etc/systemd/system/meilisearch.service; enabled; preset: enabled)
+    Active: active (running) since Sat 2026-11-01 07:13:50 UTC; 21s ago
+  Main PID: 44061 (meilisearch)
+    Tasks: 46 (limit: 503)
+    Memory: 164.8M (peak: 165.0M)
+      CPU: 505ms</code></pre>
+
+<p>If you imported a dump, verify the data by asking for an index's stats. Use <code>127.0.0.1</code> because the engine runs locally on the server.</p>
+
+<pre data-lang="bash" data-tag="server"><code>curl -X GET 'http://127.0.0.1:7700/indexes/&lt;YOUR_INDEX_NAME&gt;/stats' \
+  -H 'Authorization: Bearer &lt;YOUR_STRONG_MASTER_KEY&gt;'</code></pre>
+
+<pre data-lang="json" data-tag="response"><code>{
+  "numberOfDocuments": 10,
+  "rawDocumentDbSize": 434176,
+  "avgDocumentSize": 43409,
+  "isIndexing": false,
+  "numberOfEmbeddings": 0,
+  "numberOfEmbeddedDocuments": 0,
+  "fieldDistribution": {
+    "...": "..."
+  }
+}</code></pre>
+
+<h3>Clean up the service file</h3>
+
+<p>Once the data is imported, remove the import flags. Leaving <code>--import-dump</code> in place forever is a hidden trap: if that <code>.dump</code> file is ever deleted, Meilisearch will crash on the next reboot looking for a file that no longer exists (at 239:51). Reopen the file and delete these two lines from the <code>ExecStart</code> command.</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo nano /etc/systemd/system/meilisearch.service</code></pre>
+
+<pre data-lang="ini" data-tag="remove these lines"><code>--import-dump "/var/lib/meilisearch/&lt;YOUR_DUMP_FILE.dump&gt;" \
+--ignore-dump-if-db-exists</code></pre>
+
+<p>Then reload systemd and restart with the clean config.</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo systemctl daemon-reload
+sudo systemctl restart meilisearch</code></pre>
+
+<h2>Step 6 &#8212; Connect the backend</h2>
+
+<p>Finally, tell your Python backend the production master key so it can talk to the engine. Edit the backend's <code>.env</code> file.</p>
+
+<pre data-lang="bash" data-tag="server"><code>cd /web_app/backend
+nano .env</code></pre>
+
+<pre data-lang="ini" data-tag="backend/.env"><code>MEILISEARCH_MASTER_KEY=&lt;YOUR_STRONG_MASTER_KEY&gt;</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>MEILISEARCH_MASTER_KEY=&lt;YOUR_STRONG_MASTER_KEY&gt;</code></td><td>Sets the key FastAPI sends on every search request. It must match the key in <code>/etc/meilisearch/env</code> exactly, or every query returns an "invalid API key" error (at 236:18).</td></tr>
+</table></div>
+
+<p>Restart the backend through Supervisor so FastAPI reloads the new environment, then watch the engine's logs live while you search on the real website.</p>
+
+<pre data-lang="bash" data-tag="server"><code>sudo supervisorctl restart &lt;your_project_name&gt;</code></pre>
+
+<pre data-lang="bash" data-tag="server"><code>sudo journalctl -u meilisearch.service -f</code></pre>
+
+<div class="table-wrap"><table class="lines"><tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>sudo journalctl -u meilisearch.service -f</code></td><td><code>journalctl</code> reads systemd's log. <code>-u meilisearch.service</code> filters to just this service. <code>-f</code> "follows" the log, printing new lines as they arrive. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to stop.</td></tr>
+</table></div>
+
+<div class="callout ok"><strong>What you should see.</strong> As you type a query on your live site, log lines stream by showing successful search requests:</div>
+
+<pre data-lang="text" data-tag="log output"><code>Nov 01 07:34:15 &lt;YOUR_HOSTNAME&gt; meilisearch[44061]: [2026-11-01T07:34:15Z INFO  actix_web::middleware::logger] 127.0.0.1 "POST /indexes/&lt;YOUR_INDEX_NAME&gt;/search HTTP/1.1" 200 451 "-" "python-requests/2.31.0" 0.002345</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="Request path when a visitor searches: browser to Nginx to FastAPI to Meilisearch over localhost, with the result coming back">
+  <rect x="20" y="30" width="110" height="44" rx="8" class="box"/>
+  <text x="75" y="57" text-anchor="middle" class="small">browser</text>
+
+  <rect x="180" y="30" width="110" height="44" rx="8" class="box-ok"/>
+  <text x="235" y="57" text-anchor="middle" class="small">Nginx</text>
+
+  <rect x="340" y="30" width="130" height="44" rx="8" class="box"/>
+  <text x="405" y="52" text-anchor="middle" class="small">FastAPI</text>
+  <text x="405" y="68" text-anchor="middle" class="small">backend</text>
+
+  <rect x="520" y="30" width="150" height="44" rx="8" class="box-info"/>
+  <text x="595" y="52" text-anchor="middle" class="small">Meilisearch</text>
+  <text x="595" y="68" text-anchor="middle" class="small mono">127.0.0.1:7700</text>
+
+  <path class="arrow" d="M130,52 H178"/>
+  <path class="arrow" d="M290,52 H338"/>
+  <path class="arrow" d="M470,52 H518"/>
+  <text x="494" y="24" text-anchor="middle" class="small">localhost</text>
+
+  <path class="arrow-ok" d="M595,74 V120 H75 V76"/>
+  <text x="335" y="138" text-anchor="middle" class="small ok">results travel back the same way</text>
+
+  <text x="380" y="176" text-anchor="middle" class="small">journalctl -f shows each search as a 200 log line</text>
+</svg>
+<figcaption>A search request hops browser &#8594; Nginx &#8594; FastAPI &#8594; Meilisearch over localhost, and the results return the same way. <strong>Watching <code>journalctl -f</code> lets you confirm the whole chain works end to end.</strong></figcaption>
+</figure>
+
+<div class="callout warn"><strong>Common mistakes.</strong> Forgetting <code>daemon-reload</code> after editing the unit file (systemd keeps the stale config). Leaving a mismatched master key between <code>/etc/meilisearch/env</code> and the backend <code>.env</code> (every search fails authorization). Skipping the <code>chown</code> on the dump file (the service crashes on start, unable to read it).</div>
+
+<div class="recap"><strong>Recap</strong><ul>
+<li>You installed the Meilisearch binary into <code>/usr/local/bin/</code> so it runs from anywhere.</li>
+<li>You created a dedicated, login-less system user to own and run the engine, isolating it from your other accounts.</li>
+<li>You migrated local data with a dump (safe across machines) rather than a snapshot, moving it via <code>/tmp</code> and fixing ownership.</li>
+<li>You wrote a systemd unit with a secured environment file, so the engine runs as a daemon, starts on boot, and restarts on failure &#8212; with the master key kept out of the process list.</li>
+<li>You removed the one-time import flags and connected FastAPI with the matching master key, confirming live searches in <code>journalctl</code>.</li>
+<li>Meilisearch now listens only on <code>127.0.0.1:7700</code>, invisible behind UFW.</li>
+</ul></div>
+
+<nav class="pager">
+<a class="prev" href="06-nginx-reverse-proxy.html"><small>← Previous · Step 06</small>Nginx Reverse Proxy &amp; Security Headers</a>
+<a class="next" href="08-secure-management.html"><small>Next · Step 08 →</small>Secure Management: SSH Tunnel &amp; Backups</a>
+</nav>
+</main>
+</body>
+</html>

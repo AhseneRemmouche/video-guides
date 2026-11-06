@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15 · Advanced Testing &amp; DAST</title>
+<meta name="description" content="Add integration and end-to-end tests, and dynamic application security testing with OWASP ZAP.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">Deploy, Secure &amp; Automate Full-Stack Web Apps</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 15/19</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 15 of 19 · 431:17</div>
+  <h1>Advanced Testing &amp; DAST</h1>
+  <p class="lead">Add integration and end-to-end tests, and dynamic application security testing with OWASP ZAP.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=wY5pQOTsGaA&amp;t=25877s" target="_blank" rel="noopener">▶ Watch this part (431:17)</a>
+</section>
+<p class="intro">So far your pipeline has only read your code while it sits still: it checked the formatting, scanned for secrets, and ran isolated unit tests. But a real web application is not a static script. It is a live system of connected services that only shows its true behaviour once everything is running together. In this lesson you bring the whole application to life <em>inside</em> the GitHub Actions runner: a temporary database, the backend, and the frontend all start up, then three new kinds of checks run against the living system.</p>
+
+<p>You will add three layers, in order: backend <a class="term" href="glossary.html#integration-test">integration tests</a> that prove the API can talk to a real Meilisearch database; <a class="term" href="glossary.html#e2e-test">end-to-end tests</a> with Playwright that drive a real browser like a user would; and a <a class="term" href="glossary.html#dast">DAST</a> scan with <a class="term" href="glossary.html#owasp-zap">OWASP ZAP</a> that attacks your running API the way a hacker would. Each one plugs into the same <a class="term" href="glossary.html#pipeline">pipeline</a> you have been building.</p>
+
+<div class="callout">
+<strong>What this lesson is not</strong>
+<p>This lesson does not teach you how to <em>write</em> integration or end-to-end tests from scratch (at 431:42). It shows you how to take tests you already have and wire them into GitHub Actions so they run correctly in the cloud. The focus is the infrastructure around the tests, not the test code itself.</p>
+</div>
+
+<h2>The idea: from static text to a living system</h2>
+
+<p>A <a class="term" href="glossary.html#unit-test">unit test</a> checks one function in isolation (at 435:15). That is fast and cheap, but it cannot tell you whether two real services actually cooperate. Integration tests check that your backend can reach an external service such as Meilisearch or a database. End-to-end tests go further still: they open a browser, load the real page, and click through it, so they need the frontend, backend, and database all running at the same time (at 446:51). The presenter lays out exactly this order at 431:42: integration first, then end-to-end, then a dynamic security scan.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="The testing pyramid with unit tests at the wide base, integration tests in the middle, and end-to-end tests at the narrow top">
+<text x="380" y="26" text-anchor="middle" class="title">The testing pyramid</text>
+<rect x="300" y="46" width="160" height="48" rx="8" class="box-info"/>
+<text x="380" y="68" text-anchor="middle" class="label">End-to-end</text>
+<text x="380" y="84" text-anchor="middle" class="small">few &#183; slow &#183; whole system</text>
+<rect x="220" y="106" width="320" height="48" rx="8" class="box-warn"/>
+<text x="380" y="128" text-anchor="middle" class="label">Integration</text>
+<text x="380" y="144" text-anchor="middle" class="small">API + real service together</text>
+<rect x="120" y="166" width="520" height="48" rx="8" class="box-ok"/>
+<text x="380" y="188" text-anchor="middle" class="label">Unit</text>
+<text x="380" y="204" text-anchor="middle" class="small">many &#183; fast &#183; one function at a time</text>
+<path class="arrow" d="M 690,70 V 200"/>
+<text x="705" y="60" text-anchor="middle" class="small">cost</text>
+<text x="705" y="215" text-anchor="middle" class="small">speed</text>
+<path class="arrow" d="M 70,200 V 70"/>
+<text x="55" y="135" text-anchor="middle" class="small">count</text>
+</svg>
+<figcaption>The lower you go, the more tests you have and the faster they run. The higher you go, the fewer you need but the more of the real system each one exercises. <strong>This lesson adds the two upper layers plus a live security scan.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to the test pyramid? What it is and why it matters</summary>
+<p>The pyramid is a rule of thumb for how to split your testing effort. Most of your tests should be unit tests, because they are quick and pinpoint exactly which function broke. You need fewer integration tests, and only a handful of slow end-to-end tests, because each higher layer costs more time and is harder to debug. Following this shape keeps your pipeline fast while still proving the whole system works.</p>
+</details>
+
+<details class="primer">
+<summary>New to integration tests? What they check</summary>
+<p>An integration test checks that your code works <em>with</em> another real piece of software, not a fake stand-in. For this project the backend relies on Meilisearch to answer search queries, so the integration test starts a real Meilisearch, points the backend at it, and runs queries. You cannot use a fake database here: the whole point is to prove the two programs really talk to each other (at 435:15).</p>
+</details>
+
+<h2>Step 1: Backend integration tests against a live Meilisearch</h2>
+
+<p>To test the real connection in GitHub Actions you cannot use a fake database. You download the real Meilisearch program, start it inside the Ubuntu runner, and run <code>pytest</code> against it (at 439:33). Create the file below.</p>
+
+<ol class="steps">
+<li>In your repository, create <code>.github/workflows/backend-integration-tests.yml</code>.</li>
+<li>Paste the full workflow shown next.</li>
+<li>Commit and push it on a branch, then open a pull request so the pipeline runs it.</li>
+</ol>
+
+<pre data-lang="yaml" data-tag="backend-integration-tests.yml"><code>name: Backend integration tests
+
+on:
+  workflow_call:
+
+env:
+  MEILISEARCH_MASTER_KEY: "aStrongMasterKeyForTestingPurposes"
+  MEILISEARCH_URL: "http://localhost:7700"
+  MEILISEARCH_INDEX_NAME: "articles_test"
+  MEILISEARCH_DOWNLOAD_MAX_RETRIES: "3"
+  MEILISEARCH_DOWNLOAD_RETRY_DELAY: "5"
+
+jobs:
+  tests:
+    name: Run integration tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Download Meilisearch binary
+        run: |
+          MAX_RETRIES="${MEILISEARCH_DOWNLOAD_MAX_RETRIES}"
+          RETRY_DELAY="${MEILISEARCH_DOWNLOAD_RETRY_DELAY}"
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i of $MAX_RETRIES to download Meilisearch..."
+            if curl -L https://install.meilisearch.com | sh; then
+              echo "Meilisearch downloaded successfully!"
+              chmod +x meilisearch
+              break
+            else
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Download failed. Retrying in $RETRY_DELAY seconds..."
+                sleep $RETRY_DELAY
+              else
+                echo "Download failed after $MAX_RETRIES attempts"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Start Meilisearch
+        run: |
+          ./meilisearch --master-key="${MEILISEARCH_MASTER_KEY}" &amp;
+          echo "Waiting for Meilisearch to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:7700/health | grep -q "available"; then
+              echo "Meilisearch is ready!"
+              break
+            fi
+            echo "Attempt $i: Meilisearch not ready yet..."
+            sleep 1
+          done
+          if ! curl -s http://localhost:7700/health | grep -q "available"; then
+            echo "Meilisearch failed to start after 30 attempts"
+            exit 1
+          fi
+
+      - name: Run integration tests
+        run: pytest tests/integration --tb=short -v
+        env:
+          MEILISEARCH_URL: ${{ env.MEILISEARCH_URL }}
+          MEILISEARCH_MASTER_KEY: ${{ env.MEILISEARCH_MASTER_KEY }}
+          MEILISEARCH_INDEX_NAME: ${{ env.MEILISEARCH_INDEX_NAME }}
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>name: Backend integration tests</code></td><td>The workflow name shown in the Actions tab and logs.</td></tr>
+<tr><td>3&#8211;4</td><td><code>on:&#10;  workflow_call:</code></td><td>Marks this as a reusable template. It does nothing until the main pipeline calls it, so it can be plugged into the orchestrator later.</td></tr>
+<tr><td>6&#8211;11</td><td><code>env: MEILISEARCH_MASTER_KEY: "..." ...</code></td><td>Job-wide variables. The master key, URL, and index name tell the tests how to reach the temporary database; the two <code>DOWNLOAD_*</code> values feed the retry loop. The key here is a throwaway for testing only, never your real production key.</td></tr>
+<tr><td>13&#8211;19</td><td><code>jobs: tests: ... working-directory: ./backend</code></td><td>Defines one job on a fresh <code>ubuntu-latest</code> machine and runs every command inside <code>./backend</code> so you never type <code>cd backend</code>.</td></tr>
+<tr><td>21&#8211;22</td><td><code>uses: actions/checkout@v6</code></td><td>Downloads your repository onto the runner.</td></tr>
+<tr><td>24&#8211;28</td><td><code>uses: actions/setup-python@v6</code></td><td>Installs Python 3.13 and caches <code>pip</code> downloads so future runs are faster.</td></tr>
+<tr><td>30&#8211;31</td><td><code>run: pip install -r requirements-dev.txt</code></td><td>Installs the dev dependencies (the test tools live here, not in the production <code>requirements.txt</code>).</td></tr>
+<tr><td>33&#8211;52</td><td><code>Download Meilisearch binary ... for i in $(seq 1 $MAX_RETRIES)</code></td><td>Downloads the real Meilisearch program with <code>curl ... | sh</code>, wrapped in a retry loop. CI runners share bandwidth and downloads sometimes fail, so it tries up to three times before giving up (at 436:48). <code>chmod +x meilisearch</code> makes the downloaded file runnable.</td></tr>
+<tr><td>39</td><td><code>if curl -L https://install.meilisearch.com | sh; then</code></td><td><code>-L</code> follows redirects; the output is piped straight into <code>sh</code> to run the installer. If it succeeds the loop breaks early.</td></tr>
+<tr><td>54&#8211;56</td><td><code>./meilisearch --master-key="${MEILISEARCH_MASTER_KEY}" &amp;</code></td><td>Starts the database. The trailing <code>&amp;</code> runs it in the background. Forget the <code>&amp;</code> and the step hangs forever watching the logs and never reaches your tests (at 439:33).</td></tr>
+<tr><td>57&#8211;65</td><td><code>for i in {1..30}; do ... /health | grep -q "available"</code></td><td>Waits for the service to be ready. The database takes a few seconds to boot, so this pings the <code>/health</code> endpoint once a second and breaks the moment it sees <code>available</code>. Without this, <code>pytest</code> would start too early and fail to connect.</td></tr>
+<tr><td>66&#8211;69</td><td><code>if ! curl ... grep -q "available"; then exit 1</code></td><td>A final safety check: if the database never became ready, fail the job clearly instead of running tests against nothing.</td></tr>
+<tr><td>71&#8211;72</td><td><code>run: pytest tests/integration --tb=short -v</code></td><td>Runs only the integration test folder. <code>--tb=short</code> keeps error tracebacks compact; <code>-v</code> lists each test so you can see what ran (at 439:11).</td></tr>
+<tr><td>73&#8211;76</td><td><code>env: MEILISEARCH_URL: ${{ env.MEILISEARCH_URL }} ...</code></td><td>Passes the connection details into the test step so your backend code knows how to reach the temporary database (at 439:33).</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Inside one GitHub Actions runner the backend talks to a live Meilisearch started in the same machine">
+<text x="380" y="24" text-anchor="middle" class="title">Integration test: real backend, real Meilisearch</text>
+<rect x="30" y="50" width="700" height="170" rx="8" class="zone"/>
+<text x="150" y="72" text-anchor="middle" class="small">GitHub Actions runner (ubuntu-latest)</text>
+<rect x="70" y="95" width="180" height="90" rx="8" class="box"/>
+<text x="160" y="128" text-anchor="middle" class="label">pytest</text>
+<text x="160" y="148" text-anchor="middle" class="small">tests/integration</text>
+<rect x="310" y="95" width="180" height="90" rx="8" class="box2"/>
+<text x="400" y="128" text-anchor="middle" class="label">FastAPI backend</text>
+<text x="400" y="148" text-anchor="middle" class="small">code under test</text>
+<rect x="550" y="95" width="150" height="90" rx="8" class="box-ok"/>
+<text x="625" y="128" text-anchor="middle" class="label">Meilisearch</text>
+<text x="625" y="148" text-anchor="middle" class="small">:7700 (real)</text>
+<path class="arrow" d="M 250,140 H 308"/>
+<path class="arrow" d="M 490,140 H 548"/>
+<text x="279" y="132" text-anchor="middle" class="small">calls</text>
+<text x="519" y="132" text-anchor="middle" class="small">queries</text>
+</svg>
+<figcaption>Everything runs in one throwaway machine. The test exercises the real code path all the way to a real search engine. <strong>No fakes: if the two cannot talk, the test fails.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 270" role="img" aria-label="Sequence of booting a service in the runner: download, start in background, poll health, then run tests">
+<text x="380" y="24" text-anchor="middle" class="title">Booting a service before testing</text>
+<rect x="40" y="50" width="160" height="46" rx="8" class="box"/>
+<text x="120" y="78" text-anchor="middle" class="label">1. Download</text>
+<rect x="230" y="50" width="160" height="46" rx="8" class="box"/>
+<text x="310" y="72" text-anchor="middle" class="label">2. Start in</text>
+<text x="310" y="88" text-anchor="middle" class="label">background (&amp;)</text>
+<rect x="420" y="50" width="180" height="46" rx="8" class="box-warn"/>
+<text x="510" y="72" text-anchor="middle" class="label">3. Poll /health</text>
+<text x="510" y="88" text-anchor="middle" class="small">until "available"</text>
+<rect x="630" y="50" width="90" height="46" rx="8" class="box-ok"/>
+<text x="675" y="78" text-anchor="middle" class="label">4. Test</text>
+<path class="arrow" d="M 200,73 H 228"/>
+<path class="arrow" d="M 390,73 H 418"/>
+<path class="arrow" d="M 600,73 H 628"/>
+<path class="arrow-bad" d="M 510,96 V 150"/>
+<rect x="400" y="150" width="220" height="60" rx="8" class="box-bad"/>
+<text x="510" y="176" text-anchor="middle" class="label">not ready after 30 tries</text>
+<text x="510" y="196" text-anchor="middle" class="small">exit 1 &#8594; fail fast</text>
+<path class="arrow-ok" d="M 675,96 V 150"/>
+<rect x="605" y="150" width="130" height="60" rx="8" class="box-ok"/>
+<text x="670" y="184" text-anchor="middle" class="small">pytest connects</text>
+</svg>
+<figcaption>The same four-step rhythm &#8212; download, background-start, wait, then act &#8212; appears in every job that needs a live service. <strong>The health poll is what prevents flaky "connection refused" failures.</strong></figcaption>
+</figure>
+
+<h2>Step 2: End-to-end tests with Playwright</h2>
+
+<p>End-to-end tests open a real browser and click through your site like a user (at 432:06). Because the user needs to see the interface and load real data, these tests require the frontend, backend, and database all running at once (at 446:51). First install Playwright and set up its config.</p>
+
+<ol class="steps">
+<li>In <code>frontend/</code>, run the install command below. Playwright will create a config file for you (at 453:49).</li>
+<li>Open <code>frontend/playwright.config.js</code> and make it match the version shown, so it behaves well inside GitHub Actions.</li>
+<li>Create <code>.github/workflows/e2e-tests.yml</code> with the workflow that boots the whole stack.</li>
+</ol>
+
+<pre data-lang="bash" data-tag="local terminal, in frontend/"><code>pnpm create playwright</code></pre>
+
+<pre data-lang="js" data-tag="frontend/playwright.config.js"><code>import { defineConfig, devices } from "@playwright/test";
+
+export default defineConfig({
+  testDir: "./tests/e2e",
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: undefined,
+  reporter: process.env.CI ? [["list"], ["github"]] : "html",
+  expect: {
+    timeout: 10 * 1000,
+  },
+  use: {
+    baseURL: "http://localhost:8080",
+    trace: "on-first-retry",
+    screenshot: "only-on-failure",
+  },
+  projects: [
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "firefox",
+      use: { ...devices["Desktop Firefox"] },
+    },
+  ],
+  webServer: {
+    command: "pnpm run dev",
+    url: "http://localhost:8080",
+    reuseExistingServer: !process.env.CI,
+    timeout: 120 * 1000,
+  },
+});
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>import { defineConfig, devices } from "@playwright/test";</code></td><td>Brings in Playwright's config helper and its list of ready-made device profiles.</td></tr>
+<tr><td>4</td><td><code>testDir: "./tests/e2e",</code></td><td>Tells Playwright where your end-to-end tests live (at 454:58).</td></tr>
+<tr><td>5</td><td><code>fullyParallel: true,</code></td><td>Runs tests side by side so the slow suite finishes faster.</td></tr>
+<tr><td>6</td><td><code>forbidOnly: !!process.env.CI,</code></td><td>If you accidentally commit <code>test.only</code> (which skips every other test), this makes the CI run fail. It stops a half-disabled suite from passing silently (at 455:22).</td></tr>
+<tr><td>7</td><td><code>retries: process.env.CI ? 2 : 0,</code></td><td>Retries a failing test up to twice, but only in CI, because shared runners sometimes fail tests by accident. Locally there are no retries.</td></tr>
+<tr><td>9</td><td><code>reporter: process.env.CI ? [["list"], ["github"]] : "html",</code></td><td>In CI there is no screen to open a report page, so it uses the <code>github</code> reporter to print errors right inside the Actions interface. Locally it opens the HTML report (at 456:54).</td></tr>
+<tr><td>13&#8211;15</td><td><code>use: { baseURL: "http://localhost:8080", ... }</code></td><td>The address the browser visits, plus a trace on the first retry and a screenshot only when a test fails &#8212; just enough evidence to debug without bloating every run.</td></tr>
+<tr><td>17&#8211;26</td><td><code>projects: [ chromium, firefox ]</code></td><td>Runs the suite in two real browser engines so you catch browser-specific bugs.</td></tr>
+<tr><td>28&#8211;33</td><td><code>webServer: { command: "pnpm run dev", ... }</code></td><td>Playwright starts your frontend itself and waits for the URL to respond before testing. <code>reuseExistingServer: !process.env.CI</code> reuses your already-running dev server locally but always starts a fresh one in CI (at 456:00).</td></tr>
+</table></div>
+
+<p>Now the workflow that starts the entire system. This is the longest job in the pipeline because it boots the database, the backend, and the frontend, then runs the browser tests.</p>
+
+<pre data-lang="yaml" data-tag=".github/workflows/e2e-tests.yml"><code>name: E2E tests
+
+on:
+  workflow_call:
+
+env:
+  MEILISEARCH_MASTER_KEY: "aStrongMasterKeyForTestingPurposes"
+  MEILISEARCH_URL: "http://localhost:7700"
+  MEILISEARCH_INDEX_NAME: "articles_test"
+  MEILISEARCH_DOWNLOAD_MAX_RETRIES: "3"
+  MEILISEARCH_DOWNLOAD_RETRY_DELAY: "5"
+
+jobs:
+  tests:
+    name: Run E2E tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: pip install -r requirements.txt
+
+      - name: Download Meilisearch binary
+        working-directory: ./backend
+        run: |
+          MAX_RETRIES="${MEILISEARCH_DOWNLOAD_MAX_RETRIES}"
+          RETRY_DELAY="${MEILISEARCH_DOWNLOAD_RETRY_DELAY}"
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i of $MAX_RETRIES to download Meilisearch..."
+            if curl -L https://install.meilisearch.com | sh; then
+              echo "Meilisearch downloaded successfully!"
+              chmod +x meilisearch
+              break
+            else
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Download failed. Retrying in $RETRY_DELAY seconds..."
+                sleep $RETRY_DELAY
+              else
+                echo "Download failed after $MAX_RETRIES attempts"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Start Meilisearch
+        working-directory: ./backend
+        run: |
+          ./meilisearch --master-key="${MEILISEARCH_MASTER_KEY}" &amp;
+          echo "Waiting for Meilisearch to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:7700/health | grep -q "available"; then
+              echo "Meilisearch is ready!"
+              break
+            fi
+            echo "Attempt $i: Meilisearch not ready yet..."
+            sleep 1
+          done
+          if ! curl -s http://localhost:7700/health | grep -q "available"; then
+            echo "Meilisearch failed to start after 30 attempts"
+            exit 1
+          fi
+
+      - name: Start backend server
+        working-directory: ./backend
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8000 &amp;
+          echo "Waiting for backend to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8000/api/health | grep -q "ok"; then
+              echo "Backend is ready!"
+              break
+            fi
+            echo "Attempt $i: Backend not ready yet..."
+            sleep 1
+          done
+          if ! curl -s http://localhost:8000/api/health | grep -q "ok"; then
+            echo "Backend failed to start after 30 attempts"
+            exit 1
+          fi
+        env:
+          MEILISEARCH_URL: ${{ env.MEILISEARCH_URL }}
+          MEILISEARCH_MASTER_KEY: ${{ env.MEILISEARCH_MASTER_KEY }}
+          MEILISEARCH_INDEX_NAME: ${{ env.MEILISEARCH_INDEX_NAME }}
+
+      - name: Seed E2E test data
+        working-directory: ./backend
+        run: python -m tests.test_data
+        env:
+          MEILISEARCH_URL: ${{ env.MEILISEARCH_URL }}
+          MEILISEARCH_MASTER_KEY: ${{ env.MEILISEARCH_MASTER_KEY }}
+          MEILISEARCH_INDEX_NAME: ${{ env.MEILISEARCH_INDEX_NAME }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: pnpm install
+
+      - name: Get Playwright version
+        id: playwright-version
+        working-directory: ./frontend
+        run: echo "version=$(pnpm list @playwright/test --json | jq -r '.[0].devDependencies["@playwright/test"].version')" &gt;&gt; $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install Playwright browsers (if no cache)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: ./frontend
+        run: pnpm exec playwright install --with-deps chromium firefox
+
+      - name: Install Playwright dependencies (if cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: ./frontend
+        run: pnpm exec playwright install-deps chromium firefox
+
+      - name: Run E2E tests
+        working-directory: ./frontend
+        run: pnpm run test:e2e
+        env:
+          CI: true
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 30
+</code></pre>
+
+<h3>Line by line (the new steps)</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>16</td><td><code>timeout-minutes: 30</code></td><td>If the whole suite runs longer than 30 minutes, cancel it. End-to-end tests can hang, and you do not want a stuck job burning runner time (at 447:15).</td></tr>
+<tr><td>73&#8211;89</td><td><code>Start backend server ... uvicorn main:app --host 0.0.0.0 --port 8000 &amp;</code></td><td>Starts FastAPI in the background and polls <code>/api/health</code> until it answers <code>ok</code>. Same background-and-wait pattern as the database (at 448:00).</td></tr>
+<tr><td>91&#8211;97</td><td><code>Seed E2E test data ... run: python -m tests.test_data</code></td><td>Fills the empty database with test content. If a test clicks an article that is not there, it fails, so the browser needs something to interact with first (at 448:23).</td></tr>
+<tr><td>99&#8211;112</td><td><code>Set up pnpm ... Set up Node.js (cache: "pnpm")</code></td><td>Installs the frontend toolchain with caching, exactly like your lint and unit-test jobs.</td></tr>
+<tr><td>118&#8211;122</td><td><code>Get Playwright version ... &gt;&gt; $GITHUB_OUTPUT</code></td><td>Reads the installed Playwright version with <code>jq</code> and saves it as a step output. It becomes part of the cache key so a new browser version busts the old cache.</td></tr>
+<tr><td>124&#8211;133</td><td><code>Cache Playwright browsers ... path: ~/.cache/ms-playwright</code></td><td>Playwright downloads large browser binaries every run; caching them saves a minute or more (at 450:20).</td></tr>
+<tr><td>135&#8211;143</td><td><code>Install ... (if no cache) / (if cache hit)</code></td><td>On a cache miss it installs the full browsers with their system libraries; on a hit it only installs the missing system libraries. The <code>if:</code> conditions pick the right path.</td></tr>
+<tr><td>145&#8211;149</td><td><code>Run E2E tests ... CI: true</code></td><td>Runs the browser suite. Setting <code>CI: true</code> flips the config into its stricter CI behaviour (retries, github reporter, fresh server) (at 451:53).</td></tr>
+<tr><td>151&#8211;157</td><td><code>Upload Playwright report ... if: ${{ !cancelled() }}</code></td><td>Saves Playwright's report (with screenshots and traces) as a downloadable artifact. <code>!cancelled()</code> means the report is kept even when tests fail &#8212; which is exactly when you need it (at 452:41).</td></tr>
+</table></div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="End-to-end test stack: a Playwright browser drives the frontend, which calls the backend, which queries Meilisearch">
+<text x="380" y="24" text-anchor="middle" class="title">End-to-end: the whole stack runs at once</text>
+<rect x="24" y="50" width="712" height="150" rx="8" class="zone"/>
+<text x="130" y="72" text-anchor="middle" class="small">GitHub Actions runner</text>
+<rect x="50" y="95" width="150" height="80" rx="8" class="box-info"/>
+<text x="125" y="128" text-anchor="middle" class="label">Playwright</text>
+<text x="125" y="146" text-anchor="middle" class="small">Chromium + Firefox</text>
+<rect x="225" y="95" width="150" height="80" rx="8" class="box"/>
+<text x="300" y="128" text-anchor="middle" class="label">Frontend</text>
+<text x="300" y="146" text-anchor="middle" class="small">:8080 (pnpm dev)</text>
+<rect x="400" y="95" width="150" height="80" rx="8" class="box2"/>
+<text x="475" y="128" text-anchor="middle" class="label">Backend</text>
+<text x="475" y="146" text-anchor="middle" class="small">:8000 (uvicorn)</text>
+<rect x="575" y="95" width="140" height="80" rx="8" class="box-ok"/>
+<text x="645" y="128" text-anchor="middle" class="label">Meilisearch</text>
+<text x="645" y="146" text-anchor="middle" class="small">:7700 + seeded</text>
+<path class="arrow" d="M 200,135 H 223"/>
+<path class="arrow" d="M 375,135 H 398"/>
+<path class="arrow" d="M 550,135 H 573"/>
+</svg>
+<figcaption>One end-to-end test proves every layer cooperates: browser &#8594; frontend &#8594; backend &#8594; search engine, with real seeded data. <strong>That is why it is the slowest and most valuable test.</strong></figcaption>
+</figure>
+
+<h2>Step 3: Dynamic security scanning with OWASP ZAP (DAST)</h2>
+
+<p>Earlier you ran SAST, which reads your raw source code for flaws. Some weaknesses only appear when the app is <em>running</em> (at 465:01). DAST interacts with your live application like a real attacker, probing its inputs and routes. You will use the OWASP ZAP API scan: point it at FastAPI's auto-generated <code>openapi.json</code>, and ZAP learns every route and tests them one by one (at 463:01).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="SAST reads code at rest while DAST tests the running application, so the two find different kinds of problems">
+<text x="380" y="24" text-anchor="middle" class="title">SAST vs DAST: two different views</text>
+<rect x="30" y="48" width="340" height="130" rx="8" class="box-info"/>
+<text x="200" y="72" text-anchor="middle" class="label">SAST (earlier)</text>
+<rect x="55" y="88" width="290" height="30" rx="8" class="box2"/>
+<text x="200" y="108" text-anchor="middle" class="small">reads source code at rest</text>
+<text x="200" y="140" text-anchor="middle" class="small">finds: hardcoded secrets, weak</text>
+<text x="200" y="158" text-anchor="middle" class="small">crypto, dangerous patterns</text>
+<rect x="390" y="48" width="340" height="130" rx="8" class="box-warn"/>
+<text x="560" y="72" text-anchor="middle" class="label">DAST (this lesson)</text>
+<rect x="415" y="88" width="290" height="30" rx="8" class="box2"/>
+<text x="560" y="108" text-anchor="middle" class="small">attacks the running app</text>
+<text x="560" y="140" text-anchor="middle" class="small">finds: missing headers, injection,</text>
+<text x="560" y="158" text-anchor="middle" class="small">flaws that appear only when live</text>
+</svg>
+<figcaption>SAST looks at code that is sitting still; DAST sends real requests to the live system. <strong>You need both, because each catches problems the other cannot see.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to DAST and OWASP ZAP? What they do</summary>
+<p>DAST stands for Dynamic Application Security Testing. Unlike a static scan that reads code, a dynamic scan runs against the live, started application and sends real requests to look for weaknesses. OWASP ZAP (Zed Attack Proxy) is a free, trusted, open-source tool that performs exactly this kind of scan (at 462:37). Because FastAPI publishes an <code>openapi.json</code> describing every route, ZAP reads that file and knows precisely what to attack, instead of guessing by clicking around.</p>
+</details>
+
+<ol class="steps">
+<li>Create <code>.github/workflows/dast-scan.yml</code> with the workflow below. It boots Meilisearch and the backend, then runs the ZAP action against the running API (at 462:10).</li>
+<li>Create <code>.github/zap-rules.tsv</code> to silence false alarms that only happen because the CI server has no Nginx in front of it.</li>
+</ol>
+
+<pre data-lang="yaml" data-tag=".github/workflows/dast-scan.yml"><code>name: DAST API scan
+
+on:
+  workflow_call:
+
+jobs:
+  zap_scan:
+    name: OWASP ZAP API scan
+    runs-on: ubuntu-latest
+    env:
+      MEILISEARCH_MASTER_KEY: "aStrongMasterKeyForTestingPurposes"
+      MEILISEARCH_URL: "http://localhost:7700"
+      MEILISEARCH_INDEX_NAME: "articles_test"
+      ENVIRONMENT: "development"
+      MEILISEARCH_DOWNLOAD_MAX_RETRIES: "3"
+      MEILISEARCH_DOWNLOAD_RETRY_DELAY: "5"
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download Meilisearch binary
+        run: |
+          MAX_RETRIES="${MEILISEARCH_DOWNLOAD_MAX_RETRIES}"
+          RETRY_DELAY="${MEILISEARCH_DOWNLOAD_RETRY_DELAY}"
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i of $MAX_RETRIES to download Meilisearch..."
+            if curl -L https://install.meilisearch.com | sh; then
+              echo "Meilisearch downloaded successfully!"
+              chmod +x meilisearch
+              break
+            else
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Download failed. Retrying in $RETRY_DELAY seconds..."
+                sleep $RETRY_DELAY
+              else
+                echo "Download failed after $MAX_RETRIES attempts"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Start Meilisearch
+        run: |
+          ./meilisearch --master-key="${MEILISEARCH_MASTER_KEY}" &amp;
+          echo "Waiting for Meilisearch to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:7700/health | grep -q "available"; then
+              echo "Meilisearch is ready!"
+              break
+            fi
+            echo "Attempt $i: Meilisearch not ready yet..."
+            sleep 1
+          done
+          if ! curl -s http://localhost:7700/health | grep -q "available"; then
+            echo "Meilisearch failed to start after 30 attempts"
+            exit 1
+          fi
+
+      - name: Seed test data
+        run: python -m tests.test_data
+
+      - name: Start backend
+        run: |
+          nohup uvicorn main:app --host 0.0.0.0 --port 8000 &amp;
+          echo "Waiting for backend to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8000/api/health | grep -q "ok"; then
+              echo "Backend is ready!"
+              break
+            fi
+            echo "Attempt $i: Backend not ready yet..."
+            sleep 1
+          done
+          if ! curl -s http://localhost:8000/api/health | grep -q "ok"; then
+            echo "Backend failed to start after 30 attempts"
+            exit 1
+          fi
+
+      - name: ZAP API scan
+        uses: zaproxy/action-api-scan@v0.10.0
+        with:
+          target: "http://localhost:8000/openapi.json"
+          format: openapi
+          rules_file_name: ".github/zap-rules.tsv"
+          allow_issue_writing: false
+          fail_action: true
+</code></pre>
+
+<h3>Line by line (the ZAP step)</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>10&#8211;15</td><td><code>env: ... ENVIRONMENT: "development"</code></td><td>Same test variables as the other jobs, plus <code>ENVIRONMENT: "development"</code> so the backend runs in its dev mode during the scan.</td></tr>
+<tr><td>73&#8211;74</td><td><code>Start backend ... nohup uvicorn main:app ... &amp;</code></td><td>Starts the backend with <code>nohup</code> so it keeps running after the step's shell exits, in the background (<code>&amp;</code>), ready for ZAP to attack.</td></tr>
+<tr><td>92&#8211;93</td><td><code>uses: zaproxy/action-api-scan@v0.10.0</code></td><td>Runs the official OWASP ZAP API-scan action, pinned to version 0.10.0.</td></tr>
+<tr><td>95</td><td><code>target: "http://localhost:8000/openapi.json"</code></td><td>Points ZAP at FastAPI's auto-generated API description, so it knows every route to test instead of guessing (at 463:01).</td></tr>
+<tr><td>96</td><td><code>format: openapi</code></td><td>Tells ZAP the target is an OpenAPI spec, not a web page to crawl.</td></tr>
+<tr><td>97</td><td><code>rules_file_name: ".github/zap-rules.tsv"</code></td><td>Points to your file of alerts to ignore, so the scan only fails on real problems (at 470:32).</td></tr>
+<tr><td>98</td><td><code>allow_issue_writing: false</code></td><td>Stops ZAP from opening a GitHub Issue for every finding, which would spam your project during code review.</td></tr>
+<tr><td>99</td><td><code>fail_action: true</code></td><td>Still fails the pipeline when a real problem is found &#8212; the whole point of the gate.</td></tr>
+</table></div>
+
+<p>Now the rules file. On a plain CI server there is no Nginx or Cloudflare adding security headers, so ZAP flags those missing headers as vulnerabilities even though production handles them (at 469:21). Quiet those specific alerts.</p>
+
+<pre data-lang="text" data-tag=".github/zap-rules.tsv"><code>10096   IGNORE  (Timestamp Disclosure - Unix)
+10106   IGNORE  (HTTP Only Site)
+10021   IGNORE  (X-Content-Type-Options - Handled by Nginx)
+90004   IGNORE  (Insufficient Site Isolation / CORP - Handled by Nginx)
+10020   IGNORE  (X-Frame-Options - Handled by Nginx)
+10035   IGNORE  (Strict-Transport-Security - Handled by Nginx)
+10038   IGNORE  (Content Security Policy - Handled by Nginx)
+10063   IGNORE  (Permissions Policy - Handled by Nginx)
+10055   IGNORE  (CSP Wildcards and Unsafe - Handled by Nginx)
+40040   IGNORE  (CORS Header - Handled by Nginx)
+10049   IGNORE  (Cache Headers - Handled by Nginx)
+10027   IGNORE  (Suspicious Comments - False alarms in outside libraries)
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>&#8212;</td><td><code>&lt;Rule ID&gt;  &lt;ACTION&gt;  &lt;Comment&gt;</code></td><td>The file format: three tab-separated columns. The rule number, what to do with it, and a note for humans (at 470:55).</td></tr>
+<tr><td>1</td><td><code>10096   IGNORE  (Timestamp Disclosure - Unix)</code></td><td>Meilisearch uses Unix timestamps, which ZAP mistakes for a leak. Harmless, so ignore it (at 472:54).</td></tr>
+<tr><td>2</td><td><code>10106   IGNORE  (HTTP Only Site)</code></td><td>The test server runs on plain HTTP because it is <code>localhost</code>, not production. Ignore the "no HTTPS" warning.</td></tr>
+<tr><td>3&#8211;11</td><td><code>10021 / 90004 / 10020 / 10035 / 10038 / 10063 / 10055 / 40040 / 10049 ... Handled by Nginx</code></td><td>Each of these is a security header (content-type options, site isolation, framing, HSTS, CSP, permissions policy, CORS, cache headers). Production Nginx adds them all, but the bare CI runner does not, so ZAP flags them. Ignore here only (at 469:44).</td></tr>
+<tr><td>12</td><td><code>10027   IGNORE  (Suspicious Comments ...)</code></td><td>False alarms from comments inside third-party libraries you do not control.</td></tr>
+</table></div>
+
+<div class="callout warn">
+<strong>Common mistakes</strong>
+<ul>
+<li>Forgetting the trailing <code>&amp;</code> when starting Meilisearch, the backend, or a dev server. Without it the step hangs forever and never runs your tests (at 439:33).</li>
+<li>Running tests before the service is ready. Always poll the <code>/health</code> endpoint first, or you get "connection refused".</li>
+<li>Over-ignoring in <code>zap-rules.tsv</code>. Silence only alerts that are genuinely handled in production. Do not blanket-ignore real findings (at 472:31).</li>
+<li>The Meilisearch download can 404 if you grab it minutes after a new release, before its files are published. Just re-run the job (at 466:36).</li>
+</ul>
+</div>
+
+<div class="callout ok">
+<strong>What you should see</strong>
+<p>Integration tests connect to a real Meilisearch and pass. The end-to-end job boots the full stack and runs many browser tests across two engines in parallel (the presenter sees 178 tests at 459:18). The ZAP scan reports it found your API's routes from <code>openapi.json</code> (15 URLs in the video), and once your rules file is in place it skips the Nginx-handled headers and passes (at 474:09).</p>
+</div>
+
+<div class="callout">
+<strong>Security note</strong>
+<p>The ZAP step in the pipeline is a deliberately fast, lightweight scan of the backend API so it does not slow every commit (at 468:35). It does not cover the full frontend. The handbook sets up a separate, heavier daily scan for that, run overnight. Also remember: once your rules file stabilises, a <em>new</em> ZAP failure almost certainly means a real security issue that needs immediate attention (at 474:54).</p>
+</div>
+
+<h2>Step 4: Wire the new jobs into the orchestrator</h2>
+
+<p>These three workflows are reusable templates; nothing runs them yet. Add them to your master <code>ci.yml</code>, wiring the <code>needs</code> keys so each one waits for the right earlier job, and add them to the final <code>pipeline-success</code> gate (at 479:12).</p>
+
+<pre data-lang="yaml" data-tag="ci.yml (additions)"><code># ...
+
+jobs:
+  dast-check:
+    name: Backend
+    needs: backend-lint-format-check
+    uses: ./.github/workflows/dast-scan.yml
+    secrets: inherit
+
+  backend-integration-tests:
+    name: Backend
+    needs: backend-unit-tests
+    uses: ./.github/workflows/backend-integration-tests.yml
+
+  e2e-tests:
+    name: E2E
+    needs: [frontend-unit-tests, backend-integration-tests]
+    uses: ./.github/workflows/e2e-tests.yml
+</code></pre>
+
+<h3>Line by line</h3>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>5&#8211;9</td><td><code>dast-check: ... needs: backend-lint-format-check ... secrets: inherit</code></td><td>Runs the DAST scan after the backend lint passes. <code>secrets: inherit</code> passes the repository secrets down to the reusable workflow (at 464:12).</td></tr>
+<tr><td>11&#8211;14</td><td><code>backend-integration-tests: ... needs: backend-unit-tests</code></td><td>Runs integration tests only after the backend unit tests pass, so cheap checks fail first (at 441:11).</td></tr>
+<tr><td>16&#8211;19</td><td><code>e2e-tests: ... needs: [frontend-unit-tests, backend-integration-tests]</code></td><td>The end-to-end job waits for both the frontend unit tests and the backend integration tests, because it depends on the whole system being sound (at 457:18).</td></tr>
+</table></div>
+
+<p>Finally, add <code>dast-check</code>, <code>backend-integration-tests</code>, and <code>e2e-tests</code> to the <code>needs</code> array of the <code>pipeline-success</code> job at the bottom of <code>ci.yml</code>, so the single required check keeps guarding the merge button.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Dependency graph showing how the new jobs wait on earlier jobs using needs, then all feed the pipeline-success gate">
+<text x="380" y="24" text-anchor="middle" class="title">The new jobs in the dependency graph</text>
+<rect x="30" y="50" width="150" height="40" rx="8" class="box2"/>
+<text x="105" y="74" text-anchor="middle" class="small">backend-lint</text>
+<rect x="30" y="110" width="150" height="40" rx="8" class="box2"/>
+<text x="105" y="134" text-anchor="middle" class="small">backend-unit-tests</text>
+<rect x="30" y="170" width="150" height="40" rx="8" class="box2"/>
+<text x="105" y="194" text-anchor="middle" class="small">frontend-unit-tests</text>
+<rect x="250" y="50" width="150" height="40" rx="8" class="box-warn"/>
+<text x="325" y="74" text-anchor="middle" class="small">dast-check</text>
+<rect x="250" y="110" width="170" height="40" rx="8" class="box"/>
+<text x="335" y="129" text-anchor="middle" class="small">backend-</text>
+<text x="335" y="144" text-anchor="middle" class="small">integration-tests</text>
+<rect x="480" y="140" width="130" height="40" rx="8" class="box-info"/>
+<text x="545" y="164" text-anchor="middle" class="small">e2e-tests</text>
+<path class="arrow" d="M 180,70 H 248"/>
+<path class="arrow" d="M 180,130 H 248"/>
+<path class="arrow" d="M 420,130 Q 450,140 478,152"/>
+<path class="arrow" d="M 180,185 Q 300,190 478,168"/>
+<rect x="640" y="140" width="100" height="40" rx="8" class="box-solid"/>
+<text x="690" y="158" text-anchor="middle" class="on-solid">pipeline-</text>
+<text x="690" y="173" text-anchor="middle" class="on-solid">success</text>
+<path class="arrow-ok" d="M 610,160 H 638"/>
+</svg>
+<figcaption>Each new job names what it waits for with <code>needs</code>; the end-to-end job sits last because it depends on the whole system. <strong>All of them must be listed in <code>pipeline-success</code> so the required check still covers them.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Where each kind of test runs across the pipeline stages, from security scans through lint, unit, integration, end-to-end, and the final gate">
+<text x="380" y="24" text-anchor="middle" class="title">Where each test runs in the pipeline</text>
+<rect x="20" y="50" width="120" height="54" rx="8" class="box-warn"/>
+<text x="80" y="73" text-anchor="middle" class="small">Security</text>
+<text x="80" y="90" text-anchor="middle" class="small">SCA + SAST</text>
+<rect x="165" y="50" width="110" height="54" rx="8" class="box2"/>
+<text x="220" y="81" text-anchor="middle" class="small">Lint + format</text>
+<rect x="300" y="50" width="110" height="54" rx="8" class="box-ok"/>
+<text x="355" y="81" text-anchor="middle" class="small">Unit tests</text>
+<rect x="435" y="50" width="130" height="54" rx="8" class="box"/>
+<text x="500" y="73" text-anchor="middle" class="small">Integration</text>
+<text x="500" y="90" text-anchor="middle" class="small">+ live DB</text>
+<rect x="590" y="50" width="150" height="54" rx="8" class="box-info"/>
+<text x="665" y="73" text-anchor="middle" class="small">E2E (browser)</text>
+<text x="665" y="90" text-anchor="middle" class="small">+ DAST scan</text>
+<path class="arrow" d="M 140,77 H 163"/>
+<path class="arrow" d="M 275,77 H 298"/>
+<path class="arrow" d="M 410,77 H 433"/>
+<path class="arrow" d="M 565,77 H 588"/>
+<path class="arrow-ok" d="M 380,104 V 150"/>
+<rect x="250" y="150" width="260" height="46" rx="8" class="box-solid"/>
+<text x="380" y="178" text-anchor="middle" class="on-solid">Pipeline success (required check)</text>
+<text x="380" y="230" text-anchor="middle" class="small">Static checks on the left run first and fail fast; live-system checks on the right</text>
+<text x="380" y="248" text-anchor="middle" class="small">cost the most, so they run last, only once the cheaper checks are green.</text>
+</svg>
+<figcaption>Checks flow left to right from cheapest to most expensive. <strong>The single "Pipeline success" job watches them all and is the only required check on the branch.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="OWASP ZAP reads the openapi.json file then sends attacks to each route of the running backend">
+<text x="380" y="24" text-anchor="middle" class="title">How ZAP scans the running API</text>
+<rect x="40" y="70" width="170" height="90" rx="8" class="box-warn"/>
+<text x="125" y="105" text-anchor="middle" class="label">OWASP ZAP</text>
+<text x="125" y="125" text-anchor="middle" class="small">action-api-scan</text>
+<rect x="520" y="55" width="200" height="130" rx="8" class="box2"/>
+<text x="620" y="78" text-anchor="middle" class="label">Running backend</text>
+<text x="620" y="95" text-anchor="middle" class="small">localhost:8000</text>
+<rect x="540" y="105" width="160" height="26" rx="8" class="box"/>
+<text x="620" y="123" text-anchor="middle" class="small">/openapi.json</text>
+<rect x="540" y="140" width="160" height="26" rx="8" class="box"/>
+<text x="620" y="158" text-anchor="middle" class="small">/api/... routes</text>
+<path class="arrow" d="M 210,100 H 538"/>
+<text x="370" y="92" text-anchor="middle" class="small">1. read route list</text>
+<path class="arrow-bad" d="M 538,150 H 212"/>
+<text x="375" y="200" text-anchor="middle" class="small">2. attack each route like a real hacker would</text>
+</svg>
+<figcaption>ZAP first reads <code>openapi.json</code> to learn every route, then fires crafted requests at each one. <strong>Giving it the spec means it tests your real endpoints, not whatever it can stumble onto.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="The DAST loop: scan finds an alert, you decide whether it is a real issue to fix or a false alarm to ignore in the rules file">
+<text x="380" y="24" text-anchor="middle" class="title">DAST finding &#8594; decide &#8594; fix or ignore</text>
+<rect x="300" y="46" width="160" height="46" rx="8" class="box-warn"/>
+<text x="380" y="74" text-anchor="middle" class="label">ZAP raises alert</text>
+<path class="arrow" d="M 380,92 V 118"/>
+<rect x="280" y="118" width="200" height="46" rx="8" class="box-info"/>
+<text x="380" y="140" text-anchor="middle" class="small">Real issue, or a header</text>
+<text x="380" y="156" text-anchor="middle" class="small">Nginx adds in production?</text>
+<path class="arrow-bad" d="M 280,141 H 180"/>
+<rect x="20" y="118" width="160" height="46" rx="8" class="box-bad"/>
+<text x="100" y="140" text-anchor="middle" class="small">Real &#8594; fix the code</text>
+<text x="100" y="156" text-anchor="middle" class="small">pipeline stays red</text>
+<path class="arrow-ok" d="M 480,141 H 580"/>
+<rect x="580" y="118" width="170" height="46" rx="8" class="box-ok"/>
+<text x="665" y="140" text-anchor="middle" class="small">False alarm &#8594; add</text>
+<text x="665" y="156" text-anchor="middle" class="small">IGNORE to zap-rules</text>
+<text x="380" y="205" text-anchor="middle" class="small">Over time the rules file stabilises; after that, a new failure means a genuine threat.</text>
+</svg>
+<figcaption>Every alert is a fork: fix the code, or record it as a known false alarm. <strong>Only ignore what production already handles &#8212; never silence a real finding.</strong></figcaption>
+</figure>
+
+<div class="recap"><strong>Recap</strong>
+<ul>
+<li>The test pyramid: many fast unit tests at the base, fewer integration tests in the middle, a handful of slow end-to-end tests on top. This lesson added the two upper layers plus a live security scan.</li>
+<li>Integration tests start a real Meilisearch inside the runner and prove the backend can talk to it &#8212; download, background-start, poll <code>/health</code>, then run <code>pytest</code>.</li>
+<li>End-to-end tests boot the whole stack (frontend, backend, seeded database) and drive it with Playwright across Chromium and Firefox, uploading a report artifact for debugging.</li>
+<li>DAST with OWASP ZAP attacks the running API using FastAPI's <code>openapi.json</code>; <code>zap-rules.tsv</code> silences alerts that production Nginx already handles.</li>
+<li>All three jobs plug into <code>ci.yml</code> with <code>needs</code> ordering and feed the single required <code>pipeline-success</code> gate.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="14-security-scanning.html"><small>← Previous · Step 14</small>Automated Security Scanning</a>
+<a class="next" href="16-continuous-delivery.html"><small>Next · Step 16 →</small>Continuous Delivery &amp; Rollback</a>
+</nav>
+</main>
+</body>
+</html>

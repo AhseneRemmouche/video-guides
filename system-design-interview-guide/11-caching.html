@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 · Caching</title>
+<meta name="description" content="Browser, server and database caching; cache-control, hits/misses, write-around/through/back policies and eviction.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="assets/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-line)"/></marker>
+<marker id="arrowhead-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-accent)"/></marker>
+<marker id="arrowhead-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-ok)"/></marker>
+<marker id="arrowhead-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--d-bad)"/></marker>
+</defs></svg>
+<header class="top"><div class="wrap">
+  <a class="home" href="index.html">System Design Concepts &amp; Interview Prep</a>
+  <span class="meta"><a href="glossary.html">Glossary</a> · Step 11/14</span>
+</div></header>
+<main class="wrap">
+<section class="hero">
+  <div class="eyebrow">Step 11 of 14 · 29:15</div>
+  <h1>Caching</h1>
+  <p class="lead">Browser, server and database caching; cache-control, hits/misses, write-around/through/back policies and eviction.</p>
+  <a class="video-link" href="https://www.youtube.com/watch?v=F2FmTdLtb_4&amp;t=1755s" target="_blank" rel="noopener">▶ Watch this part (29:15)</a>
+</section>
+<p>Imagine a website whose server lives in a data center in Finland. For visitors in Europe the page might load in about 100 milliseconds, but for visitors in Mexico the same page can take three to five seconds (at 29:15). We cannot move the server closer to everyone, so instead we keep copies of data nearer to where it is needed. That is the idea behind <a class="term" href="glossary.html#caching">caching</a> &mdash; and it is one of the first things a system-design interviewer expects you to reach for when a system feels slow.</p>
+
+<p>Caching is a technique for improving the performance and efficiency of a system. It works by storing a copy of some data in a fast, temporary place, so that future requests for that same data can be served quickly instead of being computed or fetched from scratch every time (at 29:37). This page covers where caches live, how we measure whether a cache is helping, how data gets written into a cache, and what happens when a cache runs out of room.</p>
+
+<details class="primer">
+<summary>New to caching? What it is and why it matters</summary>
+<p>A cache is a small, fast store that holds copies of data you are likely to ask for again. The original, trustworthy copy still lives somewhere slower and bigger (a database, a disk, a far-away server). The cache is a shortcut, not the source of truth. Because a cache is temporary, it can be cleared or can fall out of date, so every caching design has to answer two questions: how does fresh data get in, and what gets thrown out when the cache is full? The rest of this page answers both.</p>
+</details>
+
+<h2>Four places a cache can live</h2>
+
+<p>The video calls out four common places to store a cache (at 29:51). Each one sits at a different point on the journey a request takes from the user to the database, and each saves a different kind of work.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Four places a cache can live: the browser, a CDN edge, the server, and the database">
+  <text x="380" y="18" text-anchor="middle" class="title">Four common cache locations</text>
+  <rect x="20" y="36" width="350" height="86" rx="8" class="box"/>
+  <text x="195" y="60" text-anchor="middle" class="title">1. Browser cache</text>
+  <text x="195" y="82" text-anchor="middle">HTML, CSS and JS kept on the</text>
+  <text x="195" y="100" text-anchor="middle">user&#8217;s own device</text>
+  <rect x="390" y="36" width="350" height="86" rx="8" class="box"/>
+  <text x="565" y="60" text-anchor="middle" class="title">2. CDN edge cache</text>
+  <text x="565" y="82" text-anchor="middle">Static files held near the user</text>
+  <text x="565" y="100" text-anchor="middle" class="small">(covered on the next page)</text>
+  <rect x="20" y="138" width="350" height="86" rx="8" class="box"/>
+  <text x="195" y="162" text-anchor="middle" class="title">3. Server cache</text>
+  <text x="195" y="184" text-anchor="middle">Hot data in memory (Redis) or</text>
+  <text x="195" y="202" text-anchor="middle">on disk, beside the app</text>
+  <rect x="390" y="138" width="350" height="86" rx="8" class="box"/>
+  <text x="565" y="162" text-anchor="middle" class="title">4. Database cache</text>
+  <text x="565" y="184" text-anchor="middle">Saved results of queries that</text>
+  <text x="565" y="202" text-anchor="middle">run again and again</text>
+</svg>
+<figcaption>The closer a cache sits to the user, the less work a request has to do. <strong>Each layer answers a request it recognises so the layers behind it stay idle.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="A request checks the browser cache, then the CDN, then the server cache, before finally reaching the database">
+<text x="380" y="24" text-anchor="middle" class="title">How far a request has to travel</text>
+<rect class="box" x="15" y="60" width="115" height="50" rx="8"/>
+<text x="72" y="82" text-anchor="middle" class="small">Browser</text>
+<text x="72" y="98" text-anchor="middle" class="small">cache</text>
+<rect class="box" x="160" y="60" width="115" height="50" rx="8"/>
+<text x="217" y="82" text-anchor="middle" class="small">CDN edge</text>
+<text x="217" y="98" text-anchor="middle" class="small">cache</text>
+<rect class="box" x="305" y="60" width="115" height="50" rx="8"/>
+<text x="362" y="82" text-anchor="middle" class="small">Server</text>
+<text x="362" y="98" text-anchor="middle" class="small">cache</text>
+<rect class="box-info" x="450" y="60" width="115" height="50" rx="8"/>
+<text x="507" y="90" text-anchor="middle" class="small">App server</text>
+<rect class="box-solid" x="625" y="60" width="120" height="50" rx="8"/>
+<text x="685" y="90" text-anchor="middle" class="on-solid small">Database</text>
+<path class="arrow" d="M130,85 H158"/>
+<path class="arrow" d="M275,85 H303"/>
+<path class="arrow" d="M420,85 H448"/>
+<path class="arrow" d="M565,85 H623"/>
+<text x="72" y="140" text-anchor="middle" class="small ok">nearest, fastest</text>
+<text x="685" y="140" text-anchor="middle" class="small">farthest, slowest</text>
+<text x="380" y="170" text-anchor="middle" class="small">Any layer holding the data answers, and the rest stay idle</text>
+</svg>
+<figcaption>Read left to right: each cache is a chance to stop early. <strong>The sooner a request is answered, the less distance and work it costs.</strong></figcaption>
+</figure>
+
+<h3>Browser caching</h3>
+
+<p>With browser caching we store a website's resources on the user's own computer. When the user revisits the site, the browser can load those files from the local cache instead of fetching everything from the server again (at 30:01). The files &mdash; HTML, CSS and the JavaScript bundle &mdash; are kept in a dedicated cache directory on the client's hard drive that the browser manages for you. Users can turn caching off in their browser settings, and developers can switch it off while building: in Chrome there is a <strong>Disable cache</strong> checkbox in the Network tab of the developer tools (at 30:23).</p>
+
+<p>How long should the browser keep a file? The server answers that with the <a class="term" href="glossary.html#cache-control">Cache-Control</a> header. In the example from the video the value is 7,200 seconds, which is two hours (at 30:46).</p>
+
+<pre data-lang="http" data-tag="illustrative"><code>Cache-Control: max-age=7200</code></pre>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="With max-age 7200 seconds the cached file is served without asking for two hours, then it must be revalidated">
+<text x="380" y="26" text-anchor="middle" class="title">Cache-Control: max-age=7200 (2 hours)</text>
+<line class="line" x1="40" y1="110" x2="720" y2="110"/>
+<rect class="box-ok" x="40" y="60" width="420" height="40" rx="8"/>
+<text x="250" y="85" text-anchor="middle" class="small">Fresh &#8212; served straight from cache, no server trip</text>
+<rect class="box-warn" x="460" y="60" width="260" height="40" rx="8"/>
+<text x="590" y="85" text-anchor="middle" class="small">Stale &#8212; revalidate with origin</text>
+<text x="40" y="130" text-anchor="middle" class="small">0s</text>
+<text x="460" y="130" text-anchor="middle" class="small">7200s</text>
+<text x="720" y="130" text-anchor="middle" class="small">later</text>
+</svg>
+<figcaption>For the max-age window the browser trusts its copy and skips the network. <strong>Once the timer runs out the file is stale and must be checked again.</strong></figcaption>
+</figure>
+
+<h3>Hits, misses and the cache ratio</h3>
+
+<p>When the data a request needs is already in the cache, that is a <a class="term" href="glossary.html#cache-hit">cache hit</a>, and the response is fast. When it is not there, that is a <a class="term" href="glossary.html#cache-miss">cache miss</a>, and the system has to go and fetch the data from the original source (at 30:46). The <strong>cache ratio</strong> is the share of all requests that were served from the cache; a higher ratio means the cache is doing more of the work and is therefore more effective (at 31:10).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Cache hit returns data straight from the cache; cache miss fetches from the origin and then stores a copy">
+  <text x="190" y="20" text-anchor="middle" class="title ok">Cache hit</text>
+  <rect x="40" y="36" width="120" height="44" rx="8" class="box"/>
+  <text x="100" y="63" text-anchor="middle">Request</text>
+  <rect x="220" y="36" width="120" height="44" rx="8" class="box-ok"/>
+  <text x="280" y="63" text-anchor="middle">Cache</text>
+  <path class="arrow arrow-ok" d="M160,58 H218"/>
+  <text x="100" y="118" text-anchor="middle" class="small">data found</text>
+  <path class="arrow arrow-ok" d="M280,80 V140 H162"/>
+  <rect x="40" y="128" width="120" height="44" rx="8" class="box"/>
+  <text x="100" y="155" text-anchor="middle">Fast reply</text>
+  <text x="190" y="210" text-anchor="middle" class="small">Served from the cache &#8212; no trip to the origin</text>
+
+  <text x="575" y="20" text-anchor="middle" class="title warn">Cache miss</text>
+  <rect x="430" y="36" width="110" height="44" rx="8" class="box"/>
+  <text x="485" y="63" text-anchor="middle">Request</text>
+  <rect x="600" y="36" width="110" height="44" rx="8" class="box-warn"/>
+  <text x="655" y="63" text-anchor="middle">Cache</text>
+  <path class="arrow" d="M540,58 H598"/>
+  <rect x="600" y="128" width="110" height="44" rx="8" class="box"/>
+  <text x="655" y="155" text-anchor="middle">Origin</text>
+  <path class="arrow arrow-bad" d="M655,80 V126"/>
+  <text x="700" y="108" text-anchor="start" class="small">not here</text>
+  <path class="arrow" d="M600,150 H545 V82"/>
+  <text x="485" y="210" text-anchor="middle" class="small">Fetch, store a copy, then reply</text>
+</svg>
+<figcaption>A hit skips the slow source entirely; a miss pays the full cost once and leaves a copy behind. <strong>Raising the share of hits (the cache ratio) is the whole point of caching.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 240" role="img" aria-label="Stacked bar chart comparing a high cache hit ratio with a low one, illustrative">
+<text x="380" y="26" text-anchor="middle" class="title">Cache hit ratio: high vs low (illustrative)</text>
+<line class="line" x1="110" y1="40" x2="110" y2="190"/>
+<line class="line" x1="110" y1="190" x2="700" y2="190"/>
+<rect class="box-bad" x="180" y="40" width="140" height="15" rx="8"/>
+<rect class="box-ok" x="180" y="55" width="140" height="135" rx="8"/>
+<text x="250" y="125" text-anchor="middle">90% hits</text>
+<text x="250" y="210" text-anchor="middle" class="small">Good cache</text>
+<text x="250" y="226" text-anchor="middle" class="small">10% miss</text>
+<rect class="box-bad" x="440" y="40" width="140" height="105" rx="8"/>
+<rect class="box-ok" x="440" y="145" width="140" height="45" rx="8"/>
+<text x="510" y="100" text-anchor="middle" class="small">70% miss</text>
+<text x="510" y="172" text-anchor="middle" class="small">30% hits</text>
+<text x="510" y="210" text-anchor="middle" class="small">Poor cache</text>
+<text x="92" y="48" text-anchor="end" class="small">all</text>
+<text x="92" y="190" text-anchor="end" class="small">none</text>
+</svg>
+<figcaption>Green is served from cache; red had to fall back to the origin. <strong>A high hit ratio means the cache does most of the work; a low one just adds a wasted lookup.</strong></figcaption>
+</figure>
+
+<p>You can see which one happened by reading the <strong>X-Cache</strong> response header. If it says <code>MISS</code> the cache was missed; if it says <code>HIT</code> the response came from the cache (at 31:10).</p>
+
+<pre data-lang="http" data-tag="illustrative"><code>X-Cache: MISS</code></pre>
+
+<div class="callout ok">
+<strong>In an interview, say:</strong> "I would track the cache hit ratio. A low ratio means the cache is not holding the right data, so it adds latency instead of removing it." Tying a cache to a number you can measure shows you think about whether it actually helps.
+</div>
+
+<h2>Server caching and write policies</h2>
+
+<p>Server caching stores frequently accessed data on the server side, so the app can avoid expensive work such as repeating a database query (at 31:10). The cache sits either in memory &mdash; for example in <a class="term" href="glossary.html#redis">Redis</a>, an <a class="term" href="glossary.html#in-memory-database">in-memory database</a> &mdash; or on disk, sometimes on a separate cache server. The rule is simple: before querying the database, the server checks the cache. If the data is there it is returned directly; if not, the server queries the database, returns the result, and stores a copy in the cache for next time (at 31:32).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Illustrative bar chart: reading from an in-memory cache is far faster than from disk or a remote database">
+<text x="380" y="26" text-anchor="middle" class="title">Relative read time by source (illustrative)</text>
+<line class="line" x1="110" y1="40" x2="110" y2="190"/>
+<line class="line" x1="110" y1="190" x2="710" y2="190"/>
+<rect class="box-ok" x="160" y="175" width="120" height="15" rx="8"/>
+<text x="220" y="167" text-anchor="middle" class="small">tiny</text>
+<text x="220" y="210" text-anchor="middle" class="small">Memory cache</text>
+<text x="220" y="226" text-anchor="middle" class="small">(Redis / RAM)</text>
+<rect class="box-info" x="360" y="120" width="120" height="70" rx="8"/>
+<text x="420" y="210" text-anchor="middle" class="small">Local disk</text>
+<rect class="box-warn" x="560" y="40" width="120" height="150" rx="8"/>
+<text x="620" y="210" text-anchor="middle" class="small">Remote database</text>
+<text x="92" y="48" text-anchor="end" class="small">slow</text>
+<text x="92" y="190" text-anchor="end" class="small">fast</text>
+</svg>
+<figcaption>Reading from RAM finishes in a fraction of the time a disk or network query takes. <strong>That gap is exactly why checking the cache before the database pays off.</strong></figcaption>
+</figure>
+
+<details class="primer">
+<summary>New to Redis? Why an in-memory store is so fast</summary>
+<p>Redis keeps its data in RAM rather than on a disk. RAM is far faster to read than a disk, so a lookup can finish in well under a millisecond. The trade-off is that RAM is smaller and more expensive, and its contents are lost if the machine loses power. That is exactly why Redis is popular as a cache: a cache is meant to be a fast, replaceable copy, so losing it is not a disaster &mdash; the real data still lives in the database.</p>
+</details>
+
+<p>When data changes, how does the new value reach both the cache and the permanent storage? That choice is the cache's <strong>write policy</strong>, and the video describes three (at 31:56).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Three write policies: write-around bypasses the cache, write-through writes cache and storage together, write-back writes the cache first and storage later">
+  <text x="380" y="18" text-anchor="middle" class="title">Three write policies</text>
+
+  <text x="130" y="44" text-anchor="middle" class="title">Write-around</text>
+  <rect x="60" y="56" width="140" height="40" rx="8" class="box"/>
+  <text x="130" y="81" text-anchor="middle">App writes</text>
+  <rect x="60" y="210" width="140" height="40" rx="8" class="box-solid"/>
+  <text x="130" y="235" text-anchor="middle" class="on-solid">Storage</text>
+  <rect x="60" y="133" width="140" height="40" rx="8" class="box" />
+  <text x="130" y="158" text-anchor="middle" class="small">Cache (skipped)</text>
+  <path class="arrow" d="M130,96 C20,150 20,170 130,208"/>
+  <text x="18" y="155" text-anchor="middle" class="small">bypass</text>
+
+  <text x="380" y="44" text-anchor="middle" class="title">Write-through</text>
+  <rect x="310" y="56" width="140" height="40" rx="8" class="box"/>
+  <text x="380" y="81" text-anchor="middle">App writes</text>
+  <rect x="310" y="133" width="140" height="40" rx="8" class="box-ok"/>
+  <text x="380" y="158" text-anchor="middle">Cache</text>
+  <rect x="310" y="210" width="140" height="40" rx="8" class="box-solid"/>
+  <text x="380" y="235" text-anchor="middle" class="on-solid">Storage</text>
+  <path class="arrow arrow-ok" d="M380,96 V131"/>
+  <path class="arrow arrow-ok" d="M380,173 V208"/>
+  <text x="520" y="135" text-anchor="middle" class="small">both,</text>
+  <text x="520" y="151" text-anchor="middle" class="small">together</text>
+
+  <text x="630" y="44" text-anchor="middle" class="title">Write-back</text>
+  <rect x="560" y="56" width="140" height="40" rx="8" class="box"/>
+  <text x="630" y="81" text-anchor="middle">App writes</text>
+  <rect x="560" y="133" width="140" height="40" rx="8" class="box-ok"/>
+  <text x="630" y="158" text-anchor="middle">Cache</text>
+  <rect x="560" y="210" width="140" height="40" rx="8" class="box-solid"/>
+  <text x="630" y="235" text-anchor="middle" class="on-solid">Storage</text>
+  <path class="arrow arrow-ok" d="M630,96 V131"/>
+  <path class="arrow dashed" d="M630,173 V208"/>
+  <text x="700" y="195" text-anchor="middle" class="small">later</text>
+</svg>
+<figcaption>All three end with the data in permanent storage; they differ in <em>when</em> the cache and storage are updated. <strong>Dashed = delayed, which is faster but riskier.</strong></figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="Trade-offs of the three write policies across write speed, consistency, and crash safety">
+<text x="110" y="30" text-anchor="middle" class="title">Policy</text>
+<text x="295" y="30" text-anchor="middle" class="title">Write speed</text>
+<text x="475" y="30" text-anchor="middle" class="title">Consistency</text>
+<text x="655" y="30" text-anchor="middle" class="title">Crash safety</text>
+<rect class="box2" x="20" y="40" width="180" height="34" rx="8"/>
+<text x="110" y="62" text-anchor="middle" class="small">Write-around</text>
+<rect class="box-info" x="210" y="40" width="170" height="34" rx="8"/>
+<text x="295" y="62" text-anchor="middle" class="small">Medium</text>
+<rect class="box-warn" x="390" y="40" width="170" height="34" rx="8"/>
+<text x="475" y="62" text-anchor="middle" class="small">Cache may be stale</text>
+<rect class="box-ok" x="570" y="40" width="170" height="34" rx="8"/>
+<text x="655" y="62" text-anchor="middle" class="small">Safe</text>
+<rect class="box2" x="20" y="82" width="180" height="34" rx="8"/>
+<text x="110" y="104" text-anchor="middle" class="small">Write-through</text>
+<rect class="box-warn" x="210" y="82" width="170" height="34" rx="8"/>
+<text x="295" y="104" text-anchor="middle" class="small">Slower</text>
+<rect class="box-ok" x="390" y="82" width="170" height="34" rx="8"/>
+<text x="475" y="104" text-anchor="middle" class="small">Strong</text>
+<rect class="box-ok" x="570" y="82" width="170" height="34" rx="8"/>
+<text x="655" y="104" text-anchor="middle" class="small">Safe</text>
+<rect class="box2" x="20" y="124" width="180" height="34" rx="8"/>
+<text x="110" y="146" text-anchor="middle" class="small">Write-back</text>
+<rect class="box-ok" x="210" y="124" width="170" height="34" rx="8"/>
+<text x="295" y="146" text-anchor="middle" class="small">Fastest</text>
+<rect class="box-info" x="390" y="124" width="170" height="34" rx="8"/>
+<text x="475" y="146" text-anchor="middle" class="small">Eventually</text>
+<rect class="box-bad" x="570" y="124" width="170" height="34" rx="8"/>
+<text x="655" y="146" text-anchor="middle" class="small">Risk of loss</text>
+</svg>
+<figcaption>No row wins every column &mdash; each policy trades one strength for another. <strong>Pick by what matters most: speed, consistency, or surviving a crash.</strong></figcaption>
+</figure>
+
+<ul>
+<li><strong><a class="term" href="glossary.html#write-around">Write-around</a>:</strong> data is written straight to permanent storage, bypassing the cache. Good when writes are not performance-critical and you do not expect to read the new value back soon (at 31:56).</li>
+<li><strong><a class="term" href="glossary.html#write-through">Write-through</a>:</strong> data is written to the cache and the permanent storage at the same time. This keeps the two consistent, but each write is a little slower because it has to touch both (at 32:18).</li>
+<li><strong><a class="term" href="glossary.html#write-back">Write-back</a>:</strong> data is written to the cache first and copied to permanent storage later. Writes feel fast, but if the server crashes before the copy happens, that data can be lost (at 32:18).</li>
+</ul>
+
+<div class="callout warn">
+<strong>Common mistake:</strong> assuming write-back is simply "the fast one" and always best. It trades durability for speed. If a crash between the cache write and the storage write would lose data you cannot afford to lose &mdash; an order, a payment &mdash; write-through is the safer choice.
+</div>
+
+<h2>Eviction policies: what to drop when the cache is full</h2>
+
+<p>A cache is small on purpose, so eventually it fills up. When it does and new data needs room, the cache must remove something. The rules that decide what to remove are called <a class="term" href="glossary.html#eviction-policy">eviction policies</a> (at 32:41). The three the video names are:</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="Three eviction policies: LRU removes the least recently used item, FIFO removes the oldest added item, LFU removes the least frequently used item">
+  <text x="380" y="18" text-anchor="middle" class="title">What gets evicted when the cache is full</text>
+
+  <rect x="24" y="36" width="224" height="150" rx="8" class="zone"/>
+  <text x="136" y="58" text-anchor="middle" class="title">LRU</text>
+  <text x="136" y="78" text-anchor="middle" class="small">least recently used</text>
+  <rect x="44" y="92" width="184" height="30" rx="8" class="box-bad"/>
+  <text x="136" y="112" text-anchor="middle" class="small">not touched for longest</text>
+  <text x="136" y="150" text-anchor="middle" class="small">Removes whatever has</text>
+  <text x="136" y="166" text-anchor="middle" class="small">gone unused the longest</text>
+
+  <rect x="268" y="36" width="224" height="150" rx="8" class="zone"/>
+  <text x="380" y="58" text-anchor="middle" class="title">FIFO</text>
+  <text x="380" y="78" text-anchor="middle" class="small">first in, first out</text>
+  <rect x="288" y="92" width="184" height="30" rx="8" class="box-bad"/>
+  <text x="380" y="112" text-anchor="middle" class="small">added first</text>
+  <text x="380" y="150" text-anchor="middle" class="small">Removes the oldest entry,</text>
+  <text x="380" y="166" text-anchor="middle" class="small">by arrival order</text>
+
+  <rect x="512" y="36" width="224" height="150" rx="8" class="zone"/>
+  <text x="624" y="58" text-anchor="middle" class="title">LFU</text>
+  <text x="624" y="78" text-anchor="middle" class="small">least frequently used</text>
+  <rect x="532" y="92" width="184" height="30" rx="8" class="box-bad"/>
+  <text x="624" y="112" text-anchor="middle" class="small">fewest reads</text>
+  <text x="624" y="150" text-anchor="middle" class="small">Removes whatever has</text>
+  <text x="624" y="166" text-anchor="middle" class="small">been asked for least often</text>
+</svg>
+<figcaption>Each policy answers "which copy do we need least?" differently. <strong>LRU looks at recency, FIFO at age, LFU at how often an item is used.</strong></figcaption>
+</figure>
+
+<ul>
+<li><strong><a class="term" href="glossary.html#lru">LRU</a> (least recently used):</strong> remove the item that has not been read for the longest time.</li>
+<li><strong>FIFO (first in, first out):</strong> remove the item that was added earliest, regardless of how often it is used.</li>
+<li><strong>LFU (least frequently used):</strong> remove the item that has been requested the fewest times.</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="An LRU cache holding A, B and C evicts A, the least recently used, to make room for new item D">
+<text x="380" y="26" text-anchor="middle" class="title">LRU eviction in action</text>
+<text x="153" y="58" text-anchor="middle" class="small">Cache is full (3 slots)</text>
+<rect class="box-bad" x="40" y="70" width="70" height="40" rx="8"/>
+<text x="75" y="95" text-anchor="middle">A</text>
+<rect class="box" x="118" y="70" width="70" height="40" rx="8"/>
+<text x="153" y="95" text-anchor="middle">B</text>
+<rect class="box" x="196" y="70" width="70" height="40" rx="8"/>
+<text x="231" y="95" text-anchor="middle">C</text>
+<text x="75" y="128" text-anchor="middle" class="small bad">used longest ago</text>
+<path class="arrow" d="M290,90 H360"/>
+<text x="325" y="82" text-anchor="middle" class="small">need D</text>
+<text x="553" y="58" text-anchor="middle" class="small">A is evicted, D takes its place</text>
+<rect class="box" x="440" y="70" width="70" height="40" rx="8"/>
+<text x="475" y="95" text-anchor="middle">B</text>
+<rect class="box" x="518" y="70" width="70" height="40" rx="8"/>
+<text x="553" y="95" text-anchor="middle">C</text>
+<rect class="box-ok" x="596" y="70" width="70" height="40" rx="8"/>
+<text x="631" y="95" text-anchor="middle">D</text>
+<text x="631" y="128" text-anchor="middle" class="small ok">newest</text>
+<text x="380" y="170" text-anchor="middle" class="small">LRU keeps what you touched recently and drops the stalest entry</text>
+</svg>
+<figcaption>With no room left, LRU drops the item untouched for the longest. <strong>Recently used items stay; the one gathering dust is the first to go.</strong></figcaption>
+</figure>
+
+<h2>Database caching</h2>
+
+<p>Database caching means caching the results of database queries to speed up data-driven applications (at 33:05). It can be done inside the database system itself, or through an external caching layer such as Redis or Memcached. The flow mirrors server caching: when a query comes in, first check whether its result is already stored. If it is, return the cached result and skip the database. If it is not, run the query, return the result, and store it for next time (at 33:05).</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="Database query cache flow: check the cache first, return on a hit, otherwise run the query, store the result, and return it">
+  <text x="380" y="20" text-anchor="middle" class="title">Database query cache flow</text>
+  <rect x="300" y="36" width="160" height="40" rx="8" class="box"/>
+  <text x="380" y="61" text-anchor="middle">Query arrives</text>
+  <path class="arrow" d="M380,76 V100"/>
+  <rect x="290" y="100" width="180" height="46" rx="8" class="box-info"/>
+  <text x="380" y="121" text-anchor="middle">Result in cache?</text>
+  <text x="380" y="138" text-anchor="middle" class="small">check the cache first</text>
+
+  <path class="arrow arrow-ok" d="M290,123 H150 V170"/>
+  <text x="210" y="116" text-anchor="middle" class="small ok">hit</text>
+  <rect x="70" y="170" width="160" height="46" rx="8" class="box-ok"/>
+  <text x="150" y="191" text-anchor="middle">Return cached</text>
+  <text x="150" y="208" text-anchor="middle">result</text>
+
+  <path class="arrow arrow-bad" d="M470,123 H610 V170"/>
+  <text x="552" y="116" text-anchor="middle" class="small bad">miss</text>
+  <rect x="530" y="170" width="160" height="46" rx="8" class="box"/>
+  <text x="610" y="191" text-anchor="middle">Run query on</text>
+  <text x="610" y="208" text-anchor="middle">the database</text>
+  <path class="arrow" d="M610,216 V240"/>
+  <rect x="530" y="240" width="160" height="46" rx="8" class="box-solid"/>
+  <text x="610" y="261" text-anchor="middle" class="on-solid">Store result,</text>
+  <text x="610" y="278" text-anchor="middle" class="on-solid">then return it</text>
+</svg>
+<figcaption>Reads check the cache before touching the database. <strong>This pays off most in read-heavy apps where the same queries run again and again.</strong></figcaption>
+</figure>
+
+<p>Database caching is most valuable for read-heavy applications, where a handful of queries run very frequently (at 33:28). It uses the same eviction policies as server-side caching, so LRU, FIFO and LFU apply here too.</p>
+
+<div class="callout ok">
+<strong>In an interview, say:</strong> "Caching gives fast reads and takes load off the database, but it adds the risk of serving stale data. I would set a sensible Cache-Control lifetime and pick a write policy that matches how fresh the data has to be." Naming the downside shows you understand the trade-off, not just the benefit.
+</div>
+
+<div class="recap">
+<strong>Recap</strong>
+<ul>
+<li>Caching keeps a fast, temporary copy of data so future requests are served quicker; it can live in the browser, a CDN, the server, or the database.</li>
+<li>A cache hit is served from the cache; a cache miss falls back to the origin. The cache ratio measures how often hits happen, and the X-Cache header shows HIT or MISS per response.</li>
+<li>Cache-Control sets how long content may be cached (for example <code>max-age=7200</code>, two hours).</li>
+<li>Write policies decide when the cache and permanent storage are updated: write-around bypasses the cache, write-through updates both together, write-back updates the cache first and storage later.</li>
+<li>When a cache fills up, eviction policies (LRU, FIFO, LFU) decide what to remove.</li>
+<li>Database caching stores query results, often in Redis or Memcached, and shines in read-heavy apps.</li>
+</ul>
+</div>
+
+<nav class="pager">
+<a class="prev" href="10-api-design.html"><small>← Previous · Step 10</small>API Design</a>
+<a class="next" href="12-cdns-and-proxies.html"><small>Next · Step 12 →</small>CDNs &amp; Proxy Servers</a>
+</nav>
+</main>
+</body>
+</html>
