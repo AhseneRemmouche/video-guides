@@ -179,6 +179,372 @@ export const emailAgent = new Agent({
 <figcaption>The agent is in charge of formatting; the tool only delivers. <strong>SendGrid is a paid service, so this last hop runs only with your own key and verified sender.</strong></figcaption>
 </figure>
 
+<h2>The planner, search, writer and manager modules</h2>
+
+<p>These four modules come over from the Day 4 notebook almost unchanged. You need all of them to run the app, so here they are on this page and you don't need to switch pages. First the planner, which turns the query into a list of searches:</p>
+
+<div class="code-tabs"><pre data-file="2_openai/deep_research/planner_agent.py" data-lang="py" data-tag="planner_agent.py"><code>from pydantic import BaseModel, Field
+from agents import Agent
+
+HOW_MANY_SEARCHES = 5
+
+INSTRUCTIONS = f"You are a helpful research assistant. Given a query, come up with a set of web searches \
+to perform to best answer the query. Output {HOW_MANY_SEARCHES} terms to query for."
+
+
+class WebSearchItem(BaseModel):
+    reason: str = Field(description="Your reasoning for why this search is important to the query.")
+    query: str = Field(description="The search term to use for the web search.")
+
+
+class WebSearchPlan(BaseModel):
+    searches: list[WebSearchItem] = Field(description="A list of web searches to perform to best answer the query.")
+    
+planner_agent = Agent(
+    name="PlannerAgent",
+    instructions=INSTRUCTIONS,
+    model="gpt-4o-mini",
+    output_type=WebSearchPlan,
+)</code></pre><pre data-file="src/research/planner.ts" data-lang="ts" data-tag="planner.ts"><code>// The planner agent (TypeScript port of 2_openai/deep_research/planner_agent.py).
+// Structured output: given a query, it returns a typed plan of web searches to run.
+import { Agent } from "@openai/agents";
+import { z } from "zod";
+import { MODEL } from "../setup.js";
+
+export const HOW_MANY_SEARCHES = Number(process.env.HOW_MANY_SEARCHES ?? 3);
+
+export const WebSearchItem = z.object({
+  reason: z.string().describe("Your reasoning for why this search is important to the query."),
+  query: z.string().describe("The search term to use for the web search."),
+});
+export const WebSearchPlan = z.object({
+  searches: z.array(WebSearchItem).describe("A list of web searches to perform to best answer the query."),
+});
+export type WebSearchItem = z.infer&lt;typeof WebSearchItem&gt;;
+export type WebSearchPlan = z.infer&lt;typeof WebSearchPlan&gt;;
+
+export const plannerAgent = new Agent({
+  name: "PlannerAgent",
+  instructions:
+    "You are a helpful research assistant. Given a query, come up with a set of web searches to perform to " +
+    `best answer the query. Output ${HOW_MANY_SEARCHES} terms to query for.`,
+  model: MODEL,
+  outputType: WebSearchPlan,
+});</code></pre></div>
+
+<p>The search agent, which runs one search and summarises the results:</p>
+
+<div class="code-tabs"><pre data-file="2_openai/deep_research/search_agent.py" data-lang="py" data-tag="search_agent.py"><code>from agents import Agent, WebSearchTool, ModelSettings
+
+INSTRUCTIONS = (
+    "You are a research assistant. Given a search term, you search the web for that term and "
+    "produce a concise summary of the results. The summary must 2-3 paragraphs and less than 300 "
+    "words. Capture the main points. Write succintly, no need to have complete sentences or good "
+    "grammar. This will be consumed by someone synthesizing a report, so its vital you capture the "
+    "essence and ignore any fluff. Do not include any additional commentary other than the summary itself."
+)
+
+search_agent = Agent(
+    name="Search agent",
+    instructions=INSTRUCTIONS,
+    tools=[WebSearchTool(search_context_size="low")],
+    model="gpt-4o-mini",
+    model_settings=ModelSettings(tool_choice="required"),
+)</code></pre><pre data-file="src/research/search.ts" data-lang="ts" data-tag="search.ts"><code>// The search agent (TypeScript port of 2_openai/deep_research/search_agent.py).
+//
+// The course uses OpenAI's hosted WebSearchTool, which only runs on OpenAI's own API. To keep this port
+// compiling and runnable without hosted tools, the search agent is given a CANNED function web-search tool
+// instead: it returns deterministic, offline text so the whole pipeline (plan -&gt; search -&gt; write -&gt; email)
+// works the same way end to end.
+import { Agent, tool } from "@openai/agents";
+import { z } from "zod";
+import { MODEL } from "../setup.js";
+
+const INSTRUCTIONS =
+  "You are a research assistant. Given a search term, you use the web_search tool to look it up and then " +
+  "produce a concise summary of the results. The summary must be 2-3 paragraphs and less than 300 words. " +
+  "Capture the main points. Write succinctly, no need to have complete sentences or good grammar. This will " +
+  "be consumed by someone synthesizing a report, so it is vital you capture the essence and ignore any fluff. " +
+  "Do not include any additional commentary other than the summary itself.";
+
+// A canned, offline stand-in for OpenAI's hosted WebSearchTool. It compiles with no hosted-tool dependency
+// and returns deterministic text, so searches never hit the network.
+const webSearch = tool({
+  name: "web_search",
+  description: "Search the web for the given query and return a short summary of the results.",
+  parameters: z.object({ query: z.string() }),
+  execute: async ({ query }) =&gt; {
+    console.log(`[web_search canned stand-in] ${query}`);
+    return (
+      `Canned offline search results for "${query}": several open-source agent frameworks were widely ` +
+      "discussed in 2025 - the OpenAI Agents SDK (lightweight, with handoffs, guardrails and tracing), " +
+      "CrewAI (role-based crews of agents with tasks), LangGraph (graph-based state machines with " +
+      "checkpointing), Microsoft AutoGen (AgentChat and Core layers, distributed runtime) and the Model " +
+      "Context Protocol (MCP) for connecting tools. Articles compared ease of use, control flow, " +
+      "observability and production readiness."
+    );
+  },
+});
+
+export const searchAgent = new Agent({
+  name: "Search agent",
+  instructions: INSTRUCTIONS,
+  tools: [webSearch],
+  model: MODEL,
+  modelSettings: { toolChoice: "required" },
+});</code></pre></div>
+
+<p>The writer, which turns all the summaries into one long markdown report:</p>
+
+<div class="code-tabs"><pre data-file="2_openai/deep_research/writer_agent.py" data-lang="py" data-tag="writer_agent.py"><code>from pydantic import BaseModel, Field
+from agents import Agent
+
+INSTRUCTIONS = (
+    "You are a senior researcher tasked with writing a cohesive report for a research query. "
+    "You will be provided with the original query, and some initial research done by a research assistant.\n"
+    "You should first come up with an outline for the report that describes the structure and "
+    "flow of the report. Then, generate the report and return that as your final output.\n"
+    "The final output should be in markdown format, and it should be lengthy and detailed. Aim "
+    "for 5-10 pages of content, at least 1000 words."
+)
+
+
+class ReportData(BaseModel):
+    short_summary: str = Field(description="A short 2-3 sentence summary of the findings.")
+
+    markdown_report: str = Field(description="The final report")
+
+    follow_up_questions: list[str] = Field(description="Suggested topics to research further")
+
+
+writer_agent = Agent(
+    name="WriterAgent",
+    instructions=INSTRUCTIONS,
+    model="gpt-4o-mini",
+    output_type=ReportData,
+)</code></pre><pre data-file="src/research/writer.ts" data-lang="ts" data-tag="writer.ts"><code>// The writer agent (TypeScript port of 2_openai/deep_research/writer_agent.py).
+// Structured output: a short summary, the full markdown report, and follow-up questions.
+import { Agent } from "@openai/agents";
+import { z } from "zod";
+import { MODEL } from "../setup.js";
+
+export const ReportData = z.object({
+  short_summary: z.string().describe("A short 2-3 sentence summary of the findings."),
+  markdown_report: z.string().describe("The final report"),
+  follow_up_questions: z.array(z.string()).describe("Suggested topics to research further"),
+});
+export type ReportData = z.infer&lt;typeof ReportData&gt;;
+
+export const writerAgent = new Agent({
+  name: "WriterAgent",
+  instructions:
+    "You are a senior researcher tasked with writing a cohesive report for a research query. You will be " +
+    "provided with the original query, and some initial research done by a research assistant.\n" +
+    "You should first come up with an outline for the report that describes the structure and flow of the " +
+    "report. Then, generate the report and return that as your final output.\n" +
+    "The final output should be in markdown format, and it should be lengthy and detailed. Aim for 5-10 pages " +
+    "of content, at least 1000 words.",
+  model: MODEL,
+  outputType: ReportData,
+});</code></pre></div>
+
+<p>And the research manager, which runs plan, search, write and email in order and yields a status line after each stage (the Gradio app below imports it):</p>
+
+<div class="code-tabs"><pre data-file="2_openai/deep_research/research_manager.py" data-lang="py" data-tag="research_manager.py"><code>from agents import Runner, trace, gen_trace_id
+from search_agent import search_agent
+from planner_agent import planner_agent, WebSearchItem, WebSearchPlan
+from writer_agent import writer_agent, ReportData
+from email_agent import email_agent
+import asyncio
+
+class ResearchManager:
+
+    async def run(self, query: str):
+        """ Run the deep research process, yielding the status updates and the final report"""
+        trace_id = gen_trace_id()
+        with trace("Research trace", trace_id=trace_id):
+            print(f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}")
+            yield f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}"
+            print("Starting research...")
+            search_plan = await self.plan_searches(query)
+            yield "Searches planned, starting to search..."     
+            search_results = await self.perform_searches(search_plan)
+            yield "Searches complete, writing report..."
+            report = await self.write_report(query, search_results)
+            yield "Report written, sending email..."
+            await self.send_email(report)
+            yield "Email sent, research complete"
+            yield report.markdown_report
+        
+
+    async def plan_searches(self, query: str) -&gt; WebSearchPlan:
+        """ Plan the searches to perform for the query """
+        print("Planning searches...")
+        result = await Runner.run(
+            planner_agent,
+            f"Query: {query}",
+        )
+        print(f"Will perform {len(result.final_output.searches)} searches")
+        return result.final_output_as(WebSearchPlan)
+
+    async def perform_searches(self, search_plan: WebSearchPlan) -&gt; list[str]:
+        """ Perform the searches to perform for the query """
+        print("Searching...")
+        num_completed = 0
+        tasks = [asyncio.create_task(self.search(item)) for item in search_plan.searches]
+        results = []
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            if result is not None:
+                results.append(result)
+            num_completed += 1
+            print(f"Searching... {num_completed}/{len(tasks)} completed")
+        print("Finished searching")
+        return results
+
+    async def search(self, item: WebSearchItem) -&gt; str | None:
+        """ Perform a search for the query """
+        input = f"Search term: {item.query}\nReason for searching: {item.reason}"
+        try:
+            result = await Runner.run(
+                search_agent,
+                input,
+            )
+            return str(result.final_output)
+        except Exception:
+            return None
+
+    async def write_report(self, query: str, search_results: list[str]) -&gt; ReportData:
+        """ Write the report for the query """
+        print("Thinking about report...")
+        input = f"Original query: {query}\nSummarized search results: {search_results}"
+        result = await Runner.run(
+            writer_agent,
+            input,
+        )
+
+        print("Finished writing report")
+        return result.final_output_as(ReportData)
+    
+    async def send_email(self, report: ReportData) -&gt; None:
+        print("Writing email...")
+        result = await Runner.run(
+            email_agent,
+            report.markdown_report,
+        )
+        print("Email sent")
+        return report</code></pre><pre data-file="src/research/manager.ts" data-lang="ts" data-tag="manager.ts"><code>// ResearchManager (TypeScript port of 2_openai/deep_research/research_manager.py).
+// It orchestrates the four agents: plan -&gt; search (in parallel) -&gt; write -&gt; email.
+//
+// The Python version is an async generator that yields status strings. Here run() is an async generator too,
+// so a console runner or the HTTP API can watch progress; the final value yielded is the markdown report.
+import { run, withTrace, getGlobalTraceProvider } from "@openai/agents";
+import { plannerAgent, type WebSearchItem, type WebSearchPlan } from "./planner.js";
+import { searchAgent } from "./search.js";
+import { writerAgent, type ReportData } from "./writer.js";
+import { emailAgent } from "./email.js";
+import { LOCAL } from "../setup.js";
+
+export class ResearchManager {
+  /** The full report from the most recent run (set once writeReport completes). */
+  report: ReportData | undefined;
+
+  /** Run the deep research process, yielding status updates and finally the markdown report. */
+  async *run(query: string): AsyncGenerator&lt;string&gt; {
+    const traceId = getGlobalTraceProvider().generateTraceId();
+    const updates: string[] = [];
+    this.report = undefined;
+    // A local captured by the closure below. Because it is assigned inside a closure, TypeScript keeps it at
+    // its declared type at the use site (unlike a class property, which it would narrow to never here).
+    let report: ReportData | undefined;
+
+    const work = withTrace(
+      "Research trace",
+      async () =&gt; {
+        if (!LOCAL) updates.push(`View trace: https://platform.openai.com/traces/trace?trace_id=${traceId}`);
+        console.log("Starting research...");
+        const plan = await this.planSearches(query);
+        updates.push("Searches planned, starting to search...");
+        const results = await this.performSearches(plan);
+        updates.push("Searches complete, writing report...");
+        report = await this.writeReport(query, results);
+        this.report = report;
+        updates.push("Report written, sending email...");
+        await this.sendEmail(report);
+        updates.push("Email sent, research complete");
+      },
+      { traceId },
+    );
+
+    // Drain status updates as they are recorded, while the workflow runs.
+    let done = false;
+    void work.finally(() =&gt; {
+      done = true;
+    });
+    let sent = 0;
+    while (!done || sent &lt; updates.length) {
+      if (sent &lt; updates.length) {
+        yield updates[sent++]!;
+      } else {
+        await new Promise((r) =&gt; setTimeout(r, 100));
+      }
+    }
+    await work; // rethrow if the workflow failed
+    if (report) yield report.markdown_report;
+  }
+
+  /** Plan the searches to perform for the query. */
+  async planSearches(query: string): Promise&lt;WebSearchPlan&gt; {
+    console.log("Planning searches...");
+    const result = await run(plannerAgent, `Query: ${query}`);
+    const plan = result.finalOutput!;
+    console.log(`Will perform ${plan.searches.length} searches`);
+    return plan;
+  }
+
+  /** Perform the planned searches in parallel; report progress as each one completes. */
+  async performSearches(plan: WebSearchPlan): Promise&lt;string[]&gt; {
+    console.log("Searching...");
+    let numCompleted = 0;
+    const tasks = plan.searches.map((item) =&gt;
+      this.search(item).then((r) =&gt; {
+        numCompleted += 1;
+        console.log(`Searching... ${numCompleted}/${plan.searches.length} completed`);
+        return r;
+      }),
+    );
+    const results = (await Promise.all(tasks)).filter((r): r is string =&gt; r !== null);
+    console.log("Finished searching");
+    return results;
+  }
+
+  /** Perform one search; a failed search returns null instead of killing the whole run. */
+  async search(item: WebSearchItem): Promise&lt;string | null&gt; {
+    const input = `Search term: ${item.query}\nReason for searching: ${item.reason}`;
+    try {
+      const result = await run(searchAgent, input);
+      return String(result.finalOutput);
+    } catch {
+      return null;
+    }
+  }
+
+  async writeReport(query: string, searchResults: string[]): Promise&lt;ReportData&gt; {
+    console.log("Thinking about report...");
+    const input = `Original query: ${query}\nSummarized search results: ${JSON.stringify(searchResults)}`;
+    const result = await run(writerAgent, input);
+    console.log("Finished writing report");
+    return result.finalOutput!;
+  }
+
+  async sendEmail(report: ReportData): Promise&lt;ReportData&gt; {
+    console.log("Writing email...");
+    await run(emailAgent, report.markdown_report);
+    console.log("Email sent");
+    return report;
+  }
+}</code></pre></div>
+
 <h2>The Gradio app that streams progress</h2>
 
 <p>The entry point is <code>deep_research.py</code>. It is a short <a class="term" href="glossary.html#gradio">Gradio</a> app: a heading, a text box for the topic, a "Run" button and a markdown area for the report. The clever part is that research takes a while — planning, running many searches, writing, emailing — so instead of leaving the user staring at a blank screen, the app <em>streams</em> status lines as each stage finishes.</p>

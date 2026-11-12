@@ -36,10 +36,13 @@ document.addEventListener("DOMContentLoaded", () => {
       ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", sh: "bash", ps: "powershell",
       env: "bash", sql: "sql", json: "json", py: "python", toml: "ini", yaml: "yaml", css: "css", html: "xml",
     }[lang];
-    if (code && hlLang) code.classList.add(`language-${hlLang}`);
+    // Known languages get highlighted; anything else (txt, output, folder trees) stays plain text
+    // instead of letting highlight.js guess a language and colour it at random.
+    if (code) code.classList.add(hlLang ? `language-${hlLang}` : "nohighlight");
     if (code) addLineNumbers(pre, code);
   });
   if (window.hljs) window.hljs.highlightAll();
+  setupTrackTabs();
   setupLanguageTabs();
 });
 
@@ -51,7 +54,7 @@ const langKey = (lang) => (lang === "py" ? "py" : /^(ts|tsx|js|jsx)$/.test(lang)
 
 function setupLanguageTabs() {
   const groups = document.querySelectorAll(".code-tabs");
-  if (!groups.length && !document.querySelector("[data-only]")) return;
+  if (!groups.length && !document.querySelector("[data-only], .track-tabs")) return;
   groups.forEach((group) => {
     const strip = document.createElement("div");
     strip.className = "lang-strip";
@@ -95,9 +98,38 @@ function setupLanguageTabs() {
   setLanguage(saved === "ts" ? "ts" : "py", false);
 }
 
+// Project-build pages: <div class="track-tabs"> holds one <section class="track" data-track="py|ts"
+// data-label="..."> per stack. They become tabs (Python + uv | React + Node + TypeScript). The choice
+// is the same one as the code-language switch, so the whole page follows one stack.
+function setupTrackTabs() {
+  document.querySelectorAll(".track-tabs").forEach((group) => {
+    const strip = document.createElement("div");
+    strip.className = "track-strip";
+    strip.setAttribute("role", "tablist");
+    strip.setAttribute("aria-label", "Choose your stack");
+    group.querySelectorAll(":scope > .track").forEach((sec) => {
+      const key = sec.dataset.track;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.setAttribute("role", "tab");
+      btn.dataset.langKey = key;
+      btn.textContent = sec.dataset.label || LANGS[key];
+      btn.addEventListener("click", () => {
+        setLanguage(key, true);
+        if (strip.getBoundingClientRect().top < 0) strip.scrollIntoView({ block: "start" });
+      });
+      strip.append(btn);
+    });
+    group.prepend(strip);
+  });
+}
+
 function setLanguage(key, remember) {
   document.documentElement.dataset.codeLang = key;
   document.querySelectorAll(".code-tabs > .code").forEach((card) => (card.hidden = card.dataset.langKey !== key));
+  document.querySelectorAll(".track-tabs > .track").forEach((sec) => (sec.hidden = sec.dataset.track !== key));
+  document.querySelectorAll(".track-strip button").forEach((b) =>
+    b.setAttribute("aria-selected", String(b.dataset.langKey === key)));
   document.querySelectorAll(".lang-strip button").forEach((b) =>
     b.setAttribute("aria-pressed", String(b.dataset.langKey === key)));
   if (remember) try { localStorage.setItem("guide-code-lang", key); } catch {}

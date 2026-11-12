@@ -729,9 +729,11 @@ notebook note quotes about 3 cents for its newer model. Either way, generate del
 <h2>Build it step by step</h2>
 
 <p>Beyond reading the finished file, here is how to build today's assistant from the Day 4 starting
-point. Track A is Python with uv; Track B is the TypeScript script.</p>
+point. Pick your stack with the tabs below.</p>
 
-<p><strong>Track A — Python + uv.</strong> Start from the Day 4 notebook, which already has the
+<div class="track-tabs">
+<section class="track" data-track="py" data-label="Python + uv">
+<p>Start from the Day 4 notebook, which already has the
 assistant and its price tool.</p>
 
 <ol class="steps">
@@ -748,17 +750,125 @@ assistant and its price tool.</p>
 the three panels fill: transcript, image, audio.</li>
 </ol>
 
-<p><strong>Track B — Node + TypeScript.</strong> The verified script reuses the Day 4 tool file.</p>
+</section>
+<section class="track" data-track="ts" data-label="Node + TypeScript">
+<p>The verified script reuses the Day 4 tool file, shown in step 2.</p>
 
 <ol class="steps">
 <li>In the TypeScript project (<code>week2-ts/</code> or the <code>code/ts/w2</code> folder), install once: <pre data-lang="sh"><code>npm install</code></pre> This pulls in <code>openai</code>, <code>dotenv</code>, <code>typescript</code> and <code>tsx</code>.</li>
-<li>Make sure <code>day4_tools.ts</code> is present — <code>day5_multimodal.ts</code> imports
-<code>getTicketPrice</code>, <code>tools</code> and <code>SYSTEM_MESSAGE</code> from it.</li>
+<li>Make sure <code>src/day4_tools.ts</code> is present — <code>day5_multimodal.ts</code> imports
+<code>getTicketPrice</code>, <code>tools</code> and <code>SYSTEM_MESSAGE</code> from it. Here is the Day 4 file again, so you don't need to switch pages:
+<pre data-file="src/day4_tools.ts" data-lang="ts" data-tag="complete file"><code>// Day 4 - Tools / OpenAI function-calling (TypeScript port of day4.py)
+// An airline assistant (FlightAI) that can look up ticket prices. The model decides
+// when it needs the tool, we run the real function, feed the result back, and let the
+// model turn it into a courteous reply.
+import "dotenv/config";
+import { pathToFileURL } from "node:url";
+import OpenAI from "openai";
+
+export const MODEL = "gpt-4o-mini";
+
+export const SYSTEM_MESSAGE =
+  "You are a helpful assistant for an Airline called FlightAI. " +
+  "Give short, courteous answers, no more than 1 sentence. " +
+  "Always be accurate. If you don't know the answer, say so.";
+
+// The "database" of ticket prices (a plain object stands in for the Python sqlite table).
+const ticketPrices: Record&lt;string, string&gt; = {
+  london: "$799",
+  paris: "$899",
+  tokyo: "$1400",
+  berlin: "$499",
+};
+
+export function getTicketPrice(destinationCity: string): string {
+  console.log(`Tool called for city ${destinationCity}`);
+  const price = ticketPrices[destinationCity.toLowerCase()] ?? "Unknown ticket price";
+  return `The price of a ticket to ${destinationCity} is ${price}`;
+}
+
+// The JSON schema that describes our function to the model.
+export const priceFunction: OpenAI.Chat.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "get_ticket_price",
+    description: "Get the price of a return ticket to the destination city.",
+    parameters: {
+      type: "object",
+      properties: {
+        destination_city: {
+          type: "string",
+          description: "The city that the customer wants to travel to",
+        },
+      },
+      required: ["destination_city"],
+      additionalProperties: false,
+    },
+  },
+};
+
+export const tools: OpenAI.Chat.ChatCompletionTool[] = [priceFunction];
+
+// Run each tool call the model requested and build the matching `tool` messages.
+export function handleToolCalls(
+  message: OpenAI.Chat.ChatCompletionMessage,
+): OpenAI.Chat.ChatCompletionToolMessageParam[] {
+  const responses: OpenAI.Chat.ChatCompletionToolMessageParam[] = [];
+  for (const toolCall of message.tool_calls ?? []) {
+    if (toolCall.type === "function" &amp;&amp; toolCall.function.name === "get_ticket_price") {
+      const args = JSON.parse(toolCall.function.arguments) as { destination_city: string };
+      const priceDetails = getTicketPrice(args.destination_city);
+      responses.push({ role: "tool", content: priceDetails, tool_call_id: toolCall.id });
+    }
+  }
+  return responses;
+}
+
+// The full tool-call loop: ask the model; while it wants tools, run them and ask again.
+export async function chat(openai: OpenAI, message: string): Promise&lt;string&gt; {
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: "system", content: SYSTEM_MESSAGE },
+    { role: "user", content: message },
+  ];
+  let response = await openai.chat.completions.create({ model: MODEL, messages, tools });
+
+  while (response.choices[0]?.finish_reason === "tool_calls") {
+    const responseMessage = response.choices[0].message;
+    messages.push(responseMessage);
+    messages.push(...handleToolCalls(responseMessage));
+    response = await openai.chat.completions.create({ model: MODEL, messages, tools });
+  }
+  return response.choices[0]?.message.content ?? "";
+}
+
+async function main(): Promise&lt;void&gt; {
+  // Offline-safe sanity check: the tool runs without any network call.
+  console.log(getTicketPrice("London"));
+  console.log("Tool schema:", JSON.stringify(priceFunction, null, 2));
+
+  if (!process.env.OPENAI_API_KEY) {
+    console.log("\nOPENAI_API_KEY not set - skipping the live tool-call loop. See .env.example.");
+    return;
+  }
+  const openai = new OpenAI();
+  const reply = await chat(openai, "How much is a ticket to Tokyo?");
+  console.log("Assistant:", reply);
+}
+
+// Only run the demo when this file is executed directly, not when imported.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err) =&gt; {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}</code></pre></li>
 <li>Put your key in <code>.env</code> as <code>OPENAI_API_KEY=sk-proj-...</code> (without a key the script
 prints which models it would use and exits cleanly).</li>
 <li>Run it: <pre data-lang="sh"><code>npx tsx src/day5_multimodal.ts</code></pre> It asks the agent a sample question and writes <code>day5-reply.mp3</code> and <code>day5-city.png</code> next to the script.</li>
 <li>Open the <code>.mp3</code> to hear the reply and the <code>.png</code> to see the generated city.</li>
 </ol>
+</section>
+</div>
 
 <div class="recap"><strong>Recap</strong>
 <ul>
