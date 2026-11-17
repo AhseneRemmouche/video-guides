@@ -150,7 +150,7 @@ your Weights &amp; Biases project automatically.</p>
 
 <h2>What you will do</h2>
 
-<p>The notebook loads the curated items from earlier in the week, turns a slice of them into JSONL training
+<p>The notebook loads the items pickled on Day 2, turns a slice of them into JSONL training
 and validation files, uploads both to OpenAI, creates a fine-tuning job, watches it run, and then evaluates
 the fine-tuned model against the same 250 test items used all week.</p>
 
@@ -159,8 +159,9 @@ the fine-tuned model against the same 250 test items used all week.</p>
 start JupyterLab with <code>uv run jupyter lab</code> and open <code>week6/day5.ipynb</code>. Run the import
 and environment cells first.</li>
 <li><span class="eyebrow">Keys</span> Your <code>.env</code> in the project root needs a working
-<code>OPENAI_API_KEY</code> (starts with <code>sk-proj-</code>) and your <code>HF_TOKEN</code> for loading the
-dataset from the Hugging Face Hub.</li>
+<code>OPENAI_API_KEY</code> and your <code>HF_TOKEN</code> (the notebook logs in to Hugging Face, though the
+data itself comes from <code>train.pkl</code> and <code>test.pkl</code>, next to <code>items.py</code> and
+<code>testing.py</code>).</li>
 <li><span class="eyebrow">Weights &amp; Biases (optional)</span> Sign up at <code>wandb.ai</code>, copy your
 API key from settings, and paste it into the OpenAI dashboard's <em>Integrations</em> section so you can
 watch the run.</li>
@@ -170,56 +171,95 @@ files, create the job, poll its events, then evaluate — reading the output of 
 OpenAI's side. You get an email when it is done.</li>
 </ol>
 
-<h2>The full program</h2>
+<h2>Lesson by lesson</h2>
 
-<p>Here is the complete notebook code, from loading the data through the final evaluation. Read it once end
-to end, then use the line-by-line tables underneath to understand each key part.</p>
+<p>One section per video, in the order you watch them. Each code block is what is <strong>on screen in that
+video</strong>: the Day 5 notebook as recorded in September 2024. Only the fine-tuning call needs a change today (the
+base model the video uses), so that cell has two versions, <strong>As in the video</strong> and <strong>Runs today</strong>;
+the rest still runs as shown. Nothing was run for this guide: it costs money and a quarter of an hour of OpenAI's time.
+The numbers are the ones on Ed's screen.</p>
+<section class="lesson" id="video-26">
+<h3>Video 26 · Fine-tuning with OpenAI: the three steps</h3>
+<p class="lesson-meta">26 -Day 5 - Fine-Tuning LLMs with OpenAI Preparing Data, Training, and Evaluation.mp4 · 6:06</p>
+<p>Slides, no code. Fine-tuning a frontier model is three steps: prepare the data as JSONL and
+upload it, run a training job, then evaluate and repeat. Ed warns that today "may also disappoint".</p>
 
-<pre data-file="week6/day5.py" data-lang="py" data-tag="complete file"><code># imports
+
+
+</section>
+
+<section class="lesson" id="video-27">
+<h3>Video 27 · Preparing and uploading the JSONL files</h3>
+<p class="lesson-meta">27 -Day 5 - How to Prepare JSONL Files for Fine-Tuning Large Language Models (LLMs).mp4 · 11:06</p>
+<p>Ed opens <code>week6/day5.ipynb</code>, picks 500 training and 50 validation examples, turns each into
+a conversation whose last message is the right answer, writes the two JSONL files and uploads them to OpenAI.</p>
+<div class="code-tabs"><pre data-file="week6/day5.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># imports
 
 import os
 import re
+import math
 import json
+import random
 from dotenv import load_dotenv
 from huggingface_hub import login
+from items import Item
+import matplotlib.pyplot as plt
+import numpy as np
+import pickle
+from collections import Counter
 from openai import OpenAI
-from pricer.items  import Item
-from pricer.evaluator import evaluate
+from anthropic import Anthropic
+
+# moved our Tester into a separate package
+# call it with Tester.test(function_name, test_dataset)
+
+from testing import Tester
 
 # environment
 
-LITE_MODE = False
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
 
-load_dotenv(override=True)
+# Log in to HuggingFace
+
 hf_token = os.environ['HF_TOKEN']
 login(hf_token, add_to_git_credential=True)
 
-username = "ed-donner"
-dataset = f"{username}/items_lite" if LITE_MODE else f"{username}/items_full"
-
-train, val, test = Item.from_hub(dataset)
-
-print(f"Loaded {len(train):,} training items, {len(val):,} validation items, {len(test):,} test items")
-
 openai = OpenAI()
 
+%matplotlib inline
+
+# Let's avoid curating all our data again! Load in the pickle files:
+
+with open('train.pkl', 'rb') as file:
+    train = pickle.load(file)
+
+with open('test.pkl', 'rb') as file:
+    test = pickle.load(file)
+
 # OpenAI recommends fine-tuning with populations of 50-100 examples
-# But as our examples are very small, I'm suggesting we go with 100 examples (and 1 epoch)
+# But as our examples are very small, I'm suggesting we go with 500 examples (and 1 epoch)
 
+fine_tune_train = train[:500]
+fine_tune_validation = train[500:550]
 
-fine_tune_train = train[:100]
-fine_tune_validation = val[:50]
-
-len(fine_tune_train)
+# First let's work on a good prompt for a Frontier model
+# Notice that I'm removing the " to the nearest dollar"
+# When we train our own models, we'll need to make the problem as easy as possible, 
+# but a Frontier model needs no such simplification.
 
 def messages_for(item):
-    message = f"Estimate the price of this product. Respond with the price, no explanation\n\n{item.summary}"
+    system_message = "You estimate prices of items. Reply only with the price, no explanation"
+    user_prompt = item.test_prompt().replace(" to the nearest dollar","").replace("\n\nPrice is $","")
     return [
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": f"${item.price:.2f}"}
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_prompt},
+        {"role": "assistant", "content": f"Price is ${item.price:.2f}"}
     ]
 
-messages_for(fine_tune_train[0])
+messages_for(train[0])
 
 # Convert the items into a list of json objects - a "jsonl" string
 # Each row represents a message in the form:
@@ -243,26 +283,77 @@ def write_jsonl(items, filename):
         jsonl = make_jsonl(items)
         f.write(jsonl)
 
-write_jsonl(fine_tune_train, "jsonl/fine_tune_train.jsonl")
+write_jsonl(fine_tune_train, "fine_tune_train.jsonl")
 
-write_jsonl(fine_tune_validation, "jsonl/fine_tune_validation.jsonl")
+write_jsonl(fine_tune_validation, "fine_tune_validation.jsonl")
 
-with open("jsonl/fine_tune_train.jsonl", "rb") as f:
+with open("fine_tune_train.jsonl", "rb") as f:
     train_file = openai.files.create(file=f, purpose="fine-tune")
 
 train_file
 
-with open("jsonl/fine_tune_validation.jsonl", "rb") as f:
+with open("fine_tune_validation.jsonl", "rb") as f:
     validation_file = openai.files.create(file=f, purpose="fine-tune")
 
-validation_file
+validation_file</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3-16</td><td><code>import os</code> … <code>from anthropic import Anthropic</code></td><td>The same imports as Day 4 (<code>json</code> is the one that matters today).</td></tr>
+<tr><td>21</td><td><code>from testing import Tester</code></td><td>The harness from <code>testing.py</code>, for the final score.</td></tr>
+<tr><td>25-33</td><td><code>load_dotenv()</code> … <code>login(...)</code></td><td>Keys and Hugging Face login, as before.</td></tr>
+<tr><td>35</td><td><code>openai = OpenAI()</code></td><td>Only OpenAI today: its fine-tuning API does the training.</td></tr>
+<tr><td>37</td><td><code>%matplotlib inline</code></td><td>Charts under the cells.</td></tr>
+<tr><td>41-45</td><td><code>pickle.load(file)</code> ×2</td><td>Day 2's training and test items.</td></tr>
+<tr><td>50-51</td><td><code>fine_tune_train = train[:500]</code> / <code>fine_tune_validation = train[500:550]</code></td><td>OpenAI suggests 50 to 100 examples for fine-tuning; the examples are short, so Ed uses 500, plus 50 others for validation. Both slices come from the training set, so the test items stay unseen.</td></tr>
+<tr><td>58-65</td><td><code>def messages_for(item)</code></td><td>Yesterday's prompt with one change: the assistant message now holds the <strong>answer</strong>, <code>f"Price is ${item.price:.2f}"</code>. A training example is a conversation that ends the way you want the model to answer.</td></tr>
+<tr><td>67</td><td><code>messages_for(train[0])</code></td><td>The Delphi fuel pump again, ending "Price is $226.95".</td></tr>
+<tr><td>74-80</td><td><code>def make_jsonl(items)</code></td><td>Builds <a class="term" href="glossary.html#jsonl">JSONL</a> text: for each item, <code>json.dumps</code> its messages, wrap them as <code>{"messages": ...}</code> and end the line with <code>\n</code>. One complete JSON object per line, no surrounding list.</td></tr>
+<tr><td>82</td><td><code>print(make_jsonl(train[:3]))</code></td><td>Three rows, to check the format by eye.</td></tr>
+<tr><td>86-89</td><td><code>def write_jsonl(items, filename)</code></td><td>Saves that text to a file.</td></tr>
+<tr><td>91</td><td><code>write_jsonl(fine_tune_train, "fine_tune_train.jsonl")</code></td><td>500 lines. JupyterLab can open the file as a tree: 500 items, each with three messages.</td></tr>
+<tr><td>93</td><td><code>write_jsonl(fine_tune_validation, "fine_tune_validation.jsonl")</code></td><td>50 lines.</td></tr>
+<tr><td>95-96</td><td><code>openai.files.create(file=f, purpose="fine-tune")</code></td><td>Uploads the file to OpenAI. Open it in binary mode (<code>"rb"</code>): the bytes are sent as they are.</td></tr>
+<tr><td>96</td><td><code>train_file</code></td><td>A <code>FileObject</code> with an <code>id</code> and <code>status='processed'</code>.</td></tr>
+<tr><td>100-101</td><td><code>validation_file = openai.files.create(...)</code></td><td>The same for the validation file.</td></tr>
+</table></div>
+</div>
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="One JSONL training row is a user question paired with the correct assistant answer">
+  <rect class="zone" x="20" y="14" width="720" height="150" rx="8"/>
+  <text x="36" y="38" class="title">One training row (one line of the JSONL file)</text>
+  <text x="36" y="60" class="mono small">{"messages": [</text>
+  <rect class="box box-info" x="40" y="72" width="680" height="40" rx="8"/>
+  <text x="54" y="89" class="label">role: user</text>
+  <text x="54" y="105" class="small">"How much does this cost? [the product description]"</text>
+  <rect class="box box-ok" x="40" y="116" width="680" height="40" rx="8"/>
+  <text x="54" y="133" class="label">role: assistant</text>
+  <text x="54" y="149" class="small mono">"Price is $226.95"  &#8592; the correct answer the model learns to give</text>
+  <text x="380" y="190" text-anchor="middle">The question and its correct answer, side by side.</text>
+</svg>
+<figcaption>The first training item. Each row in the video also starts with the system message. A training row is just a chat where the assistant's turn is the
+<em>right</em> answer. <strong>The model learns by seeing hundreds of these.</strong></figcaption>
+</figure>
+</section>
+
+<section class="lesson" id="video-28">
+<h3>Video 28 · Launching the fine-tuning job</h3>
+<p class="lesson-meta">28 -Day 5 - Step-by-Step Guide Launching GPT Fine-Tuning Jobs with OpenAI API.mp4 · 8:18</p>
+<p>Weights &amp; Biases (optional, free for personal use) for watching the run, then the call that starts
+training and the cells that check on it.</p>
+<div class="code-tabs"><pre data-file="week6/day5.ipynb" data-lang="py" data-tag="as in the video" data-ver="video"><code>wandb_integration = {"type": "wandb", "wandb": {"project": "gpt-pricer"}}
+
+train_file.id
 
 openai.fine_tuning.jobs.create(
     training_file=train_file.id,
     validation_file=validation_file.id,
-    model="gpt-4.1-nano-2025-04-14",
+    model="gpt-4o-mini-2024-07-18",
     seed=42,
-    hyperparameters={"n_epochs": 1, "batch_size": 1},
+    hyperparameters={"n_epochs": 1},
+    integrations = [wandb_integration],
     suffix="pricer"
 )
 
@@ -274,146 +365,44 @@ job_id
 
 openai.fine_tuning.jobs.retrieve(job_id)
 
-openai.fine_tuning.jobs.list_events(fine_tuning_job_id=job_id, limit=10).data
+openai.fine_tuning.jobs.list_events(fine_tuning_job_id=job_id, limit=10).data</code></pre><pre data-file="week6/day5.ipynb" data-lang="py" data-tag="runs today" data-ver="today"><code>wandb_integration = {"type": "wandb", "wandb": {"project": "gpt-pricer"}}
 
-fine_tuned_model_name = openai.fine_tuning.jobs.retrieve(job_id).fine_tuned_model
+train_file.id
 
-fine_tuned_model_name
+openai.fine_tuning.jobs.create(
+    training_file=train_file.id,
+    validation_file=validation_file.id,
+    # gpt-4o-mini-2024-07-18 in the video; the course repository now fine-tunes this model
+    model="gpt-4.1-nano-2025-04-14",
+    seed=42,
+    hyperparameters={"n_epochs": 1},
+    integrations = [wandb_integration],
+    suffix="pricer"
+)
 
-# The prompt
+openai.fine_tuning.jobs.list(limit=1)
 
-def test_messages_for(item):
-    message = f"Estimate the price of this product. Respond with the price, no explanation\n\n{item.summary}"
-    return [
-        {"role": "user", "content": message},
-    ]
+job_id = openai.fine_tuning.jobs.list(limit=1).data[0].id
 
-# Try this out
+job_id
 
-test_messages_for(test[0])
+openai.fine_tuning.jobs.retrieve(job_id)
 
-# The inference function
-
-
-def gpt_4__1_nano_fine_tuned(item):
-    response = openai.chat.completions.create(
-        model=fine_tuned_model_name,
-        messages=test_messages_for(item),
-        max_tokens=7
-    )
-    return response.choices[0].message.content
-
-print(test[0].price)
-print(gpt_4__1_nano_fine_tuned(test[0]))
-
-evaluate(gpt_4__1_nano_fine_tuned, test)
-
-# 96.58 - mini 200
-# 79.29 - mini 2000
-# 82.26 - nano 2000
-# 67.75 - nano 20,000</code></pre>
-
-<h3>Line by line</h3>
-
-<p>Imports, environment and loading the data.</p>
-
+openai.fine_tuning.jobs.list_events(fine_tuning_job_id=job_id, limit=10).data</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+<p>Line numbers follow the <strong>As in the video</strong> block.</p>
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>3-5</td><td><code>import os</code> / <code>import re</code> / <code>import json</code></td><td>Standard-library helpers. <code>os</code> reads settings from the environment; <code>re</code> is text matching; <code>json</code> turns Python objects into JSON text when building the JSONL.</td></tr>
-<tr><td>6-8</td><td><code>from dotenv import load_dotenv</code> / <code>from huggingface_hub import login</code> / <code>from openai import OpenAI</code></td><td>Loads your <code>.env</code>, logs in to the Hugging Face Hub (to download the dataset), and brings in the OpenAI client.</td></tr>
-<tr><td>9-10</td><td><code>from pricer.items import Item</code> / <code>from pricer.evaluator import evaluate</code></td><td>Reuses two course helpers: the <code>Item</code> class (one product, with a <code>summary</code> and a <code>price</code>) and the <code>evaluate</code> function that scores a model across the 250 test items and draws the week's familiar chart.</td></tr>
-<tr><td>14</td><td><code>LITE_MODE = False</code></td><td>A switch for using a smaller dataset on a modest machine. <code>False</code> here means the full dataset.</td></tr>
-<tr><td>16-18</td><td><code>load_dotenv(override=True)</code> / <code>login(hf_token, ...)</code></td><td>Reads the keys now (<code>override=True</code> makes the file win over any stale value), then signs in to Hugging Face with your token so the download works.</td></tr>
-<tr><td>20-23</td><td><code>dataset = ...</code> / <code>train, val, test = Item.from_hub(dataset)</code></td><td>Downloads the curated product dataset and splits it into three groups: <code>train</code> (to learn from), <code>val</code> (the held-out check), and <code>test</code> (the final exam).</td></tr>
-<tr><td>27</td><td><code>openai = OpenAI()</code></td><td>Creates the OpenAI client. With no arguments it reads <code>OPENAI_API_KEY</code> from the environment.</td></tr>
-<tr><td>33-34</td><td><code>fine_tune_train = train[:100]</code> / <code>fine_tune_validation = val[:50]</code></td><td>Takes a small slice for training — just 100 examples here, plus 50 for validation. OpenAI suggests 50–100 examples for a frontier model; the point is to nudge its style, not to re-teach it the world.</td></tr>
+<tr><td>1</td><td><code>wandb_integration = {"type": "wandb", "wandb": {"project": "gpt-pricer"}}</code></td><td>Asks OpenAI to send the run's numbers to a <a class="term" href="glossary.html#weights-and-biases">Weights &amp; Biases</a> project called gpt-pricer. It only works after you add your W&amp;B key under Integrations in the OpenAI dashboard; leave it out if you skip W&amp;B.</td></tr>
+<tr><td>3</td><td><code>train_file.id</code></td><td>The uploaded file's id, which is what the job needs.</td></tr>
+<tr><td>5-13</td><td><code>openai.fine_tuning.jobs.create(...)</code></td><td>Starts the training on OpenAI's servers: the two files by id, the base model <code>gpt-4o-mini-2024-07-18</code>, a seed, one <a class="term" href="glossary.html#epoch">epoch</a> (each example seen once), the W&amp;B integration, and <code>suffix="pricer"</code>, which ends up in the new model's name.</td></tr>
+<tr><td>15</td><td><code>openai.fine_tuning.jobs.list(limit=1)</code></td><td>Your most recent job.</td></tr>
+<tr><td>17</td><td><code>job_id = openai.fine_tuning.jobs.list(limit=1).data[0].id</code></td><td>Keeps its id, so nothing has to be copied by hand.</td></tr>
+<tr><td>21</td><td><code>openai.fine_tuning.jobs.retrieve(job_id)</code></td><td>The job's current state: status, hyperparameters and, once finished, the new model's name.</td></tr>
+<tr><td>23</td><td><code>openai.fine_tuning.jobs.list_events(fine_tuning_job_id=job_id, limit=10).data</code></td><td>The last ten events, newest first: "Created fine-tuning job", "Validating training file", later "Step 118/500: training loss=...". Ed re-runs this cell while waiting.</td></tr>
 </table></div>
-
-<p>Building the training rows — the <a class="term" href="glossary.html#jsonl">JSONL</a>.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>38-43</td><td><code>def messages_for(item):</code></td><td>Turns one product into a two-message conversation: a <strong>user</strong> message that asks for the price and shows the product summary, and an <strong>assistant</strong> message that gives the real answer (<code>f"${item.price:.2f}"</code>). The assistant reply is the "right answer" the model learns to produce.</td></tr>
-<tr><td>39</td><td><code>message = f"Estimate the price ... no explanation\n\n{item.summary}"</code></td><td>The prompt text. "Respond with the price, no explanation" trains the model to reply with a bare number, which makes the answer trivial to read back later.</td></tr>
-<tr><td>42</td><td><code>{"role": "assistant", "content": f"${item.price:.2f}"}</code></td><td>The known price, formatted to two decimals. Including the correct answer in the <code>assistant</code> turn is what makes this a <em>training</em> example rather than a question.</td></tr>
-<tr><td>52-58</td><td><code>def make_jsonl(items):</code></td><td>Builds the JSONL text. It loops over the items, converts each one's messages to a string with <code>json.dumps</code>, wraps it as <code>{"messages": ...}</code>, and joins them with a newline after each.</td></tr>
-<tr><td>57</td><td><code>result += '{"messages": ' + messages_str + '}\n'</code></td><td>Writes one row per item and ends it with <code>\n</code> — the newline is what makes this JSON <em>Lines</em>, one object per line, not a list.</td></tr>
-<tr><td>58</td><td><code>return result.strip()</code></td><td>Trims the trailing newline so the file does not end with a blank line.</td></tr>
-<tr><td>64-67</td><td><code>def write_jsonl(items, filename):</code></td><td>Opens a file and writes the JSONL text into it — the on-disk version of what <code>make_jsonl</code> produced.</td></tr>
-<tr><td>69, 71</td><td><code>write_jsonl(fine_tune_train, "jsonl/fine_tune_train.jsonl")</code></td><td>Actually writes the two files: the 100-example training set and the 50-example validation set.</td></tr>
-</table></div>
-
-<p>Uploading the files — <code>files.create</code>.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>73</td><td><code>with open("jsonl/fine_tune_train.jsonl", "rb") as f:</code></td><td>Opens the file in <strong>binary</strong> mode (<code>"rb"</code>, not <code>"r"</code>). OpenAI streams the raw bytes up, so binary mode matters — the instructor flags this as an easy mistake.</td></tr>
-<tr><td>74</td><td><code>train_file = openai.files.create(file=f, purpose="fine-tune")</code></td><td>Uploads the file to OpenAI and gets back a file object. <code>purpose="fine-tune"</code> tells OpenAI what the file is for. The returned object has an <code>id</code> you will need next.</td></tr>
-<tr><td>78-79</td><td><code>validation_file = openai.files.create(file=f, purpose="fine-tune")</code></td><td>The same upload for the validation set. After these two cells, both files live on OpenAI's side, ready to be referenced by id.</td></tr>
-</table></div>
-
-<p>Creating the fine-tuning job — <code>fine_tuning.jobs.create</code>.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>83</td><td><code>openai.fine_tuning.jobs.create(</code></td><td>The call that actually starts training. This is the heart of the day.</td></tr>
-<tr><td>84-85</td><td><code>training_file=train_file.id</code> / <code>validation_file=validation_file.id</code></td><td>Points the job at the two uploaded files <em>by their id</em> (not the local names). The validation file is optional but good practice.</td></tr>
-<tr><td>86</td><td><code>model="gpt-4.1-nano-2025-04-14"</code></td><td>The base model to fine-tune — a small, cheap frontier model, so both the training and later inference cost only cents. (The video used <code>gpt-4o-mini</code>; see the Video-vs-repo note.)</td></tr>
-<tr><td>87</td><td><code>seed=42</code></td><td>Fixes the random seed so the run is repeatable — the same inputs give the same result.</td></tr>
-<tr><td>88</td><td><code>hyperparameters={"n_epochs": 1, "batch_size": 1}</code></td><td>The training settings ("hyperparameters" is just the fancy name for the knobs). One <a class="term" href="glossary.html#epoch">epoch</a> means one pass through the data; <code>batch_size</code> is how many examples are grouped per step. You can omit these and let OpenAI choose.</td></tr>
-<tr><td>89-90</td><td><code>suffix="pricer"</code></td><td>A label that OpenAI includes in the new model's name, so your fine-tuned model is easy to recognise later.</td></tr>
-</table></div>
-
-<div class="callout warn">
-<strong>Where did Weights &amp; Biases go?</strong>
-<p>The video adds the <a class="term" href="glossary.html#weights-and-biases">Weights &amp; Biases</a>
-integration as an extra argument to this same <code>jobs.create</code> call, something like:</p>
-<pre data-lang="py" data-tag="video version"><code>integrations=[{"type": "wandb", "wandb": {"project": "gpt-pricer"}}]</code></pre>
-<p>The repo file shown above leaves this line out and instead relies on the key you pasted into the OpenAI
-dashboard (both routes send the run to your project). If you do not want Weights &amp; Biases at all, simply
-add nothing — it is optional, and the job runs the same either way.</p>
 </div>
-
-<p>Watching the job — <code>list</code>, <code>retrieve</code>, <code>list_events</code>.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>92-96</td><td><code>job_id = openai.fine_tuning.jobs.list(limit=1).data[0].id</code></td><td>Lists your jobs most-recent-first and grabs the id of the one you just started, saving it in <code>job_id</code> so you do not have to copy it by hand.</td></tr>
-<tr><td>98</td><td><code>openai.fine_tuning.jobs.retrieve(job_id)</code></td><td>Fetches the current state of the job — its status, hyperparameters, and (once finished) the name of the new model.</td></tr>
-<tr><td>100</td><td><code>openai.fine_tuning.jobs.list_events(fine_tuning_job_id=job_id, limit=10).data</code></td><td>The most useful one while you wait: the last ten <em>events</em>, newest first. You watch it move from "validating training file" to "step 1/100 …" with a <a class="term" href="glossary.html#training-loss">training loss</a> on each step.</td></tr>
-<tr><td>102-104</td><td><code>fine_tuned_model_name = openai.fine_tuning.jobs.retrieve(job_id).fine_tuned_model</code></td><td>Once the job completes, this pulls the new model's id out of the job. The same id also arrives in the completion email.</td></tr>
-</table></div>
-
-<p>Calling the fine-tuned model and scoring it.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>108-112</td><td><code>def test_messages_for(item):</code></td><td>Builds the prompt for testing — the <em>same</em> user message as training, but <strong>without</strong> the assistant answer. The model has to supply the price itself.</td></tr>
-<tr><td>121-127</td><td><code>def gpt_4__1_nano_fine_tuned(item):</code></td><td>The inference function. It is an ordinary <code>openai.chat.completions.create</code> call — the only difference from calling a normal model is the name you pass.</td></tr>
-<tr><td>123</td><td><code>model=fine_tuned_model_name</code></td><td>The one tiny change that uses your trained model: pass its id instead of <code>"gpt-4.1-nano"</code>. OpenAI routes the call to your fine-tuned version automatically.</td></tr>
-<tr><td>125</td><td><code>max_tokens=7</code></td><td>Caps the reply at a handful of tokens — the answer is only a short price, so there is no reason to let it ramble (and it keeps the cost tiny).</td></tr>
-<tr><td>127</td><td><code>return response.choices[0].message.content</code></td><td>Returns the model's text (the price), ready for the evaluator to parse.</td></tr>
-<tr><td>132</td><td><code>evaluate(gpt_4__1_nano_fine_tuned, test)</code></td><td>Runs the fine-tuned model across all 250 test items and reports the average dollar error — the same yardstick used for every model this week, so the comparison is fair.</td></tr>
-<tr><td>134-137</td><td><code># 96.58 - mini 200 ...</code></td><td>The author's own notes from later experiments: average error for different base models and dataset sizes (for example, nano on 20,000 examples reached 67.75). They show that bigger, better-curated data helps far more than tweaking the knobs.</td></tr>
-</table></div>
-
-<figure class="diagram">
-<svg viewBox="0 0 760 210" role="img" aria-label="One JSONL training row is a user question paired with the correct assistant answer">
-  <rect class="zone" x="20" y="14" width="720" height="150" rx="8"/>
-  <text x="36" y="38" class="title">One training row (one line of the JSONL file)</text>
-  <text x="36" y="60" class="mono small">{"messages": [</text>
-  <rect class="box box-info" x="40" y="72" width="680" height="40" rx="8"/>
-  <text x="54" y="89" class="label">role: user</text>
-  <text x="54" y="105" class="small">"Estimate the price of this product ... [the product summary]"</text>
-  <rect class="box box-ok" x="40" y="116" width="680" height="40" rx="8"/>
-  <text x="54" y="133" class="label">role: assistant</text>
-  <text x="54" y="149" class="small mono">"$226.95"  &#8592; the known, correct answer the model learns to give</text>
-  <text x="380" y="190" text-anchor="middle">The question and its correct answer, side by side.</text>
-</svg>
-<figcaption>Prices shown are illustrative. A training row is just a chat where the assistant's turn is the
-<em>right</em> answer. <strong>The model learns by seeing hundreds of these.</strong></figcaption>
-</figure>
-
 <figure class="diagram">
 <svg viewBox="0 0 760 300" role="img" aria-label="The lifecycle of a fine-tuning job from file upload to a finished model">
   <rect class="box" x="280" y="14" width="200" height="40" rx="8"/>
@@ -426,7 +415,7 @@ add nothing — it is optional, and the job runs the same either way.</p>
   <text x="380" y="157" text-anchor="middle">Validating training file</text>
   <path class="arrow" d="M 380,172 V 190"/>
   <rect class="box box-info" x="280" y="192" width="200" height="40" rx="8"/>
-  <text x="380" y="211" text-anchor="middle">Training: step 1 ... 100</text>
+  <text x="380" y="211" text-anchor="middle">Training: step 1 ... 500</text>
   <text x="380" y="226" text-anchor="middle" class="small">loss reported each step</text>
   <path class="arrow" d="M 380,232 V 250"/>
   <rect class="box box-ok" x="260" y="252" width="240" height="40" rx="8"/>
@@ -439,6 +428,108 @@ add nothing — it is optional, and the job runs the same either way.</p>
 <figcaption>Read top to bottom. OpenAI does the training on its servers; you watch the events go by.
 <strong>When it finishes you get a brand-new model id to call.</strong></figcaption>
 </figure>
+</section>
+
+<section class="lesson" id="video-29">
+<h3>Video 29 · Watching the training loss</h3>
+<p class="lesson-meta">29 -Day 5 - Fine-Tuning LLMs Track Training Loss &amp; Progress with Weights &amp; Biases.mp4 · 4:21</p>
+<p>No new code. After about five minutes the <code>list_events</code> cell shows training steps out of
+500, each with a training loss. Ed switches to the Weights &amp; Biases dashboard to watch the same numbers as a chart: a
+sharp drop at the start, then a jagged, slowly falling line.</p>
+
+
+
+</section>
+
+<section class="lesson" id="video-30">
+<h3>Video 30 · Testing the fine-tuned model</h3>
+<p class="lesson-meta">30 -Day 5 - Evaluating Fine-Tuned LLMs Metrics Analyzing Training &amp; Validation Loss.mp4 · 7:18</p>
+<p>Ten to fifteen minutes later the job is done (an email arrives too). Ed shows the run in Weights
+&amp; Biases, gets the new model's name, and points the Day 4 pricer at it.</p>
+<div class="code-tabs"><pre data-file="week6/day5.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code>fine_tuned_model_name = openai.fine_tuning.jobs.retrieve(job_id).fine_tuned_model
+
+fine_tuned_model_name
+
+# The prompt
+
+def messages_for(item):
+    system_message = "You estimate prices of items. Reply only with the price, no explanation"
+    user_prompt = item.test_prompt().replace(" to the nearest dollar","").replace("\n\nPrice is $","")
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_prompt},
+        {"role": "assistant", "content": "Price is $"}
+    ]
+
+# Try this out
+
+messages_for(test[0])
+
+# A utility function to extract the price from a string
+
+def get_price(s):
+    s = s.replace('$','').replace(',','')
+    match = re.search(r"[-+]?\d*\.\d+|\d+", s)
+    return float(match.group()) if match else 0
+
+get_price("The price is roughly $99.99 because blah blah")
+
+# The function for gpt-4o-mini
+
+def gpt_fine_tuned(item):
+    response = openai.chat.completions.create(
+        model=fine_tuned_model_name, 
+        messages=messages_for(item),
+        seed=42,
+        max_tokens=7
+    )
+    reply = response.choices[0].message.content
+    return get_price(reply)
+
+print(test[0].price)
+print(gpt_fine_tuned(test[0]))
+
+print(test[0].test_prompt())
+
+Tester.test(gpt_fine_tuned, test)</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>fine_tuned_model_name = openai.fine_tuning.jobs.retrieve(job_id).fine_tuned_model</code></td><td>The new model's id, like <code>ft:gpt-4o-mini-2024-07-18:personal:pricer:...</code>. It also arrives by email.</td></tr>
+<tr><td>7-14</td><td><code>def messages_for(item)</code></td><td>Back to the <em>test</em> prompt: the assistant message is only <code>"Price is $"</code> again, so the model must supply the number.</td></tr>
+<tr><td>18</td><td><code>messages_for(test[0])</code></td><td>The first test item's messages.</td></tr>
+<tr><td>22-25</td><td><code>def get_price(s)</code></td><td>Day 4's helper that pulls the number out of a reply.</td></tr>
+<tr><td>27</td><td><code>get_price(...)</code></td><td>Returns 99.99.</td></tr>
+<tr><td>31-39</td><td><code>def gpt_fine_tuned(item)</code></td><td>An ordinary chat completion; the only change is <code>model=fine_tuned_model_name</code>. <code>max_tokens=7</code> leaves room for a price like 1,299.99.</td></tr>
+<tr><td>41-42</td><td><code>print(test[0].price)</code> / <code>print(gpt_fine_tuned(test[0]))</code></td><td>One guess next to the truth.</td></tr>
+<tr><td>44</td><td><code>print(test[0].test_prompt())</code></td><td>The item it was asked about.</td></tr>
+<tr><td>46</td><td><code>Tester.test(gpt_fine_tuned, test)</code></td><td>The 250 test items. The result comes in the next video.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-31">
+<h3>Video 31 · The result</h3>
+<p class="lesson-meta">31 -Day 5 - LLM Fine-Tuning Challenges When Model Performance Doesn&#x27;t Improve.mp4 · 1:52</p>
+<p>No new code. The fine-tuned model scores about $91: a little <em>worse</em> than plain
+<code>gpt-4o-mini</code> ($80), though it no longer makes wild guesses far above $1,000.</p>
+
+
+
+</section>
+
+<section class="lesson" id="video-32">
+<h3>Video 32 · Why it did not help, and when fine-tuning does</h3>
+<p class="lesson-meta">32 -Day 5 - Fine-Tuning Frontier LLMs Challenges &amp; Best Practices for Optimization.mp4 · 11:07</p>
+<p>Slides, no code: the leaderboard, OpenAI's list of good reasons to fine-tune a frontier model, and
+why the pricer is not one of them (see below). Next week: fine-tuning an open-source model.</p>
+
+
+
+</section>
 
 <div class="callout ok">
 <strong>What you should see</strong>
@@ -515,7 +606,7 @@ numbers were: a constant guess 146, traditional machine learning 139, random for
   <text x="20" y="136" class="label">Random forest</text>
   <rect class="box-warn" x="150" y="124" width="194" height="16" rx="4"/>
   <text x="352" y="136" class="small">97</text>
-  <text x="20" y="162" class="label">Fine-tuned nano</text>
+  <text x="20" y="162" class="label">Fine-tuned 4o-mini</text>
   <rect class="box-warn" x="150" y="150" width="182" height="16" rx="4"/>
   <text x="340" y="162" class="small">91</text>
   <text x="20" y="188" class="label">gpt-4o-mini</text>
@@ -532,7 +623,7 @@ does not guarantee an improvement.</strong></figcaption>
 
 <p>Why? A frontier model like the GPT-4 family already has trillions of parameters and has read an
 enormous slice of the world's text. It already understood the task and always returned a clean, parseable
-price. Handing it 100 — or even a few thousand — extra examples is unlikely to shift that deep
+price. Handing it 500 — or even a few thousand — extra examples is unlikely to shift that deep
 world knowledge. There is even a risk called <em>catastrophic forgetting</em>, where extra training erodes
 some of what the model learned during pre-training. OpenAI's own guidance is blunt: get as much as you can
 from the prompt first, because for a frontier model good prompting usually takes you most of the way.</p>
@@ -592,19 +683,12 @@ project.</p>
 
 <div class="callout">
 <strong>Video vs repo</strong>
-<ul>
-<li><strong>Model name.</strong> The video fine-tunes <code>gpt-4o-mini</code>; the repo file shown here uses
-<code>gpt-4.1-nano-2025-04-14</code>. Both are small, cheap frontier models, and model ids get retired over
-time — treat it as a value to swap for whatever is current.</li>
-<li><strong>Number of examples.</strong> In the video the instructor trains on 500 examples (and 50 for
-validation); the repo file uses 100. OpenAI suggests 50–100, and the author's trailing comments show
-that far larger sets (thousands) helped more than any other change.</li>
-<li><strong>System message.</strong> The video's training rows open with a <code>system</code> message ("You
-estimate prices of items…"); the repo's <code>messages_for</code> uses only a user and an assistant
-turn. Either works for fine-tuning.</li>
-<li><strong>Weights &amp; Biases line.</strong> The video passes an <code>integrations</code> block into
-<code>jobs.create</code>; the repo file omits it and relies on the dashboard hook. It is optional either way.</li>
-</ul>
+<p>The code above is the notebook as recorded, except that every saved version of it says 200 training examples where
+Ed's screen says 500. In December 2025 Ed rewrote Weeks 6 to 8: today's repository loads the data from the Hub, trains on
+user + assistant rows only (no system message, the answer as <code>$226.95</code>), fine-tunes
+<code>gpt-4.1-nano-2025-04-14</code> with <code>batch_size=1</code>, leaves out the Weights &amp; Biases integration and scores
+with <code>evaluate</code> instead of the <code>Tester</code>. Ed's notes at the bottom of that notebook suggest that more
+examples (thousands) helped more than anything else: 2,000 examples brought gpt-4o-mini to about $79.</p>
 </div>
 
 <div class="callout warn">
@@ -661,8 +745,8 @@ job with <code>fine_tuning.jobs.create(...)</code>, and watch it with <code>list
 <li>Honest result: fine-tuning the frontier model did <strong>not</strong> beat the base model (91 vs 80),
 because prompting already solved the task well. Fine-tuning a frontier model helps most for tone, strict
 formatting, edge cases, and skills that are hard to put in a prompt.</li>
-<li>The fine-tuning was not run here (it costs money and time); the React demo type-checks and builds but
-was not run live.</li>
+<li>The fine-tuning was not run here (it costs money and time); the code is shown as Ed recorded it, and only
+the base model changes in the "Runs today" tab. The React demo type-checks and builds but was not run live.</li>
 </ul>
 </div>
 

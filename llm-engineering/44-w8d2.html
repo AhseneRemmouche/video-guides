@@ -43,7 +43,8 @@ and a machine-learning model built on vector embeddings.</p>
 
 <h2>Why deploy the model at all</h2>
 
-<p>Last week's fine-tuned model is just weights sitting on a GPU during a notebook session. The moment the
+<p>Day 1 deployed the fine-tuned model; here is why that matters,
+because today's ensemble calls it through the specialist agent. Last week's fine-tuned model is just weights sitting on a GPU during a notebook session. The moment the
 notebook closes, it is gone, and nothing else can reach it. For a real system &#8212; an
 <a class="term" href="glossary.html#agent">agent</a> that runs on a schedule and prices hundreds of deals
 &#8212; you need the model to be <em>always reachable</em>. That means turning it into a <strong>service</strong>:
@@ -81,7 +82,7 @@ a model into a service you wrap it: load the weights once when the service start
 callers can find it. In this course that wrapper is a separate file, <code>pricer_service.py</code>, which you
 publish to Modal with a single <code>modal deploy</code> command. After that the service has a stable name
 (<code>pricer-service</code>) and a class (<code>Pricer</code>), and the notebook simply looks it up by those
-names and calls it.</p>
+names and calls it (in the video the class version is <code>pricer_service2.py</code>).</p>
 </details>
 
 <figure class="diagram">
@@ -114,7 +115,8 @@ model on a cloud GPU and hands the price back.</strong></figcaption>
 <h2>How the service is deployed</h2>
 
 <p>The deployment itself lives in a separate file in the repo, <code>pricer_service.py</code> (it is not part
-of today's notebook, so it is described here rather than embedded). In that file you write a Modal class &#8212;
+of today's notebook, so it is described here rather than embedded). (The class version Day 1 deploys is
+<code>pricer_service2.py</code>.) In that file you write a Modal class &#8212;
 roughly, a class decorated so Modal knows it needs a GPU and the model's libraries. A method runs once when the
 service starts to load the fine-tuned weights, and a method named <code>price</code> takes a product
 description and returns an estimate. You publish it from a terminal with:</p>
@@ -164,9 +166,8 @@ one that beat the frontier models last week.</li>
 machine-learning regressor on modern transformer vectors), giving a completely independent opinion.</li>
 </ol>
 
-<p>The combiner then produces one number from the three. There are two common ways, and this is the key
-Video-vs-repo difference on this page (see the callout): the video <em>learns</em> a weighted blend with a
-linear regression, while the notebook file embedded below uses a simple fixed weighted average.</p>
+<p>The combiner then produces one number from the three. Rather than picking weights by hand, Ed
+<em>learns</em> them with a linear regression trained on 250 items (video 14).</p>
 
 <details class="primer">
 <summary>New to ensembles? Why three mediocre models can beat one good one</summary>
@@ -278,85 +279,159 @@ fine-tuned weights. Treat the code as a faithful copy of the lab to run yourself
 The prices in the diagrams are illustrative.</p>
 </div>
 
-<h2>The full program</h2>
+<h2>Lesson by lesson</h2>
+<p>One section per video, in the order you watch them. Each code block is what is <strong>on screen in that video</strong>:
+the five Day 2 notebooks (<code>day2.0</code> to <code>day2.4</code>) and the agent files, as Ed recorded them in
+September 2024. Most of this code still runs today. Where it does not (the retired <code>gpt-4o-mini</code> model),
+the block has two versions: <strong>As in the video</strong> and <strong>Runs today</strong>, with each change marked.</p>
+<section class="lesson" id="video-7">
+<h3>Video 7 · Frontier models and vector stores in RAG</h3>
+<p class="lesson-meta">7 -Day 2 - Implementing Agentic Workflows Frontier Models and Vector Stores in RAG.mp4 · 5:20</p>
+<p>Slides, no code. Ed warns this is the toughest day of the course and explains the plan: the
+ensemble agent will call three pricing agents. A <strong>frontier agent</strong> using <a class="term" href="glossary.html#rag">RAG</a> over all the
+products, the <strong>specialist agent</strong> from Day 1, and a <strong>random forest agent</strong> that combines
+traditional machine learning with transformer embeddings. The ensemble blends their answers.</p>
 
-<p>Here is the complete notebook file. It builds the vector store, visualizes it, defines the RAG pricer,
-connects to the deployed specialist, loads the machine-learning pricer, and finally defines the ensemble. Read
-it once top to bottom; the line-by-line tables below focus on the three parts that matter most today &#8212;
-calling the deployed model, the RAG pricer, and the ensemble combiner.</p>
 
-<pre data-file="week8/day2.py" data-lang="py" data-tag="complete file"><code># imports
+
+</section>
+
+<section class="lesson" id="video-8">
+<h3>Video 8 · A massive Chroma vector datastore</h3>
+<p class="lesson-meta">8 -Day 2 - Building a Massive Chroma Vector Datastore for Advanced RAG Pipelines.mp4 · 9:23</p>
+<p><code>day2.0.ipynb</code> puts all 400,000 training products into a Chroma database, without
+LangChain this time. Each product is one document with its embedding and its price in the metadata.</p>
+<div class="code-tabs"><pre data-file="week8/day2.0.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># imports
 
 import os
-import logging
+import re
+import math
+import json
+from tqdm import tqdm
+import random
 from dotenv import load_dotenv
 from huggingface_hub import login
 import numpy as np
-import re
+import pickle
 from sentence_transformers import SentenceTransformer
+from datasets import load_dataset
 import chromadb
+from items import Item
 from sklearn.manifold import TSNE
 import plotly.graph_objects as go
-from litellm import completion
-from tqdm.notebook import tqdm
-from agents.evaluator import evaluate
-from agents.items import Item
 
 # environment
 
-load_dotenv(override=True)
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
 DB = "products_vectorstore"
 
 # Log in to HuggingFace
-# If you don't have a HuggingFace account, you can set one up for free at www.huggingface.co
-# And then add the HF_TOKEN to your .env file as explained in the project README
 
 hf_token = os.environ['HF_TOKEN']
-login(token=hf_token, add_to_git_credential=False)
+login(hf_token, add_to_git_credential=True)
 
-LITE_MODE = False
+# Let's avoid curating all our data again! Load in the pickle files:
 
-username = "ed-donner"
-dataset = f"{username}/items_lite" if LITE_MODE else f"{username}/items_full"
+with open('train.pkl', 'rb') as file:
+    train = pickle.load(file)
 
-train, val, test = Item.from_hub(dataset)
-
-print(f"Loaded {len(train):,} training items, {len(val):,} validation items, {len(test):,} test items")
+train[0].prompt
 
 client = chromadb.PersistentClient(path=DB)
 
-encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+# Check if the collection exists and delete it if it does
+collection_name = "products"
+existing_collection_names = [collection.name for collection in client.list_collections()]
+if collection_name in existing_collection_names:
+    client.delete_collection(collection_name)
+    print(f"Deleted existing collection: {collection_name}")
+
+collection = client.create_collection(collection_name)
+
+model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
 # Pass in a list of texts, get back a numpy array of vectors
 
-vector = encoder.encode(["A proficient AI engineer who has almost reached the finale of AI Engineering Core Track!"])[0]
-print(vector.shape)
+vector = model.encode(["Well hi there"])[0]
+
 vector
 
-# Check if the collection exists; if not, create it
+def description(item):
+    text = item.prompt.replace("How much does this cost to the nearest dollar?\n\n", "")
+    return text.split("\n\nPrice is $")[0]
 
-collection_name = "products"
-existing_collection_names = [collection.name for collection in client.list_collections()]
+description(train[0])
 
-if collection_name not in existing_collection_names:
-    collection = client.create_collection(collection_name)
-    for i in tqdm(range(0, len(train), 1000)):
-        documents = [item.summary for item in train[i: i+1000]]
-        vectors = encoder.encode(documents).astype(float).tolist()
-        metadatas = [{"category": item.category, "price": item.price} for item in train[i: i+1000]]
-        ids = [f"doc_{j}" for j in range(i, i+1000)]
-        ids = ids[:len(documents)]
-        collection.add(ids=ids, documents=documents, embeddings=vectors, metadatas=metadatas)
+for i in tqdm(range(0, len(train), 1000)):
+    documents = [description(item) for item in train[i: i+1000]]
+    vectors = model.encode(documents).astype(float).tolist()
+    metadatas = [{"category": item.category, "price": item.price} for item in train[i: i+1000]]
+    ids = [f"doc_{j}" for j in range(i, i+1000)]
+    collection.add(
+        ids=ids,
+        documents=documents,
+        embeddings=vectors,
+        metadatas=metadatas
+    )</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
 
-collection = client.get_or_create_collection(collection_name)
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1-18</td><td><code># imports</code> … <code>import plotly.graph_objects as go</code></td><td>Familiar libraries plus <a class="term" href="glossary.html#chroma">chromadb</a> for the vector store and <code>SentenceTransformer</code> for embeddings. <code>Item</code> is the product class from Week 6.</td></tr>
+<tr><td>22-25</td><td><code>load_dotenv()</code> … <code>DB = "products_vectorstore"</code></td><td>Keys from <code>.env</code>, and the folder name of the database. Ed had "cleaned up too much" and types the <code>DB</code> line back in on camera.</td></tr>
+<tr><td>29-30</td><td><code>login(hf_token, add_to_git_credential=True)</code></td><td>Logs in to Hugging Face, as in earlier weeks.</td></tr>
+<tr><td>34-35</td><td><code>train = pickle.load(file)</code></td><td>Loads the 400,000 curated training items saved in Week 6, so nothing has to be curated again.</td></tr>
+<tr><td>37</td><td><code>train[0].prompt</code></td><td>A reminder of the training prompt: "How much does this cost to the nearest dollar?", the description, then the price.</td></tr>
+<tr><td>39</td><td><code>chromadb.PersistentClient(path=DB)</code></td><td>Opens (or creates) a Chroma database stored in that folder on disk.</td></tr>
+<tr><td>42-48</td><td><code>if collection_name in existing_collection_names: client.delete_collection(...)</code></td><td>Starts clean: delete the <code>products</code> collection if it exists, then create it. Ed does not run this on camera because his store is already built.</td></tr>
+<tr><td>50</td><td><code>SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')</code></td><td>A small Hugging Face model that turns text into a 384-number <a class="term" href="glossary.html#vector-embedding">vector embedding</a>. Free, fast, and it runs locally, so your data never leaves your machine (unlike the OpenAI embeddings of Week 5).</td></tr>
+<tr><td>54</td><td><code>vector = model.encode(["Well hi there"])[0]</code></td><td><code>encode</code> takes a list of texts and returns one vector per text; <code>[0]</code> takes the first. It has 384 dimensions.</td></tr>
+<tr><td>58-60</td><td><code>def description(item):</code></td><td>Strips the question from the front and the price from the end, leaving just the product blurb to embed.</td></tr>
+<tr><td>64-73</td><td><code>for i in tqdm(range(0, len(train), 1000)):</code> … <code>collection.add(...)</code></td><td>Adds the products 1,000 at a time: the text (<code>documents</code>), its vector, metadata with the category and the <strong>price</strong>, and an id. No chunking is needed: each product is already a small document. It takes a while.</td></tr>
+</table></div>
+</div>
 
-# It is very fun turning this up to 800_000 and seeing the full dataset visualized,
+</section>
+
+<section class="lesson" id="video-9">
+<h3>Video 9 · Visualizing the vector space in 2D</h3>
+<p class="lesson-meta">9 -Day 2 - Visualizing Vector Spaces Advanced RAG Techniques for Data Exploration.mp4 · 4:38</p>
+<p><code>day2.1.ipynb</code>: a 2D t-SNE map of the store, coloured by category, to build intuition
+that similar products sit close together.</p>
+<div class="code-tabs"><pre data-file="week8/day2.1.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># imports
+
+import os
+import re
+import math
+import json
+from tqdm import tqdm
+import random
+from dotenv import load_dotenv
+from huggingface_hub import login
+import numpy as np
+import pickle
+from sentence_transformers import SentenceTransformer
+from datasets import load_dataset
+import chromadb
+from items import Item
+from sklearn.manifold import TSNE
+import plotly.graph_objects as go
+
+# It is very fun turning this up to 400_000 and seeing the full dataset visualized,
 # but it almost crashes my box every time so do that at your own risk!! 10_000 is safe!
 
-MAXIMUM_DATAPOINTS = 10_000
+MAXIMUM_DATAPOINTS = 400_000
+
+DB = "products_vectorstore"
+client = chromadb.PersistentClient(path=DB)
+
+collection = client.get_or_create_collection('products')
 
 CATEGORIES = ['Appliances', 'Automotive', 'Cell_Phones_and_Accessories', 'Electronics','Musical_Instruments', 'Office_Products', 'Tools_and_Home_Improvement', 'Toys_and_Games']
-COLORS = ['cyan', 'blue', 'brown', 'orange', 'yellow', 'green' , 'purple', 'red']
+COLORS = ['red', 'blue', 'brown', 'orange', 'yellow', 'green' , 'purple', 'cyan']
 
 # Prework
 result = collection.get(include=['embeddings', 'documents', 'metadatas'], limit=MAXIMUM_DATAPOINTS)
@@ -366,19 +441,17 @@ categories = [metadata['category'] for metadata in result['metadatas']]
 colors = [COLORS[CATEGORIES.index(c)] for c in categories]
 
 # Let's try a 2D chart
-# TSNE stands for t-distributed Stochastic Neighbor Embedding - it's a common technique for reducing dimensionality of data
 
-tsne = TSNE(n_components=2, random_state=42)
+tsne = TSNE(n_components=2, random_state=42, n_jobs=-1)
 reduced_vectors = tsne.fit_transform(vectors)
+
 
 # Create the 2D scatter plot
 fig = go.Figure(data=[go.Scatter(
     x=reduced_vectors[:, 0],
     y=reduced_vectors[:, 1],
     mode='markers',
-    marker=dict(size=4, color=colors, opacity=0.7),
-    text=[f"Category: {c}&lt;br&gt;Text: {d[:50]}..." for c, d in zip(categories, documents)],
-    hoverinfo='text'
+    marker=dict(size=2, color=colors, opacity=0.7),
 )])
 
 fig.update_layout(
@@ -389,12 +462,52 @@ fig.update_layout(
     margin=dict(r=20, b=10, l=10, t=40)
 )
 
-fig.show()
+fig.show()</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>23</td><td><code>MAXIMUM_DATAPOINTS = 400_000</code></td><td>How many points to plot. The comment says 10,000 is safe; Ed sets all 400,000 for the video and nearly crashes his machine. Use 10,000.</td></tr>
+<tr><td>25-28</td><td><code>client.get_or_create_collection('products')</code></td><td>Opens the collection built in the previous notebook.</td></tr>
+<tr><td>30-31</td><td><code>CATEGORIES</code> / <code>COLORS</code></td><td>One colour per product category, only for the picture.</td></tr>
+<tr><td>34-38</td><td><code>collection.get(include=['embeddings', 'documents', 'metadatas'], limit=...)</code></td><td>Pulls vectors, texts and metadata back out of Chroma, and maps each category to its colour. The embedding never saw the category: only the description text.</td></tr>
+<tr><td>42-43</td><td><code>TSNE(n_components=2, ...).fit_transform(vectors)</code></td><td><a class="term" href="glossary.html#t-sne">t-SNE</a> squashes 384 dimensions down to 2 while keeping neighbours close. About an hour for 400,000 points on Ed's Mac.</td></tr>
+<tr><td>47-62</td><td><code>go.Figure(data=[go.Scatter(...)])</code> … <code>fig.show()</code></td><td>A Plotly scatter plot. Products of the same kind land in the same regions even though the model only read the text.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-10">
+<h3>Video 10 · Visualizing the vector space in 3D</h3>
+<p class="lesson-meta">10 -Day 2 - 3D Visualization Techniques for RAG Exploring Vector Embeddings.mp4 · 2:14</p>
+<p><code>day2.2.ipynb</code> is the same notebook in 3D (the imports cell is identical to day2.1 and
+not repeated here).</p>
+<div class="code-tabs"><pre data-file="week8/day2.2.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># Turn this up at your own risk! 10_000 is safe..
+
+MAXIMUM_DATAPOINTS = 10_000
+
+DB = "products_vectorstore"
+client = chromadb.PersistentClient(path=DB)
+
+collection = client.get_or_create_collection('products')
+
+CATEGORIES = ['Appliances', 'Automotive', 'Cell_Phones_and_Accessories', 'Electronics','Musical_Instruments', 'Office_Products', 'Tools_and_Home_Improvement', 'Toys_and_Games']
+COLORS = ['red', 'blue', 'brown', 'orange', 'yellow', 'green' , 'purple', 'cyan']
+
+# Prework
+result = collection.get(include=['embeddings', 'documents', 'metadatas'], limit=MAXIMUM_DATAPOINTS)
+vectors = np.array(result['embeddings'])
+documents = result['documents']
+categories = [metadata['category'] for metadata in result['metadatas']]
+colors = [COLORS[CATEGORIES.index(c)] for c in categories]
 
 # Let's try 3D!
 
-tsne = TSNE(n_components=3, random_state=42)
+tsne = TSNE(n_components=3, random_state=42, n_jobs=-1)
 reduced_vectors = tsne.fit_transform(vectors)
+
 
 # Create the 3D scatter plot
 fig = go.Figure(data=[go.Scatter3d(
@@ -402,9 +515,7 @@ fig = go.Figure(data=[go.Scatter3d(
     y=reduced_vectors[:, 1],
     z=reduced_vectors[:, 2],
     mode='markers',
-    marker=dict(size=2, color=colors, opacity=0.7),
-    text=[f"Category: {c}&lt;br&gt;Text: {d[:50]}..." for c, d in zip(categories, documents)],
-    hoverinfo='text'
+    marker=dict(size=3, color=colors, opacity=0.7),
 )])
 
 fig.update_layout(
@@ -415,161 +526,670 @@ fig.update_layout(
     margin=dict(r=20, b=10, l=10, t=40)
 )
 
-fig.show()
+fig.show()</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
 
-test[0]
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3</td><td><code>MAXIMUM_DATAPOINTS = 10_000</code></td><td>Back to a sensible 10,000 points.</td></tr>
+<tr><td>22</td><td><code>TSNE(n_components=3, ...)</code></td><td>Three dimensions this time.</td></tr>
+<tr><td>27-43</td><td><code>go.Scatter3d(x=..., y=..., z=...)</code></td><td>A 3D scatter you can rotate; clusters of related products become visible.</td></tr>
+</table></div>
+</div>
 
-def vector(item):
-    return encoder.encode(item.summary)
+</section>
 
-def find_similars(item):
-    vec = vector(item)
-    results = collection.query(query_embeddings=vec.astype(float).tolist(), n_results=5)
-    documents = results['documents'][0][:]
-    prices = [m['price'] for m in results['metadatas'][0][:]]
-    return documents, prices
+<section class="lesson" id="video-11">
+<h3>Video 11 · Finding similar products: RAG without LangChain</h3>
+<p class="lesson-meta">11 -Day 2 - Finding Similar Products Building a RAG Pipeline without LangChain.mp4 · 7:38</p>
+<p>First half of <code>day2.3.ipynb</code>: the prompt builders and the retrieval function that finds
+the five most similar products in Chroma.</p>
+<div class="code-tabs"><pre data-file="week8/day2.3.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># imports
 
-find_similars(test[0])
+import os
+import re
+import math
+import json
+from tqdm import tqdm
+import random
+from dotenv import load_dotenv
+from huggingface_hub import login
+import matplotlib.pyplot as plt
+import numpy as np
+import pickle
+from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from datasets import load_dataset
+import chromadb
+from items import Item
+from testing import Tester
 
-# We need to give some context to GPT-5.1 by selecting 5 products with similar descriptions
+# environment
+
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
+
+openai = OpenAI()
+
+# Load in the test pickle file:
+
+with open('test.pkl', 'rb') as file:
+    test = pickle.load(file)
 
 def make_context(similars, prices):
-    message = "For context, here are some other items that might be similar to the item you need to estimate.\n\n"
+    message = "To provide some context, here are some other items that might be similar to the item you need to estimate.\n\n"
     for similar, price in zip(similars, prices):
         message += f"Potentially related product:\n{similar}\nPrice is ${price:.2f}\n\n"
     return message
 
-documents, prices = find_similars(test[0])
+def messages_for(item, similars, prices):
+    system_message = "You estimate prices of items. Reply only with the price, no explanation"
+    user_prompt = make_context(similars, prices)
+    user_prompt += "And now the question for you:\n\n"
+    user_prompt += item.test_prompt().replace(" to the nearest dollar","").replace("\n\nPrice is $","")
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_prompt},
+        {"role": "assistant", "content": "Price is $"}
+    ]
+
+DB = "products_vectorstore"
+
+client = chromadb.PersistentClient(path=DB)
+collection = client.get_or_create_collection('products')
+
+def description(item):
+    text = item.prompt.replace("How much does this cost to the nearest dollar?\n\n", "")
+    return text.split("\n\nPrice is $")[0]
+
+description(test[0])
+
+model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+
+def vector(item):
+    return model.encode([description(item)])
+
+def find_similars(item):
+    results = collection.query(query_embeddings=vector(item).astype(float).tolist(), n_results=5)
+    documents = results['documents'][0][:]
+    prices = [m['price'] for m in results['metadatas'][0][:]]
+    return documents, prices
+
+test[1].prompt
+
+documents, prices = find_similars(test[1])
+
 print(make_context(documents, prices))
 
-def messages_for(item, similars, prices):
-    message = f"Estimate the price of this product. Respond with the price, no explanation\n\n{item.summary}\n\n"
-    message += make_context(similars, prices)
-    return [{"role": "user", "content": message}]
+print(messages_for(test[1], documents, prices))</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
 
-documents, prices = find_similars(test[0])
-print(messages_for(test[0], documents, prices)[0]['content'])
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>27</td><td><code>openai = OpenAI()</code></td><td>The OpenAI client; it finds <code>OPENAI_API_KEY</code> by itself.</td></tr>
+<tr><td>31-32</td><td><code>test = pickle.load(file)</code></td><td>Only the test set is loaded: the training data now lives in Chroma.</td></tr>
+<tr><td>34-38</td><td><code>def make_context(similars, prices):</code></td><td>Builds the extra context: "here are some other items that might be similar", then each similar product with its price. <code>zip</code> walks the two lists side by side.</td></tr>
+<tr><td>40-49</td><td><code>def messages_for(item, similars, prices):</code></td><td>The familiar system / user / assistant list from Week 6: the context goes in the user prompt before the question, and the assistant message "Price is $" nudges the model to answer with just a number.</td></tr>
+<tr><td>51-54</td><td><code>DB = ...</code> / <code>collection = ...</code></td><td>Opens the products collection (Ed retypes the <code>DB</code> line once more).</td></tr>
+<tr><td>56-58</td><td><code>def description(item):</code></td><td>The same helper: just the product blurb.</td></tr>
+<tr><td>62</td><td><code>model = SentenceTransformer(...)</code></td><td>The same encoder used to build the store, so queries land in the same space.</td></tr>
+<tr><td>64-65</td><td><code>def vector(item):</code></td><td>The vectorizer: description in, embedding out.</td></tr>
+<tr><td>67-71</td><td><code>def find_similars(item):</code></td><td>The retrieval step that LangChain hid in Week 5: <code>collection.query(query_embeddings=..., n_results=5)</code> returns the five nearest products. The vector is converted from numpy float32 to a plain list of floats for Chroma. Prices come from the metadata.</td></tr>
+<tr><td>73-79</td><td><code>find_similars(test[1])</code> / <code>print(make_context(...))</code></td><td>A test on a Motorcraft fan clutch: the five neighbours are all fan clutches with their prices.</td></tr>
+</table></div>
+</div>
 
-# The function for gpt-5.1
+</section>
 
-def gpt_5__1_rag(item):
-    documents, prices = find_similars(item)
-    response = completion(model="gpt-5.1", messages=messages_for(item, documents, prices), seed=42)
-    return response.choices[0].message.content
-
-# How much does our favorite distortion pedal cost?
-
-test[0].price
-
-# Let's do this!!
-
-gpt_5__1_rag(test[0])
-
-evaluate(gpt_5__1_rag, test)
-
-import modal
-Pricer = modal.Cls.from_name("pricer-service", "Pricer")
-pricer = Pricer()
-
-def specialist(item):
-    return pricer.price.remote(item.summary)
-
-
-def get_price(reply):
-    reply = reply.replace("$", "").replace(",", "")
-    match = re.search(r"[-+]?\d*\.\d+|\d+", reply)
+<section class="lesson" id="video-12">
+<h3>Video 12 · Completing the RAG pipeline and the Frontier Agent</h3>
+<p class="lesson-meta">12 -Day 2 - RAG Pipeline Implementation Enhancing LLMs with Retrieval Techniques.mp4 · 7:07</p>
+<p>The second half of <code>day2.3.ipynb</code> calls GPT-4o-mini with the five similar products in
+the prompt and runs the 250-item test. While it runs, Ed shows the same code as production code in
+<code>agents/frontier_agent.py</code>: comments, docstrings and type hints, a class with a <code>price</code>
+method.</p>
+<div class="code-tabs"><pre data-file="week8/day2.3.ipynb" data-lang="py" data-tag="as in the video" data-ver="video"><code>def get_price(s):
+    s = s.replace('$','').replace(',','')
+    match = re.search(r"[-+]?\d*\.\d+|\d+", s)
     return float(match.group()) if match else 0
 
+# The function for gpt-4o-mini
 
-from agents.deep_neural_network import DeepNeuralNetworkInference
+def gpt_4o_mini_rag(item):
+    documents, prices = find_similars(item)
+    response = openai.chat.completions.create(
+        model="gpt-4o-mini", 
+        messages=messages_for(item, documents, prices),
+        seed=42,
+        max_tokens=5
+    )
+    reply = response.choices[0].message.content
+    return get_price(reply)
 
-runner = DeepNeuralNetworkInference()
-runner.setup()
-runner.load("deep_neural_network.pth")
+gpt_4o_mini_rag(test[1])
 
-def deep_neural_network(item):
-    return runner.inference(item.summary)
+test[1].price
 
-def ensemble(item):
-    price1 = get_price(gpt_5__1_rag(item))
-    price2 = specialist(item)
-    price3 = deep_neural_network(item)
-    return price1 * 0.8 + price2 * 0.1 + price3 * 0.1
+Tester.test(gpt_4o_mini_rag, test)</code></pre><pre data-file="week8/day2.3.ipynb" data-lang="py" data-tag="runs today" data-ver="today"><code>def get_price(s):
+    s = s.replace('$','').replace(',','')
+    match = re.search(r"[-+]?\d*\.\d+|\d+", s)
+    return float(match.group()) if match else 0
+
+# The function for gpt-4o-mini (retired: today a small GPT model)
+
+def gpt_4o_mini_rag(item):
+    documents, prices = find_similars(item)
+    response = openai.chat.completions.create(
+        model="gpt-6-luna",
+        reasoning_effort="none",
+        messages=messages_for(item, documents, prices),
+        seed=42  # max_tokens=5 dropped: newer GPT models reject it
+    )
+    reply = response.choices[0].message.content
+    return get_price(reply)
+
+gpt_4o_mini_rag(test[1])
+
+test[1].price
+
+Tester.test(gpt_4o_mini_rag, test)</code></pre></div><div class="code-tabs"><pre data-file="week8/agents/frontier_agent.py" data-lang="py" data-tag="as in the video" data-ver="video"><code># imports
+
+import os
+import re
+import math
+import json
+from typing import List, Dict
+from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from datasets import load_dataset
+import chromadb
+from items import Item
+from testing import Tester
+from agents.agent import Agent
 
 
-evaluate(ensemble, test)
+class FrontierAgent(Agent):
 
-root = logging.getLogger()
-root.setLevel(logging.INFO)
+    name = "Frontier Agent"
+    color = Agent.BLUE
 
+    MODEL = "gpt-4o-mini"
+    
+    def __init__(self, collection):
+        """
+        Set up this instance by connecting to OpenAI, to the Chroma Datastore,
+        And setting up the vector encoding model
+        """
+        self.log("Initializing Frontier Agent")
+        self.openai = OpenAI()
+        self.collection = collection
+        self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        self.log("Frontier Agent is ready")
+
+    def make_context(self, similars: List[str], prices: List[float]) -&gt; str:
+        """
+        Create context that can be inserted into the prompt
+        :param similars: similar products to the one being estimated
+        :param prices: prices of the similar products
+        :return: text to insert in the prompt that provides context
+        """
+        message = "To provide some context, here are some other items that might be similar to the item you need to estimate.\n\n"
+        for similar, price in zip(similars, prices):
+            message += f"Potentially related product:\n{similar}\nPrice is ${price:.2f}\n\n"
+        return message
+
+    def messages_for(self, description: str, similars: List[str], prices: List[float]) -&gt; List[Dict[str, str]]:
+        """
+        Create the message list to be included in a call to OpenAI
+        With the system and user prompt
+        :param description: a description of the product
+        :param similars: similar products to this one
+        :param prices: prices of similar products
+        :return: the list of messages in the format expected by OpenAI
+        """
+        system_message = "You estimate prices of items. Reply only with the price, no explanation"
+        user_prompt = self.make_context(similars, prices)
+        user_prompt += "And now the question for you:\n\n"
+        user_prompt += "How much does this cost?\n\n" + description
+        return [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": "Price is $"}
+        ]
+
+    def find_similars(self, description: str):
+        """
+        Return a list of items similar to the given one by looking in the Chroma datastore
+        """
+        self.log("Frontier Agent is performing a RAG search of the Chroma datastore to find 5 similar products")
+        vector = self.model.encode([description])
+        results = self.collection.query(query_embeddings=vector.astype(float).tolist(), n_results=5)
+        documents = results['documents'][0][:]
+        prices = [m['price'] for m in results['metadatas'][0][:]]
+        self.log("Frontier Agent has found similar products")
+        return documents, prices
+
+    def get_price(self, s) -&gt; float:
+        """
+        A utility that plucks a floating point number out of a string
+        """
+        s = s.replace('$','').replace(',','')
+        match = re.search(r"[-+]?\d*\.\d+|\d+", s)
+        return float(match.group()) if match else 0.0
+
+    def price(self, description: str) -&gt; float:
+        """
+        Make a call to OpenAI to estimate the price of the described product,
+        by looking up 5 similar products and including them in the prompt to give context
+        :param description: a description of the product
+        :return: an estimate of the price
+        """
+        documents, prices = self.find_similars(description)
+        self.log("Frontier Agent is about to call OpenAI with context including 5 similar products")
+        response = self.openai.chat.completions.create(
+            model=self.MODEL, 
+            messages=self.messages_for(description, documents, prices),
+            seed=42,
+            max_tokens=5
+        )
+        reply = response.choices[0].message.content
+        result = self.get_price(reply)
+        self.log(f"Frontier Agent completed - predicting ${result:.2f}")
+        return result</code></pre><pre data-file="week8/agents/frontier_agent.py" data-lang="py" data-tag="runs today" data-ver="today"><code># imports
+
+import os
+import re
+import math
+import json
+from typing import List, Dict
+from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from datasets import load_dataset
+import chromadb
+from items import Item
+from testing import Tester
+from agents.agent import Agent
+
+
+class FrontierAgent(Agent):
+
+    name = "Frontier Agent"
+    color = Agent.BLUE
+
+    MODEL = "gpt-6-luna"  # gpt-4o-mini in the video (retired)
+    
+    def __init__(self, collection):
+        """
+        Set up this instance by connecting to OpenAI, to the Chroma Datastore,
+        And setting up the vector encoding model
+        """
+        self.log("Initializing Frontier Agent")
+        self.openai = OpenAI()
+        self.collection = collection
+        self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        self.log("Frontier Agent is ready")
+
+    def make_context(self, similars: List[str], prices: List[float]) -&gt; str:
+        """
+        Create context that can be inserted into the prompt
+        :param similars: similar products to the one being estimated
+        :param prices: prices of the similar products
+        :return: text to insert in the prompt that provides context
+        """
+        message = "To provide some context, here are some other items that might be similar to the item you need to estimate.\n\n"
+        for similar, price in zip(similars, prices):
+            message += f"Potentially related product:\n{similar}\nPrice is ${price:.2f}\n\n"
+        return message
+
+    def messages_for(self, description: str, similars: List[str], prices: List[float]) -&gt; List[Dict[str, str]]:
+        """
+        Create the message list to be included in a call to OpenAI
+        With the system and user prompt
+        :param description: a description of the product
+        :param similars: similar products to this one
+        :param prices: prices of similar products
+        :return: the list of messages in the format expected by OpenAI
+        """
+        system_message = "You estimate prices of items. Reply only with the price, no explanation"
+        user_prompt = self.make_context(similars, prices)
+        user_prompt += "And now the question for you:\n\n"
+        user_prompt += "How much does this cost?\n\n" + description
+        return [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": "Price is $"}
+        ]
+
+    def find_similars(self, description: str):
+        """
+        Return a list of items similar to the given one by looking in the Chroma datastore
+        """
+        self.log("Frontier Agent is performing a RAG search of the Chroma datastore to find 5 similar products")
+        vector = self.model.encode([description])
+        results = self.collection.query(query_embeddings=vector.astype(float).tolist(), n_results=5)
+        documents = results['documents'][0][:]
+        prices = [m['price'] for m in results['metadatas'][0][:]]
+        self.log("Frontier Agent has found similar products")
+        return documents, prices
+
+    def get_price(self, s) -&gt; float:
+        """
+        A utility that plucks a floating point number out of a string
+        """
+        s = s.replace('$','').replace(',','')
+        match = re.search(r"[-+]?\d*\.\d+|\d+", s)
+        return float(match.group()) if match else 0.0
+
+    def price(self, description: str) -&gt; float:
+        """
+        Make a call to OpenAI to estimate the price of the described product,
+        by looking up 5 similar products and including them in the prompt to give context
+        :param description: a description of the product
+        :return: an estimate of the price
+        """
+        documents, prices = self.find_similars(description)
+        self.log("Frontier Agent is about to call OpenAI with context including 5 similar products")
+        response = self.openai.chat.completions.create(
+            model=self.MODEL, 
+            messages=self.messages_for(description, documents, prices),
+            seed=42,
+            reasoning_effort="none"  # max_tokens=5 dropped: newer GPT models reject it
+        )
+        reply = response.choices[0].message.content
+        result = self.get_price(reply)
+        self.log(f"Frontier Agent completed - predicting ${result:.2f}")
+        return result</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1-4</td><td><code>def get_price(s):</code></td><td>Plucks the first number out of the reply, after removing <code>$</code> and commas.</td></tr>
+<tr><td>8-17</td><td><code>def gpt_4o_mini_rag(item):</code></td><td>The whole <a class="term" href="glossary.html#rag">RAG</a> pipeline in eight lines: find five similar products, build the messages with them as context, call GPT-4o-mini (<code>seed=42</code> for repeatable answers, <code>max_tokens=5</code> because only a number is needed), extract the price.</td></tr>
+<tr><td>19-21</td><td><code>gpt_4o_mini_rag(test[1])</code> / <code>test[1].price</code></td><td>Estimate $201.45 against a true price of $225: pretty close.</td></tr>
+<tr><td>23</td><td><code>Tester.test(gpt_4o_mini_rag, test)</code></td><td>The Week 6 test harness on 250 items. Much better than GPT-4o without RAG, but your fine-tuned model is still ahead.</td></tr>
+</table></div>
+</div><div data-only="py">
+<h4>Line by line: frontier_agent.py</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>17-22</td><td><code>class FrontierAgent(Agent):</code> / <code>MODEL = "gpt-4o-mini"</code></td><td>The notebook code turned into a production class: blue log colour, the model as a constant.</td></tr>
+<tr><td>24-33</td><td><code>def __init__(self, collection):</code></td><td>Takes the Chroma collection from outside, creates the OpenAI client and the sentence-transformer once.</td></tr>
+<tr><td>35-45</td><td><code>def make_context(self, similars: List[str], prices: List[float]) -&gt; str:</code></td><td>Same as the notebook, with type hints (<code>List[str]</code> = a list of strings) and a docstring describing each parameter.</td></tr>
+<tr><td>47-64</td><td><code>def messages_for(...) -&gt; List[Dict[str, str]]:</code></td><td>Takes a plain description instead of an <code>Item</code>, so any text can be priced.</td></tr>
+<tr><td>66-76</td><td><code>def find_similars(self, description: str):</code></td><td>The Chroma query, with log lines.</td></tr>
+<tr><td>86-104</td><td><code>def price(self, description: str) -&gt; float:</code></td><td>The public method every pricing agent has: retrieve, call the model, extract and log the price.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-13">
+<h3>Video 13 · Random forest regression with transformer embeddings</h3>
+<p class="lesson-meta">13 -Day 2 - Random Forest Regression Using Transformers &amp; ML for Price Prediction.mp4 · 7:06</p>
+<p>First part of <code>day2.4.ipynb</code>: train a random forest on the Chroma vectors, save it, and
+wrap it in <code>RandomForestAgent</code>.</p>
+<div class="code-tabs"><pre data-file="week8/day2.4.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># imports
+
+import os
+import re
+import math
+import json
+from tqdm import tqdm
+import random
+from dotenv import load_dotenv
+from huggingface_hub import login
+import numpy as np
+import pickle
+from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from datasets import load_dataset
+import chromadb
+from items import Item
+from testing import Tester
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
+import joblib
+
+# CONSTANTS
+
+QUESTION = "How much does this cost to the nearest dollar?\n\n"
+DB = "products_vectorstore"
+
+# environment
+
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
+
+# Load in the test pickle file:
+
+with open('test.pkl', 'rb') as file:
+    test = pickle.load(file)
+
+client = chromadb.PersistentClient(path=DB)
+collection = client.get_or_create_collection('products')
+
+result = collection.get(include=['embeddings', 'documents', 'metadatas'])
+vectors = np.array(result['embeddings'])
+documents = result['documents']
+prices = [metadata['price'] for metadata in result['metadatas']]
+
+# This next line takes an hour on my M1 Mac!
+
+rf_model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+rf_model.fit(vectors, prices)
+
+# Save the model to a file
+
+joblib.dump(rf_model, 'random_forest_model.pkl')
+
+# Load it back in again
+
+rf_model = joblib.load('random_forest_model.pkl')
+
+from agents.specialist_agent import SpecialistAgent
 from agents.frontier_agent import FrontierAgent
+from agents.random_forest_agent import RandomForestAgent
 
-agent = FrontierAgent(collection)
-agent.price("Quadcast HyperX condenser mic, connects via usb-c to your computer for crystal clear audio")
+specialist = SpecialistAgent()
+frontier = FrontierAgent(collection)
+random_forest = RandomForestAgent()
 
-agent.price("Shure MV7+ professional podcaster microphone with usb-c and XLR outputs")
+def description(item):
+    return item.prompt.split("to the nearest dollar?\n\n")[1].split("\n\nPrice is $")[0]
 
-from agents.neural_network_agent import NeuralNetworkAgent
-agent = NeuralNetworkAgent()
+def rf(item):
+    return random_forest.price(description(item))
+
+Tester.test(rf, test)</code></pre></div><div class="code-tabs"><pre data-file="week8/agents/random_forest_agent.py" data-lang="py" data-tag="as in the video (still runs today)"><code># imports
+
+import os
+import re
+from typing import List
+from sentence_transformers import SentenceTransformer
+import joblib
+from agents.agent import Agent
 
 
-agent.price("Shure MV7+ professional podcaster microphone with usb-c and XLR outputs")
+
+class RandomForestAgent(Agent):
+
+    name = "Random Forest Agent"
+    color = Agent.MAGENTA
+
+    def __init__(self):
+        """
+        Initialize this object by loading in the saved model weights
+        and the SentenceTransformer vector encoding model
+        """
+        self.log("Random Forest Agent is initializing")
+        self.vectorizer = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        self.model = joblib.load('random_forest_model.pkl')
+        self.log("Random Forest Agent is ready")
+
+    def price(self, description: str) -&gt; float:
+        """
+        Use a Random Forest model to estimate the price of the described item
+        :param description: the product to be estimated
+        :return: the price as a float
+        """        
+        self.log("Random Forest Agent is starting a prediction")
+        vector = self.vectorizer.encode([description])
+        result = max(0, self.model.predict(vector)[0])
+        self.log(f"Random Forest Agent completed - predicting ${result:.2f}")
+        return result</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1-24</td><td><code># imports</code> … <code>import joblib</code></td><td>Adds <a class="term" href="glossary.html#pandas">pandas</a> and <a class="term" href="glossary.html#scikit-learn">scikit-learn</a>'s <code>RandomForestRegressor</code> and <code>LinearRegression</code>, plus <code>joblib</code> to save models.</td></tr>
+<tr><td>45-48</td><td><code>collection.get(include=['embeddings', 'documents', 'metadatas'])</code></td><td>Reads all 400,000 vectors and prices back out of Chroma: they are the training data for the random forest.</td></tr>
+<tr><td>52-53</td><td><code>RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)</code> / <code>.fit(vectors, prices)</code></td><td>A <a class="term" href="glossary.html#random-forest">random forest</a> like Week 6, but on transformer embeddings instead of word2vec. <code>n_jobs=-1</code> uses every core; about an hour on Ed's M1.</td></tr>
+<tr><td>57</td><td><code>joblib.dump(rf_model, 'random_forest_model.pkl')</code></td><td>Saves the trained model to a file.</td></tr>
+<tr><td>61</td><td><code>rf_model = joblib.load(...)</code></td><td>Loads it back, so you never repeat the hour of training.</td></tr>
+<tr><td>63-69</td><td><code>specialist = SpecialistAgent()</code> … <code>random_forest = RandomForestAgent()</code></td><td>The three pricing agents. Ed walks through each file: the specialist (Day 1), the frontier agent (previous video) and the random forest agent below.</td></tr>
+<tr><td>71-72</td><td><code>def description(item):</code></td><td>The blurb-only helper again, written as one split.</td></tr>
+<tr><td>74-77</td><td><code>def rf(item):</code> / <code>Tester.test(rf, test)</code></td><td>Tests the random forest agent: a hair worse than Week 6's version, essentially the same.</td></tr>
+</table></div>
+</div><div data-only="py">
+<h4>Line by line: random_forest_agent.py</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>17-25</td><td><code>def __init__(self):</code></td><td>Creates the same sentence-transformer and loads the saved random forest.</td></tr>
+<tr><td>27-37</td><td><code>def price(self, description: str) -&gt; float:</code></td><td>Encodes the description into a vector and calls <code>model.predict</code>. <code>max(0, ...)</code> floors the result at zero, so it never predicts a negative price.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-14">
+<h3>Video 14 · Building the ensemble model</h3>
+<p class="lesson-meta">14 -Day 2 - Building an Ensemble Model Combining LLM, RAG, and Random Forest.mp4 · 9:41</p>
+<p>The rest of <code>day2.4.ipynb</code>: collect the three agents' predictions, learn the best
+weighted combination with a linear regression, and package it as <code>EnsembleAgent</code>.</p>
+<div class="code-tabs"><pre data-file="week8/day2.4.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code>product = "Quadcast HyperX condenser mic for high quality audio for podcasting"
+
+print(specialist.price(product))
+print(frontier.price(product))
+print(random_forest.price(product))
+
+specialists = []
+frontiers = []
+random_forests = []
+prices = []
+for item in tqdm(test[1000:1250]):
+    text = description(item)
+    specialists.append(specialist.price(text))
+    frontiers.append(frontier.price(text))
+    random_forests.append(random_forest.price(text))
+    prices.append(item.price)
+
+mins = [min(s,f,r) for s,f,r in zip(specialists, frontiers, random_forests)]
+maxes = [max(s,f,r) for s,f,r in zip(specialists, frontiers, random_forests)]
+
+X = pd.DataFrame({
+    'Specialist': specialists,
+    'Frontier': frontiers,
+    'RandomForest': random_forests,
+    'Min': mins,
+    'Max': maxes,
+})
+
+# Convert y to a Series
+y = pd.Series(prices)
+
+# Train a Linear Regression
+np.random.seed(42)
+
+lr = LinearRegression()
+lr.fit(X, y)
+
+feature_columns = X.columns.tolist()
+
+for feature, coef in zip(feature_columns, lr.coef_):
+    print(f"{feature}: {coef:.2f}")
+print(f"Intercept={lr.intercept_:.2f}")
+
+joblib.dump(lr, 'ensemble_model.pkl')
 
 from agents.ensemble_agent import EnsembleAgent
-agent = EnsembleAgent(collection)
+ensemble = EnsembleAgent(collection)
 
-agent.price("Shure MV7+ professional podcaster microphone with usb-c and XLR outputs")</code></pre>
+ensemble.price(product)
 
-<p>The earlier part of the file (lines 1&#8211;131) is setup you have met before: it imports the libraries,
-logs in to Hugging Face, loads the training and test data, builds the Chroma vector store from the product
-descriptions using a sentence-transformer embedding, and draws the 2D and 3D scatter plots that let you
-<em>see</em> similar products clustering together. Those plots are an intuition-building exercise, not part of
-the pricer. The pricing logic starts at line 135.</p>
+def ensemble_pricer(item):
+    return ensemble.price(description(item))
 
-<h3>Line by line</h3>
+Tester.test(ensemble_pricer, test)</code></pre></div><div class="code-tabs"><pre data-file="week8/agents/ensemble_agent.py" data-lang="py" data-tag="as in the video (still runs today)"><code>import pandas as pd
+from sklearn.linear_model import LinearRegression
+import joblib
 
-<p>Calling the deployed model. This is the whole point of the Modal deployment: four short lines connect to the
-cloud service and wrap it in a local-looking function.</p>
+from agents.agent import Agent
+from agents.specialist_agent import SpecialistAgent
+from agents.frontier_agent import FrontierAgent
+from agents.random_forest_agent import RandomForestAgent
+
+class EnsembleAgent(Agent):
+
+    name = "Ensemble Agent"
+    color = Agent.YELLOW
+    
+    def __init__(self, collection):
+        self.log("Initializing Ensemble Agent")
+        self.specialist = SpecialistAgent()
+        self.frontier = FrontierAgent(collection)
+        self.random_forest = RandomForestAgent()
+        self.model = joblib.load('ensemble_model.pkl')
+        self.log("Ensemble Agent is ready")
+
+    def price(self, description: str) -&gt; float:
+        self.log("Running Ensemble Agent - collaborating with specialist, frontier and random forest agents")
+        specialist = self.specialist.price(description)
+        frontier = self.frontier.price(description)
+        random_forest = self.random_forest.price(description)
+        X = pd.DataFrame({
+            'Specialist': [specialist],
+            'Frontier': [frontier],
+            'RandomForest': [random_forest],
+            'Min': [min(specialist, frontier, random_forest)],
+            'Max': [max(specialist, frontier, random_forest)],
+        })
+        y = self.model.predict(X)[0]
+        self.log(f"Ensemble Agent complete - returning ${y:.2f}")
+        return y</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
 
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>183</td><td><code>import modal</code></td><td>Brings in the Modal client library so this notebook can reach services you deployed to the Modal cloud.</td></tr>
-<tr><td>184</td><td><code>Pricer = modal.Cls.from_name("pricer-service", "Pricer")</code></td><td>Looks up the deployed service by name. The first argument is the app name (<code>pricer-service</code>), the second is the class inside it (<code>Pricer</code>). This does not run anything yet &#8212; it just gives you a handle to the remote class. The names must match exactly what <code>modal deploy</code> registered.</td></tr>
-<tr><td>185</td><td><code>pricer = Pricer()</code></td><td>Creates an instance of the remote class. You use it like an ordinary object, but its methods actually execute in the cloud.</td></tr>
-<tr><td>187&#8211;188</td><td><code>def specialist(item):</code> / <code>return pricer.price.remote(item.summary)</code></td><td>Wraps the remote call in a plain function. <code>item.summary</code> is the product description. The crucial part is <code>.remote</code>: it tells Modal to run the <code>price</code> method <em>on the cloud GPU</em> and bring back the result, rather than trying to run it locally. Drop <code>.remote</code> and the call has nowhere to run.</td></tr>
-<tr><td>191&#8211;194</td><td><code>def get_price(reply):</code> &#8230; <code>re.search(...)</code></td><td>A tiny helper that pulls a number out of a model's text reply. It strips <code>$</code> and commas, finds the first number with a regular expression, and returns it as a float (or <code>0</code> if none is found). The frontier model replies with text, so its answer must be parsed; the specialist already returns a number, so it does not need this.</td></tr>
+<tr><td>1-5</td><td><code>print(specialist.price(product))</code> … ×3</td><td>The three agents price Ed's microphone: three different numbers.</td></tr>
+<tr><td>7-16</td><td><code>for item in tqdm(test[1000:1250]):</code></td><td>Collects all three predictions and the true price for 250 test items that were not used for testing (1000-1250).</td></tr>
+<tr><td>18-19</td><td><code>mins = [...]</code> / <code>maxes = [...]</code></td><td>Two extra features: the lowest and the highest of the three guesses for each item.</td></tr>
+<tr><td>21-30</td><td><code>X = pd.DataFrame({...})</code> / <code>y = pd.Series(prices)</code></td><td>Five input columns (X) and the true prices (y), the classic machine-learning layout.</td></tr>
+<tr><td>35-42</td><td><code>lr = LinearRegression()</code> / <code>lr.fit(X, y)</code></td><td>A <a class="term" href="glossary.html#linear-regression">linear regression</a> finds the weighted combination of the five columns that best fits the true prices. Ed's weights favour Min and Max, then the specialist; the random forest even gets a negative weight.</td></tr>
+<tr><td>44</td><td><code>joblib.dump(lr, 'ensemble_model.pkl')</code></td><td>Saves the weights for the ensemble agent.</td></tr>
+<tr><td>46-49</td><td><code>ensemble = EnsembleAgent(collection)</code> / <code>ensemble.price(product)</code></td><td>The packaged ensemble (file below) prices the mic somewhere in the middle.</td></tr>
+<tr><td>51-54</td><td><code>Tester.test(ensemble_pricer, test)</code></td><td>A hair worse than the specialist alone on this test set. Ed calls it noise and hands you the challenge of beating it.</td></tr>
 </table></div>
-
-<p>The RAG pricer. These functions find similar products and turn them into a prompt for the frontier model.</p>
+</div><div data-only="py">
+<h4>Line by line: ensemble_agent.py</h4>
 
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>13</td><td><code>from litellm import completion</code></td><td>Imports <code>completion</code> from LiteLLM, a thin wrapper that calls many providers' models through one function. The video called OpenAI directly; this file uses LiteLLM instead (see Video vs repo).</td></tr>
-<tr><td>135&#8211;136</td><td><code>def vector(item):</code> / <code>return encoder.encode(item.summary)</code></td><td>Turns a product's text into an embedding vector using the sentence-transformer loaded earlier. This is the same model used to fill the vector store, so new items land in the same space as the stored ones.</td></tr>
-<tr><td>138&#8211;140</td><td><code>def find_similars(item):</code> &#8230; <code>collection.query(query_embeddings=..., n_results=5)</code></td><td>Embeds the item, then asks the Chroma collection for the five nearest stored products. The embedding is converted to plain Python floats in a list because that is the form Chroma's query expects.</td></tr>
-<tr><td>141&#8211;143</td><td><code>documents = results['documents'][0][:]</code> / <code>prices = [m['price'] for m in results['metadatas'][0][:]]</code></td><td>Unpacks the query result into two lists: the text of the five similar products and their real prices (kept in each item's metadata). These become the context.</td></tr>
-<tr><td>149&#8211;153</td><td><code>def make_context(similars, prices):</code> &#8230;</td><td>Builds the context string: a short intro line, then each similar product followed by <code>Price is $&#8230;</code>. This is the "here are comparable items" block that gives the model its head start.</td></tr>
-<tr><td>158&#8211;161</td><td><code>def messages_for(item, similars, prices):</code> &#8230;</td><td>Assembles the final chat message: an instruction to estimate the price and reply with the price only, the item's own description, then the context block. It returns the list-of-dicts shape every chat model expects.</td></tr>
-<tr><td>168&#8211;171</td><td><code>def gpt_5__1_rag(item):</code> &#8230; <code>completion(model="gpt-5.1", messages=..., seed=42)</code></td><td>The RAG pricer itself: find similar products, build the messages, and call the frontier model. <code>seed=42</code> asks for repeatable output; the reply text is returned and later passed through <code>get_price</code>. (The video used <code>gpt-4o-mini</code> here.)</td></tr>
+<tr><td>15-21</td><td><code>def __init__(self, collection):</code></td><td>Creates the three agents it collaborates with and loads the saved linear-regression weights.</td></tr>
+<tr><td>23-37</td><td><code>def price(self, description: str) -&gt; float:</code></td><td>Asks each agent for a price, builds the same five columns for this one item, and returns <code>model.predict(X)[0]</code>. ("It needs comments, bad me", says Ed: the docstrings came later.)</td></tr>
 </table></div>
-
-<p>The ensemble combiner. This loads the third pricer and blends all three into one estimate.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>197</td><td><code>from agents.deep_neural_network import DeepNeuralNetworkInference</code></td><td>Imports the third pricer &#8212; a machine-learning model that prices from the embedding vectors. In the repo it is packaged as a reusable class in the <code>agents</code> folder.</td></tr>
-<tr><td>199&#8211;201</td><td><code>runner = DeepNeuralNetworkInference()</code> / <code>runner.setup()</code> / <code>runner.load("deep_neural_network.pth")</code></td><td>Creates the model runner, prepares it (loads the embedding model), and loads the saved weights from disk. Loading pre-trained weights means you skip the slow training step every run.</td></tr>
-<tr><td>203&#8211;204</td><td><code>def deep_neural_network(item):</code> / <code>return runner.inference(item.summary)</code></td><td>Wraps the third pricer in a plain function, matching the shape of <code>specialist</code> and <code>gpt_5__1_rag</code> so the ensemble can call all three the same way.</td></tr>
-<tr><td>206&#8211;209</td><td><code>def ensemble(item):</code> / <code>price1 = get_price(gpt_5__1_rag(item))</code> / <code>price2 = specialist(item)</code> / <code>price3 = deep_neural_network(item)</code></td><td>The combiner. It gets one estimate from each pricer: the RAG frontier price (parsed from text with <code>get_price</code>), the deployed specialist's price, and the machine-learning price.</td></tr>
-<tr><td>210</td><td><code>return price1 * 0.8 + price2 * 0.1 + price3 * 0.1</code></td><td>Blends the three into one number with fixed weights &#8212; 80% to the RAG frontier pricer, 10% each to the other two. This is a <em>weighted average</em>. The video instead <em>learns</em> the weights with a linear regression (see Video vs repo); the weights here are a simple hand-set version of the same idea.</td></tr>
-<tr><td>213</td><td><code>evaluate(ensemble, test)</code></td><td>Runs the course's test harness on the ensemble across the test set, so you can compare its accuracy against each individual pricer.</td></tr>
-</table></div>
-
-<p>The tail of the file (lines 215&#8211;234) shows the production form of the same ideas: the repo packages
-each pricer as an agent class &#8212; <code>FrontierAgent</code>, <code>NeuralNetworkAgent</code> and
-<code>EnsembleAgent</code> &#8212; so the finished system can create them and call <code>.price(...)</code>
-without the loose notebook functions. The <code>EnsembleAgent</code> is the same combiner wrapped in a class.</p>
-
+</div>
 <figure class="diagram">
 <svg viewBox="0 0 760 230" role="img" aria-label="Illustrative bar chart suggesting the ensemble error is close to the best single model, with other models having larger error">
   <text x="380" y="24" text-anchor="middle" class="title">Error by pricer (lower is better) &#8212; illustrative</text>
@@ -589,14 +1209,25 @@ without the loose notebook functions. The <code>EnsembleAgent</code> is the same
 a lot; its value is a more reliable estimate across many different items.</strong> The instructor found it a
 hair worse on his noisy test set and left tuning it as a challenge.</figcaption>
 </figure>
+</section>
+
+<section class="lesson" id="video-15">
+<h3>Video 15 · Wrap-up: RAG and the ensemble are built</h3>
+<p class="lesson-meta">15 -Day 2 - Wrap-Up Finalizing Multi-Agent Systems and RAG Integration.mp4 · 1:54</p>
+<p>Slides, no code: the agents in red on the architecture diagram now exist in the
+<code>agents</code> folder. Next time: structured outputs, a way to force a model to answer in a given format.</p>
+
+
+
+</section>
 
 <div class="callout ok">
 <strong>What you should see</strong>
-<p>After deploying, <code>modal deploy pricer_service.py</code> prints that the service is deployed and shows a
-dashboard link. In the notebook, the RAG pricer returns a price close to the true one on a test item, and
-<code>evaluate</code> draws a chart with many green points. The ensemble's first run is slow &#8212; a few
-minutes while Modal warms up the specialist &#8212; then a few seconds per item after that. Its overall score
-lands very close to the specialist's; do not be surprised if it is not dramatically better.</p>
+<p>Building the store prints a progress bar of 400 batches. The t-SNE plots show coloured clusters by category. The
+RAG pricer returns a price close to the true one on a test item (Ed: $201.45 for a $225 fan clutch), and
+<code>Tester.test</code> draws a chart with many green points. The ensemble's first run is slow &#8212; a few minutes
+while Modal warms up the specialist &#8212; then a few seconds per item. Its overall score lands very close to the
+specialist's; do not be surprised if it is not better.</p>
 </div>
 
 <div class="callout warn">
@@ -610,29 +1241,20 @@ down services you are not using.</li>
 <li><strong>Keep secrets out of the code.</strong> Never paste API keys or your Hugging Face token into
 <code>pricer_service.py</code> or the notebook. Store them as Modal secrets (and in your local <code>.env</code>),
 so they are never committed to git or baked into the deployed file.</li>
-<li><strong>Wrong service name.</strong> <code>modal.Cls.from_name</code> must use the exact app and class names
-from the deploy, or the lookup fails. A typo here is the most common error.</li>
+<li><strong>Wrong service name.</strong> <code>modal.Cls.lookup</code> (today <code>modal.Cls.from_name</code>)
+must use the exact app and class names from the deploy, or the lookup fails.</li>
+<li><strong>Forgetting the <code>DB</code> constant.</strong> Ed deletes it twice by accident; every notebook needs
+<code>DB = "products_vectorstore"</code> before it opens Chroma.</li>
 </ul>
 </div>
 
 <div class="callout">
 <strong>Video vs repo</strong>
-<ul>
-<li><strong>The third pricer.</strong> The video builds a <em>random forest</em> (a traditional machine-learning
-model) on the embeddings. The repo file embedded here uses a <em>deep neural network</em> instead
-(<code>DeepNeuralNetworkInference</code>, <code>NeuralNetworkAgent</code>). The role is identical: a
-non-LLM opinion trained on the same vectors.</li>
-<li><strong>How the combiner is built.</strong> The video trains a <em>linear regression</em> over the model
-outputs &#8212; and even adds the minimum and maximum of the three as extra inputs &#8212; letting the data
-pick the weights. The embedded <code>ensemble</code> function uses a fixed weighted average
-(<code>0.8 / 0.1 / 0.1</code>). Same idea, simpler form; the production <code>EnsembleAgent</code> keeps the
-learned-weights approach.</li>
-<li><strong>Frontier model and SDK.</strong> The video calls <code>gpt-4o-mini</code> through the OpenAI client;
-this file calls <code>gpt-5.1</code> through <code>litellm</code>. Model names are values you swap as providers
-retire them.</li>
-<li><strong>No LangChain.</strong> Both deliberately build the RAG pipeline by hand (embed, query Chroma, build
-the prompt) rather than using LangChain, so you can see exactly what happens under the hood.</li>
-</ul>
+<p>The code above is the September 2024 folder as recorded. Ed has since rewritten the week: today's repository has a
+single <code>day2.ipynb</code> that loads the data from the Hugging Face Hub, calls <code>gpt-5.1</code> through LiteLLM,
+replaces the random forest with a deep neural network (<code>NeuralNetworkAgent</code>), and blends the three prices
+with fixed weights instead of a learned linear regression. The "Runs today" tabs keep the video's code and only swap the
+retired model.</p>
 </div>
 
 <div class="recap"><strong>Recap</strong>
@@ -642,7 +1264,7 @@ the prompt) rather than using LangChain, so you can see exactly what happens und
 <li><a class="term" href="glossary.html#serverless">Serverless</a> means you pay only for the seconds your code runs; the price is a <strong>cold start</strong> on the first call, after which calls are fast.</li>
 <li>An <a class="term" href="glossary.html#ensemble">ensemble</a> combines three different pricers &#8212; a <a class="term" href="glossary.html#rag">RAG</a> frontier pricer, the deployed specialist, and a machine-learning model &#8212; into one steadier estimate.</li>
 <li>The RAG pricer finds five similar products in a 400,000-item Chroma store and feeds them to the frontier model as context, built by hand without LangChain.</li>
-<li>The combiner blends the three estimates: a fixed weighted average in this file, a learned linear regression in the video. The result is reliable rather than dramatically more accurate.</li>
+<li>The combiner is a linear regression over the three estimates plus their minimum and maximum, saved as <code>ensemble_model.pkl</code> and wrapped in <code>EnsembleAgent</code>. The result is reliable rather than dramatically more accurate.</li>
 <li>Keep keys in Modal secrets and your <code>.env</code>, watch for idle GPU costs, and remember this code was not run here &#8212; it needs the deployed service, the vector store, and keys.</li>
 </ul>
 </div>

@@ -44,8 +44,9 @@ you learn how to <strong>deploy and call any open model in production</strong> a
 skill is the real prize of the day.</p>
 
 <div class="callout"><strong>Was this run live?</strong> No. As with the rest of Week 4, the model-calling code
-is shown exactly as in the course and was <strong>not executed live here</strong> (it needs a paid, running
-endpoint). The speed and quality results quoted below are what the instructor saw on screen in the video, not
+was <strong>not executed live here</strong> (it needs a paid, running endpoint). The "As in the video" code is shown
+exactly as recorded; the "Runs today" Python and the TypeScript files were checked against today's libraries with a type
+checker, not run. The speed and quality results quoted below are what the instructor saw on screen in the video, not
 measurements taken in this guide.</div>
 
 <h2>What an Inference Endpoint is</h2>
@@ -158,39 +159,526 @@ stop. This is the easiest way to run up a surprise bill in the whole course.</li
 24 GB. A CPU box will be unusable or crash on anything but trivial inputs.</li>
 <li><strong>Expecting a clean answer.</strong> CodeQwen ignored the “no explanation” instruction and
 wrapped its C++ in chatter. You post-process it — strip everything before and after the C++ fences.</li>
+<li><strong>Using the video's endpoint address.</strong> <code>CODE_QWEN_URL</code> must be the URL of
+<em>your</em> endpoint, copied from its page. Ed's addresses stopped working long ago.</li>
 </ul>
 </div>
 
-<h2>Calling the endpoint: the video's method</h2>
+<h2>Lesson by lesson</h2>
 
-<p>In the video the call is only a few lines. You log in to HuggingFace, load the model's tokenizer with
-<code>AutoTokenizer.from_pretrained(...)</code>, turn your usual messages list into one text string with
-<code>tokenizer.apply_chat_template(...)</code>, then create an <strong>InferenceClient</strong> pointed at your
-endpoint URL and token and call <code>text_generation(...)</code>. Streaming is optional but lets you watch the
-C++ appear token by token, exactly like the GPT and Claude streams from Day 3.</p>
+<p>One section per video, in the order you watch them. Each code block is what is <strong>on screen in that
+video</strong>: the <code>week4/day4.ipynb</code> notebook as Ed recorded it in 2024. The frontier models he uses have
+been retired, his endpoint addresses no longer exist and some flags only suit his M1 Mac, so the Python blocks have
+two versions: <strong>As in the video</strong> and <strong>Runs today</strong>. The cells build on each other, so run
+the lessons in order. The TypeScript tab is a port of the "runs today" version; each TypeScript file is complete on its
+own (the Hugging Face part needs <code>npm install @huggingface/inference</code>).</p>
+<section class="lesson" id="video-21">
+<h3>Video 21 · Open-source code generation: the plan</h3>
+<p class="lesson-meta">21 -Day 4 - Open Source LLMs for Code Generation Hugging Face Endpoints Explored.mp4 · 1:59</p>
+<p>Slides, no code. A short recap of yesterday (Claude rewrote the algorithm for a speed-up of more than
+60,000 times) and today's plan: find the best open-source code model, run it on Hugging Face's Inference Endpoints, and
+put it in the same UI as GPT and Claude to see whether open source can keep up.</p>
 
-<pre data-lang="py" data-tag="video version"><code>from huggingface_hub import login, InferenceClient
+
+
+</section>
+
+<section class="lesson" id="video-22">
+<h3>Video 22 · Choosing CodeQwen and deploying an Inference Endpoint</h3>
+<p class="lesson-meta">22 -Day 4 - How to Use HuggingFace Inference Endpoints for Code Generation Models.mp4 · 8:20</p>
+<p>On the web, no notebook. Ed opens the Big Code Models Leaderboard, filters for Python and C++ scores, and
+picks <strong>CodeQwen1.5-7B-Chat</strong>, the top chat model (CodeGemma worked on simple tasks but crashed on harder
+ones). He scrolls its model card, whose example uses <code>apply_chat_template</code> exactly as in Week 3. To run it
+from his own machine he clicks <strong>Deploy → Inference Endpoints</strong>, picks a cloud and a GPU (an Nvidia L4,
+about $0.80 an hour) and creates the endpoint, then waits about five minutes for it to start. Pause it when you are done.</p>
+
+
+
+</section>
+
+<section class="lesson" id="video-23">
+<h3>Video 23 · Calling CodeQwen through the endpoint</h3>
+<p class="lesson-meta">23 -Day 4 - Integrating Open-Source Models with Frontier LLMs for Code Generation.mp4 · 7:01</p>
+<p>In <code>week4/day4.ipynb</code>, a copy of yesterday's notebook, Ed reruns the cells he still needs
+(the setup, the two test programs, the streaming functions, the run functions and the CSS), then adds the new part:
+log in to Hugging Face, turn the messages into CodeQwen's chat format with its tokenizer, and stream a C++ answer from
+the endpoint with <code>InferenceClient</code>.</p>
+<p>The video's endpoint ran Hugging Face's Text Generation Inference server, which is what <code>text_generation</code>
+talks to. If a new endpoint offers a different engine, choose Text Generation Inference when you create it, or call
+the endpoint through its OpenAI-compatible <code>/v1/</code> address instead, the way the current repository reaches
+its open-source models.</p>
+<div class="code-tabs"><pre data-file="week4/day4.ipynb" data-lang="py" data-tag="as in the video" data-ver="video"><code># imports
+
+import os
+import io
+import sys
+import json
+import requests
+from dotenv import load_dotenv
+from openai import OpenAI
+import google.generativeai
+import anthropic
+from IPython.display import Markdown, display, update_display
+import gradio as gr
+import subprocess
+
+# environment
+
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
+
+# initialize
+
+openai = OpenAI()
+claude = anthropic.Anthropic()
+OPENAI_MODEL = "gpt-4o"
+CLAUDE_MODEL = "claude-3-5-sonnet-20240620"
+
+system_message = "You are an assistant that reimplements Python code in high performance C++ for an M1 Mac. "
+system_message += "Respond only with C++ code; use comments sparingly and do not provide any explanation other than occasional comments. "
+system_message += "The C++ response needs to produce an identical output in the fastest possible time. Keep implementations of random number generators identical so that results match exactly."
+
+def user_prompt_for(python):
+    user_prompt = "Rewrite this Python code in C++ with the fastest possible implementation that produces identical output in the least time. "
+    user_prompt += "Respond only with C++ code; do not explain your work other than a few comments. "
+    user_prompt += "Pay attention to number types to ensure no int overflows. Remember to #include all necessary C++ packages such as iomanip.\n\n"
+    user_prompt += python
+    return user_prompt
+
+def messages_for(python):
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_prompt_for(python)}
+    ]
+
+# write to a file called optimized.cpp
+
+def write_output(cpp):
+    code = cpp.replace("```cpp","").replace("```","")
+    with open("optimized.cpp", "w") as f:
+        f.write(code)
+
+pi = """
+import time
+
+def calculate(iterations, param1, param2):
+    result = 1.0
+    for i in range(1, iterations+1):
+        j = i * param1 - param2
+        result -= (1/j)
+        j = i * param1 + param2
+        result += (1/j)
+    return result
+
+start_time = time.time()
+result = calculate(100_000_000, 4, 1) * 4
+end_time = time.time()
+
+print(f"Result: {result:.12f}")
+print(f"Execution Time: {(end_time - start_time):.6f} seconds")
+"""
+
+python_hard = """
+def lcg(seed, a=1664525, c=1013904223, m=2**32):
+    value = seed
+    while True:
+        value = (a * value + c) % m
+        yield value
+        
+def max_subarray_sum(n, seed, min_val, max_val):
+    lcg_gen = lcg(seed)
+    random_numbers = [next(lcg_gen) % (max_val - min_val + 1) + min_val for _ in range(n)]
+    max_sum = float('-inf')
+    for i in range(n):
+        current_sum = 0
+        for j in range(i, n):
+            current_sum += random_numbers[j]
+            if current_sum &gt; max_sum:
+                max_sum = current_sum
+    return max_sum
+
+def total_max_subarray_sum(n, initial_seed, min_val, max_val):
+    total_sum = 0
+    lcg_gen = lcg(initial_seed)
+    for _ in range(20):
+        seed = next(lcg_gen)
+        total_sum += max_subarray_sum(n, seed, min_val, max_val)
+    return total_sum
+
+# Parameters
+n = 10000         # Number of random numbers
+initial_seed = 42 # Initial seed for the LCG
+min_val = -10     # Minimum value of random numbers
+max_val = 10      # Maximum value of random numbers
+
+# Timing the function
+import time
+start_time = time.time()
+result = total_max_subarray_sum(n, initial_seed, min_val, max_val)
+end_time = time.time()
+
+print("Total Maximum Subarray Sum (20 runs):", result)
+print("Execution Time: {:.6f} seconds".format(end_time - start_time))
+"""
+
+def stream_gpt(python):    
+    stream = openai.chat.completions.create(model=OPENAI_MODEL, messages=messages_for(python), stream=True)
+    reply = ""
+    for chunk in stream:
+        fragment = chunk.choices[0].delta.content or ""
+        reply += fragment
+        yield reply.replace('```cpp\n','').replace('```','')
+
+def stream_claude(python):
+    result = claude.messages.stream(
+        model=CLAUDE_MODEL,
+        max_tokens=2000,
+        system=system_message,
+        messages=[{"role": "user", "content": user_prompt_for(python)}],
+    )
+    reply = ""
+    with result as stream:
+        for text in stream.text_stream:
+            reply += text
+            yield reply.replace('```cpp\n','').replace('```','')
+
+def execute_python(code):
+        try:
+            output = io.StringIO()
+            sys.stdout = output
+            exec(code)
+        finally:
+            sys.stdout = sys.__stdout__
+        return output.getvalue()
+
+def execute_cpp(code):
+        write_output(code)
+        try:
+            compile_cmd = ["clang++", "-Ofast", "-std=c++17", "-march=armv8.5-a", "-mtune=apple-m1", "-mcpu=apple-m1", "-o", "optimized", "optimized.cpp"]
+            compile_result = subprocess.run(compile_cmd, check=True, text=True, capture_output=True)
+            run_cmd = ["./optimized"]
+            run_result = subprocess.run(run_cmd, check=True, text=True, capture_output=True)
+            return run_result.stdout
+        except subprocess.CalledProcessError as e:
+            return f"An error occurred:\n{e.stderr}"
+
+css = """
+.python {background-color: #306998;}
+.cpp {background-color: #050;}
+"""
+
+from huggingface_hub import login, InferenceClient
 from transformers import AutoTokenizer
 
-login(hf_token)
-CODE_QWEN = "Qwen/CodeQwen1.5-7B-Chat"
-CODE_QWEN_URL = "https://your-endpoint.endpoints.huggingface.cloud"
+hf_token = os.environ['HF_TOKEN']
+login(hf_token, add_to_git_credential=True)
 
-# turn the messages list into the exact prompt text CodeQwen was trained on
-tokenizer = AutoTokenizer.from_pretrained(CODE_QWEN)
-text = tokenizer.apply_chat_template(
-    messages_for(python), tokenize=False, add_generation_prompt=True)
+code_qwen = "Qwen/CodeQwen1.5-7B-Chat"
+code_gemma = "google/codegemma-7b-it"
+CODE_QWEN_URL = "https://h1vdol7jxhje3mpn.us-east-1.aws.endpoints.huggingface.cloud"
+CODE_GEMMA_URL = "https://c5hggiyqachmgnqg.us-east-1.aws.endpoints.huggingface.cloud"
 
-# the whole remote call: point the client at your endpoint, stream back tokens
+tokenizer = AutoTokenizer.from_pretrained(code_qwen)
+messages = messages_for(pi)
+text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+messages
+
+print(text)
+
 client = InferenceClient(CODE_QWEN_URL, token=hf_token)
-stream = client.text_generation(text, stream=True, max_new_tokens=3000)
-for chunk in stream:
-    print(chunk, end="")
-</code></pre>
+stream = client.text_generation(text, stream=True, details=True, max_new_tokens=3000)
+for r in stream:
+    print(r.token.text, end = "")</code></pre><pre data-file="week4/day4.ipynb" data-lang="py" data-tag="runs today" data-ver="today"><code># imports
 
-<p class="small">Illustrative — this is the shape the instructor types in the video, shown to explain the
-InferenceClient idea. It is not the file embedded below, and it was not run here.</p>
+import os
+import io
+import sys
+import json
+import requests
+from dotenv import load_dotenv
+from openai import OpenAI
+import anthropic
+from IPython.display import Markdown, display, update_display
+import gradio as gr
+import subprocess
+# (the video also imports google.generativeai: never used here, and Google has retired it)
 
+# environment
+
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
+
+# initialize
+# gpt-4o and claude-3-5-sonnet-20240620 from the video are retired;
+# these are the current top models the course repository uses for this lesson
+
+openai = OpenAI()
+claude = anthropic.Anthropic()
+OPENAI_MODEL = "gpt-6.1-sol"
+CLAUDE_MODEL = "claude-sonnet-5-5"
+
+system_message = "You are an assistant that reimplements Python code in high performance C++ for an M1 Mac. "
+system_message += "Respond only with C++ code; use comments sparingly and do not provide any explanation other than occasional comments. "
+system_message += "The C++ response needs to produce an identical output in the fastest possible time. Keep implementations of random number generators identical so that results match exactly."
+
+def user_prompt_for(python):
+    user_prompt = "Rewrite this Python code in C++ with the fastest possible implementation that produces identical output in the least time. "
+    user_prompt += "Respond only with C++ code; do not explain your work other than a few comments. "
+    user_prompt += "Pay attention to number types to ensure no int overflows. Remember to #include all necessary C++ packages such as iomanip.\n\n"
+    user_prompt += python
+    return user_prompt
+
+def messages_for(python):
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_prompt_for(python)}
+    ]
+
+# write to a file called optimized.cpp
+
+def write_output(cpp):
+    code = cpp.replace("```cpp","").replace("```","")
+    with open("optimized.cpp", "w") as f:
+        f.write(code)
+
+pi = """
+import time
+
+def calculate(iterations, param1, param2):
+    result = 1.0
+    for i in range(1, iterations+1):
+        j = i * param1 - param2
+        result -= (1/j)
+        j = i * param1 + param2
+        result += (1/j)
+    return result
+
+start_time = time.time()
+result = calculate(100_000_000, 4, 1) * 4
+end_time = time.time()
+
+print(f"Result: {result:.12f}")
+print(f"Execution Time: {(end_time - start_time):.6f} seconds")
+"""
+
+python_hard = """
+def lcg(seed, a=1664525, c=1013904223, m=2**32):
+    value = seed
+    while True:
+        value = (a * value + c) % m
+        yield value
+        
+def max_subarray_sum(n, seed, min_val, max_val):
+    lcg_gen = lcg(seed)
+    random_numbers = [next(lcg_gen) % (max_val - min_val + 1) + min_val for _ in range(n)]
+    max_sum = float('-inf')
+    for i in range(n):
+        current_sum = 0
+        for j in range(i, n):
+            current_sum += random_numbers[j]
+            if current_sum &gt; max_sum:
+                max_sum = current_sum
+    return max_sum
+
+def total_max_subarray_sum(n, initial_seed, min_val, max_val):
+    total_sum = 0
+    lcg_gen = lcg(initial_seed)
+    for _ in range(20):
+        seed = next(lcg_gen)
+        total_sum += max_subarray_sum(n, seed, min_val, max_val)
+    return total_sum
+
+# Parameters
+n = 10000         # Number of random numbers
+initial_seed = 42 # Initial seed for the LCG
+min_val = -10     # Minimum value of random numbers
+max_val = 10      # Maximum value of random numbers
+
+# Timing the function
+import time
+start_time = time.time()
+result = total_max_subarray_sum(n, initial_seed, min_val, max_val)
+end_time = time.time()
+
+print("Total Maximum Subarray Sum (20 runs):", result)
+print("Execution Time: {:.6f} seconds".format(end_time - start_time))
+"""
+
+def stream_gpt(python):
+    # reasoning_effort="low" lets the newer GPT think a little before writing (not in the video)
+    stream = openai.chat.completions.create(model=OPENAI_MODEL, reasoning_effort="low", messages=messages_for(python), stream=True)
+    reply = ""
+    for chunk in stream:
+        fragment = chunk.choices[0].delta.content or ""
+        reply += fragment
+        yield reply.replace('```cpp\n','').replace('```','')
+
+def stream_claude(python):
+    result = claude.messages.stream(
+        model=CLAUDE_MODEL,
+        max_tokens=2000,
+        system=system_message,
+        messages=[{"role": "user", "content": user_prompt_for(python)}],
+    )
+    reply = ""
+    with result as stream:
+        for text in stream.text_stream:
+            reply += text
+            yield reply.replace('```cpp\n','').replace('```','')
+
+def execute_python(code):
+        try:
+            output = io.StringIO()
+            sys.stdout = output
+            exec(code)
+        finally:
+            sys.stdout = sys.__stdout__
+        return output.getvalue()
+
+def execute_cpp(code):
+        write_output(code)
+        try:
+            # The video's flags (-march=armv8.5-a -mtune=apple-m1 -mcpu=apple-m1) only suit an M1 Mac;
+            # -march=native tunes for whatever machine you run this on. (On Windows, run "optimized.exe".)
+            compile_cmd = ["clang++", "-Ofast", "-std=c++17", "-march=native", "-o", "optimized", "optimized.cpp"]
+            compile_result = subprocess.run(compile_cmd, check=True, text=True, capture_output=True)
+            run_cmd = ["./optimized"]
+            run_result = subprocess.run(run_cmd, check=True, text=True, capture_output=True)
+            return run_result.stdout
+        except subprocess.CalledProcessError as e:
+            return f"An error occurred:\n{e.stderr}"
+
+css = """
+.python {background-color: #306998;}
+.cpp {background-color: #050;}
+"""
+
+from huggingface_hub import login, InferenceClient
+from transformers import AutoTokenizer
+
+hf_token = os.environ['HF_TOKEN']
+login(hf_token, add_to_git_credential=True)
+
+code_qwen = "Qwen/CodeQwen1.5-7B-Chat"
+code_gemma = "google/codegemma-7b-it"
+# Ed's endpoints from the video no longer exist: paste the URL of your own endpoint
+CODE_QWEN_URL = "https://your-codeqwen-endpoint.us-east-1.aws.endpoints.huggingface.cloud"
+CODE_GEMMA_URL = "https://your-codegemma-endpoint.us-east-1.aws.endpoints.huggingface.cloud"
+
+tokenizer = AutoTokenizer.from_pretrained(code_qwen)
+messages = messages_for(pi)
+text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+messages
+
+print(text)
+
+client = InferenceClient(CODE_QWEN_URL, token=hf_token)
+stream = client.text_generation(text, stream=True, details=True, max_new_tokens=3000)
+for r in stream:
+    print(r.token.text, end = "")</code></pre><pre data-file="day4_codeqwen.ts" data-lang="ts" data-tag="runs today"><code>// Video 23 in TypeScript: send the Python to CodeQwen on your own endpoint (npx tsx day4_codeqwen.ts)
+import "dotenv/config";
+import { InferenceClient } from "@huggingface/inference";
+
+const hf = new InferenceClient(process.env.HF_TOKEN); // reads your Hugging Face token
+const CODE_QWEN_URL = "https://your-codeqwen-endpoint.us-east-1.aws.endpoints.huggingface.cloud"; // your own endpoint
+
+const systemMessage =
+  "You are an assistant that reimplements Python code in high performance C++ for an M1 Mac. " +
+  "Respond only with C++ code; use comments sparingly and do not provide any explanation other than occasional comments. " +
+  "The C++ response needs to produce an identical output in the fastest possible time. " +
+  "Keep implementations of random number generators identical so that results match exactly.";
+
+function userPromptFor(python: string): string {
+  return (
+    "Rewrite this Python code in C++ with the fastest possible implementation that produces identical output in the least time. " +
+    "Respond only with C++ code; do not explain your work other than a few comments. " +
+    "Pay attention to number types to ensure no int overflows. Remember to #include all necessary C++ packages such as iomanip.\n\n" +
+    python
+  );
+}
+
+function messagesFor(python: string): { role: string; content: string }[] {
+  return [
+    { role: "system", content: systemMessage },
+    { role: "user", content: userPromptFor(python) },
+  ];
+}
+
+// tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) gives this text for
+// CodeQwen (the ChatML format print(text) shows in the video), so TypeScript can build it by hand
+function applyChatTemplate(messages: { role: string; content?: unknown }[]): string {
+  return messages.map((m) =&gt; `&lt;|im_start|&gt;${m.role}\n${m.content}&lt;|im_end|&gt;\n`).join("") + "&lt;|im_start|&gt;assistant\n";
+}
+
+const pi = `
+import time
+
+def calculate(iterations, param1, param2):
+    result = 1.0
+    for i in range(1, iterations+1):
+        j = i * param1 - param2
+        result -= (1/j)
+        j = i * param1 + param2
+        result += (1/j)
+    return result
+
+start_time = time.time()
+result = calculate(100_000_000, 4, 1) * 4
+end_time = time.time()
+
+print(f"Result: {result:.12f}")
+print(f"Execution Time: {(end_time - start_time):.6f} seconds")
+`;
+
+const text = applyChatTemplate(messagesFor(pi));
+console.log(text);  // print(text): the special tokens CodeQwen was trained on
+
+// client.text_generation(text, stream=True, details=True, max_new_tokens=3000)
+const stream = hf.textGenerationStream({ endpointUrl: CODE_QWEN_URL, inputs: text, parameters: { max_new_tokens: 3000 } });
+for await (const r of stream) {
+  process.stdout.write(r.token.text);
+}</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+<p>Line numbers follow the <strong>As in the video</strong> block.</p>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1-14</td><td><code># imports</code> … <code>import requests</code> …</td><td>Day 4 starts as a copy of yesterday's notebook, so Ed reruns its cells first. The imports are the same plus <code>json</code> and <code>requests</code> (not actually used).</td></tr>
+<tr><td>18-21</td><td><code>os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', ...)</code></td><td>One new key: your <a class="term" href="glossary.html#hugging-face">Hugging Face</a> token, which must have permission to call your own endpoint. It goes in <code>.env</code> as <code>HF_TOKEN=...</code> like the others.</td></tr>
+<tr><td>25-28</td><td><code>openai = OpenAI()</code> … <code>CLAUDE_MODEL = "claude-3-5-sonnet-20240620"</code></td><td>The two frontier clients and models, unchanged.</td></tr>
+<tr><td>30-32</td><td><code>system_message += "... Keep implementations of random number generators identical so that results match exactly."</code></td><td>The system prompt has one new sentence. Ed points it out "in the spirit of being completely open": a hint for the hard problem, so that a model does not swap the program's own random-number generator for a different one.</td></tr>
+<tr><td>34-52</td><td><code>user_prompt_for</code>, <code>messages_for</code>, <code>write_output</code></td><td>Yesterday's helpers, rerun as they were: the user prompt with the Python appended, the two-message list, and the function that strips Markdown fences and saves <code>optimized.cpp</code>.</td></tr>
+<tr><td>54-114</td><td><code>pi = """..."""</code> / <code>python_hard = """..."""</code></td><td>The two test programs from yesterday: the slow pi series and the maximum-subarray sum with its own random-number generator.</td></tr>
+<tr><td>117-136</td><td><code>def stream_gpt(python)</code> / <code>def stream_claude(python)</code></td><td>The streaming functions for the UI. Each yields the whole cleaned reply so far, which is what Gradio displays.</td></tr>
+<tr><td>138-156</td><td><code>def execute_python(code)</code> / <code>def execute_cpp(code)</code></td><td>Run the Python (capturing what it prints) and compile-and-run the C++, for the Run buttons. Ed repeats his warning: keep this Gradio app to yourself, because it runs code on your machine.</td></tr>
+<tr><td>158-160</td><td><code>css = """..."""</code></td><td>The blue and green result boxes. "And now we get to our new code."</td></tr>
+<tr><td>163-164</td><td><code>from huggingface_hub import login, InferenceClient</code> / <code>from transformers import AutoTokenizer</code></td><td><code>login</code> signs in to the Hub, <code>InferenceClient</code> calls a hosted model, and <a class="term" href="glossary.html#auto-tokenizer">AutoTokenizer</a> loads the right tokenizer for a model by name (Week 3).</td></tr>
+<tr><td>166-167</td><td><code>hf_token = os.environ['HF_TOKEN']</code> / <code>login(hf_token, add_to_git_credential=True)</code></td><td>Reads the token and logs in. The output confirms the token is valid and has been saved.</td></tr>
+<tr><td>169-172</td><td><code>code_qwen = "Qwen/CodeQwen1.5-7B-Chat"</code> … <code>CODE_QWEN_URL = "https://...endpoints.huggingface.cloud"</code></td><td>The model names on the Hub and the addresses of Ed's two <a class="term" href="glossary.html#inference-endpoint">inference endpoints</a>, copied from the endpoint page. CodeGemma is there in case you want to try it; Ed found it crashed on harder tasks.</td></tr>
+<tr><td>174-176</td><td><code>tokenizer = AutoTokenizer.from_pretrained(code_qwen)</code> … <code>text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)</code></td><td>An endpoint running an open model takes plain text, not a list of messages. So the <a class="term" href="glossary.html#tokenizer">tokenizer</a>'s <a class="term" href="glossary.html#chat-template">chat template</a> turns the usual messages for the pi program into the exact text format CodeQwen was trained on. <code>tokenize=False</code> returns that text rather than token ids; <code>add_generation_prompt=True</code> ends it with the start of the assistant's turn, so the model continues by answering.</td></tr>
+<tr><td>178</td><td><code>messages</code></td><td>Ed displays the list first: one system message (with the new random-number sentence) and one user message with the pi code.</td></tr>
+<tr><td>180</td><td><code>print(text)</code></td><td>Then he changes the cell to print the templated text: <code>&lt;|im_start|&gt;system</code>, the system prompt, <code>&lt;|im_end|&gt;</code>, the same for the user, and finally <code>&lt;|im_start|&gt;assistant</code> — the special tokens from Week 3.</td></tr>
+<tr><td>182-185</td><td><code>client = InferenceClient(CODE_QWEN_URL, token=hf_token)</code> … <code>print(r.token.text, end = "")</code></td><td>The whole remote call. The client points at your endpoint; <code>text_generation</code> sends the text with <code>stream=True</code> (results as they are generated), <code>details=True</code> (each result is an object, so the text is in <code>r.token.text</code>) and <code>max_new_tokens=3000</code> (room for a full C++ file). The C++ streams in from the GPU in the cloud — wrapped in an explanation the system prompt told it not to write, which a little post-processing could cut off.</td></tr>
+</table></div>
+</div><div data-only="ts">
+<h4>Line by line (TypeScript)</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3</td><td><code>import { InferenceClient } from "@huggingface/inference"</code></td><td>Hugging Face's JavaScript client (<code>npm install @huggingface/inference</code>).</td></tr>
+<tr><td>5-6</td><td><code>new InferenceClient(process.env.HF_TOKEN)</code> / <code>CODE_QWEN_URL</code></td><td>The client, holding your token, and the address of your own endpoint.</td></tr>
+<tr><td>8-12</td><td><code>const systemMessage = ...</code></td><td>The Day 4 system prompt, with the random-number sentence.</td></tr>
+<tr><td>32-34</td><td><code>function applyChatTemplate(messages)</code></td><td>There is no <code>AutoTokenizer</code> in plain Node, so this builds the same text by hand: each message wrapped in <code>&lt;|im_start|&gt;role</code> … <code>&lt;|im_end|&gt;</code>, then the opening of the assistant's turn.</td></tr>
+<tr><td>56-57</td><td><code>const text = applyChatTemplate(messagesFor(pi))</code></td><td>The templated prompt for the pi program, printed.</td></tr>
+<tr><td>60-63</td><td><code>hf.textGenerationStream({ endpointUrl, inputs: text, parameters: { max_new_tokens: 3000 } })</code></td><td>Streams the generated tokens from your endpoint; each result carries one token's text in <code>r.token.text</code>.</td></tr>
+</table></div>
+</div>
 <figure class="diagram">
 <svg viewBox="0 0 760 300" role="img" aria-label="Request flow: messages become text, go to the endpoint via InferenceClient, tokens stream back, then the C++ is cleaned and run">
   <rect class="box" x="250" y="16" width="260" height="36" rx="8"/>
@@ -213,141 +701,221 @@ InferenceClient idea. It is not the file embedded below, and it was not run here
 <figcaption>The round trip for one open-source call. <strong>The only new part versus Day 3 is the middle box —
 InferenceClient instead of the OpenAI client.</strong></figcaption>
 </figure>
+</section>
 
-<h2>The repo's version of Day 4</h2>
+<section class="lesson" id="video-24">
+<h3>Video 24 · CodeQwen vs GPT-4o and Claude in the UI</h3>
+<p class="lesson-meta">24 -Day 4 - Comparing Code Generation GPT-4, Claude, and CodeQuen LLMs.mp4 · 10:33</p>
+<p>Ed glances at the endpoint's analytics ($3.64 spent so far), wraps the call in a streaming function, adds
+CodeQwen to the dropdown and runs the comparison. On the pi program CodeQwen succeeds; on the hard program it changes the
+random-number generator and gets a different total.</p>
+<div class="code-tabs"><pre data-file="week4/day4.ipynb" data-lang="py" data-tag="as in the video" data-ver="video"><code>def stream_code_quen(python):
+    tokenizer = AutoTokenizer.from_pretrained(code_qwen)
+    messages = messages_for(python)
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    client = InferenceClient(CODE_QWEN_URL, token=hf_token)
+    stream = client.text_generation(text, stream=True, details=True, max_new_tokens=3000)
+    result = ""
+    for r in stream:
+        result += r.token.text
+        yield result
 
-<p>Here is the file the current repo actually ships for this day. Read it once end to end, then use the
-line-by-line tables underneath. It is the Day 3 optimizer grown up: the same prompts, the same Gradio
-compare-and-run UI, but the model dropdown now includes several <strong>open-source</strong> code models
-alongside the frontier ones.</p>
+def optimize(python, model):
+    if model=="GPT":
+        result = stream_gpt(python)
+    elif model=="Claude":
+        result = stream_claude(python)
+    elif model=="CodeQwen":
+        result = stream_code_qwen(python)
+    else:
+        raise ValueError("Unknown model")
+    for stream_so_far in result:
+        yield stream_so_far
 
-<pre data-file="week4/day4.py" data-lang="py" data-tag="complete file"><code># imports
+with gr.Blocks(css=css) as ui:
+    gr.Markdown("## Convert code from Python to C++")
+    with gr.Row():
+        python = gr.Textbox(label="Python code:", value=pi, lines=10)
+        cpp = gr.Textbox(label="C++ code:", lines=10)
+    with gr.Row():
+        model = gr.Dropdown(["GPT", "Claude", "CodeQwen"], label="Select model", value="GPT")
+    with gr.Row():
+        convert = gr.Button("Convert code")
+    with gr.Row():
+        python_run = gr.Button("Run Python")
+        cpp_run = gr.Button("Run C++")
+    with gr.Row():
+        python_out = gr.TextArea(label="Python result:", elem_classes=["python"])
+        cpp_out = gr.TextArea(label="C++ result:", elem_classes=["cpp"])
 
-import os
-import io
-import sys
-from dotenv import load_dotenv
-from openai import OpenAI
-import gradio as gr
-import subprocess
+    convert.click(optimize, inputs=[python, model], outputs=[cpp])
+    python_run.click(execute_python, inputs=[python], outputs=[python_out])
+    cpp_run.click(execute_cpp, inputs=[cpp], outputs=[cpp_out])
 
+ui.launch(inbrowser=True)</code></pre><pre data-file="week4/day4.ipynb" data-lang="py" data-tag="runs today" data-ver="today"><code># Named stream_code_qwen here: the video's cell says stream_code_quen, but optimize() below calls stream_code_qwen
+def stream_code_qwen(python):
+    tokenizer = AutoTokenizer.from_pretrained(code_qwen)
+    messages = messages_for(python)
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    client = InferenceClient(CODE_QWEN_URL, token=hf_token)
+    stream = client.text_generation(text, stream=True, details=True, max_new_tokens=3000)
+    result = ""
+    for r in stream:
+        result += r.token.text
+        yield result
 
-load_dotenv(override=True)
-openai_api_key = os.getenv('OPENAI_API_KEY')
-anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
-google_api_key = os.getenv('GOOGLE_API_KEY')
-grok_api_key = os.getenv('GROK_API_KEY')
-groq_api_key = os.getenv('GROQ_API_KEY')
-openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+def optimize(python, model):
+    if model=="GPT":
+        result = stream_gpt(python)
+    elif model=="Claude":
+        result = stream_claude(python)
+    elif model=="CodeQwen":
+        result = stream_code_qwen(python)
+    else:
+        raise ValueError("Unknown model")
+    for stream_so_far in result:
+        yield stream_so_far
 
-if openai_api_key:
-    print(f"OpenAI API Key exists and begins {openai_api_key[:8]}")
-else:
-    print("OpenAI API Key not set")
-    
-if anthropic_api_key:
-    print(f"Anthropic API Key exists and begins {anthropic_api_key[:7]}")
-else:
-    print("Anthropic API Key not set (and this is optional)")
+with gr.Blocks() as ui:
+    gr.Markdown("## Convert code from Python to C++")
+    with gr.Row():
+        python = gr.Textbox(label="Python code:", value=pi, lines=10)
+        cpp = gr.Textbox(label="C++ code:", lines=10)
+    with gr.Row():
+        model = gr.Dropdown(["GPT", "Claude", "CodeQwen"], label="Select model", value="GPT")
+    with gr.Row():
+        convert = gr.Button("Convert code")
+    with gr.Row():
+        python_run = gr.Button("Run Python")
+        cpp_run = gr.Button("Run C++")
+    with gr.Row():
+        python_out = gr.TextArea(label="Python result:", elem_classes=["python"])
+        cpp_out = gr.TextArea(label="C++ result:", elem_classes=["cpp"])
 
-if google_api_key:
-    print(f"Google API Key exists and begins {google_api_key[:2]}")
-else:
-    print("Google API Key not set (and this is optional)")
+    convert.click(optimize, inputs=[python, model], outputs=[cpp])
+    python_run.click(execute_python, inputs=[python], outputs=[python_out])
+    cpp_run.click(execute_cpp, inputs=[cpp], outputs=[cpp_out])
 
-if grok_api_key:
-    print(f"Grok API Key exists and begins {grok_api_key[:4]}")
-else:
-    print("Grok API Key not set (and this is optional)")
+# Gradio 6 takes css in launch() (the video passes it to gr.Blocks)
+ui.launch(inbrowser=True, css=css)</code></pre><pre data-file="day4_ui.ts" data-lang="ts" data-tag="runs today"><code>// Video 24 in TypeScript: the prototype with a third model, CodeQwen (npx tsx day4_ui.ts)
+import "dotenv/config";
+import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { InferenceClient } from "@huggingface/inference";
+import { createServer, type IncomingMessage } from "node:http";
 
-if groq_api_key:
-    print(f"Groq API Key exists and begins {groq_api_key[:4]}")
-else:
-    print("Groq API Key not set (and this is optional)")
+const openai = new OpenAI();     // reads OPENAI_API_KEY
+const claude = new Anthropic();  // reads ANTHROPIC_API_KEY
+const OPENAI_MODEL = "gpt-6.1-sol";      // gpt-4o in the video
+const CLAUDE_MODEL = "claude-sonnet-5-5"; // claude-3-5-sonnet-20240620 in the video
 
-if openrouter_api_key:
-    print(f"OpenRouter API Key exists and begins {openrouter_api_key[:6]}")
-else:
-    print("OpenRouter API Key not set (and this is optional)")
+const hf = new InferenceClient(process.env.HF_TOKEN); // reads your Hugging Face token
+const CODE_QWEN_URL = "https://your-codeqwen-endpoint.us-east-1.aws.endpoints.huggingface.cloud"; // your own endpoint
 
+const systemMessage =
+  "You are an assistant that reimplements Python code in high performance C++ for an M1 Mac. " +
+  "Respond only with C++ code; use comments sparingly and do not provide any explanation other than occasional comments. " +
+  "The C++ response needs to produce an identical output in the fastest possible time. " +
+  "Keep implementations of random number generators identical so that results match exactly.";
 
+function userPromptFor(python: string): string {
+  return (
+    "Rewrite this Python code in C++ with the fastest possible implementation that produces identical output in the least time. " +
+    "Respond only with C++ code; do not explain your work other than a few comments. " +
+    "Pay attention to number types to ensure no int overflows. Remember to #include all necessary C++ packages such as iomanip.\n\n" +
+    python
+  );
+}
 
-# Connect to client libraries
+function messagesFor(python: string): OpenAI.Chat.ChatCompletionMessageParam[] {
+  return [
+    { role: "system", content: systemMessage },
+    { role: "user", content: userPromptFor(python) },
+  ];
+}
 
-openai = OpenAI()
+// write to a file called optimized.cpp
+function writeOutput(cpp: string): void {
+  const code = cpp.replaceAll("```cpp", "").replaceAll("```", "");
+  writeFileSync("optimized.cpp", code);
+}
 
-anthropic_url = "https://api.anthropic.com/v1/"
-gemini_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-grok_url = "https://api.x.ai/v1"
-groq_url = "https://api.groq.com/openai/v1"
-ollama_url = "http://localhost:11434/v1"
-openrouter_url = "https://openrouter.ai/api/v1"
+// Gradio wants the whole reply so far on every step, so each yield is cumulative
+async function* streamGpt(python: string): AsyncGenerator&lt;string&gt; {
+  const stream = await openai.chat.completions.create({
+    model: OPENAI_MODEL,
+    reasoning_effort: "low",
+    messages: messagesFor(python),
+    stream: true,
+  });
+  let reply = "";
+  for await (const chunk of stream) {
+    reply += chunk.choices[0]?.delta?.content ?? "";
+    yield reply.replaceAll("```cpp\n", "").replaceAll("```", "");
+  }
+}
 
-anthropic = OpenAI(api_key=anthropic_api_key, base_url=anthropic_url)
-gemini = OpenAI(api_key=google_api_key, base_url=gemini_url)
-grok = OpenAI(api_key=grok_api_key, base_url=grok_url)
-groq = OpenAI(api_key=groq_api_key, base_url=groq_url)
-ollama = OpenAI(api_key="ollama", base_url=ollama_url)
-openrouter = OpenAI(api_key=openrouter_api_key, base_url=openrouter_url)
+async function* streamClaude(python: string): AsyncGenerator&lt;string&gt; {
+  const stream = claude.messages.stream({
+    model: CLAUDE_MODEL,
+    max_tokens: 2000,
+    system: systemMessage,
+    messages: [{ role: "user", content: userPromptFor(python) }],
+  });
+  let reply = "";
+  for await (const event of stream) {
+    if (event.type === "content_block_delta" &amp;&amp; event.delta.type === "text_delta") {
+      reply += event.delta.text;
+      yield reply.replaceAll("```cpp\n", "").replaceAll("```", "");
+    }
+  }
+}
 
+// tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) gives this text for
+// CodeQwen (the ChatML format print(text) shows in the video), so TypeScript can build it by hand
+function applyChatTemplate(messages: { role: string; content?: unknown }[]): string {
+  return messages.map((m) =&gt; `&lt;|im_start|&gt;${m.role}\n${m.content}&lt;|im_end|&gt;\n`).join("") + "&lt;|im_start|&gt;assistant\n";
+}
 
-models = ["gpt-4o-mini-sol", "claude-3-5-sonnet-20240620", "grok-4.3", "gemini-4-argon", "qwen2.5-coder", "deepseek-coder-v2", "gpt-oss:20b", "qwen/qwen3-coder-30b-a3b-instruct", "openai/gpt-oss-120b", ]
+// stream_code_qwen: template the messages, stream tokens from the endpoint, yield the text so far
+async function* streamCodeQwen(python: string): AsyncGenerator&lt;string&gt; {
+  const text = applyChatTemplate(messagesFor(python));
+  const stream = hf.textGenerationStream({ endpointUrl: CODE_QWEN_URL, inputs: text, parameters: { max_new_tokens: 3000 } });
+  let result = "";
+  for await (const r of stream) {
+    result += r.token.text;
+    yield result;
+  }
+}
 
-clients = {"gpt-4o-mini-sol": openai, "claude-3-5-sonnet-20240620": anthropic, "grok-4.3": grok, "gemini-4-argon": gemini, "openai/gpt-oss-120b": groq, "qwen2.5-coder": ollama, "deepseek-coder-v2": ollama, "gpt-oss:20b": ollama, "qwen/qwen3-coder-30b-a3b-instruct": openrouter}
+async function* optimize(python: string, model: string): AsyncGenerator&lt;string&gt; {
+  let result: AsyncGenerator&lt;string&gt;;
+  if (model === "GPT") result = streamGpt(python);
+  else if (model === "Claude") result = streamClaude(python);
+  else if (model === "CodeQwen") result = streamCodeQwen(python);
+  else throw new Error("Unknown model");
+  for await (const streamSoFar of result) yield streamSoFar;
+}
 
-# Want to keep costs ultra-low? Replace this with models of your choice, using the examples from yesterday
+// execute_python: run the code and hand back what it printed
+function executePython(code: string): string {
+  return execFileSync("python", ["-c", code], { encoding: "utf8" });
+}
 
-from system_info import retrieve_system_info
+// execute_cpp: save, compile with speed flags, run, return the output (or the compiler's complaint)
+function executeCpp(code: string): string {
+  writeOutput(code);
+  try {
+    execFileSync("clang++", ["-Ofast", "-std=c++17", "-march=native", "-o", "optimized", "optimized.cpp"], { encoding: "utf8", stdio: "pipe" });
+    return execFileSync("./optimized", { encoding: "utf8" }); // on Windows: "optimized.exe"
+  } catch (e) {
+    return `An error occurred:\n${(e as { stderr?: string }).stderr ?? String(e)}`;
+  }
+}
 
-system_info = retrieve_system_info()
-system_info
-
-compile_command = ["clang++", "-std=c++17", "-Ofast", "-mcpu=native", "-flto=thin", "-fvisibility=hidden", "-DNDEBUG", "main.cpp", "-o", "main"]
-run_command = ["./main"]
-
-
-system_prompt = """
-Your task is to convert Python code into high performance C++ code.
-Respond only with C++ code. Do not provide any explanation other than occasional comments.
-The C++ response needs to produce an identical output in the fastest possible time.
-"""
-
-def user_prompt_for(python):
-    return f"""
-Port this Python code to C++ with the fastest possible implementation that produces identical output in the least time.
-The system information is:
-{system_info}
-Your response will be written to a file called main.cpp and then compiled and executed; the compilation command is:
-{compile_command}
-Respond only with C++ code.
-Python code to port:
-
-```python
-{python}
-```
-"""
-
-def messages_for(python):
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt_for(python)}
-    ]
- 
-
-def write_output(cpp):
-    with open("main.cpp", "w") as f:
-        f.write(cpp)
-
-def port(model, python):
-    client = clients[model]
-    openai_reasoning_models = {"gpt-4o-mini-sol"} if model in openai_reasoning_models else None
-    response = client.chat.completions.create(model=model, messages=messages_for(python))
-    reply = response.choices[0].message.content
-    reply = reply.replace('```cpp','').replace('```','')
-    write_output(reply)
-    return reply
-
-pi = """
+const pi = `
 import time
 
 def calculate(iterations, param1, param2):
@@ -360,114 +928,94 @@ def calculate(iterations, param1, param2):
     return result
 
 start_time = time.time()
-result = calculate(200_000_000, 4, 1) * 4
+result = calculate(100_000_000, 4, 1) * 4
 end_time = time.time()
 
 print(f"Result: {result:.12f}")
 print(f"Execution Time: {(end_time - start_time):.6f} seconds")
-"""
+`;
 
-def run_python(code):
-    globals_dict = {"__builtins__": __builtins__}
+const escapeHtml = (s: string) =&gt; s.replaceAll("&amp;", "&amp;amp;").replaceAll("&lt;", "&amp;lt;");
 
-    buffer = io.StringIO()
-    old_stdout = sys.stdout
-    sys.stdout = buffer
+// The page: the same widgets as the gr.Blocks layout
+const page = `&lt;!doctype html&gt;&lt;meta charset="utf-8"&gt;&lt;title&gt;Python to C++&lt;/title&gt;
+&lt;style&gt;.row{display:flex;gap:8px} textarea{flex:1;font-family:monospace}&lt;/style&gt;
+&lt;h2&gt;Convert code from Python to C++&lt;/h2&gt;
+&lt;div class="row"&gt;&lt;textarea id="python" rows="10"&gt;${escapeHtml(pi)}&lt;/textarea&gt;
+&lt;textarea id="cpp" rows="10"&gt;&lt;/textarea&gt;&lt;/div&gt;
+&lt;p&gt;&lt;select id="model"&gt;&lt;option&gt;GPT&lt;/option&gt;&lt;option&gt;Claude&lt;/option&gt;&lt;option&gt;CodeQwen&lt;/option&gt;&lt;/select&gt;
+&lt;button onclick="convert()"&gt;Convert code&lt;/button&gt;&lt;/p&gt;
+&lt;p&gt;&lt;button onclick="run('/run-python', 'pythonOut')"&gt;Run Python&lt;/button&gt;
+&lt;button onclick="run('/run-cpp', 'cppOut')"&gt;Run C++&lt;/button&gt;&lt;/p&gt;
+&lt;div class="row"&gt;&lt;textarea id="pythonOut" rows="4" style="background:#306998;color:#fff"&gt;&lt;/textarea&gt;
+&lt;textarea id="cppOut" rows="4" style="background:#050;color:#fff"&gt;&lt;/textarea&gt;&lt;/div&gt;
+&lt;script&gt;
+// convert.click(optimize, ...): read the stream and show the latest "reply so far"
+async function convert() {
+  const res = await fetch("/convert", { method: "POST", body: JSON.stringify({ python: python.value, model: model.value }) });
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    const lines = buffer.split("\\n");
+    buffer = lines.pop();
+    if (lines.length) cpp.value = JSON.parse(lines[lines.length - 1]);
+  }
+}
+async function run(url, out) {
+  const code = url === "/run-python" ? python.value : cpp.value;
+  document.getElementById(out).value = await (await fetch(url, { method: "POST", body: code })).text();
+}
+&lt;/script&gt;`;
 
-    try:
-        exec(code, globals_dict)
-        output = buffer.getvalue()
-    except Exception as e:
-        output = f"Error: {e}"
-    finally:
-        sys.stdout = old_stdout
+async function readBody(req: IncomingMessage): Promise&lt;string&gt; {
+  let body = "";
+  for await (const part of req) body += part;
+  return body;
+}
 
-    return output
-
-def compile_and_run():
-    try:
-        subprocess.run(compile_command, check=True, text=True, capture_output=True)
-        print(subprocess.run(run_command, check=True, text=True, capture_output=True).stdout)
-        print(subprocess.run(run_command, check=True, text=True, capture_output=True).stdout)
-        print(subprocess.run(run_command, check=True, text=True, capture_output=True).stdout)
-    except subprocess.CalledProcessError as e:
-        print(f"An error occurred:\n{e.stderr}")
-
-with gr.Blocks() as ui:
-    with gr.Row():
-        python = gr.Textbox(label="Python code:", lines=28, value=pi)
-        cpp = gr.Textbox(label="C++ code:", lines=28)
-    with gr.Row():
-        model = gr.Dropdown(models, label="Select model", value=models[0])
-        convert = gr.Button("Convert code")
-
-    convert.click(port, inputs=[model, python], outputs=[cpp])
-
-ui.launch(inbrowser=True)
-
-compile_and_run()</code></pre>
-
-<div class="callout"><strong>Important — how this file reaches the open-source models.</strong> The file does
-<em>not</em> use <code>InferenceClient</code> or a self-deployed HuggingFace endpoint. Instead it reaches every
-open-source model through an <strong>OpenAI-compatible</strong> URL: local ones (<code>qwen2.5-coder</code>,
-<code>deepseek-coder-v2</code>, <code>gpt-oss:20b</code>) through Ollama
-on your own box, and cloud ones through Groq and OpenRouter. Same goal as the video — run an open-source code
-model next to the frontier ones — reached with the same <code>client.chat.completions.create(...)</code> call
-you already know, instead of the <code>InferenceClient</code> shown above. The teaching above is the video's method;
-this file is the repo's current, simpler plumbing.</div>
-
-<h3>Line by line</h3>
-
-<p>Imports and the keys for every provider.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>3-5</td><td><code>import os / import io / import sys</code></td><td>Standard library. <code>os</code> reads the API keys from the environment; <code>io</code> and <code>sys</code> are used later to capture the output of the Python code the UI runs.</td></tr>
-<tr><td>6</td><td><code>from dotenv import load_dotenv</code></td><td>Loads the <code>.env</code> file so the keys become environment variables.</td></tr>
-<tr><td>7</td><td><code>from openai import OpenAI</code></td><td>The OpenAI client library. The whole trick of this file is that it uses this one class for <em>every</em> provider, by pointing it at different base URLs.</td></tr>
-<tr><td>8</td><td><code>import gradio as gr</code></td><td>Gradio, the library that builds the two-pane web UI with the buttons and dropdown.</td></tr>
-<tr><td>9</td><td><code>import subprocess</code></td><td>Lets the program shell out to the C++ compiler and run the compiled program.</td></tr>
-<tr><td>12-18</td><td><code>load_dotenv(override=True) ... os.getenv('OPENAI_API_KEY') ...</code></td><td>Reads the <code>.env</code> file and pulls out a key for each provider the file can talk to: OpenAI, Anthropic, Google, Grok, Groq and OpenRouter.</td></tr>
-<tr><td>20-48</td><td><code>if openai_api_key: print(...) else: print("... not set")</code></td><td>A friendly check that prints the first few characters of each key if present, or says it is missing. All but OpenAI are marked optional, so you only need the keys for the providers you actually plan to use.</td></tr>
-</table></div>
-
-<p>The endpoint setup — one OpenAI client per provider, each a different URL. This is this file's answer to
-“where does the open-source model run”.</p>
+createServer(async (req, res) =&gt; {
+  try {
+    if (req.method === "POST" &amp;&amp; req.url === "/convert") {
+      const { python, model } = JSON.parse(await readBody(req));
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      for await (const streamSoFar of optimize(python, model)) res.write(JSON.stringify(streamSoFar) + "\n");
+      res.end();
+    } else if (req.method === "POST" &amp;&amp; req.url === "/run-python") {
+      res.end(executePython(await readBody(req)));
+    } else if (req.method === "POST" &amp;&amp; req.url === "/run-cpp") {
+      res.end(executeCpp(await readBody(req)));
+    } else {
+      res.writeHead(200, { "Content-Type": "text/html" }).end(page);
+    }
+  } catch (e) {
+    res.end(`Error: ${String(e)}`);
+  }
+}).listen(7860, "127.0.0.1", () =&gt; console.log("Open http://127.0.0.1:7860"));</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
 
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>54</td><td><code>openai = OpenAI()</code></td><td>The plain OpenAI client, for the frontier GPT model. With no arguments it uses the default OpenAI URL and the <code>OPENAI_API_KEY</code> from the environment.</td></tr>
-<tr><td>56-61</td><td><code>anthropic_url = "https://api.anthropic.com/v1/" ... ollama_url = "http://localhost:11434/v1"</code></td><td>The base URL of each provider's OpenAI-compatible endpoint. Notice <code>ollama_url</code> is <code>localhost</code> — that one runs on your own machine. The rest are hosted services in the cloud.</td></tr>
-<tr><td>63-68</td><td><code>anthropic = OpenAI(api_key=anthropic_api_key, base_url=anthropic_url) ... ollama = OpenAI(api_key="ollama", base_url=ollama_url)</code></td><td>Six more clients, all the same <code>OpenAI</code> class pointed at the URLs above. This is the key idea: because each provider speaks the OpenAI protocol, one library reaches all of them. Ollama needs no real key, so a placeholder string is passed.</td></tr>
-<tr><td>71</td><td><code>models = ["gpt-4o-mini-sol", "claude-3-5-sonnet-20240620", ..., "qwen2.5-coder", "deepseek-coder-v2", "gpt-oss:20b", ...]</code></td><td>The list that fills the dropdown — <strong>the comparison itself</strong>. It mixes frontier models (GPT, Claude, Grok, Gemini) with open-source code models (the Qwen coders, DeepSeek Coder, the gpt-oss models) so you can flip between them on the same task.</td></tr>
-<tr><td>73</td><td><code>clients = {"gpt-4o-mini-sol": openai, "claude-3-5-sonnet-20240620": anthropic, ...}</code></td><td>Maps each model name to the client that can reach it. Open-source models point at <code>ollama</code>, <code>groq</code> or <code>openrouter</code>; frontier ones at their own clients. This dictionary is how one call later works for any chosen model.</td></tr>
+<tr><td>1-10</td><td><code>def stream_code_quen(python): ...</code></td><td>The CodeQwen version of <code>stream_gpt</code>, wrapping the previous video's steps: load the tokenizer, build the messages, apply the chat template, call the endpoint with streaming on, and <code>yield</code> the result so far after each token, as Gradio expects. (The name has a typo — <code>quen</code> — while <code>optimize</code> calls <code>stream_code_qwen</code>; Ed's notebook still worked, most likely because a correctly named version was already defined in his session. The <strong>Runs today</strong> tab fixes the name.)</td></tr>
+<tr><td>12-22</td><td><code>def optimize(python, model): ... elif model=="CodeQwen": ...</code></td><td>The dispatcher gains a third branch for CodeQwen.</td></tr>
+<tr><td>24</td><td><code>with gr.Blocks(css=css) as ui:</code></td><td>The same prototype screen as yesterday, starting with the pi program (<code>value=pi</code>).</td></tr>
+<tr><td>30</td><td><code>model = gr.Dropdown(["GPT", "Claude", "CodeQwen"], ...)</code></td><td>The only change to the layout: CodeQwen joins the dropdown.</td></tr>
+<tr><td>40-44</td><td>the three <code>.click(...)</code> lines and <code>ui.launch(inbrowser=True)</code></td><td>Wired exactly as before. Ed's run: pi in Python about 8 s; GPT's C++ 0.06 s; Claude's similar; CodeQwen's C++ arrives with some chatter around it, and once that is deleted it runs just as fast with the same answer (you can watch the endpoint's GPU usage blip as it streams). Then he changes the default to <code>python_hard</code> and relaunches: CodeQwen swaps the program's random-number generator for a Mersenne Twister despite the system prompt, so its total does not match Python's. The frontier models win the hard test.</td></tr>
 </table></div>
-
-<p>The prompts and the call that does the work.</p>
+</div><div data-only="ts">
+<h4>Line by line (TypeScript)</h4>
 
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>77-80</td><td><code>from system_info import retrieve_system_info / system_info = retrieve_system_info()</code></td><td>Reads details about your machine (CPU, OS) so the prompt can ask for C++ tuned to it. The compile command targets your hardware too.</td></tr>
-<tr><td>82-83</td><td><code>compile_command = ["clang++", "-std=c++17", "-Ofast", ...]</code></td><td>The exact command used to compile the generated C++. <code>-Ofast</code> turns on aggressive optimization; the other flags target the native CPU and strip debug checks, all to make the C++ as fast as possible.</td></tr>
-<tr><td>86-90</td><td><code>system_prompt = """Your task is to convert Python code into high performance C++ code. ..."""</code></td><td>The system prompt. It demands C++ only, no explanation, and identical output in the least time. CodeQwen famously ignored the “no explanation” part — which is why the output needs cleaning.</td></tr>
-<tr><td>92-105</td><td><code>def user_prompt_for(python): return f"""Port this Python code to C++ ... {python} ..."""</code></td><td>Builds the user message: the task, the machine info, the compile command, and the Python source dropped in with an f-string. Telling the model the exact compile command helps it target the right C++ standard.</td></tr>
-<tr><td>107-111</td><td><code>def messages_for(python): return [{"role": "system", ...}, {"role": "user", ...}]</code></td><td>The standard two-message list — one system and one user message — the same shape used all through the course and the same one the video feeds to <code>apply_chat_template</code>.</td></tr>
-<tr><td>114-116</td><td><code>def write_output(cpp): with open("main.cpp", "w") as f: f.write(cpp)</code></td><td>Saves the model's C++ to <code>main.cpp</code>, ready to compile. This is why the instructor wanted the model remote but the file on his own box.</td></tr>
-<tr><td>118-125</td><td><code>def port(model, python): client = clients[model] ... response = client.chat.completions.create(model=model, messages=messages_for(python), reasoning_effort=reasoning_effort) ... reply.replace('```cpp','').replace('```','')</code></td><td><strong>The call.</strong> It looks up the right client for the chosen model, makes one chat-completions request, then strips the Markdown code fences so only raw C++ is written to the file. Because the client was chosen from the dictionary, the <em>same line</em> calls a frontier model or an open-source one.</td></tr>
+<tr><td>15-16</td><td><code>const hf</code> / <code>CODE_QWEN_URL</code></td><td>The Hugging Face client and your endpoint, next to the OpenAI and Anthropic clients.</td></tr>
+<tr><td>84-92</td><td><code>async function* streamCodeQwen(python)</code></td><td>Templated prompt in, tokens streamed out, the text so far yielded each time — the same shape as <code>streamGpt</code>.</td></tr>
+<tr><td>94-101</td><td><code>async function* optimize(python, model)</code></td><td>Three branches now: GPT, Claude, CodeQwen.</td></tr>
+<tr><td>147</td><td><code>&lt;option&gt;CodeQwen&lt;/option&gt;</code></td><td>The third model in the page's dropdown.</td></tr>
 </table></div>
-
-<p>The pi program, the runners, and the Gradio UI that lets you compare models.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>127-145</td><td><code>pi = """import time ... def calculate(iterations, param1, param2): ..."""</code></td><td>The easy test from Day 3: a slow Python loop that approximates pi. It is the starting value in the UI, the one CodeQwen managed to convert correctly.</td></tr>
-<tr><td>147-162</td><td><code>def run_python(code): ... exec(code, globals_dict) ...</code></td><td>Runs the original Python and captures its printed output, so you can time it and compare against the compiled C++.</td></tr>
-<tr><td>164-171</td><td><code>def compile_and_run(): subprocess.run(compile_command, ...) ...</code></td><td>Compiles <code>main.cpp</code> with the command above and runs the result, printing its output — this is where you see the C++ speed-up.</td></tr>
-<tr><td>173-179</td><td><code>with gr.Blocks() as ui: with gr.Row(): python = gr.Textbox(...); cpp = gr.Textbox(...) ... model = gr.Dropdown(models, ...)</code></td><td>Builds the two-pane UI: Python on the left, C++ on the right, and a dropdown filled with the <code>models</code> list. Choosing a different model here is how you run the comparison.</td></tr>
-<tr><td>181</td><td><code>convert.click(port, inputs=[model, python], outputs=[cpp])</code></td><td>Wires the Convert button to <code>port</code>: it passes the chosen model and the Python code, and puts the returned C++ in the right-hand box.</td></tr>
-<tr><td>183-185</td><td><code>ui.launch(inbrowser=True) / compile_and_run()</code></td><td>Opens the UI in your browser. Note there is no <code>share=True</code> — the instructor warns never to share a UI that can run arbitrary code on your machine.</td></tr>
-</table></div>
-
+</div>
 <figure class="diagram">
 <svg viewBox="0 0 760 240" role="img" aria-label="Frontier models versus the open-source CodeQwen, compared on parameters, hosting, cost and results">
   <rect class="zone" x="18" y="34" width="352" height="196" rx="8"/>
@@ -493,52 +1041,35 @@ this file is the repo's current, simpler plumbing.</div>
 <figcaption>How the two sides compared in the video. <strong>The frontier models won, but a 7B model that passed the
 easy test at all is an impressive showing against trillion-parameter giants.</strong></figcaption>
 </figure>
+</section>
 
-<h3>In TypeScript</h3>
+<section class="lesson" id="video-25">
+<h3>Video 25 · Wrap-up: what you can do now</h3>
+<p class="lesson-meta">25 -Day 4 - Mastering Code Generation with LLMs Techniques and Model Selection.mp4 · 1:48</p>
+<p>A short recap with no code. You can code against frontier and open-source models, choose a model using
+leaderboards and arenas, and deploy an open model on an endpoint. Open source was a little disappointing on the hard test,
+but a 7-billion-parameter model did a fine job against models with well over a trillion parameters. Next: evaluating
+results and more ideas for code generation.</p>
 
-<p>There is no official <a class="term" href="glossary.html#typescript">TypeScript</a> port of this particular day,
-and that is fine, because the endpoint idea travels almost unchanged. An Inference Endpoint is just a URL that
-accepts a POST request, so from Node you can call it with plain <code>fetch</code>: send the prompt text in the
-request body, include your HuggingFace token in an <code>Authorization</code> header, and read the generated text
-out of the JSON response. That is the same round trip the Python <code>InferenceClient</code> makes under the hood
-— the client is a convenience wrapper over exactly this HTTP call.</p>
 
-<pre data-lang="ts" data-tag="illustrative"><code>// Illustrative only - not from the course repo, and not run here.
-const res = await fetch(ENDPOINT_URL, {
-  method: "POST",
-  headers: {
-    Authorization: `Bearer ${HF_TOKEN}`,
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({
-    inputs: text,                      // the chat-templated prompt
-    parameters: { max_new_tokens: 3000 },
-  }),
-});
-const data = await res.json();
-console.log(data[0].generated_text);   // the generated C++
-</code></pre>
 
-<p>The one Python-only piece is <code>apply_chat_template</code>, which formats the prompt the exact way CodeQwen
-expects. In TypeScript you would either hard-code that template string or let a hosted chat API apply it for you;
-everything else is an ordinary HTTP request.</p>
+</section>
 
 <div class="callout"><strong>Video vs repo.</strong>
 <ul>
-<li><strong>The whole mechanism differs.</strong> The <em>video</em> deploys CodeQwen on a HuggingFace Inference
+<li><strong>The whole mechanism differs.</strong> The <em>video</em> deploys CodeQwen on a Hugging Face Inference
 Endpoint and calls it with <code>InferenceClient</code> plus <code>AutoTokenizer.apply_chat_template</code>. The
-<em>current repo file</em> drops all of that and reaches open-source models through OpenAI-compatible URLs
-(Ollama locally, Groq and OpenRouter in the cloud). The guide teaches the video's method and embeds the repo's file,
-so you can see both.</li>
-<li><strong>Models.</strong> The video's open-source model is CodeQwen 1.5 7B Chat; the repo's dropdown lists newer
-names (<code>qwen2.5-coder</code>, <code>deepseek-coder-v2</code>, <code>gpt-oss</code>, <code>qwen3-coder</code>).
-Model ids change constantly — treat them as values to swap for whatever is current.</li>
-<li><strong>reasoning_effort.</strong> The <code>port</code> function passes a <code>reasoning_effort</code> argument
-to <code>chat.completions.create</code>. That is a repo addition; the video-era code did not have it. It is valid
-code, just newer than what the video shows.</li>
-<li><strong>No live run here.</strong> The model-calling code is shown as in the course and was not executed in this
-guide; the quality and speed results are the instructor's.</li>
+<em>current repository</em> drops all of that and reaches open-source models through OpenAI-compatible addresses
+(Ollama on your own machine, Groq and OpenRouter in the cloud), with the same
+<code>client.chat.completions.create(...)</code> call as the frontier models.</li>
+<li><strong>Models.</strong> The video compares GPT-4o, Claude 3.5 Sonnet and CodeQwen 1.5 7B Chat; the repository's
+dropdown lists current frontier models plus <code>qwen2.5-coder</code>, <code>deepseek-coder-v2</code>,
+<code>gpt-oss</code> and <code>qwen3-coder</code>.</li>
+<li><strong>Simpler UI.</strong> The repository's Day 4 screen has no Run buttons: one <code>port(model, python)</code>
+function returns the whole C++ at once (no streaming), and a separate cell compiles and runs it.</li>
 </ul>
+<p>The "Runs today" tabs keep the video's method and change only what no longer works: model ids, endpoint addresses,
+the M1-only compiler flags, the misnamed function and where Gradio 6 expects the CSS.</p>
 </div>
 
 <figure class="diagram">
@@ -566,7 +1097,6 @@ guide; the quality and speed results are the instructor's.</li>
 <figcaption>Two routes to the same destination. <strong>The video rents a dedicated GPU endpoint; the repo leans on
 services that already host the model — both run an open-source model from your own code.</strong></figcaption>
 </figure>
-
 <div class="callout ok"><strong>What you should see.</strong> With a running endpoint (video method) or a reachable
 open-source client (repo method), choosing an open-source model in the dropdown and pressing <strong>Convert</strong>
 streams C++ into the right-hand box, usually wrapped in a little explanation you then delete. On the easy
@@ -588,10 +1118,10 @@ URL to call any open model — the instructor picks CodeQwen
 <strong>paused or deleted</strong> when you finish.</li>
 <li>Results: CodeQwen passed the easy <code>pi</code> test but stumbled on the hard one; the frontier models passed
 both. A 7B model versus trillion-parameter ones is not a fair fight — yet open-source did well.</li>
-<li><strong>Video vs repo:</strong> the embedded file reaches open-source models through OpenAI-compatible URLs
-(Ollama, Groq, OpenRouter) rather than <code>InferenceClient</code>; same goal, simpler plumbing.</li>
-<li>In TypeScript an endpoint is just a URL — POST the
-prompt with <code>fetch</code> and read the generated text; the <code>InferenceClient</code> is a wrapper over that.</li>
+<li><strong>Video vs repo:</strong> today's repository reaches open-source models through OpenAI-compatible
+addresses (Ollama, Groq, OpenRouter) rather than <code>InferenceClient</code>; same goal, simpler plumbing.</li>
+<li>In TypeScript, <code>@huggingface/inference</code>'s <code>textGenerationStream</code> calls the same endpoint;
+the chat template is a few lines of string building.</li>
 <li>The model-calling code was not run live here; the speed and quality results are the instructor's.</li>
 </ul>
 </div>

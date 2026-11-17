@@ -36,10 +36,10 @@ built — instead you sit and <strong>watch the training happen</strong>, learn 
 <a class="term" href="glossary.html#hyperparameter">hyperparameters</a> you chose, and see each checkpoint
 appear in the HuggingFace Hub. The instructor says it plainly: "few slides, all action."</p>
 
-<p>Because Day 3 and Day 4 are one Colab notebook, this page embeds the <strong>same file</strong> as
-Day 3. The difference is focus: Day 3 explained the <a class="term" href="glossary.html#lora">LoRA</a>
-config half (rank, alpha, target modules); today the line-by-line table zooms in on the training
-hyperparameters, the Weights &amp; Biases hook, and the save-and-push settings.</p>
+<p>Day 3 and Day 4 share one Colab notebook, and its code is on the <a href="39-w7d3.html">Day 3 page</a>.
+Today's lessons show what that code produces: the loss and learning-rate charts that <code>report_to="wandb"</code>
+feeds, and the checkpoints that <code>push_to_hub=True</code> with <code>save_steps=5000</code> uploads. There is
+also a cheaper route: a 25,000-item dataset of appliances only.</p>
 
 <figure class="diagram">
 <svg viewBox="0 0 760 150" role="img" aria-label="Day 3 configures and launches the training; Day 4 monitors it and saves the adapter">
@@ -63,10 +63,9 @@ read what the training is telling you.</strong></figcaption>
 <div class="callout warn">
 <strong>Honesty — this was not run here</strong>
 <p>The <a class="term" href="glossary.html#qlora">QLoRA</a> training needs a real GPU (the instructor uses a
-rented A100) and runs for hours, so it was <strong>not executed</strong> for this guide. The code below is
-reconstructed standard QLoRA/PEFT/TRL code that matches the course's Colab notebook; a comment at the top of
-the file says so. The loss numbers, the "109 MB adapter", the "100,000 steps" and the chart shapes are the
-instructor's, quoted from the video — the charts you draw will look different in detail.</p>
+rented A100) and runs for hours, so it was <strong>not executed</strong> for this guide. The loss numbers, the
+"109 MB adapter", the "100,000 steps" and the chart shapes are the instructor's, quoted from the video — the charts
+you draw will look different in detail.</p>
 </div>
 
 <h2>What the instructor shows today</h2>
@@ -189,290 +188,186 @@ copy of the adapter to a HuggingFace Hub repo every <code>save_steps</code> (500
 a Git commit you can download and test.</p>
 </details>
 
-<h2>The full program</h2>
+<h2>Lesson by lesson</h2>
 
-<p>Here is the complete training file again — the same one from Day 3. Read it once, then use the
-line-by-line tables below, which focus on the parts that matter for <em>monitoring and saving</em>: the
-hyperparameter constants, the Weights &amp; Biases login, the <code>SFTConfig</code> training arguments, and
-the push-to-Hub at the end.</p>
+<p>One section per video. There is no new notebook code today: the Day 3 Colab notebook keeps training while Ed
+tours Weights &amp; Biases and the Hugging Face Hub. The code you do see is a small Week 6 notebook for building a
+cheaper dataset (Video 24) and the adapter's configuration file on the Hub (Video 26), both transcribed from the
+videos.</p>
+<section class="lesson" id="video-23">
+<h3>Video 23 · Keeping training costs low</h3>
+<p class="lesson-meta">23 -Day 4 - Keeping Training Costs Low Efficient Fine-Tuning Strategies.mp4 · 1:50</p>
+<p>Slides. Today is "few slides, all action": the run in Weights &amp; Biases, the model on the Hub,
+and a way to train for a few cents instead of dollars.</p>
 
-<pre data-file="day3_4_train.py" data-lang="py" data-tag="complete file"><code># Reconstructed to match the course's Google Colab notebook for this day.
-# Standard QLoRA/PEFT code; runs on a GPU (e.g. Colab). Not executed here (no GPU).
-#
-# Week 7 - Day 3 / Day 4: the actual QLoRA training run.
-# Freeze the 4-bit base model, attach LoRA adapters to the attention projections,
-# and fine-tune only those adapters with TRL's SFTTrainer. A DataCollator for
-# completion-only LM masks out the prompt so the model is trained only to predict
-# the price token(s) after "Price is $". Progress is logged to Weights &amp; Biases and
-# checkpoints are pushed to the HuggingFace Hub.
+
+
+</section>
+
+<section class="lesson" id="video-24">
+<h3>Video 24 · A smaller dataset: Appliances only</h3>
+<p class="lesson-meta">24 -Day 4 - Efficient Fine-Tuning Using Smaller Datasets for QLoRA Training.mp4 · 6:00</p>
+<p>You do not need 400,000 examples or an A100. On a T4 use the biggest batch that fits (probably 1 or
+2), and train on less data: either <code>train.select(range(20000))</code> on the big dataset, or, better, a narrow
+dataset of one product type. In JupyterLab Ed opens <code>week6/lite.ipynb</code>, a slimmed copy of the Week 6
+Day 2 data notebook that keeps only Appliances. It runs in the Week 6 folder next to <code>items.py</code> and
+<code>loaders.py</code>, with the <code>datasets</code> 3.x install explained in <a href="31-w6d1.html">Week 6
+Day 1</a>, so this block is shown as recorded and not re-checked here.</p>
+<div class="code-tabs"><pre data-file="week6/lite.ipynb (JupyterLab)" data-lang="py" data-tag="as in the video (excerpt)"><code># imports
 
 import os
-from datetime import datetime
-
-import torch
-import wandb
-from google.colab import userdata
+import random
+from dotenv import load_dotenv
 from huggingface_hub import login
-from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-from peft import LoraConfig
-from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+from datasets import load_dataset, Dataset, DatasetDict
+from items import Item
+from loaders import ItemLoader
+import matplotlib.pyplot as plt
+from collections import Counter, defaultdict
+import numpy as np
+import pickle
 
+# environment
 
-# ----------------------------------------------------------------------------
-# Constants
-# ----------------------------------------------------------------------------
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
 
-BASE_MODEL = "meta-llama/Meta-Llama-3.1-8B"
-PROJECT_NAME = "pricer"
-HF_USER = "ed-donner"  # change to your own HuggingFace username
+# Log in to HuggingFace
 
-DATASET_NAME = f"{HF_USER}/pricer-data"
-MAX_SEQUENCE_LENGTH = 182
-
-# Unique, timestamped run name so every run is its own Hub repo / W&amp;B run.
-RUN_NAME = f"{datetime.now():%Y-%m-%d_%H.%M.%S}"
-PROJECT_RUN_NAME = f"{PROJECT_NAME}-{RUN_NAME}"
-HUB_MODEL_NAME = f"{HF_USER}/{PROJECT_RUN_NAME}"
-
-# --- QLoRA hyperparameters ---
-LORA_R = 32                 # adapter rank (start 8, double to 16, then 32)
-LORA_ALPHA = 64             # scaling factor; rule of thumb alpha = 2 * r
-TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj"]  # the attention layers
-LORA_DROPOUT = 0.1          # regularization: drop 10% of neurons each step
-QUANT_4_BIT = True
-
-# --- Training hyperparameters ---
-EPOCHS = 3                  # instructor ran 3 (best checkpoint ~end of epoch 3);
-                            # a single epoch already gives strong results and is far cheaper.
-BATCH_SIZE = 16             # 16 fits an A100 (40GB); use 1 (or 2-4) on a T4.
-GRADIENT_ACCUMULATION_STEPS = 1
-LEARNING_RATE = 1e-4
-LR_SCHEDULER_TYPE = "cosine"
-WARMUP_RATIO = 0.03
-OPTIMIZER = "paged_adamw_32bit"  # good convergence; memory-hungry. Swap for a
-                                 # cheaper optimizer if you run out of memory.
-
-# --- Admin / logging ---
-STEPS = 50                  # log training loss to W&amp;B every 50 steps
-SAVE_STEPS = 5000           # push a checkpoint to the Hub every 5000 steps
-LOG_TO_WANDB = True
-
-
-# ----------------------------------------------------------------------------
-# Log in to HuggingFace and Weights &amp; Biases
-# ----------------------------------------------------------------------------
-
-hf_token = userdata.get("HF_TOKEN")
+hf_token = os.environ['HF_TOKEN']
 login(hf_token, add_to_git_credential=True)
 
-if LOG_TO_WANDB:
-    wandb_api_key = userdata.get("WANDB_API_KEY")
-    os.environ["WANDB_API_KEY"] = wandb_api_key
-    wandb.login()
-    os.environ["WANDB_PROJECT"] = PROJECT_NAME
-    os.environ["WANDB_LOG_MODEL"] = "checkpoint"
-    os.environ["WANDB_WATCH"] = "gradients"
+%matplotlib inline
 
+dataset_names = [
+    # "Automotive",
+    # "Electronics",
+    # "Office_Products",
+    # "Tools_and_Home_Improvement",
+    # "Cell_Phones_and_Accessories",
+    # "Toys_and_Games",
+    "Appliances",
+    # "Musical_Instruments",
+]
 
-# ----------------------------------------------------------------------------
-# Data
-# ----------------------------------------------------------------------------
+items = []
+for dataset_name in dataset_names:
+    loader = ItemLoader(dataset_name)
+    items.extend(loader.load())
 
-dataset = load_dataset(DATASET_NAME)
-train = dataset["train"]
-test = dataset["test"]
+print(f"A grand total of {len(items):,} items")
 
-print(f"Training on {len(train):,} items; holding out {len(test):,} test items")
-print("Example training text:\n")
-print(train[0]["text"])
+# How does the price vary with the character count of the prompt?
 
+sample = items
 
-# ----------------------------------------------------------------------------
-# Quantization config + tokenizer + frozen base model
-# ----------------------------------------------------------------------------
+sizes = [len(item.prompt) for item in sample]
+prices = [item.price for item in sample]
 
-if QUANT_4_BIT:
-    quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_quant_type="nf4",
-    )
-else:
-    quant_config = BitsAndBytesConfig(
-        load_in_8bit=True,
-        bnb_8bit_compute_dtype=torch.bfloat16,
-    )
+# Create the scatter plot
+plt.figure(figsize=(15, 8))
+plt.scatter(sizes, prices, s=0.2, color="red")
 
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "right"
+# Add labels and title
+plt.xlabel('Size')
+plt.ylabel('Price')
+plt.title('Is there a simple correlation?')
 
-base_model = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL,
-    quantization_config=quant_config,
-    device_map="auto",
-)
-base_model.generation_config.pad_token_id = tokenizer.pad_token_id
-print(f"Memory footprint: {base_model.get_memory_footprint() / 1e6:,.1f} MB")
+# Display the plot
+plt.show()
 
+random.seed(42)
+random.shuffle(sample)
+train = sample[:25_000]
+test = sample[25_000:27_000]
+print(f"Divided into a training set of {len(train):,} items and test set of {len(test):,} items")
 
-# ----------------------------------------------------------------------------
-# Completion-only data collator
-# ----------------------------------------------------------------------------
-#
-# We only want the model to learn the token(s) AFTER "Price is $" - not how to
-# rewrite the product description. The collator masks everything up to and
-# including the response template so the loss is computed only on the price.
+print(train[0].prompt)
 
-response_template = "Price is $"
-collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)
+print(test[0].test_prompt())
 
+train_prompts = [item.prompt for item in train]
+train_prices = [item.price for item in train]
+test_prompts = [item.test_prompt() for item in test]
+test_prices = [item.price for item in test]
 
-# ----------------------------------------------------------------------------
-# LoRA config (the QLoRA adapters)
-# ----------------------------------------------------------------------------
+# Create a Dataset from the lists
 
-lora_config = LoraConfig(
-    r=LORA_R,
-    lora_alpha=LORA_ALPHA,
-    target_modules=TARGET_MODULES,
-    lora_dropout=LORA_DROPOUT,
-    bias="none",
-    task_type="CAUSAL_LM",
-)
+train_dataset = Dataset.from_dict({"text": train_prompts, "price": train_prices})
+test_dataset = Dataset.from_dict({"text": test_prompts, "price": test_prices})
+dataset = DatasetDict({
+    "train": train_dataset,
+    "test": test_dataset
+})
 
+DATASET_NAME = "ed-donner/lite-data"
+dataset.push_to_hub(DATASET_NAME, private=True)
 
-# ----------------------------------------------------------------------------
-# SFT training config
-# ----------------------------------------------------------------------------
+# One more thing!
+# Let's pickle the training and test dataset so we don't have to execute all this code next time!
 
-train_config = SFTConfig(
-    output_dir=PROJECT_RUN_NAME,
-    num_train_epochs=EPOCHS,
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-    learning_rate=LEARNING_RATE,
-    lr_scheduler_type=LR_SCHEDULER_TYPE,
-    warmup_ratio=WARMUP_RATIO,
-    optim=OPTIMIZER,
-    max_grad_norm=0.3,
-    weight_decay=0.001,
-    max_seq_length=MAX_SEQUENCE_LENGTH,
-    dataset_text_field="text",
-    # logging
-    logging_steps=STEPS,
-    report_to="wandb" if LOG_TO_WANDB else "none",
-    run_name=RUN_NAME,
-    # saving / pushing to the Hub
-    save_strategy="steps",
-    save_steps=SAVE_STEPS,
-    push_to_hub=True,
-    hub_model_id=HUB_MODEL_NAME,
-    hub_strategy="every_save",
-    hub_private_repo=True,
-    # misc
-    save_total_limit=10,
-    bf16=True,
-    group_by_length=True,
-    seed=42,
-)
+with open('train_lite.pkl', 'wb') as file:
+    pickle.dump(train, file)
 
-
-# ----------------------------------------------------------------------------
-# Trainer
-# ----------------------------------------------------------------------------
-
-trainer = SFTTrainer(
-    model=base_model,
-    train_dataset=train,
-    peft_config=lora_config,
-    args=train_config,
-    data_collator=collator,
-    processing_class=tokenizer,  # older TRL versions use tokenizer=tokenizer
-)
-
-
-# ----------------------------------------------------------------------------
-# Train, then push the final adapter to the Hub
-# ----------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    trainer.train()
-    trainer.model.push_to_hub(PROJECT_RUN_NAME, private=True)
-    print(f"Saved adapter to the Hub: {HUB_MODEL_NAME}")
-    if LOG_TO_WANDB:
-        wandb.finish()</code></pre>
-
-<h3>Line by line</h3>
-
-<p>The hyperparameter constants (lines 40–61). The LoRA block on lines 40–45 was covered on
-Day 3; here we focus on the training knobs.</p>
-
+with open('test_lite.pkl', 'wb') as file:
+    pickle.dump(test, file)</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+<p>An excerpt: the cells Ed walks through, without the histogram cells he scrolls past.</p>
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>48</td><td><code>EPOCHS = 3</code></td><td>How many full passes through the data. The instructor ran three and found the best checkpoint near the end of epoch 3; the comment notes a single <a class="term" href="glossary.html#epoch">epoch</a> already gives strong results and is far cheaper. More epochs risk overfitting.</td></tr>
-<tr><td>50</td><td><code>BATCH_SIZE = 16</code></td><td>Examples processed together per step. 16 fills a 40 GB A100; on a cheap T4 you would use 1 (or 2–4). With 400,000 items in batches of 16 over 4 epochs you get the round 100,000 steps the instructor points at.</td></tr>
-<tr><td>51</td><td><code>GRADIENT_ACCUMULATION_STEPS = 1</code></td><td>No <a class="term" href="glossary.html#gradient-accumulation">gradient accumulation</a> — update the weights after every batch. Raise it to get a larger effective batch when the GPU cannot hold one.</td></tr>
-<tr><td>52</td><td><code>LEARNING_RATE = 1e-4</code></td><td>The peak <a class="term" href="glossary.html#learning-rate">learning rate</a> — the step size. 1e-4 is a common, safe starting point for QLoRA. Too high and the loss diverges; too low and it barely moves.</td></tr>
-<tr><td>53</td><td><code>LR_SCHEDULER_TYPE = "cosine"</code></td><td>Follow a cosine curve: hold near the peak, then ease smoothly down toward zero by the final epoch so late steps are small and precise.</td></tr>
-<tr><td>54</td><td><code>WARMUP_RATIO = 0.03</code></td><td>Spend the first 3% of steps ramping the rate up from zero to the peak, so the big early corrections do not overshoot. This is why the learning-rate chart does not start at the top.</td></tr>
-<tr><td>55-56</td><td><code>OPTIMIZER = "paged_adamw_32bit"</code></td><td>The optimizer — the algorithm that turns gradients into weight updates. This paged AdamW variant converges well but is memory-hungry; swap for a cheaper optimizer if you run out of GPU memory.</td></tr>
-<tr><td>59</td><td><code>STEPS = 50</code></td><td>Log the training loss to Weights &amp; Biases every 50 steps — often enough to see the trend, rare enough not to flood the charts.</td></tr>
-<tr><td>60</td><td><code>SAVE_STEPS = 5000</code></td><td>Push a checkpoint (the adapter) to the Hub every 5000 steps, giving you a series of testable snapshots.</td></tr>
-<tr><td>61</td><td><code>LOG_TO_WANDB = True</code></td><td>Master switch for the Weights &amp; Biases integration; set <code>False</code> to train without logging.</td></tr>
+<tr><td>1-13</td><td><code>import os</code> … <code>from items import Item</code> / <code>from loaders import ItemLoader</code> …</td><td>A local JupyterLab notebook in the <strong>week6</strong> folder, not Colab. <code>Item</code> and <code>ItemLoader</code> are the Week 6 helper files <code>items.py</code> and <code>loaders.py</code> in that folder.</td></tr>
+<tr><td>17-20</td><td><code>load_dotenv()</code> / <code>os.environ[...] = os.getenv(..., 'your-key-if-not-using-env')</code></td><td>Reads your keys from the <code>.env</code> file, as in Week 6 (the placeholder is only a fallback).</td></tr>
+<tr><td>24-25</td><td><code>login(hf_token, add_to_git_credential=True)</code></td><td>Hugging Face login, needed to upload the dataset.</td></tr>
+<tr><td>29-38</td><td><code>dataset_names = [ ... "Appliances", ... ]</code></td><td>The Week 6 list of product categories with everything commented out except <strong>Appliances</strong>, one of the smallest. A narrow dataset also lets the model learn one kind of product well.</td></tr>
+<tr><td>40-43</td><td><code>for dataset_name in dataset_names: loader = ItemLoader(dataset_name); items.extend(loader.load())</code></td><td>Downloads and cleans the Appliances data with the Week 6 loader: 28,625 items in about 0.3 minutes.</td></tr>
+<tr><td>45</td><td><code>print(f"A grand total of {len(items):,} items")</code></td><td>Prints <code>A grand total of 28,625 items</code>.</td></tr>
+<tr><td>47-64</td><td><code>sample = items</code> and the scatter plot</td><td>No balancing step this time: all items are kept (<code>sample = items</code>). The scatter plot checks again that price is not simply related to the length of the description. (Ed skips past the token-count and price histograms, left out here.)</td></tr>
+<tr><td>66-70</td><td><code>random.shuffle(sample)</code> / <code>train = sample[:25_000]</code> / <code>test = sample[25_000:27_000]</code></td><td>Shuffle with a fixed seed, then 25,000 items for training and 2,000 for testing, instead of 400,000 and 2,000.</td></tr>
+<tr><td>72-74</td><td><code>print(train[0].prompt)</code> / <code>print(test[0].test_prompt())</code></td><td>The same prompt format as the big dataset: training prompts end with the price, test prompts stop at <code>Price is $</code>.</td></tr>
+<tr><td>76-79</td><td><code>train_prompts = [item.prompt for item in train]</code> …</td><td>Four plain lists: texts and prices for each split.</td></tr>
+<tr><td>83</td><td><code>Dataset.from_dict({"text": ..., "price": ...})</code> / <code>DatasetDict({...})</code></td><td>The same <code>text</code> and <code>price</code> columns as <code>pricer-data</code>, so the Day 3 notebook works unchanged.</td></tr>
+<tr><td>90-91</td><td><code>DATASET_NAME = "ed-donner/lite-data"</code> / <code>dataset.push_to_hub(DATASET_NAME, private=True)</code></td><td>Uploads it under a different name. Use your own user name, then set <code>DATASET_NAME</code> in the Day 3 constants to it.</td></tr>
+<tr><td>96-100</td><td><code>pickle.dump(train, file)</code> …</td><td>Also saves both lists locally, as Week 6 did, with <code>_lite</code> in the file names.</td></tr>
 </table></div>
+</div>
 
-<p>Logging in to Weights &amp; Biases (lines 68–77).</p>
+</section>
 
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>68-69</td><td><code>hf_token = userdata.get("HF_TOKEN")</code> / <code>login(hf_token, ...)</code></td><td>Reads your HuggingFace token from Colab's secret store and logs in, so the trainer can push checkpoints to the Hub later.</td></tr>
-<tr><td>72-74</td><td><code>wandb_api_key = userdata.get("WANDB_API_KEY")</code> / <code>wandb.login()</code></td><td>Reads your Weights &amp; Biases API key (also a Colab secret), puts it in the environment, and logs in. Without this the run cannot stream its numbers to your project.</td></tr>
-<tr><td>75</td><td><code>os.environ["WANDB_PROJECT"] = PROJECT_NAME</code></td><td>Names the project ("pricer") that the run appears under, so all your pricer runs sit together and can be compared on one chart.</td></tr>
-<tr><td>76</td><td><code>os.environ["WANDB_LOG_MODEL"] = "checkpoint"</code></td><td>Tells Weights &amp; Biases to track the saved checkpoints as well as the metrics.</td></tr>
-<tr><td>77</td><td><code>os.environ["WANDB_WATCH"] = "gradients"</code></td><td>Records the gradients so you can inspect them — the instructor's tip is to watch that gradients never hit zero (no learning) or blow up (unstable).</td></tr>
-</table></div>
+<section class="lesson" id="video-25">
+<h3>Video 25 · Watching the run in Weights &amp; Biases</h3>
+<p class="lesson-meta">25 -Day 4 - Visualizing LLM Fine-Tuning Progress with Weights and Biases Charts.mp4 · 14:52</p>
+<p>Back in the Day 3 Colab notebook, still training (step 4,350 of 100,000, GPU memory steady at
+38.2 of 40 GB). The cell's output prints the training loss every 50 steps, which is hard to read as a trend. In
+Weights &amp; Biases the same numbers become charts: <code>train/loss</code> (apply smoothing to see the trend),
+<code>train/learning_rate</code> (still warming up), gradient norms and GPU usage. Ed then compares an older run with
+the same settings that went through four epochs: the loss drops in a step at each new epoch, a sign of
+overfitting, and falls below about 1.5, his rule-of-thumb warning level. No new code: this is the
+<code>fine_tuning.train()</code> cell from Day 3.</p>
 
-<p>The training arguments — <code>SFTConfig</code> (lines 153–182). This is where every
-hyperparameter and the logging/saving behaviour come together.</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>153-154</td><td><code>train_config = SFTConfig(</code> / <code>output_dir=PROJECT_RUN_NAME</code></td><td>Builds the TRL training configuration. <code>output_dir</code> is the local folder (and Hub repo name) for this run, named with a timestamp so every run is distinct.</td></tr>
-<tr><td>155</td><td><code>num_train_epochs=EPOCHS</code></td><td>Wires in the 3 epochs from the constants. This, with the data size and batch size, fixes the total step count.</td></tr>
-<tr><td>156</td><td><code>per_device_train_batch_size=BATCH_SIZE</code></td><td>The 16-example batch per GPU. The "per device" wording matters on multi-GPU machines; here there is one device.</td></tr>
-<tr><td>157</td><td><code>gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS</code></td><td>Applies the accumulation setting (1 = off). Effective batch = this × the per-device batch.</td></tr>
-<tr><td>158</td><td><code>learning_rate=LEARNING_RATE</code></td><td>The peak learning rate the scheduler warms up to and decays from.</td></tr>
-<tr><td>159</td><td><code>lr_scheduler_type=LR_SCHEDULER_TYPE</code></td><td>Selects the cosine schedule.</td></tr>
-<tr><td>160</td><td><code>warmup_ratio=WARMUP_RATIO</code></td><td>The 3% warmup phase.</td></tr>
-<tr><td>161</td><td><code>optim=OPTIMIZER</code></td><td>The <code>paged_adamw_32bit</code> optimizer.</td></tr>
-<tr><td>162</td><td><code>max_grad_norm=0.3</code></td><td>Gradient clipping: cap the size of any single update so a wild batch cannot jerk the weights too far. A form of stabilisation.</td></tr>
-<tr><td>163</td><td><code>weight_decay=0.001</code></td><td>A small pull of the weights toward zero each step — light regularisation that discourages overfitting.</td></tr>
-<tr><td>164-165</td><td><code>max_seq_length=...</code> / <code>dataset_text_field="text"</code></td><td>Cap each example at 182 tokens and tell the trainer which dataset column holds the training text.</td></tr>
-<tr><td>167</td><td><code>logging_steps=STEPS</code></td><td>Log every 50 steps (from the constant) — this is what feeds the live loss chart.</td></tr>
-<tr><td>168</td><td><code>report_to="wandb" if LOG_TO_WANDB else "none"</code></td><td>The one line that turns on Weights &amp; Biases. Set the switch off and it logs nowhere. This is the hook the whole dashboard hangs on.</td></tr>
-<tr><td>169</td><td><code>run_name=RUN_NAME</code></td><td>The timestamped name this run shows under in the Weights &amp; Biases project, so you can tell runs apart.</td></tr>
-<tr><td>171-172</td><td><code>save_strategy="steps"</code> / <code>save_steps=SAVE_STEPS</code></td><td>Save on a step schedule rather than once at the end — a checkpoint every 5000 steps. This is what fills the Hub repo with testable snapshots.</td></tr>
-<tr><td>173-174</td><td><code>push_to_hub=True</code> / <code>hub_model_id=HUB_MODEL_NAME</code></td><td>Automatically push each saved checkpoint to the HuggingFace Hub, into the repo named here. No manual upload needed.</td></tr>
-<tr><td>175</td><td><code>hub_strategy="every_save"</code></td><td>Push to the Hub on every save — so each 5000-step checkpoint becomes a commit you can load back later.</td></tr>
-<tr><td>176</td><td><code>hub_private_repo=True</code></td><td>Make the Hub repo private, so your in-progress model is not public.</td></tr>
-<tr><td>178-179</td><td><code>save_total_limit=10</code> / <code>bf16=True</code></td><td>Keep at most 10 local checkpoints (older ones are deleted to save disk), and compute in bfloat16 for speed and memory on the A100.</td></tr>
-<tr><td>180-181</td><td><code>group_by_length=True</code> / <code>seed=42</code></td><td>Batch together examples of similar length (less wasted padding, faster), and fix the random seed so the run is repeatable.</td></tr>
-</table></div>
-
-<p>Train, then push the final adapter to the Hub (lines 203–208).</p>
-
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>204</td><td><code>trainer.train()</code></td><td>Starts the training loop. From here on the Colab log fills with per-step losses and — thanks to <code>report_to="wandb"</code> — the charts come alive. This is the line that runs for hours.</td></tr>
-<tr><td>205</td><td><code>trainer.model.push_to_hub(PROJECT_RUN_NAME, private=True)</code></td><td>After training, push the <strong>final</strong> adapter to the Hub one last time (on top of the checkpoints saved along the way). Only the small <a class="term" href="glossary.html#adapter">adapter</a> is uploaded, not the whole base model.</td></tr>
-<tr><td>206</td><td><code>print(f"Saved adapter to the Hub: {HUB_MODEL_NAME}")</code></td><td>Prints where the finished adapter lives, so you know the repo id to load on Day 5.</td></tr>
-<tr><td>207-208</td><td><code>if LOG_TO_WANDB: wandb.finish()</code></td><td>Cleanly closes the Weights &amp; Biases run so the charts are marked complete.</td></tr>
-</table></div>
 
 <figure class="diagram">
+<svg viewBox="0 0 760 280" role="img" aria-label="An illustrative Weights and Biases training-loss chart, bumpy but trending down with a small dip at each epoch boundary">
+  <line class="line" x1="70" y1="30" x2="70" y2="230"/>
+  <line class="line" x1="70" y1="230" x2="710" y2="230"/>
+  <text x="40" y="46" class="small">loss</text>
+  <text x="684" y="252" class="small">steps &#8594;</text>
+  <text x="44" y="226" class="small">1.0</text>
+  <line class="line dashed" x1="70" y1="150" x2="710" y2="150"/>
+  <text x="76" y="144" class="small warn">~1.5 rule-of-thumb floor</text>
+  <path class="line" d="M 72,56 L 110,92 100,80 150,120 140,108 210,138 230,150 L 232,120 280,150 300,162 L 302,132 380,168 440,178 L 442,150 520,182 600,190 L 602,168 680,196 700,200"/>
+  <text x="180" y="200" class="small">epoch 1</text>
+  <text x="330" y="208" class="small">epoch 2</text>
+  <text x="470" y="210" class="small">epoch 3</text>
+  <text x="620" y="214" class="small">epoch 4</text>
+  <text x="380" y="270" text-anchor="middle" class="small">Illustrative &#8212; bumpy because each step is a random batch of 16; dips mark epoch boundaries</text>
+</svg>
+<figcaption>Illustrative shape, not real data. Loss falls steeply at first, then trends down with lots of
+wiggle; it drops a little at each epoch boundary because the model is re-seeing data.
+<strong>A sudden dip at each epoch is the warning sign of overfitting.</strong></figcaption>
+</figure><figure class="diagram">
 <svg viewBox="0 0 760 230" role="img" aria-label="Key QLoRA hyperparameters, their values, and what each one controls">
   <text x="36" y="24" class="title">Hyperparameter cheat-sheet (this run)</text>
   <line class="line" x1="30" y1="34" x2="730" y2="34"/>
@@ -504,57 +399,56 @@ hyperparameter and the logging/saving behaviour come together.</p>
 <figcaption>The knobs you set before training and what each changes. <strong>You tune these by watching the
 charts, not by guessing once.</strong></figcaption>
 </figure>
+</section>
 
-<div class="callout ok">
-<strong>What you should see</strong>
-<p>In the Colab log, a line per batch step with a <a class="term" href="glossary.html#training-loss">training
-loss</a> that starts high and bounces its way down. In Weights &amp; Biases the same numbers become a chart:
-a bumpy line with a clear <em>downward trend</em> (apply the smoothing slider and the trend pops out). The
-learning-rate chart ramps up during warmup, then eases down a cosine curve. GPU-utilisation charts should show
-the GPU "nice and hot" — busy computing, not waiting on memory. And in the HuggingFace Hub your model
-repo gains a new commit roughly every 5000 steps, each holding a ~109 MB <code>safetensors</code> adapter and
-an <code>adapter_config.json</code>. You can load and test any of these checkpoints while training is still
-running.</p>
-</div>
-
-<figure class="diagram">
-<svg viewBox="0 0 760 280" role="img" aria-label="An illustrative Weights and Biases training-loss chart, bumpy but trending down with a small dip at each epoch boundary">
-  <line class="line" x1="70" y1="30" x2="70" y2="230"/>
-  <line class="line" x1="70" y1="230" x2="710" y2="230"/>
-  <text x="40" y="46" class="small">loss</text>
-  <text x="684" y="252" class="small">steps &#8594;</text>
-  <text x="44" y="226" class="small">1.0</text>
-  <line class="line dashed" x1="70" y1="150" x2="710" y2="150"/>
-  <text x="76" y="144" class="small warn">~1.5 rule-of-thumb floor</text>
-  <path class="line" d="M 72,56 L 110,92 100,80 150,120 140,108 210,138 230,150 L 232,120 280,150 300,162 L 302,132 380,168 440,178 L 442,150 520,182 600,190 L 602,168 680,196 700,200"/>
-  <text x="180" y="200" class="small">epoch 1</text>
-  <text x="330" y="208" class="small">epoch 2</text>
-  <text x="470" y="210" class="small">epoch 3</text>
-  <text x="620" y="214" class="small">epoch 4</text>
-  <text x="380" y="270" text-anchor="middle" class="small">Illustrative &#8212; bumpy because each step is a random batch of 16; dips mark epoch boundaries</text>
-</svg>
-<figcaption>Illustrative shape, not real data. Loss falls steeply at first, then trends down with lots of
-wiggle; it drops a little at each epoch boundary because the model is re-seeing data.
-<strong>A sudden dip at each epoch is the warning sign of overfitting.</strong></figcaption>
-</figure>
-
-<div class="callout warn">
-<strong>Common mistakes and pitfalls</strong>
-<ul>
-<li><strong>Learning rate too high.</strong> If <a class="term" href="glossary.html#learning-rate">learning
-rate</a> is too large the loss diverges — it jumps around or shoots up instead of settling. If it is too
-small, training crawls. 1e-4 with warmup is a safe start.</li>
-<li><strong>Too many epochs = overfitting.</strong> The instructor watched the loss take a bigger dive at each
-epoch boundary: the model was memorising data it had already seen. When he tested later checkpoints they were
-<em>worse</em>, so there was no point past epoch 3. His rule of thumb: a loss much below <strong>1.5</strong>
-should make you suspicious. Often <strong>one epoch is enough</strong>.</li>
-<li><strong>Dead or exploding gradients.</strong> With <code>WANDB_WATCH="gradients"</code> on, watch that
-gradients never fall to zero (the model has stopped learning) or blow up (training is unstable).</li>
-<li><strong>Idle GPU.</strong> If GPU utilisation is low the GPU is shuffling memory, not computing —
-you are paying for time you are not using. Tune the hyperparameters to keep it busy.</li>
-</ul>
-</div>
-
+<section class="lesson" id="video-26">
+<h3>Video 26 · More Weights &amp; Biases, and the model on the Hub</h3>
+<p class="lesson-meta">26 -Day 4 - Advanced Weights &amp; Biases Tools and Model Saving on Hugging Face.mp4 · 11:55</p>
+<p>The learning-rate chart shows the warm-up and the cosine fall to zero. Ed overlays the current run
+on older ones (same settings, nearly identical curves) and explains what to watch in the gradients: not zero, not
+exploding. Then the Hugging Face Hub: every 5,000 steps the trainer has pushed a commit ("Training in progress, step
+5000", ...) to a private repository, holding the 109 MB <code>adapter_model.safetensors</code> and this
+configuration file. Any commit can be loaded and tested; Day 5 picks one.</p>
+<pre data-file="adapter_config.json (on the Hub)" data-lang="json" data-tag="as in the video"><code>{
+  "alpha_pattern": {},
+  "auto_mapping": null,
+  "base_model_name_or_path": "meta-llama/Meta-Llama-3.1-8B",
+  "bias": "none",
+  "fan_in_fan_out": false,
+  "inference_mode": true,
+  "init_lora_weights": true,
+  "layer_replication": null,
+  "layers_pattern": null,
+  "layers_to_transform": null,
+  "loftq_config": {},
+  "lora_alpha": 64,
+  "lora_dropout": 0.1,
+  "megatron_config": null,
+  "megatron_core": "megatron.core",
+  "modules_to_save": null,
+  "peft_type": "LORA",
+  "r": 32,
+  "rank_pattern": {},
+  "revision": null,
+  "target_modules": [
+    "o_proj",
+    "v_proj",
+    "k_proj",
+    "q_proj"
+  ],
+  "task_type": "CAUSAL_LM",
+  "use_dora": false,
+  "use_rslora": false
+}</code></pre>
+<h4>Field by field</h4>
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>4</td><td><code>"base_model_name_or_path": "meta-llama/Meta-Llama-3.1-8B"</code></td><td>Which base model the adapter belongs to. <code>PeftModel.from_pretrained</code> needs that model loaded first.</td></tr>
+<tr><td>13-14</td><td><code>"lora_alpha": 64</code> / <code>"lora_dropout": 0.1</code></td><td>The alpha and dropout from the Day 3 constants.</td></tr>
+<tr><td>18-19</td><td><code>"peft_type": "LORA"</code> / <code>"r": 32</code></td><td>A LoRA adapter of rank 32.</td></tr>
+<tr><td>22-27</td><td><code>"target_modules": ["o_proj", "v_proj", "k_proj", "q_proj"]</code></td><td>The four attention layers that received adapters (the order does not matter).</td></tr>
+<tr><td>28</td><td><code>"task_type": "CAUSAL_LM"</code></td><td>A next-token model.</td></tr>
+</table></div>
 <figure class="diagram">
 <svg viewBox="0 0 760 250" role="img" aria-label="How the training loop pushes checkpoints to a HuggingFace Hub repo every 5000 steps">
   <rect class="box box-info" x="30" y="40" width="200" height="54" rx="8"/>
@@ -581,9 +475,7 @@ you are paying for time you are not using. Tune the hyperparameters to keep it b
 </svg>
 <figcaption>Checkpoints flow to a private Hub repo as you train. <strong>Each commit is a loadable snapshot,
 so you can pick the best checkpoint afterwards instead of guessing the epoch count.</strong></figcaption>
-</figure>
-
-<figure class="diagram">
+</figure><figure class="diagram">
 <svg viewBox="0 0 760 170" role="img" aria-label="Comparing a fresh run against an earlier run on the same Weights and Biases axes">
   <line class="line" x1="60" y1="24" x2="60" y2="130"/>
   <line class="line" x1="60" y1="130" x2="710" y2="130"/>
@@ -598,28 +490,64 @@ so you can pick the best checkpoint afterwards instead of guessing the epoch cou
 <figcaption>Illustrative. Weights &amp; Biases lets you overlay runs. <strong>A new run hugging an old one with
 the same settings is reassuring — the training is reproducible, not luck.</strong></figcaption>
 </figure>
+</section>
+
+<section class="lesson" id="video-27">
+<h3>Video 27 · Wrap-up: from problem to trained model</h3>
+<p class="lesson-meta">27 -Day 4 - End-to-End LLM Fine-Tuning From Problem Definition to Trained Model.mp4 · 2:04</p>
+<p>Slides, no code. You can now run QLoRA fine-tuning of an open-source model, choosing its
+hyperparameters, and watch it train. Tomorrow: load the trained adapter on top of the base model and test it.</p>
+
+
+
+</section>
+
+<div class="callout ok">
+<strong>What you should see</strong>
+<p>In the Colab log, a table of <a class="term" href="glossary.html#training-loss">training loss</a> every 50 steps,
+starting near 2.85 and bouncing down to about 1.8. In Weights &amp; Biases the same numbers become a chart with a
+clear <em>downward trend</em> once you apply smoothing. The learning-rate chart ramps up during warm-up, then eases
+down a cosine curve. GPU charts should show the GPU busy. On the Hugging Face Hub your model repository gains a new
+commit every 5,000 steps, each with a ~109 MB <code>adapter_model.safetensors</code> and an
+<code>adapter_config.json</code> like the one above. If you built the lite dataset, it reports 28,625 items, split
+into 25,000 and 2,000.</p>
+</div>
+
+<div class="callout warn">
+<strong>Common mistakes and pitfalls</strong>
+<ul>
+<li><strong>Learning rate too high.</strong> If <a class="term" href="glossary.html#learning-rate">learning
+rate</a> is too large the loss diverges — it jumps around or shoots up instead of settling. If it is too
+small, training crawls. 1e-4 with warmup is a safe start.</li>
+<li><strong>Too many epochs = overfitting.</strong> The instructor watched the loss take a bigger dive at each
+epoch boundary: the model was memorising data it had already seen. When he tested later checkpoints they were
+<em>worse</em>, so there was no point past epoch 3. His rule of thumb: a loss much below <strong>1.5</strong>
+should make you suspicious. Often <strong>one epoch is enough</strong>.</li>
+<li><strong>Dead or exploding gradients.</strong> With <code>WANDB_WATCH="gradients"</code> on, watch that
+gradients never fall to zero (the model has stopped learning) or blow up (training is unstable).</li>
+<li><strong>Idle GPU.</strong> If GPU utilisation is low the GPU is shuffling memory, not computing —
+you are paying for time you are not using. Tune the hyperparameters to keep it busy.</li>
+</ul>
+</div>
 
 <div class="callout">
 <strong>Video vs repo</strong>
 <ul>
-<li><strong>Reconstructed file.</strong> The course code lives in a Google Colab notebook; the file shown here
-is a faithful reconstruction of it as a plain <code>.py</code>, so you can read it top to bottom. It was not
-run on a GPU for this guide.</li>
-<li><strong>Base model.</strong> The video fine-tunes <code>meta-llama/Meta-Llama-3.1-8B</code> on the Week 6
-pricing dataset (shown here). The repo's newer re-recording uses a smaller <code>Llama-3.2-3B</code> and a
-different dataset — the method is identical.</li>
-<li><strong>Epochs.</strong> The run is set to 3 (the instructor left it at 4 once and watched it overfit). His
-takeaway: one epoch is often plenty, and you should pick the best checkpoint rather than trusting a fixed
-epoch count.</li>
-<li><strong>Box size.</strong> Batch size 16 assumes a 40 GB A100. On a cheap T4, drop it to 1 or 2 (and
-training takes longer). The cost can still be cents, not dollars.</li>
+<li><strong>Same run as Day 3.</strong> The training code is the Day 3 Colab notebook (see the <a href="39-w7d3.html">Day 3
+page</a>, including its Runs today version); the repository's <code>week7/day3 and 4.ipynb</code> only links to it.</li>
+<li><strong>The lite notebook.</strong> <code>week6/lite.ipynb</code> was added to the repository with the Week 7 Colab links
+(September 2024). Ed's newer re-recording replaces it with a built-in "lite mode" (a smaller
+<code>ed-donner/items_lite</code> dataset) and trains the smaller <code>meta-llama/Llama-3.2-3B</code>.</li>
+<li><strong>Epochs.</strong> The run is set to 3 epochs; the older run Ed compares against went through 4 and overfit. His
+takeaway: one epoch is often enough, and you should pick the best checkpoint rather than trust a fixed epoch count.</li>
 </ul>
 </div>
 
 <div class="recap"><strong>Recap</strong>
 <ul>
-<li>Day 4 is the monitoring half of the same notebook you launched on Day 3 — no new code, just reading
-the charts and saving the result.</li>
+<li>Day 4 is the monitoring half of the same notebook you launched on Day 3 — no new training code, just reading
+the charts and finding the checkpoints on the Hub. A 25,000-item Appliances dataset (<code>week6/lite.ipynb</code>)
+makes your own run cost cents.</li>
 <li>The key <a class="term" href="glossary.html#hyperparameter">hyperparameters</a>: a peak
 <a class="term" href="glossary.html#learning-rate">learning rate</a> of <code>1e-4</code> with a 3% warmup and
 a cosine decay; 3 <a class="term" href="glossary.html#epoch">epochs</a>; batch size 16; no
@@ -632,7 +560,7 @@ down-trending <a class="term" href="glossary.html#training-loss">training-loss</
 <li>Training pushes the small <a class="term" href="glossary.html#adapter">adapter</a> (~109 MB, not the whole
 model) to a private HuggingFace Hub repo every 5000 steps, giving you loadable checkpoints to test.</li>
 <li>Honest note: the training needs a GPU and hours, so it was not run here; the numbers and charts are the
-instructor's, and the code is reconstructed to match the Colab notebook.</li>
+instructor's, read from the videos.</li>
 </ul>
 </div>
 

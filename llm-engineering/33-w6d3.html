@@ -89,58 +89,377 @@
 <li><strong>Constant</strong> — always guess the average training price. Surprisingly, much better than random.</li>
 <li><strong>Features + linear regression</strong> — hand-pick a few properties of the product (its weight, how long its description is…) and fit a straight-line model.</li>
 <li><strong>Bag of words + linear regression</strong> — stop hand-picking; just count words and let the model decide which words matter.</li>
-<li><strong>Random forest</strong> — a more powerful model fed the same word counts.</li>
+<li><strong>word2vec + linear regression</strong> — replace counts with learned word vectors.</li>
+<li><strong>Support vector regression and random forest</strong> — two more powerful models fed the word2vec vectors.</li>
 </ol>
 
-<p>Each model is wrapped in a small <em>pricer function</em> that takes one product and returns an estimated price. We then hand that function to a tester that runs it over 250 held-out products and reports the average error.</p>
+<p>Each model is wrapped in a small <em>pricer function</em> that takes one product and returns an estimated price. We then hand that function to Ed's <code>Tester</code>, which runs it over 250 held-out products and reports the average error.</p>
 
-<h2>The complete notebook</h2>
+<h2>Lesson by lesson</h2>
 
-<p>Here is the whole file. Read it top to bottom once; the sections below explain the key parts line by line. Note that this is the current repo version of the notebook — it differs from what the instructor types on screen in a few places, which we flag in a callout further down.</p>
+<p>One section per video, in the order you watch them. Each code block is what is <strong>on screen in that
+video</strong>: the Day 3 notebook as recorded in September 2024, continuing from top to bottom, so later sections reuse
+names defined earlier. It all still runs today (scikit-learn, pandas and Gensim have not broken it). It needs
+<code>train.pkl</code>, <code>test.pkl</code> and <code>items.py</code> from Days 1 and 2 in the same folder. It was not run for
+this guide; the errors quoted are the ones on Ed's screen.</p>
+<section class="lesson" id="video-13">
+<h3>Video 13 · Why baselines? The plan for today</h3>
+<p class="lesson-meta">13 -Day 3 - Feature Engineering and Bag of Words Building ML Baselines for NLP.mp4 · 7:10</p>
+<p>Slides, no code. A step back into traditional machine learning: feature engineering, bag of words,
+word2vec, and three kinds of regression (linear, support vector, random forest), all to set a bar that the LLMs will have
+to beat.</p>
 
-<pre data-file="week6/day3.py" data-lang="py" data-tag="complete file"><code>import random
+
+
+</section>
+
+<section class="lesson" id="video-14">
+<h3>Video 14 · The test harness and two silly models</h3>
+<p class="lesson-meta">14 -Day 3 - Baseline Models in ML Implementing Simple Prediction Functions.mp4 · 17:18</p>
+<p>Ed opens <code>week6/day3.ipynb</code>: new imports for scikit-learn and Gensim, the pickled data from
+Day 2, and the <code>Tester</code> class he will use for every model from now on. Then a random pricer and a constant pricer.</p>
+<div class="code-tabs"><pre data-file="week6/day3.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># imports
+
+import os
+import math
+import json
+import random
+from dotenv import load_dotenv
+from huggingface_hub import login
+from items import Item
+import matplotlib.pyplot as plt
+import numpy as np
+import pickle
+from collections import Counter
+
+# More imports for our traditional machine learning
+
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+
+# And more imports for our NLP related machine learning
+
 from sklearn.feature_extraction.text import CountVectorizer
+from gensim.models import Word2Vec
+from gensim.utils import simple_preprocess
+
+# Finally, more imports for more advanced machine learning
+
+from sklearn.svm import LinearSVR
 from sklearn.ensemble import RandomForestRegressor
-from pricer.evaluator import evaluate
-from pricer.items import Item
 
-LITE_MODE = False
+# Constants - used for printing to stdout in color
 
-username = "ed-donner"
-dataset = f"{username}/items_lite" if LITE_MODE else f"{username}/items_full"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
+COLOR_MAP = {"red":RED, "yellow": YELLOW, "green": GREEN}
 
-train, val, test = Item.from_hub(dataset)
+# environment
 
-print(f"Loaded {len(train):,} training items, {len(val):,} validation items, {len(test):,} test items")
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
+
+# Log in to HuggingFace
+
+hf_token = os.environ['HF_TOKEN']
+login(hf_token, add_to_git_credential=True)
+
+%matplotlib inline
+
+# Let's avoid curating all our data again! Load in the pickle files:
+
+with open('train.pkl', 'rb') as file:
+    train = pickle.load(file)
+
+with open('test.pkl', 'rb') as file:
+    test = pickle.load(file)
+
+# Remind ourselves the training prompt
+
+print(train[0].prompt)
+
+# Remind a test prompt
+
+print(train[0].price)
+
+class Tester:
+
+    def __init__(self, predictor, title=None, data=test, size=250):
+        self.predictor = predictor
+        self.data = data
+        self.title = title or predictor.__name__.replace("_", " ").title()
+        self.size = size
+        self.guesses = []
+        self.truths = []
+        self.errors = []
+        self.sles = []
+        self.colors = []
+
+    def color_for(self, error, truth):
+        if error&lt;40 or error/truth &lt; 0.2:
+            return "green"
+        elif error&lt;80 or error/truth &lt; 0.4:
+            return "yellow"
+        else:
+            return "red"
+    
+    def run_datapoint(self, i):
+        datapoint = self.data[i]
+        guess = self.predictor(datapoint)
+        truth = datapoint.price
+        error = abs(guess - truth)
+        log_error = math.log(truth+1) - math.log(guess+1)
+        sle = log_error ** 2
+        color = self.color_for(error, truth)
+        title = datapoint.title if len(datapoint.title) &lt;= 40 else datapoint.title[:40]+"..."
+        self.guesses.append(guess)
+        self.truths.append(truth)
+        self.errors.append(error)
+        self.sles.append(sle)
+        self.colors.append(color)
+        print(f"{COLOR_MAP[color]}{i+1}: Guess: ${guess:,.2f} Truth: ${truth:,.2f} Error: ${error:,.2f} SLE: {sle:,.2f} Item: {title}{RESET}")
+
+    def chart(self, title):
+        max_error = max(self.errors)
+        plt.figure(figsize=(12, 8))
+        max_val = max(max(self.truths), max(self.guesses))
+        plt.plot([0, max_val], [0, max_val], color='deepskyblue', lw=2, alpha=0.6)
+        plt.scatter(self.truths, self.guesses, s=3, c=self.colors)
+        plt.xlabel('Ground Truth')
+        plt.ylabel('Model Estimate')
+        plt.xlim(0, max_val)
+        plt.ylim(0, max_val)
+        plt.title(title)
+        plt.show()
+
+    def report(self):
+        average_error = sum(self.errors) / self.size
+        rmsle = math.sqrt(sum(self.sles) / self.size)
+        hits = sum(1 for color in self.colors if color=="green")
+        title = f"{self.title} Error=${average_error:,.2f} RMSLE={rmsle:,.2f} Hits={hits/self.size*100:.1f}%"
+        self.chart(title)
+
+    def run(self):
+        self.error = 0
+        for i in range(self.size):
+            self.run_datapoint(i)
+        self.report()
+
+    @classmethod
+    def test(cls, function):
+        cls(function).run()
 
 def random_pricer(item):
     return random.randrange(1,1000)
 
+# Set the random seed
+
 random.seed(42)
-evaluate(random_pricer, test)
+
+# Run our TestRunner
+Tester.test(random_pricer)
 
 # That was fun!
 # We can do better - here's another rather trivial model
 
 training_prices = [item.price for item in train]
 training_average = sum(training_prices) / len(training_prices)
-print(training_average)
 
 def constant_pricer(item):
     return training_average
 
-evaluate(constant_pricer, test)
+# Run our constant predictor
+Tester.test(constant_pricer)</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3-13</td><td><code>import os</code> … <code>from collections import Counter</code></td><td>The usual imports, plus <code>pickle</code> to load yesterday's saved lists and Ed's <code>Item</code> class (which unpickling needs).</td></tr>
+<tr><td>17-21</td><td><code>import pandas as pd</code> … <code>from sklearn.linear_model import LinearRegression</code></td><td><a class="term" href="glossary.html#pandas">pandas</a> for tables, and <a class="term" href="glossary.html#scikit-learn">scikit-learn</a> for classic machine learning: <a class="term" href="glossary.html#linear-regression">linear regression</a> and two scores.</td></tr>
+<tr><td>25-27</td><td><code>CountVectorizer</code>, <code>Word2Vec</code>, <code>simple_preprocess</code></td><td>Tools for turning text into numbers: a <a class="term" href="glossary.html#count-vectorizer">CountVectorizer</a> and the Gensim library's word2vec. Install it with <code>uv add gensim</code> if it is missing.</td></tr>
+<tr><td>31-32</td><td><code>LinearSVR</code> / <code>RandomForestRegressor</code></td><td>Two more powerful regressors for the end of the day.</td></tr>
+<tr><td>36-40</td><td><code>GREEN = "\033[92m"</code> … <code>COLOR_MAP = {...}</code></td><td>Terminal colour codes, so each result line prints green, yellow or red.</td></tr>
+<tr><td>44-52</td><td><code>load_dotenv()</code> … <code>login(...)</code></td><td>Environment and Hugging Face login, as before.</td></tr>
+<tr><td>54</td><td><code>%matplotlib inline</code></td><td>Charts under the cells.</td></tr>
+<tr><td>58-62</td><td><code>train = pickle.load(file)</code> / <code>test = pickle.load(file)</code></td><td>Loads the 400,000 training and 2,000 test <code>Item</code>s saved on Day 2, in seconds.</td></tr>
+<tr><td>66-70</td><td><code>print(train[0].prompt)</code> / <code>print(train[0].price)</code></td><td>A reminder of what an item holds: the Delphi fuel pump, $226.95.</td></tr>
+<tr><td>72-83</td><td><code>class Tester:</code> / <code>__init__(self, predictor, title=None, data=test, size=250)</code></td><td>Ed's test harness. You give it a <em>predictor</em>: any function that takes an item and returns a price. It will try it on the first 250 test items and keep lists of guesses, truths, errors and colours.</td></tr>
+<tr><td>85-91</td><td><code>def color_for(self, error, truth)</code></td><td>Green if the guess is within $40 or 20% of the truth, yellow within $80 or 40%, red otherwise. Green counts as a "hit".</td></tr>
+<tr><td>93-107</td><td><code>def run_datapoint(self, i)</code></td><td>Prices one item, works out the absolute error and the squared log error (for <a class="term" href="glossary.html#rmsle">RMSLE</a>), and prints one coloured line with guess, truth, error and a shortened title.</td></tr>
+<tr><td>109-120</td><td><code>def chart(self, title)</code></td><td>A scatter plot of truth (x) against guess (y), each dot in its colour, with a blue diagonal where a perfect guess would sit.</td></tr>
+<tr><td>122-127</td><td><code>def report(self)</code></td><td>Average error in dollars, RMSLE, and the percentage of hits, all in the chart title.</td></tr>
+<tr><td>129-133</td><td><code>def run(self)</code></td><td>Runs the 250 items, then the report.</td></tr>
+<tr><td>135-137</td><td><code>@classmethod def test(cls, function)</code></td><td>The short way to use it: <code>Tester.test(my_pricer)</code>.</td></tr>
+<tr><td>139-140</td><td><code>def random_pricer(item): return random.randrange(1,1000)</code></td><td>The silliest model: ignore the item, guess a random whole number from 1 to 999.</td></tr>
+<tr><td>144-147</td><td><code>random.seed(42)</code> / <code>Tester.test(random_pricer)</code></td><td>Same random numbers every run. Note that the function itself is passed, not called. Result: about $341 off on average, a sea of red.</td></tr>
+<tr><td>152-156</td><td><code>training_average = sum(training_prices) / len(training_prices)</code></td><td>The next silly model: always guess the average training price.</td></tr>
+<tr><td>159</td><td><code>Tester.test(constant_pricer)</code></td><td>About $146 off: far better than random, because prices are not spread evenly from 1 to 999.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-15">
+<h3>Video 15 · Feature engineering, part 1: weight</h3>
+<p class="lesson-meta">15 -Day 3 Feature Engineering Techniques for Amazon Product Price Prediction Models.mp4 · 9:08</p>
+<p>Ed first changes the harness colour from yellow to orange (easier to see): <code>"orange": YELLOW</code>
+in <code>COLOR_MAP</code> and <code>return "orange"</code> in <code>color_for</code>; the rest of the day uses that version.
+Then he digs into the details of each item to find features, starting with the weight.</p>
+<div class="code-tabs"><pre data-file="week6/day3.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code>train[0].details
+
+# Create a new "features" field on items, and populate it with json parsed from the details dict
+
+for item in train:
+    item.features = json.loads(item.details)
+for item in test:
+    item.features = json.loads(item.details)
+
+# Look at one
+
+train[0].features.keys()
+
+# Look at 20 most common features in training set
+
+feature_count = Counter()
+for item in train:
+    for f in item.features.keys():
+        feature_count[f]+=1
+
+feature_count.most_common(40)
+
+# Now some janky code to pluck out the Item Weight
+# Don't worry too much about this: spoiler alert, it's not going to be much use in training!
+
+def get_weight(item):
+    weight_str = item.features.get('Item Weight')
+    if weight_str:
+        parts = weight_str.split(' ')
+        amount = float(parts[0])
+        unit = parts[1].lower()
+        if unit=="pounds":
+            return amount
+        elif unit=="ounces":
+            return amount / 16
+        elif unit=="grams":
+            return amount / 453.592
+        elif unit=="milligrams":
+            return amount / 453592
+        elif unit=="kilograms":
+            return amount / 0.453592
+        elif unit=="hundredths" and parts[2].lower()=="pounds":
+            return amount / 100
+        else:
+            print(weight_str)
+    return None
+
+weights = [get_weight(t) for t in train]
+weights = [w for w in weights if w]
+
+average_weight = sum(weights)/len(weights)
+average_weight
+
+def get_weight_with_default(item):
+    weight = get_weight(item)
+    return weight or average_weight</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1</td><td><code>train[0].details</code></td><td>The details string again: JSON text with keys such as Brand, Item Weight and Best Sellers Rank.</td></tr>
+<tr><td>5-6</td><td><code>item.features = json.loads(item.details)</code></td><td>Parses that JSON into a real dictionary on every training and test item, so its fields can be read.</td></tr>
+<tr><td>12</td><td><code>train[0].features.keys()</code></td><td>Which fields one item has.</td></tr>
+<tr><td>16-21</td><td><code>feature_count.most_common(40)</code></td><td>Counts how often each field appears across the training set: Date First Available, Item Weight, Manufacturer, Brand, Best Sellers Rank lead the list. These are candidate <a class="term" href="glossary.html#feature-engineering">features</a>.</td></tr>
+<tr><td>26-46</td><td><code>def get_weight(item)</code></td><td>"Janky" code that reads the Item Weight text ("2.2 Pounds", "12 ounces", "300 grams"...) and converts it to pounds; unknown formats are printed so you can see what was missed.</td></tr>
+<tr><td>48-49</td><td><code>weights = [...]</code></td><td>All known weights.</td></tr>
+<tr><td>51</td><td><code>average_weight = sum(weights)/len(weights)</code></td><td>The average, used when a weight is missing.</td></tr>
+<tr><td>54-56</td><td><code>def get_weight_with_default(item)</code></td><td>The weight, or the average if there is none, so every item has a number.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-16">
+<h3>Video 16 · Feature engineering, part 2: rank, length and brand</h3>
+<p class="lesson-meta">16 -Day 3 - Optimizing LLM Performance Advanced Feature Engineering Strategies.mp4 · 7:21</p>
+<p>Three more hand-made features and the function that puts all four together.</p>
+<div class="code-tabs"><pre data-file="week6/day3.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code>def get_rank(item):
+    rank_dict = item.features.get("Best Sellers Rank")
+    if rank_dict:
+        ranks = rank_dict.values()
+        return sum(ranks)/len(ranks)
+    return None
+
+ranks = [get_rank(t) for t in train]
+ranks = [r for r in ranks if r]
+average_rank = sum(ranks)/len(ranks)
+average_rank
+
+def get_rank_with_default(item):
+    rank = get_rank(item)
+    return rank or average_rank
+
+def get_text_length(item):
+    return len(item.test_prompt())
+
+# investigate the brands
+
+brands = Counter()
+for t in train:
+    brand = t.features.get("Brand")
+    if brand:
+        brands[brand]+=1
+
+# Look at most common 40 brands
+
+brands.most_common(40)
+
+TOP_ELECTRONICS_BRANDS = ["hp", "dell", "lenovo", "samsung", "asus", "sony", "canon", "apple", "intel"]
+def is_top_electronics_brand(item):
+    brand = item.features.get("Brand")
+    return brand and brand.lower() in TOP_ELECTRONICS_BRANDS
 
 def get_features(item):
     return {
-        "weight": item.weight,
-        "weight_unknown": 1 if item.weight==0 else 0,
-        "text_length": len(item.summary)
-    }
+        "weight": get_weight_with_default(item),
+        "rank": get_rank_with_default(item),
+        "text_length": get_text_length(item),
+        "is_top_electronics_brand": 1 if is_top_electronics_brand(item) else 0
+    }</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1-6</td><td><code>def get_rank(item)</code></td><td>Best Sellers Rank is itself a dictionary (an item can rank in several lists); this takes the average of its ranks.</td></tr>
+<tr><td>8-10</td><td><code>average_rank = sum(ranks)/len(ranks)</code></td><td>The average rank, as a default.</td></tr>
+<tr><td>13-15</td><td><code>def get_rank_with_default(item)</code></td><td>Rank, or the average when missing.</td></tr>
+<tr><td>17-18</td><td><code>def get_text_length(item)</code></td><td>The length of the test prompt in characters (the test prompt, so the price is never included).</td></tr>
+<tr><td>22-30</td><td><code>brands.most_common(40)</code></td><td>The 40 most common brands in the training set.</td></tr>
+<tr><td>32-35</td><td><code>def is_top_electronics_brand(item)</code></td><td>True for a handful of big electronics names (HP, Dell, Lenovo, Samsung, Asus, Sony, Canon, Apple, Intel), which tend to be expensive.</td></tr>
+<tr><td>37-43</td><td><code>def get_features(item)</code></td><td>The four engineered features as a dictionary: weight, rank, text length and the brand flag (1 or 0).</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-17">
+<h3>Video 17 · Linear regression on the features</h3>
+<p class="lesson-meta">17 -Day 3 - Linear Regression for LLM Fine-Tuning Baseline Model Comparison.mp4 · 5:43</p>
+<p>The features go into a pandas table and a scikit-learn linear regression, which is then wrapped as a
+pricer and tested.</p>
+<div class="code-tabs"><pre data-file="week6/day3.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># Look at features in a training item
+get_features(train[0])
+
+# A utility function to convert our features into a pandas dataframe
 
 def list_to_dataframe(items):
     features = [get_features(item) for item in items]
@@ -149,14 +468,20 @@ def list_to_dataframe(items):
     return df
 
 train_df = list_to_dataframe(train)
-test_df = list_to_dataframe(test)
+test_df = list_to_dataframe(test[:250])
 
 # Traditional Linear Regression!
 
 np.random.seed(42)
 
 # Separate features and target
-feature_columns = ['weight', 'weight_unknown', 'text_length']
+feature_columns = [col for col in train_df.columns if col != 'price']
+X_train = train_df[feature_columns]
+y_train = train_df['price']
+X_test = test_df[feature_columns]
+y_test = test_df['price']
+
+feature_columns = ['weight', 'rank', 'text_length', 'is_top_electronics_brand']
 
 X_train = train_df[feature_columns]
 y_train = train_df['price']
@@ -179,102 +504,169 @@ r2 = r2_score(y_test, y_pred)
 print(f"Mean Squared Error: {mse}")
 print(f"R-squared Score: {r2}")
 
+# Function to predict price for a new item
+
 def linear_regression_pricer(item):
     features = get_features(item)
     features_df = pd.DataFrame([features])
     return model.predict(features_df)[0]
 
-evaluate(linear_regression_pricer, test)
+# test it
+
+Tester.test(linear_regression_pricer)</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>2</td><td><code>get_features(train[0])</code></td><td>One item's features: 2.2 pounds, rank 460,069.5, 748 characters, not a top brand.</td></tr>
+<tr><td>6-10</td><td><code>def list_to_dataframe(items)</code></td><td>One table row per item, one column per feature, plus a <code>price</code> column with the right answer.</td></tr>
+<tr><td>12-13</td><td><code>train_df</code> / <code>test_df = list_to_dataframe(test[:250])</code></td><td>The training table and the table of the 250 test items.</td></tr>
+<tr><td>17-24</td><td><code>feature_columns = [...]</code> / <code>X_train</code>, <code>y_train</code>, <code>X_test</code>, <code>y_test</code></td><td>Splits each table into inputs <code>X</code> and target <code>y</code> (the price). The block appears twice: first taking every column except price, then naming the four columns explicitly. Both give the same result.</td></tr>
+<tr><td>21-24</td><td>(second copy)</td><td>The same split again, with the explicit column list.</td></tr>
+<tr><td>34-35</td><td><code>model = LinearRegression()</code> / <code>model.fit(X_train, y_train)</code></td><td>Training: finds the weighted sum of the four features that best predicts the price.</td></tr>
+<tr><td>37-39</td><td><code>for feature, coef in zip(feature_columns, model.coef_)</code></td><td>Prints the learned weight of each feature and the intercept (the starting value). Being a top brand adds about $198.</td></tr>
+<tr><td>42-47</td><td><code>mean_squared_error</code> / <code>r2_score</code></td><td>Two standard data-science scores on the test table. An R-squared of 0.09 means the features explain very little of the price.</td></tr>
+<tr><td>51-54</td><td><code>def linear_regression_pricer(item)</code></td><td>Wraps the model as a pricer: one item's features into a one-row table, predict, return the number.</td></tr>
+<tr><td>58</td><td><code>Tester.test(linear_regression_pricer)</code></td><td>About $139 off: only a little better than the constant.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-18">
+<h3>Video 18 · Bag of words and word2vec</h3>
+<p class="lesson-meta">18 -Day 3 - Bag of Words NLP Implementing Count Vectorizer for Text Analysis in ML.mp4 · 7:48</p>
+<p>Goodbye hand-made features: now the models read the text itself. First word counts, then word2vec
+vectors, each with a linear regression.</p>
+<div class="code-tabs"><pre data-file="week6/day3.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># For the next few models, we prepare our documents and prices
+# Note that we use the test prompt for the documents, otherwise we'll reveal the answer!!
 
 prices = np.array([float(item.price) for item in train])
-documents = [item.summary for item in train]
+documents = [item.test_prompt() for item in train]
+
+# Use the CountVectorizer for a Bag of Words model
 
 np.random.seed(42)
-vectorizer = CountVectorizer(max_features=2000, stop_words='english')
+vectorizer = CountVectorizer(max_features=1000, stop_words='english')
 X = vectorizer.fit_transform(documents)
-
-
-# Here are the 1,000 most common words that it picked, not including "stop words":
-
-selected_words = vectorizer.get_feature_names_out()
-print(f"Number of selected words: {len(selected_words)}")
-print("Selected words:", selected_words[1000:1020])
-
 regressor = LinearRegression()
 regressor.fit(X, prices)
 
-def natural_language_linear_regression_pricer(item):
-    x = vectorizer.transform([item.summary])
+def bow_lr_pricer(item):
+    x = vectorizer.transform([item.test_prompt()])
     return max(regressor.predict(x)[0], 0)
 
-evaluate(natural_language_linear_regression_pricer, test)
+# test it
 
-subset = 15_000
-rf_model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=4)
-rf_model.fit(X[:subset], prices[:subset])
+Tester.test(bow_lr_pricer)
 
-def random_forest(item):
-    x = vectorizer.transform([item.summary])
-    return max(0, rf_model.predict(x)[0])
-
-evaluate(random_forest, test)
-
-# This is how to save the model if you want to, particularly if you run this on a larger dataset
-
-# import joblib
-# joblib.dump(rf_model, "random_forest.joblib")
-
-import xgboost as xgb
+# The amazing word2vec model, implemented in gensim NLP library
 
 np.random.seed(42)
 
-xgb_model = xgb.XGBRegressor(n_estimators=1000, random_state=42, n_jobs=4, learning_rate=0.1)
-xgb_model.fit(X, prices)
+# Preprocess the documents
+processed_docs = [simple_preprocess(doc) for doc in documents]
 
-def xg_boost(item):
-    x = vectorizer.transform([item.summary])
-    return max(0, xgb_model.predict(x)[0])
+# Train Word2Vec model
+w2v_model = Word2Vec(sentences=processed_docs, vector_size=400, window=5, min_count=1, workers=8)
 
-evaluate(xg_boost, test)</code></pre>
+# This step of averaging vectors across the document is a weakness in our approach
 
-<h3>Line by line</h3>
+def document_vector(doc):
+    doc_words = simple_preprocess(doc)
+    word_vectors = [w2v_model.wv[word] for word in doc_words if word in w2v_model.wv]
+    return np.mean(word_vectors, axis=0) if word_vectors else np.zeros(w2v_model.vector_size)
+
+# Create feature matrix
+X_w2v = np.array([document_vector(doc) for doc in documents])
+
+# Run Linear Regression on word2vec
+
+word2vec_lr_regressor = LinearRegression()
+word2vec_lr_regressor.fit(X_w2v, prices)
+
+def word2vec_lr_pricer(item):
+    doc = item.test_prompt()
+    doc_vector = document_vector(doc)
+    return max(0, word2vec_lr_regressor.predict([doc_vector])[0])
+
+Tester.test(word2vec_lr_pricer)</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-
-<tr><td>1–7</td><td><code>import random…</code><br><code>from sklearn… import …</code></td><td>The toolbox. <code>random</code> powers the silly random model. <code>pandas</code> (as <code>pd</code>) holds data in table form; <code>numpy</code> (as <code>np</code>) does fast number crunching. The four <code>sklearn</code> imports are the heart of the day: <code>LinearRegression</code> (the straight-line model), <code>mean_squared_error</code> and <code>r2_score</code> (two scoring measures), <code>CountVectorizer</code> (turns text into word counts), and <code>RandomForestRegressor</code> (the ensemble model). Without these imports the model classes do not exist.</td></tr>
-
-<tr><td>8–9</td><td><code>from pricer.evaluator import evaluate</code><br><code>from pricer.items import Item</code></td><td>The course's own helpers. <code>Item</code> is the product class built on earlier days (it carries the description, the price, a cleaned-up <code>summary</code>, and a <code>weight</code>). <code>evaluate</code> is the test harness: give it a pricing function and the test set, and it scores the function for you.</td></tr>
-
-<tr><td>11–18</td><td><code>LITE_MODE = False</code><br><code>dataset = … "items_full"</code><br><code>train, val, test = Item.from_hub(dataset)</code></td><td>Loads the ready-made dataset of products straight from the Hugging Face Hub, split into training, validation, and test lists. <code>LITE_MODE</code> would switch to a smaller set for quick experiments; here it uses the full data. The <code>print</code> on line 18 shows how many items landed in each split.</td></tr>
-
-<tr><td>20–24</td><td><code>def random_pricer(item):</code><br><code>  return random.randrange(1,1000)</code><br><code>random.seed(42)</code><br><code>evaluate(random_pricer, test)</code></td><td><strong>The test harness in action.</strong> A pricer is just a function: in goes one <code>item</code>, out comes a number. This one ignores the item entirely and returns a random value from 1 to 999. <code>random.seed(42)</code> fixes the randomness so the run is repeatable. <code>evaluate(random_pricer, test)</code> runs the function over the test products and reports the average error — we pass the function itself, not <code>random_pricer()</code>, because the harness must call it many times.</td></tr>
-
-<tr><td>29–36</td><td><code>training_prices = [item.price for item in train]</code><br><code>training_average = sum(…) / len(…)</code><br><code>def constant_pricer(item): return training_average</code></td><td>The second silly model. It computes the mean price across all training products once, then <code>constant_pricer</code> returns that same number for every product, ignoring the item. Because the dataset is skewed toward cheaper items, "always guess the average" already beats random by a wide margin.</td></tr>
-
-<tr><td>38–43</td><td><code>def get_features(item):</code><br><code>  return {"weight": item.weight, …}</code></td><td><strong>Feature engineering.</strong> This is where a human decides, by hand, which properties of a product might predict its price. Here: the item's <code>weight</code>, a <code>weight_unknown</code> flag (1 when the weight is missing, so the model can treat "no weight" specially), and <code>text_length</code> (how long the description is). It returns a small dictionary of numbers describing the product.</td></tr>
-
-<tr><td>45–52</td><td><code>def list_to_dataframe(items):</code><br><code>  features = [get_features(item) …]</code><br><code>  df = pd.DataFrame(features)</code><br><code>  df['price'] = [item.price …]</code></td><td>Turns a list of products into a pandas table (a <code>DataFrame</code>) — one row per product, one column per feature, plus a <code>price</code> column holding the correct answer. Lines 51–52 build a training table and a test table. scikit-learn models expect data in exactly this row-and-column shape.</td></tr>
-
-<tr><td>56–64</td><td><code>np.random.seed(42)</code><br><code>feature_columns = ['weight', …]</code><br><code>X_train = train_df[feature_columns]</code><br><code>y_train = train_df['price']</code></td><td>Splits each table into <code>X</code> (the input features) and <code>y</code> (the target we want to predict, the price). The convention <code>X</code> for inputs and <code>y</code> for the answer is used everywhere in machine learning. The seed keeps results repeatable.</td></tr>
-
-<tr><td>67–72</td><td><code>model = LinearRegression()</code><br><code>model.fit(X_train, y_train)</code><br><code>for feature, coef in zip(…):</code></td><td><strong>Fitting a model.</strong> <code>LinearRegression()</code> creates an unfitted model; <code>.fit(X_train, y_train)</code> is where the learning happens — it finds the best straight-line combination of the features to predict price. The loop then prints each feature's <em>coefficient</em> (how much weight the model gave it), so you can see which features actually mattered.</td></tr>
-
-<tr><td>75–80</td><td><code>y_pred = model.predict(X_test)</code><br><code>mse = mean_squared_error(y_test, y_pred)</code><br><code>r2 = r2_score(y_test, y_pred)</code></td><td>Runs the fitted model on the unseen test features and scores it. <code>mean_squared_error</code> and <code>r2_score</code> are standard regression metrics for the data scientists in the room; the course mostly cares about the plain average-dollars error that the harness reports instead.</td></tr>
-
-<tr><td>82–87</td><td><code>def linear_regression_pricer(item):</code><br><code>  features = get_features(item)</code><br><code>  … return model.predict(…)[0]</code><br><code>evaluate(linear_regression_pricer, test)</code></td><td>Wraps the fitted model in a pricer function so the harness can score it the same way as the silly models: build the one product's features, hand them to the model, return the single predicted price.</td></tr>
-
-<tr><td>89–94</td><td><code>prices = np.array([… item.price …])</code><br><code>documents = [item.summary for item in train]</code><br><code>vectorizer = CountVectorizer(max_features=2000, stop_words='english')</code><br><code>X = vectorizer.fit_transform(documents)</code></td><td><strong>Bag of words.</strong> We stop hand-building features and feed the raw text instead. <code>documents</code> is the list of product descriptions; <code>prices</code> is the matching answers. <code>CountVectorizer</code> learns a vocabulary of the 2,000 most common words (<code>max_features=2000</code>), skipping useless <em>stop words</em> like "the" and "and" (<code>stop_words='english'</code>). <code>fit_transform</code> then turns every document into a row of word counts — the "bag of words." Note it uses <code>item.summary</code>, not the training prompt, so the price is never leaked into the text.</td></tr>
-
-<tr><td>99–104</td><td><code>selected_words = vectorizer.get_feature_names_out()</code><br><code>regressor = LinearRegression()</code><br><code>regressor.fit(X, prices)</code></td><td>Shows which words made the vocabulary, then fits a second linear regression — this time on the word-count rows instead of hand-built features. The model learns a coefficient per word: words like "Intel" push the price up, others pull it down.</td></tr>
-
-<tr><td>106–110</td><td><code>def natural_language_linear_regression_pricer(item):</code><br><code>  x = vectorizer.transform([item.summary])</code><br><code>  return max(regressor.predict(x)[0], 0)</code></td><td>The bag-of-words pricer. It converts one product's summary into the same word-count form (<code>transform</code>, not <code>fit_transform</code> — reuse the learned vocabulary, do not relearn it) and predicts. <code>max(…, 0)</code> clamps negative predictions to zero, since a price cannot be negative.</td></tr>
-
-<tr><td>112–120</td><td><code>rf_model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=4)</code><br><code>rf_model.fit(X[:subset], prices[:subset])</code><br><code>def random_forest(item): …</code></td><td><strong>The winning baseline.</strong> A random forest trained on the same word counts (on a 15,000-row subset for speed). <code>n_estimators=100</code> builds 100 small decision trees and averages them; <code>n_jobs=4</code> uses four CPU cores. The <code>random_forest</code> pricer then works just like the others: vectorize one summary, predict, clamp at zero.</td></tr>
-
-<tr><td>127–138</td><td><code>import xgboost as xgb</code><br><code>xgb_model = xgb.XGBRegressor(…)</code><br><code>xgb_model.fit(X, prices)</code></td><td>A bonus model in the repo: XGBoost, another tree-based technique, trained on the full word-count data and wrapped in one more pricer. Each of these final models is fitted and scored the same way — create the model, call <code>.fit(X, prices)</code>, wrap it in a pricer, hand it to <code>evaluate</code>.</td></tr>
+<tr><td>4-5</td><td><code>prices = np.array(...)</code> / <code>documents = [item.test_prompt() ...]</code></td><td>The answers and the texts for all 400,000 training items. The <strong>test</strong> prompt is used on purpose: the training prompt contains the price, and a model would simply learn to read it.</td></tr>
+<tr><td>9-13</td><td><code>CountVectorizer(max_features=1000, stop_words='english')</code> / <code>regressor.fit(X, prices)</code></td><td><a class="term" href="glossary.html#bag-of-words">Bag of words</a>: keep the 1,000 most common words (minus stop words like "the"), turn every document into a row of 1,000 word counts, and fit a linear regression on those rows.</td></tr>
+<tr><td>15-17</td><td><code>def bow_lr_pricer(item)</code></td><td>One item's text through the <em>same</em> vocabulary (<code>transform</code>, not <code>fit_transform</code>), predict, and never return a negative price.</td></tr>
+<tr><td>21</td><td><code>Tester.test(bow_lr_pricer)</code></td><td>About $114 off: the words carry real signal.</td></tr>
+<tr><td>25-31</td><td><code>Word2Vec(sentences=processed_docs, vector_size=400, window=5, min_count=1, workers=8)</code></td><td>Trains word2vec on our own documents: every word gets a 400-number <a class="term" href="glossary.html#vector-embedding">vector</a>, and words used in similar contexts get similar vectors. <code>simple_preprocess</code> lower-cases and splits the text first.</td></tr>
+<tr><td>35-38</td><td><code>def document_vector(doc)</code></td><td>One vector per document: the average of its words' vectors. Ed calls this averaging "a weakness in our approach".</td></tr>
+<tr><td>41</td><td><code>X_w2v = np.array([document_vector(doc) for doc in documents])</code></td><td>A 400-column table for all training documents.</td></tr>
+<tr><td>45-46</td><td><code>word2vec_lr_regressor.fit(X_w2v, prices)</code></td><td>Linear regression on those vectors.</td></tr>
+<tr><td>48-51</td><td><code>def word2vec_lr_pricer(item)</code></td><td>The matching pricer.</td></tr>
+<tr><td>53</td><td><code>Tester.test(word2vec_lr_pricer)</code></td><td>About $115 off: slightly <em>worse</em> than bag of words, a surprise Ed discusses.</td></tr>
 </table></div>
+</div>
 
-<p>Notice the repeated rhythm: <strong>create a model, call <code>.fit(X, y)</code>, wrap it in a pricer, score it with <code>evaluate</code>.</strong> Only the first two steps change from model to model. That repetition is exactly what the harness is designed to make painless.</p>
+</section>
+
+<section class="lesson" id="video-19">
+<h3>Video 19 · Support vector regression and random forest</h3>
+<p class="lesson-meta">19 -Day 3 - Support Vector Regression vs Random Forest Machine Learning Face-Off.mp4 · 6:03</p>
+<p>The last two traditional models, both trained on the word2vec vectors.</p>
+<div class="code-tabs"><pre data-file="week6/day3.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># Support Vector Machines
+
+np.random.seed(42)
+svr_regressor = LinearSVR()
+
+svr_regressor.fit(X_w2v, prices)
+
+def svr_pricer(item):
+    np.random.seed(42)
+    doc = item.test_prompt()
+    doc_vector = document_vector(doc)
+    return max(float(svr_regressor.predict([doc_vector])[0]),0)
+
+Tester.test(svr_pricer)
+
+# And the powerful Random Forest regression
+
+rf_model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=8)
+rf_model.fit(X_w2v, prices)
+
+def random_forest_pricer(item):
+    doc = item.test_prompt()
+    doc_vector = document_vector(doc)
+    return max(0, rf_model.predict([doc_vector])[0])
+
+Tester.test(random_forest_pricer)</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3-6</td><td><code>svr_regressor = LinearSVR()</code> / <code>.fit(X_w2v, prices)</code></td><td><a class="term" href="glossary.html#svr">Support vector regression</a> on the word2vec vectors. The linear version is used because the other kinds would take far too long on 400,000 rows.</td></tr>
+<tr><td>8-12</td><td><code>def svr_pricer(item)</code></td><td>Its pricer.</td></tr>
+<tr><td>14</td><td><code>Tester.test(svr_pricer)</code></td><td>About $112 off, a hair better.</td></tr>
+<tr><td>18-19</td><td><code>RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=8)</code></td><td>A <a class="term" href="glossary.html#random-forest">random forest</a>: 100 decision trees, each trained on a random part of the data, averaged together, using 8 CPU cores. Also trained on the word2vec vectors. It takes a while.</td></tr>
+<tr><td>21-24</td><td><code>def random_forest_pricer(item)</code></td><td>Its pricer.</td></tr>
+<tr><td>26</td><td><code>Tester.test(random_forest_pricer)</code></td><td>About $97 off with 34% hits: the best traditional model, and the number to beat.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-20">
+<h3>Video 20 · Comparing the traditional models</h3>
+<p class="lesson-meta">20 -Day 3 -  Comparing Traditional ML Models From Random to Random Forest.mp4 · 4:13</p>
+<p>Slides, no code: the results side by side (see the table below), and a warning that tomorrow's
+frontier models get no training data at all, only the test descriptions.</p>
+
+
+
+</section>
 
 <h2>Feature engineering: guessing by hand</h2>
 
@@ -297,23 +689,23 @@ evaluate(xg_boost, test)</code></pre>
   <rect class="box-info" x="302" y="22" width="300" height="126" rx="8"/>
   <text x="452" y="46" text-anchor="middle" class="label">A dictionary of numbers</text>
   <text x="322" y="74" class="mono">weight: 2.2</text>
-  <text x="322" y="96" class="mono">weight_unknown: 0</text>
-  <text x="322" y="118" class="mono">text_length: 318</text>
-  <text x="322" y="138" class="small">(illustrative values)</text>
+  <text x="322" y="96" class="mono">rank: 460,069.5</text>
+  <text x="322" y="118" class="mono">text_length: 748 · brand: 0</text>
+  <text x="322" y="138" class="small">(train[0] in the video)</text>
 
   <path class="arrow" d="M 602,85 H 686"/>
   <rect class="box-solid" x="688" y="55" width="62" height="60" rx="8"/>
   <text x="719" y="80" text-anchor="middle" class="on-solid small">to the</text>
   <text x="719" y="96" text-anchor="middle" class="on-solid small">model</text>
 </svg>
-<figcaption>Feature engineering squeezes a whole product down to a few numbers a human chose. <strong>The model only ever sees these numbers — never the real product.</strong> Values are illustrative.</figcaption>
+<figcaption>Feature engineering squeezes a whole product down to a few numbers a human chose. <strong>The model only ever sees these numbers — never the real product.</strong> The values are the first training item's.</figcaption>
 </figure>
 
 <h2>Bag of words and the CountVectorizer</h2>
 
 <p>Instead of hand-picking features, <a class="term" href="glossary.html#bag-of-words">bag of words</a> lets the text speak for itself. You take a document, count how many times each word appears, and throw away the order entirely. "Red laptop case" and "case laptop red" produce the identical bag. Each document becomes a long list of counts — one slot per word in the vocabulary.</p>
 
-<p>scikit-learn does the counting with a <a class="term" href="glossary.html#count-vectorizer">CountVectorizer</a>. Despite the impressive name, it simply learns a vocabulary of the most common words and then counts them. In this notebook it keeps the 2,000 most common words and drops English <em>stop words</em> — the "the", "and", "is" that appear everywhere and carry no signal.</p>
+<p>scikit-learn does the counting with a <a class="term" href="glossary.html#count-vectorizer">CountVectorizer</a>. Despite the impressive name, it simply learns a vocabulary of the most common words and then counts them. In this notebook it keeps the 1,000 most common words and drops English <em>stop words</em> — the "the", "and", "is" that appear everywhere and carry no signal.</p>
 
 <details class="primer">
 <summary>New to bag of words / CountVectorizer? What they are</summary>
@@ -440,9 +832,9 @@ evaluate(xg_boost, test)</code></pre>
 <tr><td>Constant (average price)</td><td>nothing — always the training mean</td><td>about $146</td><td>a huge jump, just from "guess average"</td></tr>
 <tr><td>Features + linear regression</td><td>hand-built features (weight, rank, length, brand)</td><td>about $139</td><td>only a little better than average</td></tr>
 <tr><td>Bag of words + linear regression</td><td>CountVectorizer word counts</td><td>about $114</td><td>the best of the simple linear models</td></tr>
-<tr><td>word2vec + linear regression</td><td>400-dimensional word embeddings</td><td>about $115</td><td>shown in the video; slightly worse, a surprise</td></tr>
-<tr><td>Linear SVR</td><td>bag-of-words vectors</td><td>about $112</td><td>shown in the video; a hair better</td></tr>
-<tr><td>Random forest</td><td>bag-of-words vectors (ensemble of trees)</td><td>about $97</td><td>the winner — the baseline to beat</td></tr>
+<tr><td>word2vec + linear regression</td><td>400-dimensional word embeddings</td><td>about $115</td><td>slightly worse, a surprise</td></tr>
+<tr><td>Linear SVR</td><td>word2vec vectors</td><td>about $112</td><td>a hair better</td></tr>
+<tr><td>Random forest</td><td>word2vec vectors (ensemble of trees)</td><td>about $97</td><td>the winner — the baseline to beat</td></tr>
 </table></div>
 
 <p>These are the course's numbers, spoken over the instructor's own run in the video. This notebook was <strong>not run here</strong> (it needs the full dataset and real training time), so treat the figures as the course's results, not ours.</p>
@@ -479,14 +871,14 @@ evaluate(xg_boost, test)</code></pre>
 
 <div class="callout ok">
 <strong>What you should see</strong>
-<p>As you run each pricer through <code>evaluate</code>, the average-dollars number should fall: hundreds for random, around $146 for the constant, down into the $100s once bag of words and the random forest arrive. The scatter plot should show dots creeping closer to the diagonal "perfect guess" line and more of them turning green as the models improve.</p>
+<p>As you run each pricer through <code>Tester.test</code>, the average-dollars number should fall: hundreds for random, around $146 for the constant, down into the $100s once bag of words and the random forest arrive. The scatter plot should show dots creeping closer to the diagonal "perfect guess" line and more of them turning green as the models improve.</p>
 </div>
 
 <div class="callout warn">
 <strong>Common mistakes and limits</strong>
 <ul>
 <li><strong>Bag of words throws away word order.</strong> "Not waterproof" and "waterproof" look almost identical to it. That is the price of its simplicity — it counts words, it does not understand them.</li>
-<li><strong>Fitting on the training prompt leaks the answer.</strong> The code deliberately vectorizes <code>item.summary</code>, not the full training prompt, because the training prompt contains the price. Train on text that includes the answer and the model will look brilliant in training and fail completely on real data (overfitting in its purest form).</li>
+<li><strong>Fitting on the training prompt leaks the answer.</strong> The code deliberately uses <code>item.test_prompt()</code>, not the training prompt, because the training prompt contains the price. Train on text that includes the answer and the model will look brilliant in training and fail completely on real data (overfitting in its purest form).</li>
 <li><strong>Use <code>transform</code>, not <code>fit_transform</code>, at prediction time.</strong> Each pricer calls <code>vectorizer.transform([…])</code> so it reuses the vocabulary learned from the training set. Calling <code>fit_transform</code> again would relearn a different vocabulary and break the alignment with the trained model.</li>
 <li><strong>A random forest can overfit too</strong> if it memorises the training set, which is why we judge every model on held-out test products it never saw during fitting.</li>
 </ul>
@@ -494,21 +886,20 @@ evaluate(xg_boost, test)</code></pre>
 
 <div class="callout">
 <strong>Video vs repo</strong>
-<p>The notebook in the current repo differs from what the instructor types on screen:</p>
-<ul>
-<li><strong>Features.</strong> The video engineers four features — weight, Amazon best-seller rank, text length, and an "is top electronics brand" flag. The repo's <code>get_features</code> keeps three simpler ones: <code>weight</code>, a <code>weight_unknown</code> flag, and <code>text_length</code>.</li>
-<li><strong>Vocabulary size.</strong> The video sets <code>CountVectorizer(max_features=1000)</code>; the repo uses <code>max_features=2000</code> (a code comment still mentions 1,000).</li>
-<li><strong>Which models.</strong> The video also demonstrates a <strong>word2vec</strong> embedding (via the Gensim library) and a <strong>linear SVR</strong> before the random forest. The repo code shown here skips both and adds an <strong>XGBoost</strong> model after the random forest instead. We describe word2vec and SVR as concepts because the video covers them, even though they are not in this file.</li>
-<li><strong>The test harness.</strong> On screen the instructor builds a <code>Tester</code> class and calls <code>tester.test(fn)</code>, which prints the coloured rows and the scatter chart. The repo wraps the same idea in an <code>evaluate(fn, test)</code> helper imported from <code>pricer.evaluator</code>. Same job: run the pricer over the test set, report the average error.</li>
-</ul>
+<p>The code above is the notebook as recorded (September 2024). In December 2025 Ed rewrote Weeks 6 to 8, and today's
+repository is quite different: it loads the dataset from the Hub with <code>Item.from_hub</code>, scores models with an
+<code>evaluate(fn, test)</code> helper from <code>pricer/evaluator.py</code> instead of the <code>Tester</code> class, uses
+three simpler features (weight, a weight-unknown flag, text length), a 2,000-word <code>CountVectorizer</code> on an
+LLM-written <code>summary</code> of each item, drops word2vec and SVR, and adds an XGBoost model.</p>
 </div>
 
 <div class="recap"><strong>Recap</strong>
 <ul>
 <li>Before reaching for an LLM, build simple <strong>baselines</strong> — a cheap yardstick that tells you whether anything fancier is actually helping.</li>
 <li><strong>Feature engineering</strong> turns a product into a few hand-picked numbers; <strong>bag of words</strong> (via <code>CountVectorizer</code>) skips the handwork and just counts words, losing word order.</li>
+<li><strong>word2vec</strong> (Gensim) replaces counts with learned word vectors, averaged per document.</li>
 <li>Three classic scikit-learn regressors map those numbers to a price: <strong>linear regression</strong>, <strong>support vector regression</strong>, and the strongest here, the <strong>random forest</strong>.</li>
-<li>Every model is a tiny pricer function scored the same way by the harness: run it over 250 test products, report the <strong>average error in dollars</strong>.</li>
+<li>Every model is a tiny pricer function scored the same way by Ed's <code>Tester</code>: run it over 250 test products, report the <strong>average error in dollars</strong>.</li>
 <li>The course's numbers fall from about $341 (random) to about $97 (random forest). That $97 is the baseline tomorrow's frontier models have to beat — and it is harder than it sounds.</li>
 <li>Honesty: this notebook was not run here; the figures are the course's own, spoken over the instructor's run.</li>
 </ul>

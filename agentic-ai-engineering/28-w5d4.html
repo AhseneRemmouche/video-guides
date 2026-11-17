@@ -177,10 +177,35 @@ runtime absorbs the difference.</strong></figcaption>
 not a code change.</strong></figcaption>
 </figure>
 
-<h2>The full lab</h2>
-<p>Here is the complete file. The flag near the top switches between the two layouts.</p>
+<h2>Lesson by lesson</h2>
 
-<pre data-file="5_autogen/4_lab4_autogen_distributed.py" data-lang="py" data-tag="complete file"><code>from dataclasses import dataclass
+<p>One section per video, in the order you watch them. Each code block is what is <strong>on screen in that
+video</strong>: the course notebook or file as Ed recorded it in April 2025, with AutoGen 0.5.1. Two things have
+changed since then: newer OpenAI models have replaced <code>gpt-4o-mini</code>, and LangChain moved its <code>Tool</code> class. So where it matters the
+Python block has two versions: <strong>As in the video</strong> and <strong>Runs today</strong> (the same code with
+a current model and the AutoGen 0.7.5 API, every change marked with a comment). This week is Python only; see
+"In TypeScript" below.</p>
+
+<section class="lesson" id="video-12">
+<h3>Video 12 · The distributed runtime: host and workers</h3>
+<p class="lesson-meta">12. Day 4 - Autogen Core Distributed Runtime Architecture &amp; Components Explained.mp4 · 3:00</p>
+<p>Slides, no code, and "even higher level than last time". Microsoft calls the distributed runtime
+experimental, with APIs that may change. It handles messaging across process boundaries and has two parts: a
+<strong>host service</strong> that connects workers and manages delivery and sessions over gRPC, and <strong>worker
+runtimes</strong> that register agents, advertise them to the host and run their code.</p>
+
+
+
+</section>
+
+<section class="lesson" id="video-13">
+<h3>Video 13 · Distributed agents with gRPC: all in one worker</h3>
+<p class="lesson-meta">13. Day 4 - Implementing Distributed AI Agents with AutoGen Core and gRPC Runtime.mp4 · 10:28</p>
+<p>In <code>5_autogen/4_lab4_autogen_distributed.ipynb</code> Ed starts a gRPC host, brings back the Serper search tool, and builds two research
+agents and a judge to decide whether to use AutoGen. With <code>ALL_IN_ONE_WORKER = True</code> all three run in a single
+worker connected to the host.</p>
+<p><strong>About the Runs today model.</strong> AutoGen recognises the OpenAI models it was released with by name, <code>gpt-4o-mini</code> among them. A newer model such as <code>gpt-6-luna</code> also needs <code>model_info</code>: a small description of what the model can do (see pictures, call tools, return JSON). Without it AutoGen stops with <em>"model_info is required when model name is not a valid OpenAI model"</em>. <code>reasoning_effort="none"</code> makes the new model answer straight away, like the older chat models did.</p>
+<div class="code-tabs"><pre data-file="5_autogen/4_lab4_autogen_distributed.ipynb" data-lang="py" data-tag="as in the video" data-ver="video"><code>from dataclasses import dataclass
 from autogen_core import AgentId, MessageContext, RoutedAgent, message_handler
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.messages import TextMessage
@@ -194,7 +219,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-ALL_IN_ONE_WORKER = False
+ALL_IN_ONE_WORKER = True
 
 
 @dataclass
@@ -204,7 +229,7 @@ class Message:
 from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntimeHost
 
 host = GrpcWorkerAgentRuntimeHost(address="localhost:50051")
-host.start() 
+host.start()
 
 serper = GoogleSerperAPIWrapper()
 langchain_serper =Tool(name="internet_search", func=serper.run, description="Useful for when you need to search the internet")
@@ -264,6 +289,132 @@ class Judge(RoutedAgent):
         response = await self._delegate.on_messages([message], ctx.cancellation_token)
         return Message(content=result + "\n\n## Decision:\n\n" + response.chat_message.content)
 
+from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntime
+
+if ALL_IN_ONE_WORKER:
+
+    worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker.start()
+
+    await Player1Agent.register(worker, "player1", lambda: Player1Agent("player1"))
+    await Player2Agent.register(worker, "player2", lambda: Player2Agent("player2"))
+    await Judge.register(worker, "judge", lambda: Judge("judge"))
+
+    agent_id = AgentId("judge", "default")
+
+else:
+
+    worker1 = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker1.start()
+    await Player1Agent.register(worker1, "player1", lambda: Player1Agent("player1"))
+
+    worker2 = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker2.start()
+    await Player2Agent.register(worker2, "player2", lambda: Player2Agent("player2"))
+
+    worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker.start()
+    await Judge.register(worker, "judge", lambda: Judge("judge"))
+    agent_id = AgentId("judge", "default")
+
+response = await worker.send_message(Message(content="Go!"), agent_id)
+
+display(Markdown(response.content))
+
+await worker.stop()
+if not ALL_IN_ONE_WORKER:
+    await worker1.stop()
+    await worker2.stop()
+
+await host.stop()</code></pre><pre data-file="5_autogen/4_lab4_autogen_distributed.ipynb" data-lang="py" data-tag="runs today" data-ver="today"><code>from dataclasses import dataclass
+from autogen_core import AgentId, MessageContext, RoutedAgent, message_handler
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.messages import TextMessage
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_ext.tools.langchain import LangChainToolAdapter
+from langchain_community.utilities import GoogleSerperAPIWrapper
+from langchain_core.tools import Tool  # langchain.agents in the video; moved in LangChain 1.0
+from IPython.display import display, Markdown
+
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+# gpt-4o-mini in the video, which AutoGen knows by name. A newer model also needs model_info
+# (what it can do); the three agents below use it.
+from autogen_core.models import ModelInfo
+GPT_INFO = ModelInfo(vision=True, function_calling=True, json_output=True,
+                     family="unknown", structured_output=True)
+
+ALL_IN_ONE_WORKER = True
+
+
+@dataclass
+class Message:
+    content: str
+
+from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntimeHost
+
+host = GrpcWorkerAgentRuntimeHost(address="localhost:50051")
+host.start()
+
+serper = GoogleSerperAPIWrapper()
+langchain_serper =Tool(name="internet_search", func=serper.run, description="Useful for when you need to search the internet")
+autogen_serper = LangChainToolAdapter(langchain_serper)
+
+instruction1 = "To help with a decision on whether to use AutoGen in a new AI Agent project, \
+please research and briefly respond with reasons in favor of choosing AutoGen; the pros of AutoGen."
+
+instruction2 = "To help with a decision on whether to use AutoGen in a new AI Agent project, \
+please research and briefly respond with reasons against choosing AutoGen; the cons of Autogen."
+
+judge = "You must make a decision on whether to use AutoGen for a project. \
+Your research team has come up with the following reasons for and against. \
+Based purely on the research from your team, please respond with your decision and brief rationale."
+
+class Player1Agent(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OpenAIChatCompletionClient(model="gpt-6-luna", reasoning_effort="none", model_info=GPT_INFO)
+        self._delegate = AssistantAgent(name, model_client=model_client, tools=[autogen_serper], reflect_on_tool_use=True)
+
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        text_message = TextMessage(content=message.content, source="user")
+        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)
+        return Message(content=response.chat_message.content)
+    
+class Player2Agent(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OpenAIChatCompletionClient(model="gpt-6-luna", reasoning_effort="none", model_info=GPT_INFO)
+        self._delegate = AssistantAgent(name, model_client=model_client, tools=[autogen_serper], reflect_on_tool_use=True)
+
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        text_message = TextMessage(content=message.content, source="user")
+        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)
+        return Message(content=response.chat_message.content)
+    
+class Judge(RoutedAgent):
+    def __init__(self, name: str) -&gt; None:
+        super().__init__(name)
+        model_client = OpenAIChatCompletionClient(model="gpt-6-luna", reasoning_effort="none", model_info=GPT_INFO)
+        self._delegate = AssistantAgent(name, model_client=model_client)
+        
+    @message_handler
+    async def handle_my_message_type(self, message: Message, ctx: MessageContext) -&gt; Message:
+        message1 = Message(content=instruction1)
+        message2 = Message(content=instruction2)
+        inner_1 = AgentId("player1", "default")
+        inner_2 = AgentId("player2", "default")
+        response1 = await self.send_message(message1, inner_1)
+        response2 = await self.send_message(message2, inner_2)
+        result = f"## Pros of AutoGen:\n{response1.content}\n\n## Cons of AutoGen:\n{response2.content}\n\n"
+        judgement = f"{judge}\n{result}Respond with your decision and brief explanation"
+        message = TextMessage(content=judgement, source="user")
+        response = await self._delegate.on_messages([message], ctx.cancellation_token)
+        return Message(content=result + "\n\n## Decision:\n\n" + response.chat_message.content)
 
 from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntime
 
@@ -293,8 +444,75 @@ else:
     await Judge.register(worker, "judge", lambda: Judge("judge"))
     agent_id = AgentId("judge", "default")
 
+response = await worker.send_message(Message(content="Go!"), agent_id)
 
+display(Markdown(response.content))
 
+await worker.stop()
+if not ALL_IN_ONE_WORKER:
+    await worker1.stop()
+    await worker2.stop()
+
+await host.stop()</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1-9</td><td><code>from autogen_core import AgentId, MessageContext, RoutedAgent, message_handler</code> …</td><td>The Day 3 imports plus the Week 4 search tool (Serper through LangChain) and the AutoGen adapter for it.</td></tr>
+<tr><td>15</td><td><code>ALL_IN_ONE_WORKER = True</code></td><td>A switch for the two layouts Ed demonstrates: all agents in one worker (this video) or one worker per agent (Video 14).</td></tr>
+<tr><td>18-20</td><td><code>@dataclass class Message: content: str</code></td><td>The same message class as Day 3.</td></tr>
+<tr><td>22-25</td><td><code>host = GrpcWorkerAgentRuntimeHost(address="localhost:50051")</code> / <code>host.start()</code></td><td>The first half of the <a class="term" href="glossary.html#distributed-agents">distributed runtime</a>: a host that listens on port 50051 and uses <a class="term" href="glossary.html#grpc">gRPC</a> to carry messages between processes. It starts in the background (no <code>await</code>).</td></tr>
+<tr><td>27-29</td><td><code>autogen_serper = LangChainToolAdapter(langchain_serper)</code></td><td>"Reintroduce an old friend": the Serper web search, wrapped first as a LangChain tool and then as an AutoGen tool, as on Day 2.</td></tr>
+<tr><td>31-39</td><td><code>instruction1</code> (pros) / <code>instruction2</code> (cons) / <code>judge</code></td><td>Ed swapped rock-paper-scissors for a business question: should a new project use AutoGen? One researcher argues for, one against, and a judge decides "based purely on the research". The backslashes continue each string on the next line.</td></tr>
+<tr><td>41-51</td><td><code>class Player1Agent(RoutedAgent):</code> … <code>tools=[autogen_serper], reflect_on_tool_use=True</code></td><td>"Really a copy-paste job" from Day 3, but both players now use gpt-4o-mini (a local model would not be a fair match) and get the search tool.</td></tr>
+<tr><td>53-63</td><td><code>class Player2Agent(RoutedAgent):</code></td><td>Identical; Ed admits one class would do, but keeping two lets you give the other side a different model, such as DeepSeek.</td></tr>
+<tr><td>65-83</td><td><code>class Judge(RoutedAgent):</code> … <code>await self.send_message(message1, inner_1)</code></td><td>Sends each researcher its instruction, combines the answers under "Pros" and "Cons" headings, and asks its own model for a decision. Nothing here mentions distribution: <code>self.send_message</code> is the same call as on Day 3, and the runtime handles the rest.</td></tr>
+<tr><td>85-96</td><td><code>if ALL_IN_ONE_WORKER: worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")</code> …</td><td>The second half: a <strong>worker</strong> runtime that connects to the host. With the flag on, one worker is started (with <code>await</code>) and all three agent types are registered with it. The <code>else</code> branch is for Video 14.</td></tr>
+<tr><td>113</td><td><code>response = await worker.send_message(Message(content="Go!"), agent_id)</code></td><td>Sends "Go!" to the judge. Behind the scenes the two research calls and the judge's own call happen through the host.</td></tr>
+<tr><td>115</td><td><code>display(Markdown(response.content))</code></td><td>Shows the result. Ed's run listed pros (memory, ease of development, scalability) and cons (less customisable, possible bugs) and recommended using AutoGen.</td></tr>
+<tr><td>117-122</td><td><code>await worker.stop()</code> … <code>await host.stop()</code></td><td>Stops the worker(s), then the host, which frees port 50051 for the next run.</td></tr>
+</table></div>
+</div>
+
+</section>
+
+<section class="lesson" id="video-14">
+<h3>Video 14 · Across workers: one runtime per agent</h3>
+<p class="lesson-meta">14. Day 4 - Building Distributed Agent Systems AutoGen Cross-Process Communication.mp4 · 4:21</p>
+<p>The same notebook with the flag set to <code>False</code>. The agent code is untouched; only the
+registration changes, so each agent runs in its own worker. Ed closes with the bigger picture: AutoGen Core as a
+"playpen" where agents written in any language, anywhere, can find and message each other. The code below is what
+changes and runs differently; everything else is as in Video 13.</p>
+<div class="code-tabs"><pre data-file="5_autogen/4_lab4_autogen_distributed.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code>ALL_IN_ONE_WORKER = False
+
+from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntime
+
+if ALL_IN_ONE_WORKER:
+
+    worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker.start()
+
+    await Player1Agent.register(worker, "player1", lambda: Player1Agent("player1"))
+    await Player2Agent.register(worker, "player2", lambda: Player2Agent("player2"))
+    await Judge.register(worker, "judge", lambda: Judge("judge"))
+
+    agent_id = AgentId("judge", "default")
+
+else:
+
+    worker1 = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker1.start()
+    await Player1Agent.register(worker1, "player1", lambda: Player1Agent("player1"))
+
+    worker2 = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker2.start()
+    await Player2Agent.register(worker2, "player2", lambda: Player2Agent("player2"))
+
+    worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")
+    await worker.start()
+    await Judge.register(worker, "judge", lambda: Judge("judge"))
+    agent_id = AgentId("judge", "default")
 
 response = await worker.send_message(Message(content="Go!"), agent_id)
 
@@ -305,25 +523,22 @@ if not ALL_IN_ONE_WORKER:
     await worker1.stop()
     await worker2.stop()
 
-await host.stop()</code></pre>
+await host.stop()</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
 
-<h3>Line by line</h3>
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>1–13</td><td><code>from autogen_core import AgentId, MessageContext, RoutedAgent, message_handler<br>from autogen_agentchat.agents import AssistantAgent<br>from autogen_ext.tools.langchain import LangChainToolAdapter<br>from langchain_community.utilities import GoogleSerperAPIWrapper<br>…<br>load_dotenv(override=True)</code></td><td>The same Core and AgentChat imports as Day 3, plus the LangChain adapter and Serper search wrapper from Day 2. Everything the example needs: agents, a search tool, and the environment keys.</td></tr>
-<tr><td>15</td><td><code>ALL_IN_ONE_WORKER = False</code></td><td>The switch that chooses the layout. <code>True</code> runs all agents in one worker; <code>False</code> (the default here) spreads them across three. You run the lab once each way to feel the difference.</td></tr>
-<tr><td>18–20</td><td><code>@dataclass<br>class Message:<br>    content: str</code></td><td>Our message type again — one string of content. Distributed agents pass these just like local ones did.</td></tr>
-<tr><td>22–25</td><td><code>from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntimeHost<br>host = GrpcWorkerAgentRuntimeHost(address="localhost:50051")<br>host.start()</code></td><td>Creates and starts the host service, listening on port 50051 of your machine. This is the meeting point workers will connect to. It must be running before any worker starts.</td></tr>
-<tr><td>27–29</td><td><code>serper = GoogleSerperAPIWrapper()<br>langchain_serper = Tool(name="internet_search", func=serper.run, description="Useful for when you need to search the internet")<br>autogen_serper = LangChainToolAdapter(langchain_serper)</code></td><td>Rebuilds the web-search tool from Day 2: a LangChain Serper tool wrapped by <code>LangChainToolAdapter</code> into an AutoGen tool. The research agents will use it to find real pros and cons.</td></tr>
-<tr><td>31–39</td><td><code>instruction1 = "…please research and briefly respond with reasons in favor of choosing AutoGen…"<br>instruction2 = "…reasons against choosing AutoGen…"<br>judge = "You must make a decision on whether to use AutoGen…"</code></td><td>The three prompts. <code>instruction1</code> asks for the pros, <code>instruction2</code> for the cons, and <code>judge</code> frames the final decision. The trailing backslashes just continue each string across lines.</td></tr>
-<tr><td>41–63</td><td><code>class Player1Agent(RoutedAgent):<br>    …<br>        self._delegate = AssistantAgent(name, model_client=model_client, tools=[autogen_serper], reflect_on_tool_use=True)<br>    @message_handler<br>    async def handle_my_message_type(self, message, ctx):<br>        text_message = TextMessage(content=message.content, source="user")<br>        response = await self._delegate.on_messages([text_message], ctx.cancellation_token)<br>        return Message(content=response.chat_message.content)<br>class Player2Agent(RoutedAgent):<br>    … (identical)</code></td><td>Two research agents, both backed by <code>gpt-4o-mini</code> and armed with the search tool. Their handlers are the familiar pattern: wrap the message as a <code>TextMessage</code>, delegate to the AgentChat agent, return a <code>Message</code>. They are identical on purpose — the instructor notes you could give one a different model if you wanted.</td></tr>
-<tr><td>65–83</td><td><code>class Judge(RoutedAgent):<br>    …<br>    async def handle_my_message_type(self, message, ctx):<br>        inner_1 = AgentId("player1", "default")<br>        inner_2 = AgentId("player2", "default")<br>        response1 = await self.send_message(message1, inner_1)<br>        response2 = await self.send_message(message2, inner_2)<br>        result = f"## Pros of AutoGen:\n{response1.content}\n\n## Cons of AutoGen:\n{response2.content}\n\n"<br>        …<br>        return Message(content=result + "\n\n## Decision:\n\n" + response.chat_message.content)</code></td><td>The judge. It sends <code>instruction1</code> to player 1 and <code>instruction2</code> to player 2 via <code>self.send_message</code>, assembles their answers into a Markdown block, asks its own model for a verdict, and returns pros, cons and decision together. This is <strong>exactly</strong> the Day 3 referee pattern — yet these calls may now cross processes.</td></tr>
-<tr><td>86</td><td><code>from autogen_ext.runtimes.grpc import GrpcWorkerAgentRuntime</code></td><td>Imports the worker runtime — the distributed cousin of yesterday's <code>SingleThreadedAgentRuntime</code>.</td></tr>
-<tr><td>88–97</td><td><code>if ALL_IN_ONE_WORKER:<br>    worker = GrpcWorkerAgentRuntime(host_address="localhost:50051")<br>    await worker.start()<br>    await Player1Agent.register(worker, "player1", lambda: Player1Agent("player1"))<br>    await Player2Agent.register(worker, "player2", lambda: Player2Agent("player2"))<br>    await Judge.register(worker, "judge", lambda: Judge("judge"))<br>    agent_id = AgentId("judge", "default")</code></td><td>Layout one: a single worker connects to the host and all three agents register with it. Registration looks just like Day 3, except the runtime is a gRPC worker pointed at the host. Everything runs in one process, but still through the host.</td></tr>
-<tr><td>99–112</td><td><code>else:<br>    worker1 = GrpcWorkerAgentRuntime(host_address="localhost:50051")<br>    await worker1.start()<br>    await Player1Agent.register(worker1, "player1", …)<br>    worker2 = … register player2 …<br>    worker = … register judge …<br>    agent_id = AgentId("judge", "default")</code></td><td>Layout two: three separate workers, each connected to the same host, each hosting one agent. Now the judge in one worker really does message players in other workers, across process boundaries, over gRPC. The agent classes did not change at all — only where they are registered.</td></tr>
-<tr><td>117–119</td><td><code>response = await worker.send_message(Message(content="Go!"), agent_id)<br>display(Markdown(response.content))</code></td><td>Sends a single "Go!" to the judge and shows its Markdown answer. One message kicks off the whole pros/cons/decision cascade, whichever layout is active.</td></tr>
-<tr><td>121–126</td><td><code>await worker.stop()<br>if not ALL_IN_ONE_WORKER:<br>    await worker1.stop()<br>    await worker2.stop()<br>await host.stop()</code></td><td>Shuts everything down: stop the worker(s), and in the three-worker layout stop the extra workers too, then stop the host. Clean shutdown matters even more here because there are several connected pieces.</td></tr>
+<tr><td>1</td><td><code>ALL_IN_ONE_WORKER = False</code></td><td>The only edit, in the first cell. Ed restarts the kernel and runs everything again: same message, same host, same tool, same agent classes.</td></tr>
+<tr><td>16-20</td><td><code>worker1 = GrpcWorkerAgentRuntime(...)</code> / <code>await Player1Agent.register(worker1, ...)</code></td><td>Now the <code>else</code> branch runs: a worker of its own for player 1 …</td></tr>
+<tr><td>22-24</td><td><code>worker2 = ...</code> / <code>await Player2Agent.register(worker2, ...)</code></td><td>… another for player 2 …</td></tr>
+<tr><td>26-29</td><td><code>worker = ...</code> / <code>await Judge.register(worker, ...)</code></td><td>… and a third for the judge. Three separate runtimes, all connected to the one host; they could be different processes or machines.</td></tr>
+<tr><td>31-33</td><td><code>await worker.send_message(Message(content="Go!"), agent_id)</code></td><td>The same call as before. The judge's messages to the players now cross between runtimes. Ed's second answer differed in detail (community and support, cost considerations) but still recommended proceeding.</td></tr>
+<tr><td>35-40</td><td><code>if not ALL_IN_ONE_WORKER: await worker1.stop(); await worker2.stop()</code></td><td>This time all three workers are stopped, then the host.</td></tr>
 </table></div>
+</div>
+
+</section>
 
 <div class="callout ok">
 <strong>What you should see.</strong> After "Go!" the two researchers search the web and return reasons for
@@ -332,12 +547,24 @@ section. In the instructor's runs — in both layouts — the recommendation was
 see harmless warnings about threads or gRPC during start-up; they did not stop the run.
 </div>
 
+<div class="callout">
+<strong>Video vs repo</strong>
+<p>The code above is what Ed shows in the videos (<code>5_autogen/4_lab4_autogen_distributed.ipynb</code> from the course repository's April 2025 version; the only later change was the flag's default, <code>False</code>, as in Video 14). Later fixes to the AutoGen labs were small: a
+<code>max_turns=20</code> safety cap on the Day 2 team, a longer timeout for the MCP server, a note for Windows
+users about MCP, and <code>load_dotenv</code> in the Day 5 agent files. Then, in June 2026, Ed restructured
+Week 5: <strong>the current repository has no AutoGen folder any more</strong>. Its <code>5_agent_frameworks</code>
+folder covers Google ADK with A2A, Strands and Pydantic AI, Microsoft Agent Framework (AutoGen's successor) and
+Agno, Mastra, and a hand-written agent loop. If you open the current repository, expect different code; the
+"Runs today" tabs keep the video's code and follow the AutoGen version you can install today (0.7.5).</p>
+</div>
+
 <div class="callout warn">
 <strong>Common mistakes.</strong>
 <ul>
 <li><strong>No host running.</strong> Start the <code>GrpcWorkerAgentRuntimeHost</code> before any worker, or the workers have nothing to connect to.</li>
 <li><strong>Port already in use.</strong> If 50051 is taken (an earlier run you did not stop), the host fails to start. Stop the old one or pick another port.</li>
 <li><strong>Not awaiting worker start.</strong> <code>GrpcWorkerAgentRuntime</code> must be started with <code>await worker.start()</code>; the host uses a plain <code>host.start()</code>. Mixing these up is a common slip.</li>
+<li><strong>The old LangChain import.</strong> <code>from langchain.agents import Tool</code> fails with LangChain 1.x; import <code>Tool</code> from <code>langchain_core.tools</code> as in the Runs today tab.</li>
 <li><strong>Forgetting the Serper key.</strong> The research agents search the web; without <code>SERPER_API_KEY</code> they cannot gather pros and cons.</li>
 <li><strong>Leaving runtimes running.</strong> Stop all workers and the host at the end, especially in the three-worker layout, or the next run clashes on the port.</li>
 </ul>
@@ -360,9 +587,10 @@ only a chat-style UI. If you want distributed agents, you write them in Python.<
 </div>
 
 <div class="callout">
-<strong>Honesty note.</strong> The distributed gRPC runtime is shown exactly as in the course and was not
-re-run live for this guide: it calls <code>gpt-4o-mini</code>, reaches the Serper web API, and is labelled
-experimental by Microsoft. What we verified locally against Ollama is the AgentChat conversational examples
+<strong>Honesty note.</strong> The distributed gRPC runtime was not re-run live
+for this guide: it calls an OpenAI model, reaches the Serper web API, and is labelled experimental by Microsoft.
+The "As in the video" code is shown exactly as recorded; the "Runs today" code was checked against the installed
+AutoGen 0.7.5 with a type checker. What we verified locally against Ollama is the AgentChat conversational examples
 and a single-machine Core message-passing example. The distributed pieces here are presented faithfully but
 not independently reproduced.
 </div>

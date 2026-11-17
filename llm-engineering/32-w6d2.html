@@ -411,221 +411,494 @@ exact same data in one line - so the curation work on this page only has to happ
 dataset.</strong></figcaption>
 </figure>
 
-<h2>The code</h2>
+<h2>Lesson by lesson</h2>
 
-<p>Here is the repo's full Week 6 Day 2 file. An important heads-up before you read it: the current repo has
-moved on from what the video shows (see the Video-vs-repo note right after). Read the file for the
-<strong>shape</strong> of the work - load a prepared dataset, give each item an id, enrich items, then split
-and upload - and read the prose above for the dataset-balancing reasoning the video walks through by hand.</p>
-
-<pre data-file="week6/day2.py" data-lang="py" data-tag="complete file"><code>from litellm import completion
-from dotenv import load_dotenv
-import json
-from pricer.batch import Batch
-from pricer.items import Item
-
-load_dotenv(override=True)
-
-LITE_MODE = True
-
-username = "ed-donner"
-dataset = f"{username}/items_raw_lite" if LITE_MODE else f"{username}/items_raw_full"
-
-train, val, test = Item.from_hub(dataset)
-
-items = train + val + test
-
-print(f"Loaded {len(items):,} items")
-print(items[0])
-
-items[2].id
-
-# Give every item an id
-
-for index, item in enumerate(items):
-    item.id = index
+<p>One section per video, in the order you watch them. The first three videos are the strategy talk above; the code
+starts in Video 9. Each code block is what is <strong>on screen in that video</strong>: the Day 2 notebook and Ed's
+<code>loaders.py</code> as recorded in September 2024. It still runs today with <code>datasets==3.6.0</code> (the version the
+course repository pins, because the Amazon dataset needs a loading script) and the <code>items.py</code> from Day 1 in the
+same folder. It was not run for this guide; the numbers are the ones on Ed's screen.</p>
+<section class="lesson" id="video-6">
+<h3>Video 6 · From business problem to production</h3>
+<p class="lesson-meta">6 -Day 2 - LLM Deployment Pipeline From Business Problem to Production Solution.mp4 · 7:42</p>
+<p>Slides, no code. The five-step strategy (understand, prepare, select, customize, productionize)
+described at the top of this page, steps one to three in detail.</p>
 
 
 
-SYSTEM_PROMPT = """Create a concise description of a product. Respond only in this format. Do not include part numbers.
-Title: Rewritten short precise title
-Category: eg Electronics
-Brand: Brand name
-Description: 1 sentence description
-Details: 1 sentence on features"""
+</section>
 
-print(items[0].full)
-
-messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": items[0].full}]
-response = completion(messages=messages, model="groq/openai/gpt-oss-20b")
-
-print(response.choices[0].message.content)
-print()
-print(f"Input tokens: {response.usage.prompt_tokens}")
-print(f"Output tokens: {response.usage.completion_tokens}")
-print(f"Cost: {response._hidden_params['response_cost']*100:.3f} cents")
+<section class="lesson" id="video-7">
+<h3>Video 7 · Prompting, RAG or fine-tuning?</h3>
+<p class="lesson-meta">7 -Day 2 - Prompting, RAG, and Fine-Tuning When to Use Each Approach.mp4 · 9:55</p>
+<p>Slides, no code. Step four, customize: the benefits and costs of the three techniques, and why the
+price predictor is a fine-tuning problem (see the table and decision tree above).</p>
 
 
 
-messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": items[0].full}]
-response = completion(messages=messages, model="ollama/llama3.2", api_base="http://localhost:11434")
-print(response.choices[0].message.content)
-print()
-print(f"Input tokens: {response.usage.prompt_tokens}")
-print(f"Output tokens: {response.usage.completion_tokens}")
-print(f"Cost: {response._hidden_params['response_cost']*100:.3f} cents")
+</section>
+
+<section class="lesson" id="video-8">
+<h3>Video 8 · Productionizing</h3>
+<p class="lesson-meta">8 -Day 2 - Productionizing LLMs Best Practices for Deploying AI Models at Scale.mp4 · 1:49</p>
+<p>Slides, no code. Step five in two minutes, and where our project stands: understand is done,
+prepare is in progress.</p>
 
 
-MODEL = "openai/gpt-oss-20b"
+
+</section>
+
+<section class="lesson" id="video-9">
+<h3>Video 9 · Scaling up: the ItemLoader</h3>
+<p class="lesson-meta">9 -Day 2 - Optimizing Large Datasets for Model Training Data Curation Strategies.mp4 · 9:50</p>
+<p>Ed opens <code>week6/loaders.py</code>, a short module with one class, <code>ItemLoader</code>, that
+loads a category with several worker processes. He fixes a bug in it on camera, reloads Appliances through it, then starts
+loading all eight categories.</p>
+<div class="code-tabs"><pre data-file="week6/loaders.py" data-lang="py" data-tag="as in the video (still runs today)"><code>from datetime import datetime
+from tqdm import tqdm
+from datasets import load_dataset
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from items import Item
+
+CHUNK_SIZE = 1000
+MIN_PRICE = 0.5
+MAX_PRICE = 999.49
+
+class ItemLoader:
 
 
-def make_jsonl(item):
-    body = {"model": MODEL, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": item.full}], "reasoning_effort": "low"}
-    line = {"custom_id": str(item.id), "method": "POST", "url": "/v1/chat/completions", "body": body}
-    return json.dumps(line)
+    def __init__(self, name):
+        self.name = name
+        self.dataset = None
 
-items[0]
+    def from_datapoint(self, datapoint):
+        """
+        Try to create an Item from this datapoint
+        Return the Item if successful, or None if it shouldn't be included
+        """
+        try:
+            price_str = datapoint['price']
+            if price_str:
+                price = float(price_str)
+                if MIN_PRICE &lt;= price &lt;= MAX_PRICE:
+                    item = Item(datapoint, price)
+                    return item if item.include else None
+        except ValueError:
+            return None
 
-make_jsonl(items[0])
+    def from_chunk(self, chunk):
+        """
+        Create a list of Items from this chunk of elements from the Dataset
+        """
+        batch = []
+        for datapoint in chunk:
+            result = self.from_datapoint(datapoint)
+            if result:
+                batch.append(result)
+        return batch
 
+    def chunk_generator(self):
+        """
+        Iterate over the Dataset, yielding chunks of datapoints at a time
+        """
+        size = len(self.dataset)
+        for i in range(0, size, CHUNK_SIZE):
+            yield self.dataset.select(range(i, min(i + CHUNK_SIZE, size)))
 
-def make_file(start, end, filename):
-    batch_file = filename
-    with open(batch_file, "w", encoding="utf-8") as f:
-        for i in range(start, end):
-            f.write(make_jsonl(items[i]))
-            f.write("\n")
-
-make_file(0, 1000, "jsonl/0_1000.jsonl")
+    def load_in_parallel(self, workers):
+        """
+        Use concurrent.futures to farm out the work to process chunks of datapoints -
+        This speeds up processing significantly, but will tie up your computer while it's doing so!
+        """
+        results = []
+        chunk_count = (len(self.dataset) // CHUNK_SIZE) + 1
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for batch in tqdm(pool.map(self.from_chunk, self.chunk_generator()), total=chunk_count):
+                results.extend(batch)
+        for result in results:
+            result.category = self.name
+        return results
+            
+    def load(self, workers=8):
+        """
+        Load in this dataset; the workers parameter specifies how many processes
+        should work on loading and scrubbing the data
+        """
+        start = datetime.now()
+        print(f"Loading dataset {self.name}", flush=True)
+        self.dataset = load_dataset("McAuley-Lab/Amazon-Reviews-2023", f"raw_meta_{self.name}", split="full", trust_remote_code=True)
+        results = self.load_in_parallel(workers)
+        finish = datetime.now()
+        print(f"Completed {self.name} with {len(results):,} datapoints in {(finish-start).total_seconds()/60:.1f} mins", flush=True)
+        return results</code></pre></div><p>And in <code>day2.ipynb</code>:</p><div class="code-tabs"><pre data-file="week6/day2.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># imports
 
 import os
-from groq import Groq
+import random
+from dotenv import load_dotenv
+from huggingface_hub import login
+from datasets import load_dataset, Dataset, DatasetDict
+from items import Item
+from loaders import ItemLoader
+import matplotlib.pyplot as plt
+from collections import Counter, defaultdict
+import numpy as np
+import pickle
 
-groq = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+# environment
 
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-not-using-env')
+os.environ['HF_TOKEN'] = os.getenv('HF_TOKEN', 'your-key-if-not-using-env')
 
-with open("jsonl/0_1000.jsonl", "rb") as f:
-    response = groq.files.create(file=f, purpose="batch")
-response
+# Log in to HuggingFace
 
-file_id = response.id
-file_id
+hf_token = os.environ['HF_TOKEN']
+login(hf_token, add_to_git_credential=True)
 
-response = groq.batches.create(completion_window="24h", endpoint="/v1/chat/completions", input_file_id=file_id)
-response
+%matplotlib inline
 
-result = groq.batches.retrieve(response.id)
-result
+# Load in the same dataset as last time
 
-response = groq.files.content(result.output_file_id)
-response.write_to_file("jsonl/batch_results.jsonl")
+items = ItemLoader("Appliances").load()
 
-with open("jsonl/batch_results.jsonl", "r", encoding="utf-8") as f:
-    for line in f:
-        json_line = json.loads(line)
-        id = int(json_line["custom_id"])
-        summary = json_line["response"]["body"]["choices"][0]["message"]["content"]
-        items[id].summary = summary
+# Look for a familiar item..
+print(items[1].prompt)
 
+dataset_names = [
+    "Automotive",
+    "Electronics",
+    "Office_Products",
+    "Tools_and_Home_Improvement",
+    "Cell_Phones_and_Accessories",
+    "Toys_and_Games",
+    "Appliances",
+    "Musical_Instruments",
+]
 
-print(items[0].full)
+items = []
+for dataset_name in dataset_names:
+    loader = ItemLoader(dataset_name)
+    items.extend(loader.load())
 
-print(items[1000].summary)
+# Now, time for a coffee break!!
+# By the way, I put the biggest datasets first.. it gets faster.</code></pre></div>
+<div data-only="py">
+<h4>Line by line: loaders.py</h4>
 
-Batch.create(items, LITE_MODE)
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>1-5</td><td><code>from datetime import datetime</code> … <code>from items import Item</code></td><td><code>tqdm</code> draws progress bars, <code>load_dataset</code> fetches a category, <code>ProcessPoolExecutor</code> runs work in several processes at once, and <code>Item</code> is yesterday's class.</td></tr>
+<tr><td>7-9</td><td><code>CHUNK_SIZE = 1000</code> / <code>MIN_PRICE = 0.5</code> / <code>MAX_PRICE = 999.49</code></td><td>Work is handed out 1,000 records at a time, and only prices from $0.50 to $999.49 are kept (they round to $1 to $999). Ed's reason: a few very expensive items would make the error numbers wild.</td></tr>
+<tr><td>14-16</td><td><code>def __init__(self, name)</code></td><td>Remembers the category name, for example <code>"Appliances"</code>.</td></tr>
+<tr><td>18-31</td><td><code>def from_datapoint(self, datapoint)</code></td><td>One record in, one <code>Item</code> (or <code>None</code>) out: it needs a price string, a price inside the range, and an item that passes yesterday's checks (<code>item.include</code>).</td></tr>
+<tr><td>33-42</td><td><code>def from_chunk(self, chunk)</code></td><td>Runs <code>from_datapoint</code> over a chunk and keeps the successes.</td></tr>
+<tr><td>44-50</td><td><code>def chunk_generator(self)</code></td><td>A generator that yields the dataset 1,000 rows at a time with <code>select(range(...))</code>, so no worker gets everything at once.</td></tr>
+<tr><td>52-64</td><td><code>def load_in_parallel(self, workers)</code></td><td><code>ProcessPoolExecutor(max_workers=workers)</code> starts that many processes and <code>pool.map</code> sends each chunk to one of them; <code>tqdm</code> shows the progress. Every result is then tagged with the category. On screen this line first read <code>max_workers=6</code>; Ed spots the bug and changes it to <code>workers</code>.</td></tr>
+<tr><td>66-77</td><td><code>def load(self, workers=8)</code></td><td>The method you call: download the category with <code>load_dataset</code>, load it in parallel, and print how many items it kept and how many minutes it took. Pass a smaller <code>workers</code> if your machine has fewer cores.</td></tr>
+</table></div>
+</div><div data-only="py">
+<h4>Line by line: the notebook cells</h4>
 
-Batch.run()
+<div class="table-wrap"><table class="lines">
+<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
+<tr><td>3-13</td><td><code>import os</code> … <code>import pickle</code></td><td>Yesterday's imports plus <code>ItemLoader</code>, <code>Counter</code> / <code>defaultdict</code> (counting and bucketing), <code>numpy</code> (weighted random choice) and <code>pickle</code> (saving Python objects to a file).</td></tr>
+<tr><td>17-25</td><td><code>load_dotenv()</code> … <code>login(hf_token, add_to_git_credential=True)</code></td><td>The same environment and Hugging Face login as Day 1.</td></tr>
+<tr><td>27</td><td><code>%matplotlib inline</code></td><td>Charts under the cells.</td></tr>
+<tr><td>31</td><td><code>items = ItemLoader("Appliances").load()</code></td><td>Yesterday's Appliances data again, now through the loader: 28,625 items in the price range, in 0.2 minutes instead of about one.</td></tr>
+<tr><td>34</td><td><code>print(items[1].prompt)</code></td><td>The familiar door pivot block, part numbers removed.</td></tr>
+<tr><td>36-45</td><td><code>dataset_names = ["Automotive", ..., "Musical_Instruments"]</code></td><td>Eight categories of things a large home store sells (no clothes, beauty or books). Biggest first. To save time you could keep only Electronics, a mid-sized one.</td></tr>
+<tr><td>47-50</td><td><code>for dataset_name in dataset_names: ... items.extend(loader.load())</code></td><td>Loads each category and adds its items to one big list. About 20 minutes on Ed's machine, longer the first time because of the downloads: "time for a coffee break".</td></tr>
+</table></div>
+</div>
 
-Batch.fetch()
+</section>
 
-for index, item in enumerate(items):
-    if not item.summary:
-        print(index)
+<section class="lesson" id="video-10">
+<h3>Video 10 · Balancing the dataset</h3>
+<p class="lesson-meta">10 -Day 2 - How to Create a Balanced Dataset for LLM Training Curation Techniques.mp4 · 11:27</p>
+<p>All 2.8 million items are loaded. Ed charts them, then builds a smaller sample with a fairer spread of
+prices and fewer Automotive items, and charts it again.</p>
+<div class="code-tabs"><pre data-file="week6/day2.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code>print(f"A grand total of {len(items):,} items")
 
-print(items[10234].summary)
+# Plot the distribution of token counts again
 
-# Remove the fields that we don't need in the hub
+tokens = [item.token_count for item in items]
+plt.figure(figsize=(15, 6))
+plt.title(f"Token counts: Avg {sum(tokens)/len(tokens):,.1f} and highest {max(tokens):,}\n")
+plt.xlabel('Length (tokens)')
+plt.ylabel('Count')
+plt.hist(tokens, rwidth=0.7, color="skyblue", bins=range(0, 300, 10))
+plt.show()
 
+# Plot the distribution of prices
+
+prices = [item.price for item in items]
+plt.figure(figsize=(15, 6))
+plt.title(f"Prices: Avg {sum(prices)/len(prices):,.1f} and highest {max(prices):,}\n")
+plt.xlabel('Price ($)')
+plt.ylabel('Count')
+plt.hist(prices, rwidth=0.7, color="blueviolet", bins=range(0, 1000, 10))
+plt.show()
+
+category_counts = Counter()
 for item in items:
-    item.full = None
-    item.id = None
+    category_counts[item.category]+=1
 
-username = "ed-donner"
-full = f"{username}/items_full"
-lite = f"{username}/items_lite"
+categories = category_counts.keys()
+counts = [category_counts[category] for category in categories]
 
-if LITE_MODE:
-    train = items[:20_000]
-    val = items[20_000:21_000]
-    test = items[21_000:]
-    Item.push_to_hub(lite, train, val, test)
-else:
-    train = items[:800_000]
-    val = items[800_000:810_000]
-    test = items[810_000:]
-    Item.push_to_hub(full, train, val, test)
+# Bar chart by category
+plt.figure(figsize=(15, 6))
+plt.bar(categories, counts, color="goldenrod")
+plt.title('How many in each category')
+plt.xlabel('Categories')
+plt.ylabel('Count')
 
-    train_lite = train[:20_000]
-    val_lite = val[:1_000]
-    test_lite = test[:1_000]
-    Item.push_to_hub(lite, train_lite, val_lite, test_lite)</code></pre>
+plt.xticks(rotation=30, ha='right')
 
-<div class="callout warn"><strong>Honesty: not run here.</strong> This file needs a Hugging Face login, paid
-batch API access and large downloads, so it was <strong>not run live</strong> in this guide. It is shown as
-the course's code. The dataset sizes, prices and counts quoted above are the figures the instructor reports
-in the video.</div>
+# Add value labels on top of each bar
+for i, v in enumerate(counts):
+    plt.text(i, v, f"{v:,}", ha='center', va='bottom')
 
-<div class="callout"><strong>Video vs repo.</strong> The video builds the balanced dataset <em>by hand</em>
-in the notebook: the <code>slots</code> dictionary, <code>np.random.choice</code> with category weights, the
-histograms, the shuffle, and a <code>Dataset.from_dict</code> / <code>DatasetDict</code> upload. The current
-repo has refactored all of that away. This <code>day2.py</code> instead loads an <em>already-prepared</em>
-items dataset from the Hub (<code>items_raw_lite</code> / <code>items_raw_full</code>), gives each item an
-id, enriches each one with a short LLM-written summary through a <strong>batch job</strong> (via
-<code>litellm</code>, a Groq model, and a helper <code>Batch</code> class), and finally slices and calls
-<code>Item.push_to_hub(...)</code>. It also uses a newer model id (<code>gpt-oss-20b</code> with
-<code>reasoning_effort</code>) rather than the video's <code>gpt-4o-mini</code>. The <em>idea</em> is the
-same - curate a clean dataset and publish it to the Hub for reuse - but the balancing details live in the
-prose and diagrams above, not in this file. The <code>LITE_MODE</code> flag at the top switches the whole
-script between a small 20,000-item run and the full 800,000-item run.</div>
+# Display the chart
+plt.show()
 
-<h3>Line by line: load the prepared dataset and give every item an id</h3>
+# Create a dict with a key of each price from $1 to $999
+# And in the value, put a list of items with that price (to nearest round number)
+
+slots = defaultdict(list)
+for item in items:
+    slots[round(item.price)].append(item)
+
+# Create a dataset called "sample" which tries to more evenly take from the range of prices
+# And gives more weight to items from categories other than Automotive
+# Set random seed for reproducibility
+
+np.random.seed(42)
+random.seed(42)
+sample = []
+for i in range(1, 1000):
+    slot = slots[i]
+    if i&gt;=240:
+        sample.extend(slot)
+    elif len(slot) &lt;= 1200:
+        sample.extend(slot)
+    else:
+        weights = np.array([1 if item.category=='Automotive' else 5 for item in slot])
+        weights = weights / np.sum(weights)
+        selected_indices = np.random.choice(len(slot), size=1200, replace=False, p=weights)
+        selected = [slot[i] for i in selected_indices]
+        sample.extend(selected)
+
+print(f"There are {len(sample):,} items in the sample")
+
+# Plot the distribution of prices in sample
+
+prices = [float(item.price) for item in sample]
+plt.figure(figsize=(15, 6))
+plt.title(f"Avg {sum(prices)/len(prices):.2f} and highest {max(prices):,.2f}\n")
+plt.xlabel('Price ($)')
+plt.ylabel('Count')
+plt.hist(prices, rwidth=0.7, color="darkblue", bins=range(0, 1000, 10))
+plt.show()
+
+# OK, we did well in terms of raising the average price and having a smooth-ish population of prices
+# Let's see the categories
+
+category_counts = Counter()
+for item in sample:
+    category_counts[item.category]+=1
+
+categories = category_counts.keys()
+counts = [category_counts[category] for category in categories]
+
+# Create bar chart
+plt.figure(figsize=(15, 6))
+plt.bar(categories, counts, color="lightgreen")
+
+# Customize the chart
+plt.title('How many in each category')
+plt.xlabel('Categories')
+plt.ylabel('Count')
+
+plt.xticks(rotation=30, ha='right')
+
+# Add value labels on top of each bar
+for i, v in enumerate(counts):
+    plt.text(i, v, f"{v:,}", ha='center', va='bottom')
+
+# Display the chart
+plt.show()
+
+# Automotive still in the lead, but improved somewhat
+# For another perspective, let's look at a pie
+
+plt.figure(figsize=(12, 10))
+plt.pie(counts, labels=categories, autopct='%1.0f%%', startangle=90)
+
+# Add a circle at the center to create a donut chart (optional)
+centre_circle = plt.Circle((0,0), 0.70, fc='white')
+fig = plt.gcf()
+fig.gca().add_artist(centre_circle)
+plt.title('Categories')
+
+# Equal aspect ratio ensures that pie is drawn as a circle
+plt.axis('equal')  
+
+plt.show()</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>1-5</td><td><code>from litellm import completion</code> ... <code>from pricer.items import Item</code></td><td>Imports. <code>litellm</code> gives one <code>completion()</code> call that works across many model providers; <code>json</code> builds the batch lines; <code>Batch</code> and <code>Item</code> are the course's own helper classes (the batch runner and the product-item class from Day 1).</td></tr>
-<tr><td>7</td><td><code>load_dotenv(override=True)</code></td><td>Loads API keys from the <code>.env</code> file into the environment. <code>override=True</code> makes the file win over any value already set, so you always use the key you wrote down.</td></tr>
-<tr><td>9</td><td><code>LITE_MODE = True</code></td><td>One switch for the whole script. <code>True</code> runs a small, fast dataset; <code>False</code> runs the full one. It controls both which source dataset is loaded and how big the final splits are.</td></tr>
-<tr><td>11-12</td><td><code>dataset = f"{username}/items_raw_lite" if LITE_MODE else ...</code></td><td>Chooses which prepared dataset to pull from the Hub, lite or full, based on the flag.</td></tr>
-<tr><td>14-16</td><td><code>train, val, test = Item.from_hub(dataset)</code></td><td>Downloads the prepared items and splits them back into three lists, then joins them into one <code>items</code> list so the script can re-process everything together.</td></tr>
-<tr><td>18-19</td><td><code>print(f"Loaded {len(items):,} items")</code></td><td>Prints how many items loaded (the <code>:,</code> adds thousands separators) and shows the first one, so you can confirm the load worked.</td></tr>
-<tr><td>25-26</td><td><code>for index, item in enumerate(items):</code> / <code>item.id = index</code></td><td>Gives every item a unique id equal to its position. The batch job needs a <code>custom_id</code> to match each result back to the right item, so each item must be numbered first.</td></tr>
+<tr><td>1</td><td><code>print(f"A grand total of {len(items):,} items")</code></td><td>2,811,408 items: far more than needed.</td></tr>
+<tr><td>5-11</td><td><code>plt.hist(tokens, ...)</code></td><td>Still never more than 180 tokens per prompt.</td></tr>
+<tr><td>15-21</td><td><code>plt.hist(prices, ..., bins=range(0, 1000, 10))</code></td><td>Average $59.70, highest $999.49, and still crowded at the cheap end.</td></tr>
+<tr><td>23-44</td><td><code>category_counts = Counter()</code> … <code>plt.bar(categories, counts, ...)</code></td><td>Counts items per category and draws a bar chart with the number on top of each bar: Automotive has over 900,000.</td></tr>
+<tr><td>49-51</td><td><code>slots = defaultdict(list)</code> / <code>slots[round(item.price)].append(item)</code></td><td>Buckets the items by whole-dollar price: <code>slots[2]</code> is the list of every $2 item. A <code>defaultdict</code> creates an empty list the first time a key is used, so no <code>if</code> is needed.</td></tr>
+<tr><td>57-59</td><td><code>np.random.seed(42)</code> / <code>random.seed(42)</code> / <code>sample = []</code></td><td>Fixed seeds, so you get exactly Ed's sample.</td></tr>
+<tr><td>60-71</td><td><code>for i in range(1, 1000): ...</code></td><td>For every price: from $240 up, keep the whole slot; a slot of 1,200 or fewer is kept whole too; a bigger slot gives 1,200 items picked by <code>np.random.choice(..., replace=False, p=weights)</code>, where Automotive items weigh 1 and the rest 5. Ed tuned these numbers by trial and error until the charts looked right.</td></tr>
+<tr><td>73</td><td><code>print(f"There are {len(sample):,} items in the sample")</code></td><td>About 408,000 items.</td></tr>
+<tr><td>77-83</td><td><code>plt.hist(prices, ...)</code> for the sample</td><td>Average $220.52 now, with a steady count at every cheap price and natural spikes at $399 and $499.</td></tr>
+<tr><td>88-111</td><td><code>Counter</code> + bar chart for the sample</td><td>Automotive still leads, but by less.</td></tr>
+<tr><td>116-128</td><td><code>plt.pie(counts, labels=categories, autopct='%1.0f%%', ...)</code></td><td>The same counts as a donut: a pie chart with a white circle drawn over its middle. Automotive 35%, Appliances 1%.</td></tr>
 </table></div>
+</div>
 
-<h3>Line by line: build the batch request file</h3>
+</section>
+
+<section class="lesson" id="video-11">
+<h3>Video 11 · Final checks, the split and the upload</h3>
+<p class="lesson-meta">11 -Day 2 - Finalizing Dataset Curation Analyzing Price-Description Correlations.mp4 · 12:03</p>
+<p>The last curation video: is price correlated with description length, how do prices tokenize, then
+shuffle, split, build a Hugging Face <code>DatasetDict</code>, push it to the Hub and pickle the two lists.</p>
+<div class="code-tabs"><pre data-file="week6/day2.ipynb" data-lang="py" data-tag="as in the video (still runs today)"><code># How does the price vary with the character count of the prompt?
+
+sizes = [len(item.prompt) for item in sample]
+prices = [item.price for item in sample]
+
+# Create the scatter plot
+plt.figure(figsize=(15, 8))
+plt.scatter(sizes, prices, s=0.2, color="red")
+
+# Add labels and title
+plt.xlabel('Size')
+plt.ylabel('Price')
+plt.title('Is there a simple correlation?')
+
+# Display the plot
+plt.show()
+
+def report(item):
+    prompt = item.prompt
+    tokens = Item.tokenizer.encode(item.prompt)
+    print(prompt)
+    print(tokens[-10:])
+    print(Item.tokenizer.batch_decode(tokens[-10:]))
+
+report(sample[398000])
+
+random.seed(42)
+random.shuffle(sample)
+train = sample[:400_000]
+test = sample[400_000:402_000]
+print(f"Divided into a training set of {len(train):,} items and test set of {len(test):,} items")
+
+print(train[0].prompt)
+
+print(test[0].test_prompt())
+
+# Plot the distribution of prices in the first 250 test points
+
+prices = [float(item.price) for item in test[:250]]
+plt.figure(figsize=(15, 6))
+plt.title(f"Avg {sum(prices)/len(prices):.2f} and highest {max(prices):,.2f}\n")
+plt.xlabel('Price ($)')
+plt.ylabel('Count')
+plt.hist(prices, rwidth=0.7, color="darkblue", bins=range(0, 1000, 10))
+plt.show()
+
+train_prompts = [item.prompt for item in train]
+train_prices = [item.price for item in train]
+test_prompts = [item.test_prompt() for item in test]
+test_prices = [item.price for item in test]
+
+# Create a Dataset from the lists
+
+train_dataset = Dataset.from_dict({"text": train_prompts, "price": train_prices})
+test_dataset = Dataset.from_dict({"text": test_prompts, "price": test_prices})
+dataset = DatasetDict({
+    "train": train_dataset,
+    "test": test_dataset
+})
+
+DATASET_NAME = "your-hf-username/pricer-data"
+dataset.push_to_hub(DATASET_NAME, private=True)
+
+# One more thing!
+# Let's pickle the training and test dataset so we don't have to execute all this code next time!
+
+with open('train.pkl', 'wb') as file:
+    pickle.dump(train, file)
+
+with open('test.pkl', 'wb') as file:
+    pickle.dump(test, file)</code></pre></div>
+<div data-only="py">
+<h4>Line by line</h4>
+
 <div class="table-wrap"><table class="lines">
 <tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>62-63</td><td><code>def make_jsonl(item):</code> / <code>body = {"model": MODEL, "messages": [...], "reasoning_effort": "low"}</code></td><td>Builds the request body for one item: which model to call, the system + user messages (the system prompt asks for a concise product summary, the user content is the item's full text), and a low reasoning effort to keep it cheap.</td></tr>
-<tr><td>64-65</td><td><code>line = {"custom_id": str(item.id), "method": "POST", ...}</code> / <code>return json.dumps(line)</code></td><td>Wraps the body in the batch-line format the API expects, tagging it with the item's id as <code>custom_id</code> so the answer can be matched back later, and returns it as a one-line JSON string.</td></tr>
-<tr><td>72-77</td><td><code>def make_file(start, end, filename):</code> ... <code>f.write(make_jsonl(items[i]))</code></td><td>Writes one JSON line per item for a range into a <code>.jsonl</code> file (JSON Lines - one JSON object per line). This file is what gets uploaded as a single batch job.</td></tr>
-<tr><td>79</td><td><code>make_file(0, 1000, "jsonl/0_1000.jsonl")</code></td><td>Creates the first batch file for items 0 to 999. A batch lets you send thousands of requests in one job, far cheaper and simpler than one call at a time.</td></tr>
+<tr><td>3-16</td><td><code>plt.scatter(sizes, prices, s=0.2, color="red")</code></td><td>Prompt length against price for all 400,000 points: maybe a slight upward trend, but no strong correlation.</td></tr>
+<tr><td>18-23</td><td><code>def report(item)</code></td><td>Prints a training prompt, its last 10 token ids and what each of them decodes to.</td></tr>
+<tr><td>25</td><td><code>report(sample[398000])</code></td><td>Ed tries items 40,000, 10,000 and 398,000. Each time the price (34, 9, 765) is <strong>one</strong> token, followed by <code>.</code> and <code>00</code>: Llama's tokenizer has a token for every number from 1 to 999.</td></tr>
+<tr><td>27-31</td><td><code>random.shuffle(sample)</code> / <code>train = sample[:400_000]</code> / <code>test = sample[400_000:402_000]</code></td><td>The sample is ordered cheapest first, so it is shuffled (with a seed) before the split: 400,000 for training, 2,000 for testing. Only a few hundred test items are ever used, so 2,000 is plenty here.</td></tr>
+<tr><td>33</td><td><code>print(train[0].prompt)</code></td><td>A training prompt with its answer: a Delphi fuel pump, $227.</td></tr>
+<tr><td>35</td><td><code>print(test[0].test_prompt())</code></td><td>A test prompt, answer hidden.</td></tr>
+<tr><td>39-45</td><td><code>plt.hist(prices, ...)</code> for <code>test[:250]</code></td><td>The 250 test items used to score every model this week: a healthy spread of prices.</td></tr>
+<tr><td>47-50</td><td><code>train_prompts = [item.prompt ...]</code> … <code>test_prices = [...]</code></td><td>Training rows carry the full prompt (answer included); test rows carry the test prompt.</td></tr>
+<tr><td>54</td><td><code>Dataset.from_dict({"text": ..., "price": ...})</code> / <code>DatasetDict({...})</code></td><td>Turns the lists into Hugging Face datasets with two columns and groups them as <code>train</code> and <code>test</code>.</td></tr>
+<tr><td>61-62</td><td><code>dataset.push_to_hub(DATASET_NAME, private=True)</code></td><td>Uploads the dataset to your Hugging Face account as a private dataset. Put your own username in. Ed does not run it again because his copy is already there.</td></tr>
+<tr><td>67-71</td><td><code>pickle.dump(train, file)</code> / <code>pickle.dump(test, file)</code></td><td>Saves the two lists of <code>Item</code> objects to <code>train.pkl</code> and <code>test.pkl</code>, so the next days can load them in a second instead of repeating all of this.</td></tr>
 </table></div>
+</div>
 
-<h3>Line by line: shape the data, split train/test, and upload to the Hub</h3>
-<div class="table-wrap"><table class="lines">
-<tr><th>Line(s)</th><th>Code</th><th>What it does &amp; why</th></tr>
-<tr><td>127-131</td><td><code>for item in items:</code> / <code>item.full = None</code> / <code>item.id = None</code></td><td>Clears the two fields that were only needed during processing (the long raw text and the temporary id). Dropping them keeps the published dataset small and clean - the Hub copy should carry only what training needs.</td></tr>
-<tr><td>133-135</td><td><code>full = f"{username}/items_full"</code> / <code>lite = f"{username}/items_lite"</code></td><td>The two destination names on the Hub: a full dataset and a lite one. Naming them up front keeps the upload lines below short.</td></tr>
-<tr><td>137-140</td><td><code>if LITE_MODE:</code> / <code>train = items[:20_000]</code> / <code>val = items[20_000:21_000]</code> / <code>test = items[21_000:]</code></td><td>The lite split: slice the list into training (first 20,000), validation (next 1,000) and test (the rest). The underscores in <code>20_000</code> are just readable digit separators. This is the train/test split - the test slice is held out and never trained on.</td></tr>
-<tr><td>141</td><td><code>Item.push_to_hub(lite, train, val, test)</code></td><td>Uploads the three splits to the Hub under the lite name. This is the moment the curated dataset becomes downloadable in one line on any machine later.</td></tr>
-<tr><td>142-146</td><td><code>else:</code> / <code>train = items[:800_000]</code> ... / <code>Item.push_to_hub(full, train, val, test)</code></td><td>The full run instead: much larger slices (800,000 train, 10,000 validation, the rest test) pushed under the full name. Same split idea, bigger numbers.</td></tr>
-<tr><td>148-151</td><td><code>train_lite = train[:20_000]</code> ... / <code>Item.push_to_hub(lite, train_lite, val_lite, test_lite)</code></td><td>After the full upload, it also carves a small lite subset out of the full data and pushes that too, so both a big and a small version of the dataset exist on the Hub from one run.</td></tr>
-</table></div>
+</section>
 
-<div class="callout ok"><strong>What you should see.</strong> The load step prints a thousands-formatted
-count (for example <code>Loaded 408,000 items</code> in the video's run) and the first item. After the batch
-job finishes and the splits are pushed, your Hugging Face profile shows a new dataset with
-<code>train</code>, <code>validation</code> and <code>test</code> parts, ready to download in later days.
-The instructor does not re-run the upload on screen because he had already run it once - the data is already
-on his Hub.</div>
+<section class="lesson" id="video-12">
+<h3>Video 12 · Wrap-up</h3>
+<p class="lesson-meta">12 -Day 2 - How to Create and Upload a High-Quality Dataset on HuggingFace.mp4 · 1:39</p>
+<p>A short recap with no code: the five-step strategy, the three optimization techniques, and a
+curated dataset on the Hub. Next time: baseline models.</p>
+
+
+
+</section>
+
+<div class="callout ok"><strong>What you should see.</strong> Each category prints
+<code>Loading dataset ...</code>, a progress bar and <code>Completed ... with N datapoints in M mins</code> (Appliances 28,625).
+Then <code>A grand total of 2,811,408 items</code>, about 408,000 items in the sample, a much flatter price
+histogram (average about $220), <code>Divided into a training set of 400,000 items and test set of 2,000 items</code>, and two
+new files, <code>train.pkl</code> and <code>test.pkl</code>, next to the notebook.</div>
+
+<div class="callout warn"><strong>Common mistakes.</strong>
+<ul>
+<li>Your computer freezes while loading: <code>load()</code> starts 8 processes by default. Use
+<code>loader.load(workers=4)</code> (or fewer) on a smaller machine.</li>
+<li><code>ModuleNotFoundError: No module named 'items'</code>: the notebook, <code>items.py</code> and <code>loaders.py</code> must
+sit in the same folder (<code>week6/</code>).</li>
+<li>Running out of memory with all eight categories: start with one or two (Electronics is a good middle size). The
+results are similar, just from less data.</li>
+<li>The upload fails with a permission error: <code>DATASET_NAME</code> must start with <em>your</em> Hugging Face username,
+and your token needs write access.</li>
+</ul></div>
+
+<div class="callout"><strong>Video vs repo.</strong> The code above is the course repository's first version, as Ed
+shows it. A later 2024 update added a "lite" notebook (Appliances only) for people who want a cheaper Week 7. In
+December 2025 Ed rewrote Weeks 6 to 8: today's repository has no <code>slots</code> sampling in this notebook. Its Day 1
+already builds and uploads a weighted 820,000-item set, and its Day 2 downloads that set and asks an LLM, through a batch
+job, to write a short summary of every product, which later days use as the prompt. If you open the current repository,
+expect different code.</div>
 
 <div class="recap"><strong>Recap</strong>
 <ul>
@@ -643,9 +916,9 @@ metrics, and continuous retraining - not just a notebook.</li>
 (automotive 1, rest 5), giving a ~408,000-item sample with a far flatter price distribution.</li>
 <li>We checked that price and description length are not strongly correlated, shuffled with a fixed seed,
 split into training and test sets, and uploaded the dataset to the Hugging Face Hub for one-line reuse.</li>
-<li>Honesty: the code needs a Hub login, paid batch access and large downloads, so it was not run live here;
-the repo has also refactored the hand-built balancing into prepared datasets plus a batch summarization step
-(see the Video-vs-repo note).</li>
+<li>We pickled <code>train</code> and <code>test</code> so the next days can load them in seconds.</li>
+<li>Honesty: the code needs a Hub login and large downloads, so it was not run here; it is shown as Ed recorded it.
+Today's repository does this step differently (see the Video-vs-repo note).</li>
 </ul>
 </div>
 

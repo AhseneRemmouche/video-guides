@@ -55,15 +55,26 @@ const langKey = (lang) => (lang === "py" ? "py" : /^(ts|tsx|js|jsx)$/.test(lang)
 function setupLanguageTabs() {
   const groups = document.querySelectorAll(".code-tabs");
   if (!groups.length && !document.querySelector("[data-only], .track-tabs")) return;
+  // Python-only pages (no TypeScript anywhere): no language switch, and never hide the Python code because a
+  // reader picked TypeScript on another page. The "As in the video | Runs today" switch still appears.
+  const hasTs = !!document.querySelector(
+    '.code-tabs pre[data-lang="ts"], .code-tabs pre[data-lang="tsx"], .code-tabs pre[data-lang="js"], [data-only="ts"], .track-tabs > [data-track="ts"]');
   groups.forEach((group) => {
     const strip = document.createElement("div");
+    if (!hasTs) strip.hidden = true;
     strip.className = "lang-strip";
     strip.setAttribute("role", "group");
     strip.setAttribute("aria-label", "Code language");
+    const seen = new Set();
+    let versioned = false;
     group.querySelectorAll(":scope > .code").forEach((card) => {
-      const key = langKey(card.querySelector("pre")?.dataset.lang || "");
+      const pre = card.querySelector("pre");
+      const key = langKey(pre?.dataset.lang || "");
       if (!key) return;
       card.dataset.langKey = key;
+      if (pre.dataset.ver) { card.dataset.ver = pre.dataset.ver; versioned = true; }
+      if (seen.has(key)) return; // a second Python card (the "runs today" version) shares one button
+      seen.add(key);
       const btn = document.createElement("button");
       btn.type = "button";
       btn.dataset.langKey = key;
@@ -72,10 +83,27 @@ function setupLanguageTabs() {
       strip.append(btn);
     });
     group.prepend(strip);
+    // Lessons whose video code no longer runs as recorded: an "As in the video | Runs today" switch.
+    if (versioned) {
+      const vs = document.createElement("div");
+      vs.className = "ver-strip";
+      vs.setAttribute("role", "group");
+      vs.setAttribute("aria-label", "Code version");
+      for (const [v, text] of Object.entries(VERS)) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.ver = v;
+        b.textContent = text;
+        b.addEventListener("click", () => setVersion(v, true));
+        vs.append(b);
+      }
+      strip.after(vs);
+    }
   });
+  try { codeVer = localStorage.getItem("guide-code-ver") === "today" ? "today" : "video"; } catch {}
   // The same switch at the top of the page, so the choice is visible before the first code block.
   const hero = document.querySelector(".hero");
-  if (hero) {
+  if (hero && hasTs) {
     const top = document.createElement("div");
     top.className = "lang-strip page-lang";
     top.setAttribute("role", "group");
@@ -95,7 +123,7 @@ function setupLanguageTabs() {
   }
   let saved = null;
   try { saved = localStorage.getItem("guide-code-lang"); } catch {}
-  setLanguage(saved === "ts" ? "ts" : "py", false);
+  setLanguage(hasTs && saved === "ts" ? "ts" : "py", false);
 }
 
 // Project-build pages: <div class="track-tabs"> holds one <section class="track" data-track="py|ts"
@@ -124,9 +152,29 @@ function setupTrackTabs() {
   });
 }
 
+const VERS = { video: "As in the video", today: "Runs today" };
+let codeVer = "video";
+
+function setVersion(v, remember) {
+  codeVer = v;
+  if (remember) try { localStorage.setItem("guide-code-ver", v); } catch {}
+  setLanguage(document.documentElement.dataset.codeLang || "py", false);
+}
+
 function setLanguage(key, remember) {
   document.documentElement.dataset.codeLang = key;
-  document.querySelectorAll(".code-tabs > .code").forEach((card) => (card.hidden = card.dataset.langKey !== key));
+  document.querySelectorAll(".code-tabs").forEach((group) => {
+    // A group with no card in the chosen language (e.g. a Python-only lesson on a bilingual page) shows Python
+    // rather than an empty box.
+    const cards = [...group.querySelectorAll(":scope > .code")];
+    const k = cards.some((c) => c.dataset.langKey === key) ? key : "py";
+    cards.forEach((card) => (card.hidden =
+      card.dataset.langKey !== k || (card.dataset.ver !== undefined && card.dataset.ver !== codeVer)));
+    const vs = group.querySelector(":scope > .ver-strip");
+    if (vs) vs.hidden = k !== "py";
+  });
+  document.querySelectorAll(".ver-strip button").forEach((b) =>
+    b.setAttribute("aria-pressed", String(b.dataset.ver === codeVer)));
   document.querySelectorAll(".track-tabs > .track").forEach((sec) => (sec.hidden = sec.dataset.track !== key));
   document.querySelectorAll(".track-strip button").forEach((b) =>
     b.setAttribute("aria-selected", String(b.dataset.langKey === key)));
